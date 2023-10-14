@@ -1,0 +1,8 @@
+.hpc/
+.idea/
+.stack-work/
+dojang.cabal
+dojang.iml
+dojang.tix
+dojang.exe.tix
+out/

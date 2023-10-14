@@ -1,0 +1,12 @@
+cradle:
+  stack:
+  - path: ./app/
+    component: dojang:exe:dojang
+  - path: ./src/
+    component: dojang:lib
+  - path: ./test/Dojang/
+    component: dojang:test:spec
+  - path: ./test/Spec.hs
+    component: dojang:test:spec
+  - path: ./test/doctest.hs
+    component: dojang:test:doctest

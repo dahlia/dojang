@@ -1,0 +1,81 @@
+{
+  "editor.formatOnSave": true,
+  "haskell.toolchain": {
+    "ghc": null,
+    "cabal": null
+  },
+  "haskell.formattingProvider": "fourmolu",
+  "yaml.format.enable": false,
+  "[json]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "[haskell]": {
+    "editor.defaultFormatter": "haskell.haskell"
+  },
+  "[yaml]": {
+    "editor.formatOnSave": false
+  },
+  "cSpell.dictionaries": [
+    "en_US",
+    "softwareTerms"
+  ],
+  "cSpell.ignoreRegExpList": [
+    "\\x[A-Fa-f0-9]{2}[A-Fa-f0-9]{2}",
+    "\\u[A-Fa-f0-9]{4}",
+  ],
+  "cSpell.words": [
+    "aarch64",
+    "amigaos",
+    "bifunctor",
+    "bimap",
+    "bytestring",
+    "dojang",
+    "combinators",
+    "concat",
+    "deepseq",
+    "dioptional",
+    "doctest",
+    "dotfiles",
+    "edsl",
+    "eeof",
+    "eithers",
+    "elabel",
+    "elif",
+    "etok",
+    "etoks",
+    "fmap",
+    "foldl",
+    "fortytwo",
+    "hashable",
+    "HLint",
+    "hspace",
+    "hspec",
+    "mconcat",
+    "mempty",
+    "metavar",
+    "Minhee",
+    "monoid",
+    "NOINLINE",
+    "POSIX",
+    "prefs",
+    "sconcat",
+    "semigroup",
+    "seti",
+    "showt",
+    "stackage",
+    "subdir",
+    "subdirs",
+    "subexpression",
+    "subparser",
+    "systeminfo",
+    "ueof",
+    "uncons",
+    "unlines",
+    "unrecognised",
+    "utok",
+    "utoks"
+  ]
+}

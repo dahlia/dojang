@@ -1,0 +1,10 @@
+{
+  "ignore": [],
+  "sourceFolders": [
+    "src"
+  ],
+  "doctestOptions": [
+    "-interactive-print=Text.Show.Unicode.uprint",
+    "-XHaskell2010"
+  ]
+}

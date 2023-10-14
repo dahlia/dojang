@@ -1,0 +1,102 @@
+name: &name dojang
+version: 0.1.0
+synopsis: A cross-platform dotfiles manager
+description: See also the README.md file
+homepage: https://codeberg.org/hongminhee/dojang
+license: GPL-3.0-or-later
+author: &author Hong Minhee <hong@minhee.org>
+maintainer: *author
+copyright: "\xa9 2023 Hong Minhee"
+category: Configuration
+
+extra-source-files:
+- README.md
+- CHANGES.md
+- LICENSE
+
+dependencies:
+  base: ">=4.7 && <5"
+  case-insensitive: ">=1.2.1.0 && <2"
+  filepath: ">=1.4.100 && <2"
+  hashable: ">=1.4.2.0 && <2"
+  megaparsec: ">=9.3 && <9.4"
+  monad-logger: ">=0.3 && <0.4"
+  text: ">=2 && <3"
+  toml-parser: ">=1.3 && <2"
+  unordered-containers: ">=0.2.19.1 && <1"
+
+ghc-options:
+# cSpell:disable
+- -Wall
+- -Wcompat
+- -Widentities
+- -Wincomplete-record-updates
+- -Wincomplete-uni-patterns
+- -Wmissing-home-modules
+- -Wpartial-fields
+- -Wredundant-constraints
+# cSpell:enable
+
+library:
+  source-dirs: src
+  dependencies:
+    bytestring: ">=0.11 && <0.13"
+    containers: ">0"
+    deepseq: ">=1.4 && <2"
+    directory: ">=1.3 && <1.4"
+    fortytwo: ">=2 && < 2.1"
+    mtl: ">=2 && <3"
+    parser-combinators: ">=1 && <2"
+    text-show: ">=3 && <4"
+  ghc-options:
+  # cSpell:disable
+  - -threaded
+  - -rtsopts
+  - -with-rtsopts=-N
+  - -Wmissing-export-lists
+  # cSpell:enable
+
+executables:
+  dojang:
+    source-dirs: app
+    main: Main.hs
+    dependencies:
+      # cSpell:disable
+      *name : ">0"
+      code-page: ">=0.2 && <0.3"
+      optparse-applicative: ">=0.17 && <0.19"
+      # cSpell:enable
+    ghc-options: &executable-ghc-options
+    # cSpell:disable
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wno-incomplete-uni-patterns
+    # See also: https://github.com/commercialhaskell/stack/issues/3918
+    - -optP-Wno-nonportable-include-path
+    # cSpell:enable
+
+tests:
+  doctest:
+    source-dirs: test
+    main: doctest.hs
+    other-modules: []
+    dependencies:
+      *name : ">0"
+      doctest: ">=0.20.1 && <0.22"
+      doctest-discover: ">=0.2 && <0.3"
+      unicode-show: ">=0.1.1.1 && <0.2"
+    ghc-options: *executable-ghc-options
+
+  spec:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options: *executable-ghc-options
+    dependencies:
+      *name : ">0"
+      hedgehog: ">=1.2 && <2"
+      hspec: ">=2.10.10 && <2.11"
+      hspec-discover: ">=2.10.10 && <2.11"
+      hspec-expectations-pretty-diff: ">=0.7 && <0.8"
+      hspec-hedgehog: ">=0.0.1.2 && <0.1"
+      hspec-megaparsec: ">=2.2 && <2.3"

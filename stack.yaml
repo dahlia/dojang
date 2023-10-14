@@ -1,0 +1,22 @@
+resolver: lts-21.15
+require-stack-version: ">=2.11.1"
+packages:
+- .
+extra-deps:
+- Cabal-3.8.1.0
+- Cabal-syntax-3.8.1.0
+- code-page-0.2.1
+- directory-1.3.7.1
+- doctest-0.21.1
+- filepath-1.4.100.4
+- fortytwo-2.0.0
+- process-1.6.16.0
+- terminal-size-0.3.3
+- time-1.12.2
+- toml-parser-1.3.0.0
+- Win32-2.13.0.0
+ghc-options:
+  # cSpell:disable
+  "$everything": -j4 +RTS -A32m -RTS -haddock
+  "$locals": -Werror -fhide-source-paths
+  # cSpell:enable

@@ -1,0 +1,102 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "label": "Build",
+      "type": "shell",
+      "command": "stack build --coverage --test --no-run-tests",
+    },
+    {
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "label": "Clean build",
+      "type": "shell",
+      "command": "stack clean && stack build --coverage",
+      "windows": {
+        "command": "stack clean; if ($?) { stack build --coverage }"
+      }
+    },
+    {
+      "label": "Run tests",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "type": "shell",
+      "command": "stack",
+      "args": [
+        "test",
+        "--coverage"
+      ],
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      }
+    },
+    {
+      "group": {
+        "kind": "test",
+        "isDefault": false
+      },
+      "label": "Run tests with coverage",
+      "type": "shell",
+      "command": "stack test --coverage :spec && html=\"$(stack path --local-hpc-root)/dojang/spec/hpc_index.html\" && (wslview \"$html\" || xdg-open \"$html\")",
+      "osx": {
+        "command": "stack test --coverage :spec && open \"$(stack path --local-hpc-root)/dojang/spec/hpc_index.html\""
+      },
+      "windows": {
+        "command": "if (stack test --coverage :spec) { Start-Process \\\"$(stack path --local-hpc-root)\\\\dojang\\\\spec\\\\hpc_index.html\\\" }"
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      }
+    },
+    {
+      "group": {
+        "kind": "test",
+        "isDefault": false
+      },
+      "label": "Run doctest",
+      "type": "shell",
+      "command": "stack test :doctest",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared",
+        "showReuseMessage": true,
+        "clear": false
+      }
+    },
+    {
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "label": "Build haddock",
+      "type": "shell",
+      "command": "stack haddock && html=\"$(stack path --local-doc-root)/index.html\" && (wslview \"$html\" || xdg-open \"$html\")",
+      "osx": {
+        "command": "stack haddock && open \"$(stack path --local-doc-root)/index.html\""
+      },
+      "windows": {
+        "command": "if (stack haddock) { Start-Process \\\"$(stack path --local-doc-root)\\\\index.html\\\" }"
+      },
+    }
+  ]
+}
