@@ -1,4 +1,5 @@
 .hpc/
+.hspec-failures
 .idea/
 .stack-work/
 dojang.cabal

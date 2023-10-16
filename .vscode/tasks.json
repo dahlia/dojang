@@ -32,7 +32,8 @@
       "command": "stack",
       "args": [
         "test",
-        "--coverage"
+        "--coverage",
+        "--test-arguments=--failure-report=.hspec-failures -r --rerun-all-on-success"
       ],
       "presentation": {
         "echo": true,
