@@ -1,9 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Dojang.FilePathExpansionSpec
-  ( spec
-  ) where
+module Dojang.FilePathExpansionSpec (spec) where
 
 import Dojang.FilePathExpansion (expandFilePath)
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (++), (+/+))
