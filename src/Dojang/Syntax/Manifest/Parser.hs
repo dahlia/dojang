@@ -10,7 +10,6 @@ module Dojang.Syntax.Manifest.Parser
   , readManifestFile
   ) where
 
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bifunctor (Bifunctor (first))
 import Data.Either (lefts)
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -19,14 +18,14 @@ import Data.String (IsString (fromString))
 import Data.Void (Void)
 import Prelude hiding (readFile)
 
-import Data.ByteString (readFile)
 import Data.HashMap.Strict (fromList)
 import Data.Map.Strict (toList)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient)
-import System.OsPath (OsPath, decodeFS)
+import System.OsPath (OsPath)
 import Toml (Result (..), decode)
 
+import Dojang.MonadFileSystem (MonadFileSystem (readFile))
 import Dojang.Syntax.EnvironmentPredicate.Parser
   ( ParseErrorBundle
   , errorBundlePretty
@@ -64,6 +63,8 @@ data Error
     EnvironmentPredicateError (ParseErrorBundle Text Void)
   | -- | An error made during parsing a 'FilePathExpression'.
     FilePathExpressionError (ParseErrorBundle Text Void)
+  | -- | An I/O-related error made during reading a file.
+    IOError IOError
 
 
 -- | A warning message made during parsing.
@@ -88,15 +89,16 @@ readManifest toml = case decode $ unpack toml of
 -- | Reads a 'Manifest' file from the given path.  It assumes that the file
 -- is encoded in UTF-8.
 readManifestFile
-  :: (MonadIO m)
+  :: (MonadFileSystem m)
   => OsPath
   -- ^ A path to the manifest file.
   -> m (Either Error (Manifest, [TomlWarning]))
   -- ^ A decoded manifest with warnings, or a list of errors.
-readManifestFile osPath = liftIO $ do
-  filePath <- decodeFS osPath
+readManifestFile filePath = do
   content <- readFile filePath
-  return $ readManifest $ decodeUtf8Lenient content
+  return $ case content of
+    Left e -> Left $ IOError e
+    Right content' -> readManifest $ decodeUtf8Lenient content'
 
 
 formatError :: Error -> Text
@@ -105,6 +107,7 @@ formatError (EnvironmentPredicateError e) =
   Dojang.Syntax.EnvironmentPredicate.Parser.errorBundlePretty e
 formatError (FilePathExpressionError e) =
   Dojang.Syntax.FilePathExpression.Parser.errorBundlePretty e
+formatError (IOError e) = pack $ show e
 
 
 mapManifest :: Manifest' -> Either Error Manifest

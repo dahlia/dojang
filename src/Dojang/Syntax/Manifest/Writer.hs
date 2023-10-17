@@ -7,22 +7,21 @@ module Dojang.Syntax.Manifest.Writer
   , writeManifestFile
   ) where
 
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bifunctor (Bifunctor (second))
-import Data.List.NonEmpty (NonEmpty ((:|)), length, toList)
 import Data.List (partition)
+import Data.List.NonEmpty (NonEmpty ((:|)), length, toList)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import GHC.IsList (IsList (fromList))
 import Prelude hiding (all, any, writeFile)
 
-import Data.ByteString (writeFile)
 import Data.CaseInsensitive (CI (original))
 import Data.Text (Text, unpack)
 import Data.Text.Encoding (encodeUtf8)
-import System.OsPath (OsPath, decodeFS)
+import System.OsPath (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Toml (encode)
 
+import Dojang.MonadFileSystem (MonadFileSystem (writeFile))
 import Dojang.Syntax.EnvironmentPredicate.Writer (writeEnvironmentPredicate)
 import Dojang.Syntax.Manifest.Internal
   ( EnvironmentPredicate' (..)
@@ -38,7 +37,7 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (toPathText)
-import Dojang.Types.FileRoute (FileRoute (..), FileType(Directory))
+import Dojang.Types.FileRoute (FileRoute (..), FileType (Directory))
 import Dojang.Types.FileRouteMap (FileRouteMap, toList)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap, toList)
@@ -55,9 +54,15 @@ writeManifest manifest =
 
 
 -- | Writes a 'Manifest' file to the given path.
-writeManifestFile :: (MonadIO m) => Manifest -> OsPath -> m ()
-writeManifestFile manifest osPath = liftIO $ do
-  filePath <- decodeFS osPath
+writeManifestFile
+  :: (MonadFileSystem m)
+  => Manifest
+  -- ^ The 'Manifest' to write.
+  -> OsPath
+  -- ^ The path to write the 'Manifest' to.
+  -> m (Either IOError ())
+  -- ^ The error, if any, that occurred while writing the 'Manifest'.
+writeManifestFile manifest filePath =
   writeFile filePath $ encodeUtf8 $ writeManifest manifest
 
 
@@ -80,9 +85,10 @@ mapFiles fileRouteMap monikers =
  where
   dirs :: [(Text, FileRoute)]
   files :: [(Text, FileRoute)]
-  (dirs, files) = partition
-    ((== Directory) . fileType . snd)
-     $ Dojang.Types.FileRouteMap.toList fileRouteMap
+  (dirs, files) =
+    partition
+      ((== Directory) . fileType . snd)
+      $ Dojang.Types.FileRouteMap.toList fileRouteMap
 
 
 mapFileRoute' :: FileRoute -> MonikerMap -> FileRoute'

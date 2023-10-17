@@ -26,6 +26,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.String (IsString (fromString))
 import System.Exit (die)
 import System.IO.Error (isDoesNotExistError, tryIOError)
+import Prelude hiding (readFile, writeFile)
 
 import Control.Monad.Logger
   ( Loc
@@ -42,8 +43,7 @@ import Control.Monad.Logger
   , runStderrLoggingT
   )
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
-import System.Directory (doesFileExist)
-import System.OsPath (decodeFS, encodeFS, (</>))
+import System.OsPath (encodeFS, (</>))
 import System.OsPath.Types (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
@@ -51,7 +51,8 @@ import Dojang.Syntax.Manifest.Parser (Error, formatError, readManifestFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.Types.Manifest (Manifest)
 
-import Dojang.Syntax.Env (readEnvFile)
+import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.Syntax.Env (EnvFileError (..), readEnvFile)
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Environment.Current
   ( MonadArchitecture (currentArchitecture)
@@ -86,6 +87,18 @@ newtype App a = App {unApp :: ReaderT AppEnv (LoggingT IO) a}
     )
 
 
+instance MonadFileSystem App where
+  decodePath = liftIO . decodePath
+  exists = liftIO . exists
+  isFile = liftIO . isFile
+  isDirectory = liftIO . isDirectory
+  readFile = liftIO . readFile
+  writeFile dst = liftIO . writeFile dst
+  copyFile src = liftIO . copyFile src
+  createDirectory = liftIO . createDirectory
+  removeFile = liftIO . removeFile
+
+
 die' :: String -> App a
 die' = liftIO . die
 
@@ -105,7 +118,9 @@ currentEnvironment' = do
       liftIO currentEnvironment
     Left e -> do
       die' $ "Error: " <> show e
-    Right (Left errors) -> do
+    Right (Left (IOError e)) -> do
+      die' $ "Error: " <> show e
+    Right (Left (TomlErrors errors)) -> do
       let formattedErrors = concatMap ("\n  " ++) errors
       die' $ "Error: Syntax errors in environment file:" <> formattedErrors
     Right (Right (env, warnings)) -> do
@@ -178,24 +193,28 @@ loadManifest = do
 
 doesManifestExist :: App Bool
 doesManifestExist = do
-  filename <- manifestPath
-  filePath <- liftIO $ decodeFS filename
-  exists <- liftIO $ doesFileExist filePath
+  filePath <- manifestPath
+  exists' <- liftIO $ exists filePath
   $(logInfo)
     $ "Manifest file "
-    <> showt (FromStringShow filename)
+    <> showt (FromStringShow filePath)
     <> " "
-    <> if exists then "exists" else "does not exist"
-  return exists
+    <> if exists' then "exists" else "does not exist"
+  return exists'
 
 
 saveManifest :: Manifest -> App OsPath
 saveManifest manifest = do
   filename <- manifestPath
   $(logDebugSH) manifest
-  writeManifestFile manifest filename
-  $(logInfo)
-    $ "Manifest file "
-    <> showt (FromStringShow filename)
-    <> " written"
-  return filename
+  writeResult <- writeManifestFile manifest filename
+  case writeResult of
+    Left e -> do
+      $(logError) $ "Error writing manifest file: " <> showt (FromStringShow e)
+      liftIO $ ioError e
+    Right () -> do
+      $(logInfo)
+        $ "Manifest file "
+        <> showt (FromStringShow filename)
+        <> " written"
+      return filename

@@ -2,7 +2,8 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Dojang.Syntax.Env
-  ( TomlError
+  ( EnvFileError (..)
+  , TomlError
   , TomlWarning
   , readEnvFile
   , readEnvironment
@@ -10,17 +11,15 @@ module Dojang.Syntax.Env
   , writeEnvironment
   ) where
 
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.String (IsString (fromString))
 import Prelude hiding (readFile, writeFile)
 
 import Control.DeepSeq (force)
-import Data.ByteString (readFile, writeFile)
 import Data.CaseInsensitive (CI (original))
 import Data.Text (Text, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
-import System.OsPath (OsPath, decodeFS)
+import System.OsPath (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Toml (decode, encode)
 import Toml.FromValue
@@ -37,6 +36,8 @@ import Toml.ToValue
   , (.=)
   )
 
+import Data.Bifunctor (Bifunctor (first))
+import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Environment
   ( Architecture
   , Environment (..)
@@ -80,6 +81,15 @@ instance ToTable Environment where
       ]
 
 
+-- | An error that occurred while reading an environment file.
+data EnvFileError
+  = -- | TOML parsing errors.
+    TomlErrors (NonEmpty TomlError)
+  | -- | An I/O-related error made during reading a file.
+    IOError IOError
+  deriving (Eq, Show)
+
+
 -- | An error made during parsing.
 type TomlError = String
 
@@ -103,16 +113,18 @@ readEnvironment toml = case decode $ unpack toml of
 -- | Reads a TOML-encoded 'Environment' from the given file path.  It assumes
 -- that the file is encoded in UTF-8.
 readEnvFile
-  :: (MonadIO m)
+  :: (MonadFileSystem m)
   => OsPath
   -- ^ A path to the env file.
-  -> m (Either (NonEmpty TomlError) (Environment, [TomlWarning]))
-  -- ^ A decoded 'Environment' with warnings, or a list of errors.
-readEnvFile osPath = liftIO $ do
-  filePath <- decodeFS osPath
+  -> m (Either EnvFileError (Environment, [TomlWarning]))
+  -- ^ A decoded 'Environment' with warnings, or error(s).
+readEnvFile filePath = do
   content <- readFile filePath
-  let decoded = decodeUtf8Lenient content
-  return $ readEnvironment $ force decoded
+  return $ case content of
+    Left e -> Left $ IOError e
+    Right content' -> do
+      let decoded = decodeUtf8Lenient content'
+      first TomlErrors $ readEnvironment $ force decoded
 
 
 -- | Encodes an 'Environment' into a TOML document.
@@ -121,7 +133,13 @@ writeEnvironment = showt . FromStringShow . encode
 
 
 -- | Writes an 'Environment' file to the given path.
-writeEnvFile :: (MonadIO m) => Environment -> OsPath -> m ()
-writeEnvFile env osPath = liftIO $ do
-  filePath <- decodeFS osPath
+writeEnvFile
+  :: (MonadFileSystem m)
+  => Environment
+  -- ^ The 'Environment' to write.
+  -> OsPath
+  -- ^ The path to write the 'Environment' to.
+  -> m (Either IOError ())
+  -- ^ The error, if any, that occurred while writing the 'Environment'.
+writeEnvFile env filePath =
   writeFile filePath $ encodeUtf8 $ writeEnvironment env
