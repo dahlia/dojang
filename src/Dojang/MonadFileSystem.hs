@@ -159,6 +159,8 @@ currentSequenceNumber state = nextSequenceNumber state - 1
 
 
 -- | A monad that can perform filesystem operations, but only in memory.
+-- Note that, however, it can bypass the sandboxing of the 'MonadFileSystem'
+-- class by using 'liftIO'.
 newtype DryRunIO a = DryRunIO {unDryRunIO :: StateT DryRunState IO a}
   deriving
     (Functor, Applicative, Monad, MonadFail, MonadIO, MonadState DryRunState)

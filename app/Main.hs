@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main (main) where
 
@@ -14,12 +15,14 @@ import Data.Version (showVersion)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO.CodePage (withCP65001)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
 import Options.Applicative
   ( Parser
   , ParserInfo
   , ParserPrefs
+  , ParserResult
   , argument
   , command
   , commandGroup
@@ -40,12 +43,12 @@ import Options.Applicative
   , short
   , showDefault
   , str
-  , strOption
   , subparser
   , switch
   , value
   )
-import Paths_dojang qualified as Meta
+import Options.Applicative.Path (hyphen, pathOption, period)
+import System.OsPath (OsPath, encodeFS)
 
 import Dojang.App
   ( App
@@ -53,28 +56,39 @@ import Dojang.App
   , runAppWithStderrLogging
   , runAppWithoutLogging
   )
+import Dojang.Commands (Admonition (Note), printStderr')
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
+import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO)
+import Paths_dojang qualified as Meta
 
 
-appP :: Parser (AppEnv, App ExitCode)
+manifestFilename :: OsPath
+manifestFilename = unsafePerformIO $ encodeFS "dojang.toml"
+
+
+envFilename :: OsPath
+envFilename = unsafePerformIO $ encodeFS "dojang-env.toml"
+
+
+appP :: (MonadFileSystem i, MonadIO i) => Parser (AppEnv, App i ExitCode)
 appP = do
   sourceDirectory' <-
-    strOption
+    pathOption
       ( long "source-dir"
           <> short 's'
           <> metavar "PATH"
-          <> value "."
+          <> value period
           <> showDefault
           <> help "Source tree directory"
       )
   manifestFile' <-
-    strOption
+    pathOption
       ( long "manifest-file"
           <> short 'm'
           <> metavar "PATH"
-          <> value "dojang.toml"
+          <> value manifestFilename
           <> showDefault
           <> help
             ( "Manifest file.  Relative to source tree directory "
@@ -82,11 +96,11 @@ appP = do
             )
       )
   envFile' <-
-    strOption
+    pathOption
       ( long "env-file"
           <> short 'e'
           <> metavar "PATH"
-          <> value "dojang-env.toml"
+          <> value envFilename
           <> showDefault
           <> help
             ( "Environment file.  Relative to source tree directory "
@@ -94,9 +108,14 @@ appP = do
                 ++ "ignored if the file does not exist"
             )
       )
+  dryRun' <-
+    switch
+      ( long "dry-run"
+          <> help "Do not actually perform actions, but just print them"
+      )
   debug' <- switch (long "debug" <> short 'd' <> help "Enable debug logging")
   cmd <- cmdP
-  return (AppEnv sourceDirectory' manifestFile' envFile' debug', cmd)
+  return (AppEnv sourceDirectory' manifestFile' envFile' dryRun' debug', cmd)
 
 
 initPresetP :: Parser [InitPreset]
@@ -120,7 +139,7 @@ initPresetP =
       )
 
 
-cmdP :: Parser (App ExitCode)
+cmdP :: (MonadFileSystem i, MonadIO i) => Parser (App i ExitCode)
 cmdP =
   subparser
     ( commandGroup "Managing commands:"
@@ -147,11 +166,11 @@ cmdP =
                         <> short 'i'
                         <> help "Ignore environment file"
                     )
-                  <*> strOption
+                  <*> pathOption
                     ( long "output-file"
                         <> short 'o'
                         <> metavar "PATH"
-                        <> value "-"
+                        <> value hyphen
                         <> showDefault
                         <> help
                           ( "Output file path.  Use - for stdout, "
@@ -178,14 +197,14 @@ cmdP =
       )
 
 
-helpP :: Parser (App ExitCode)
+helpP :: (MonadFileSystem i, MonadIO i) => Parser (App i ExitCode)
 helpP =
   helpCmd
     <$> optional (argument str (metavar "COMMAND"))
     <**> helper
 
 
-parser :: ParserInfo (AppEnv, App ExitCode)
+parser :: (MonadFileSystem i, MonadIO i) => ParserInfo (AppEnv, App i ExitCode)
 parser =
   info
     (appP <**> helper)
@@ -200,26 +219,39 @@ parserPrefs :: ParserPrefs
 parserPrefs = defaultPrefs
 
 
-versionCmd :: App ExitCode
+versionCmd :: (MonadFileSystem i, MonadIO i) => App i ExitCode
 versionCmd = do
   liftIO $ putStrLn $ "dojang " <> showVersion Meta.version
   return ExitSuccess
 
 
-helpCmd :: Maybe String -> App ExitCode
+helpCmd
+  :: forall i. (MonadFileSystem i, MonadIO i) => Maybe String -> App i ExitCode
 helpCmd cmdString = do
-  let args = maybeToList cmdString ++ ["--help"]
-  let result = execParserPure parserPrefs parser args
   void $ liftIO $ handleParseResult result
   return ExitSuccess
+ where
+  args = maybeToList cmdString ++ ["--help"]
+  result :: ParserResult (AppEnv, App i ExitCode)
+  result = execParserPure parserPrefs parser args
 
 
 main :: IO ()
 main = withCP65001 $ do
   when (System.Info.os == "mingw32") $ setLocaleEncoding utf8
-  (appEnv, cmd) <- customExecParser parserPrefs parser
-  exitCode <-
+  (appEnv, _) <-
+    liftIO $ customExecParser parserPrefs parser
+      :: IO (AppEnv, App DryRunIO ExitCode)
+  exitCode <- if appEnv.dryRun then dryRunIO $ run appEnv else run appEnv
+  when appEnv.dryRun
+    $ printStderr' Note
+    $ "Since --dry-run was specified, no changes were committed "
+    <> "to the file system."
+  exitWith exitCode
+ where
+  run :: (MonadFileSystem i, MonadIO i) => AppEnv -> i ExitCode
+  run appEnv = do
+    (_, cmd) <- liftIO $ customExecParser parserPrefs parser
     (if appEnv.debug then runAppWithStderrLogging else runAppWithoutLogging)
       appEnv
       cmd
-  exitWith exitCode

@@ -11,26 +11,27 @@ import Prelude hiding (putStr)
 
 import Control.Monad.Logger (logDebugSH, logError)
 import Data.Text.IO (putStr)
-import System.OsPath (encodeFS)
+import Options.Applicative.Path (hyphen)
+import System.OsPath (OsPath)
 import TextShow (TextShow (showt))
 
 import Dojang.App (App, currentEnvironment')
+import Dojang.MonadFileSystem (MonadFileSystem)
 import Dojang.Syntax.Env (writeEnvFile, writeEnvironment)
 import Dojang.Types.Environment.Current (MonadEnvironment (..))
 
 
-env :: Bool -> FilePath -> App ExitCode
-env ignoreEnvFile outputFile = do
+env :: (MonadFileSystem i, MonadIO i) => Bool -> OsPath -> App i ExitCode
+env ignoreEnvFile outputPath = do
   currentEnv <-
     if ignoreEnvFile then liftIO currentEnvironment else currentEnvironment'
   $(logDebugSH) currentEnv
-  if outputFile == "-"
+  if outputPath == hyphen
     then do
       liftIO $ putStr $ writeEnvironment currentEnv
       return ExitSuccess
     else do
-      outputPath' <- liftIO $ encodeFS outputFile
-      writeResult <- writeEnvFile currentEnv outputPath'
+      writeResult <- writeEnvFile currentEnv outputPath
       case writeResult of
         Left err -> do
           $(logError) $ showt err

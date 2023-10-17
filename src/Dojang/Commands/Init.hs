@@ -13,6 +13,7 @@ module Dojang.Commands.Init
   , initPresetName
   ) where
 
+import Control.Monad.IO.Class (MonadIO)
 import Data.Bifunctor (Bifunctor (second))
 import Data.Either (rights)
 import Data.String (IsString)
@@ -31,11 +32,12 @@ import Data.Map.Strict
   , (!)
   )
 import Data.Set (singleton, size, toAscList, union)
+import Data.Text (pack)
 import FortyTwo.Prompts.Multiselect (multiselect)
-import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, doesManifestExist, saveManifest)
 import Dojang.Commands (Admonition (Error), printStderr, printStderr')
+import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
@@ -80,7 +82,7 @@ initPresetEnvironment = \case
   WinArm64 -> (Windows, AArch64)
 
 
-init :: [InitPreset] -> Bool -> App ExitCode
+init :: (MonadFileSystem i, MonadIO i) => [InitPreset] -> Bool -> App i ExitCode
 init presets noInteractive = do
   manifestExists <- doesManifestExist
   if manifestExists
@@ -217,7 +219,8 @@ init presets noInteractive = do
               `FileRouteMap.union` appDataRoutes
       let manifest = Manifest monikers fileRoutes
       filename <- saveManifest manifest
-      printStderr $ "Manifest created: " <> showt (FromStringShow filename)
+      filename' <- decodePath filename
+      printStderr $ "Manifest created: " <> pack filename'
       return ExitSuccess
 
 
@@ -248,7 +251,7 @@ windowsAppData :: FilePathExpression
 windowsAppData = Substitution "AppData"
 
 
-askPresets :: App [InitPreset]
+askPresets :: (MonadFileSystem i, MonadIO i) => App i [InitPreset]
 askPresets = do
   -- FIXME: It doesn't seem to work on Windows...
   -- https://github.com/GianlucaGuarini/fortytwo/issues/7

@@ -2,6 +2,7 @@
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 -- | The application monad for Dojang.
@@ -44,10 +45,11 @@ import Control.Monad.Logger
   )
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
 import Data.Text (concat, pack)
-import System.OsPath (encodeFS, (</>))
+import System.OsPath ((</>))
 import System.OsPath.Types (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
+import Control.Monad.Trans (MonadTrans (lift))
 import Dojang.Commands (die)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Env (EnvFileError (..), readEnvFile)
@@ -64,12 +66,14 @@ import Dojang.Types.Manifest (Manifest)
 
 -- | The environment for the application monad.
 data AppEnv = AppEnv
-  { sourceDirectory :: FilePath
+  { sourceDirectory :: OsPath
   -- ^ The source directory (i.e., repository).
-  , manifestFile :: FilePath
+  , manifestFile :: OsPath
   -- ^ The manifest file.
-  , envFile :: FilePath
+  , envFile :: OsPath
   -- ^ The environment file.
+  , dryRun :: Bool
+  -- ^ Whether to actually perform actions or just print what would be done.
   , debug :: Bool
   -- ^ Whether debug logging is enabled.
   }
@@ -77,7 +81,9 @@ data AppEnv = AppEnv
 
 
 -- | The application monad for Dojang.
-newtype App a = App {unApp :: ReaderT AppEnv (LoggingT IO) a}
+newtype (MonadFileSystem i, MonadIO i) => App i v = App
+  { unApp :: ReaderT AppEnv (LoggingT i) v
+  }
   deriving
     ( Functor
     , Applicative
@@ -88,25 +94,23 @@ newtype App a = App {unApp :: ReaderT AppEnv (LoggingT IO) a}
     )
 
 
-instance MonadFileSystem App where
-  decodePath = liftIO . decodePath
-  exists = liftIO . exists
-  isFile = liftIO . isFile
-  isDirectory = liftIO . isDirectory
-  readFile = liftIO . readFile
-  writeFile dst = liftIO . writeFile dst
-  copyFile src = liftIO . copyFile src
-  createDirectory = liftIO . createDirectory
-  removeFile = liftIO . removeFile
+instance forall i. (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
+  decodePath = App . lift . lift . decodePath
+  exists = App . lift . lift . exists
+  isFile = App . lift . lift . isFile
+  isDirectory = App . lift . lift . isDirectory
+  readFile = App . lift . lift . readFile
+  writeFile dst = App . lift . lift . writeFile dst
+  copyFile src = App . lift . lift . copyFile src
+  createDirectory = App . lift . lift . createDirectory
+  removeFile = App . lift . lift . removeFile
 
 
-currentEnvironment' :: App Environment
+currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
 currentEnvironment' = do
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
-  sourceDirOP <- liftIO $ encodeFS sourceDir
-  envFileOP <- liftIO $ encodeFS envFile'
-  let filePath = sourceDirOP </> envFileOP
+  let filePath = sourceDir </> envFile'
   $(logDebug) $ "Environment file path: " <> showt (FromStringShow filePath)
   result <- readEnvFile filePath
   case result of
@@ -126,48 +130,50 @@ currentEnvironment' = do
       return env
 
 
-instance MonadEnvironment App where
+instance (MonadFileSystem i, MonadIO i) => MonadEnvironment (App i) where
   currentEnvironment = currentEnvironment'
 
 
-instance MonadOperatingSystem App where
+instance (MonadFileSystem i, MonadIO i) => MonadOperatingSystem (App i) where
   currentOperatingSystem = (.operatingSystem) <$> currentEnvironment'
 
 
-instance MonadArchitecture App where
+instance (MonadFileSystem i, MonadIO i) => MonadArchitecture (App i) where
   currentArchitecture = (.architecture) <$> currentEnvironment'
 
 
-runAppWithoutLogging :: AppEnv -> App a -> IO a
+runAppWithoutLogging
+  :: (MonadFileSystem i, MonadIO i) => AppEnv -> App i a -> i a
 runAppWithoutLogging env app = runAppWithLogging env app (\_ _ _ _ -> pure ())
 
 
 -- | Run the application monad with logging handled by the given function.
 runAppWithLogging
-  :: AppEnv
-  -> App a
+  :: (MonadFileSystem i, MonadIO i)
+  => AppEnv
+  -> App i a
   -> (Loc -> LogSource -> LogLevel -> LogStr -> IO ())
-  -> IO a
+  -> i a
 runAppWithLogging env app = runLoggingT (runReaderT app.unApp env)
 
 
 -- | Run the application monad with logging to stderr.
-runAppWithStderrLogging :: AppEnv -> App a -> IO a
+runAppWithStderrLogging
+  :: (MonadFileSystem i, MonadIO i) => AppEnv -> App i a -> i a
 runAppWithStderrLogging env = runStderrLoggingT . (`runReaderT` env) . unApp
 
 
-manifestPath :: App OsPath
+manifestPath :: (MonadFileSystem i, MonadIO i) => App i OsPath
 manifestPath = do
   sourceDir <- asks (.sourceDirectory)
   manifestFile' <- asks (.manifestFile)
-  sourceDirOP <- liftIO $ encodeFS sourceDir
-  manifestOP <- liftIO $ encodeFS manifestFile'
-  let path = sourceDirOP </> manifestOP
+  let path = sourceDir </> manifestFile'
   $(logDebug) $ "Manifest path: " <> showt (FromStringShow path)
   return path
 
 
-loadManifest :: App (Either Error (Maybe Manifest))
+loadManifest
+  :: (MonadFileSystem i, MonadIO i) => App i (Either Error (Maybe Manifest))
 loadManifest = do
   filename <- manifestPath
   result <- liftIO $ tryIOError (readManifestFile filename)
@@ -188,7 +194,7 @@ loadManifest = do
       return $ Right $ Just manifest
 
 
-doesManifestExist :: App Bool
+doesManifestExist :: (MonadFileSystem i, MonadIO i) => App i Bool
 doesManifestExist = do
   filePath <- manifestPath
   exists' <- liftIO $ exists filePath
@@ -200,7 +206,7 @@ doesManifestExist = do
   return exists'
 
 
-saveManifest :: Manifest -> App OsPath
+saveManifest :: (MonadFileSystem i, MonadIO i) => Manifest -> App i OsPath
 saveManifest manifest = do
   filename <- manifestPath
   $(logDebugSH) manifest
