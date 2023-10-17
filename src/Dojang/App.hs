@@ -23,8 +23,8 @@ module Dojang.App
 
 import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
-import System.Exit (die)
 import System.IO.Error (isDoesNotExistError, tryIOError)
 import Prelude hiding (readFile, writeFile)
 
@@ -43,22 +43,23 @@ import Control.Monad.Logger
   , runStderrLoggingT
   )
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
+import Data.Text (concat, pack)
 import System.OsPath (encodeFS, (</>))
 import System.OsPath.Types (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
-import Dojang.Syntax.Manifest.Parser (Error, formatError, readManifestFile)
-import Dojang.Syntax.Manifest.Writer (writeManifestFile)
-import Dojang.Types.Manifest (Manifest)
-
+import Dojang.Commands (die)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Env (EnvFileError (..), readEnvFile)
+import Dojang.Syntax.Manifest.Parser (Error, formatError, readManifestFile)
+import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Environment.Current
   ( MonadArchitecture (currentArchitecture)
   , MonadEnvironment (currentEnvironment)
   , MonadOperatingSystem (currentOperatingSystem)
   )
+import Dojang.Types.Manifest (Manifest)
 
 
 -- | The environment for the application monad.
@@ -99,10 +100,6 @@ instance MonadFileSystem App where
   removeFile = liftIO . removeFile
 
 
-die' :: String -> App a
-die' = liftIO . die
-
-
 currentEnvironment' :: App Environment
 currentEnvironment' = do
   sourceDir <- asks (.sourceDirectory)
@@ -111,19 +108,19 @@ currentEnvironment' = do
   envFileOP <- liftIO $ encodeFS envFile'
   let filePath = sourceDirOP </> envFileOP
   $(logDebug) $ "Environment file path: " <> showt (FromStringShow filePath)
-  result <- liftIO $ tryIOError $ readEnvFile filePath
+  result <- readEnvFile filePath
   case result of
-    Left e | isDoesNotExistError e -> do
+    Left (IOError e) | isDoesNotExistError e -> do
       $(logWarn) $ "Environment file not found: " <> showt (FromStringShow e)
       liftIO currentEnvironment
-    Left e -> do
-      die' $ "Error: " <> show e
-    Right (Left (IOError e)) -> do
-      die' $ "Error: " <> show e
-    Right (Left (TomlErrors errors)) -> do
-      let formattedErrors = concatMap ("\n  " ++) errors
-      die' $ "Error: Syntax errors in environment file:" <> formattedErrors
-    Right (Right (env, warnings)) -> do
+    Left (IOError e) -> do
+      die $ showt e
+    Left (TomlErrors errors) -> do
+      let formattedErrors =
+            Data.Text.concat
+              ["\n  " <> pack e | e <- toList errors]
+      die $ "Syntax errors in environment file:" <> formattedErrors
+    Right (env, warnings) -> do
       $(logDebugSH) env
       forM_ warnings $ \w -> $(logWarn) $ fromString w
       return env
