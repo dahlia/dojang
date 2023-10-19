@@ -1,10 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Dojang.FilePathExpansionSpec (spec) where
+module Dojang.Types.FilePathExpression.ExpansionSpec (spec) where
 
-import Dojang.FilePathExpansion (expandFilePath)
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (++), (+/+))
+import Dojang.Types.FilePathExpression.Expansion (expandFilePath)
 
 import Data.Text (Text, unpack)
 import GHC.IO.Unsafe (unsafePerformIO)

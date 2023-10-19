@@ -1,4 +1,4 @@
-module Dojang.FilePathExpansion (expandFilePath) where
+module Dojang.Types.FilePathExpression.Expansion (expandFilePath) where
 
 import Dojang.Types.FilePathExpression
   ( EnvironmentVariable
