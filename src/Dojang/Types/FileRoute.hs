@@ -9,9 +9,9 @@ module Dojang.Types.FileRoute
   , dispatch
   ) where
 
-import Dojang.Evaluate (EvaluationWarning, evaluate')
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning, evaluate')
 import Dojang.Types.EnvironmentPredicate.Specificity (specificity)
 import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)

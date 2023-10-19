@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedRecordUpdate #-}
 
-module Dojang.Evaluate
+module Dojang.Types.EnvironmentPredicate.Evaluate
   ( EvaluationWarning (..)
   , evaluate
   , evaluate'

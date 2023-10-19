@@ -2,14 +2,13 @@
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Dojang.EvaluateSpec (spec) where
+module Dojang.Types.EnvironmentPredicate.EvaluateSpec (spec) where
 
 import Data.HashMap.Strict (HashMap)
 import Test.Hspec (Spec, describe, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (/==), (===))
 
-import Dojang.Evaluate (EvaluationWarning (UndefinedMoniker), evaluate)
 import Dojang.Gen qualified as Gen
 import Dojang.Types.Environment
   ( Architecture (AArch64, X86_64)
@@ -17,6 +16,10 @@ import Dojang.Types.Environment
   , OperatingSystem (Linux, MacOS)
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate.Evaluate
+  ( EvaluationWarning (UndefinedMoniker)
+  , evaluate
+  )
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 
 

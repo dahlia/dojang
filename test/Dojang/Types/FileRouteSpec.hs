@@ -11,10 +11,12 @@ import Test.Hspec (Spec, describe, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotBe)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
-import Dojang.Evaluate (EvaluationWarning (UndefinedMoniker))
 import Dojang.Types.Environment (Environment (Environment))
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Moniker, OperatingSystem, Or)
+  )
+import Dojang.Types.EnvironmentPredicate.Evaluate
+  ( EvaluationWarning (UndefinedMoniker)
   )
 import Dojang.Types.FilePathExpression
   ( FilePathExpression (Root, Substitution)
