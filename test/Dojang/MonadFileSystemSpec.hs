@@ -4,7 +4,10 @@
 
 module Dojang.MonadFileSystemSpec (spec) where
 
+import Control.Concurrent (myThreadId)
 import Control.Monad (when)
+import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List (sort)
 import System.IO.Error
   ( doesNotExistErrorType
   , ioeGetErrorString
@@ -14,18 +17,24 @@ import System.IO.Error
   )
 import System.Info (os)
 import Prelude hiding (readFile, writeFile)
+import Prelude qualified (writeFile)
 
 import Data.ByteString qualified (readFile, writeFile)
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
   ( doesDirectoryExist
   , doesFileExist
   , doesPathExist
   )
+import System.Directory.OsPath qualified (createDirectory)
 import System.FilePath (combine)
 import System.IO.Temp (withSystemTempDirectory)
-import System.OsPath (OsPath, encodeFS, (</>))
+import System.OsPath (OsPath, dropFileName, encodeFS, (</>))
+import System.Random (genWord64, newStdGen)
 import Test.Hspec (Spec, describe, it, runIO, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotReturn, shouldReturn)
+import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
 
@@ -47,8 +56,12 @@ nonExistentFP' = "---non-existent-2---"
 
 
 withTempDir :: (OsPath -> FilePath -> IO a) -> IO a
-withTempDir action =
-  withSystemTempDirectory "" $ \tmpDir -> do
+withTempDir action = do
+  stdGen <- newStdGen
+  let (uniqNo, _) = genWord64 stdGen
+  tid <- myThreadId
+  let uniqName = "dojang-spec-" ++ show uniqNo ++ "-" ++ show tid
+  withSystemTempDirectory uniqName $ \tmpDir -> do
     tmpDir' <- encodeFS tmpDir
     action tmpDir' tmpDir
 
@@ -60,7 +73,29 @@ spec = do
   nonExistentP <- runIO $ encodeFS nonExistentFP
   nonExistentP' <- runIO $ encodeFS nonExistentFP'
 
+  -- cSpell:ignore quux corge
+  foo <- runIO $ encodeFS "foo"
+  bar <- runIO $ encodeFS "bar"
+  baz <- runIO $ encodeFS "baz"
+  qux <- runIO $ encodeFS "qux"
+  quux <- runIO $ encodeFS "quux"
+  corge <- runIO $ encodeFS "corge"
+
+  let withFixture action = withTempDir $ \tmpDir tmpDir' -> do
+        () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
+        () <- System.Directory.OsPath.createDirectory $ tmpDir </> bar
+        () <- System.Directory.OsPath.createDirectory $ tmpDir </> baz
+        () <-
+          System.Directory.OsPath.createDirectory
+            (tmpDir </> baz </> qux)
+        action tmpDir tmpDir'
+
   describe "MonadFileSystem IO" $ do
+    specify "encodePath" $ hedgehog $ do
+      filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicodeAll
+      filePath' <- liftIO $ encodePath filePath >>= decodePath
+      filePath' === filePath
+
     specify "exists" $ do
       exists packageYamlP `shouldReturn` True
       exists testP `shouldReturn` True
@@ -110,7 +145,16 @@ spec = do
         Right () <- removeFile (tmpDirP </> nonExistentP)
         doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` False
 
+    specify "listDirectory" $ withFixture $ \tmpDir _ -> do
+      Right result <- listDirectory tmpDir
+      sort result `shouldBe` [bar, baz, foo]
+
   describe "DryRunIO" $ do
+    specify "encodePath" $ hedgehog $ do
+      filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicodeAll
+      filePath' <- liftIO $ dryRunIO (encodePath filePath >>= decodePath)
+      filePath' === filePath
+
     describe "isFile" $ do
       it "checks an actual file that exists on the real file system" $ do
         packageYamlIsFile <- dryRunIO $ isFile packageYamlP
@@ -588,3 +632,57 @@ spec = do
         ioeGetFileName failToCreate `shouldBe` Just packageYamlFP
         ioeGetErrorString failToCreate
           `shouldBe` "createDirectories: one of its ancestors is a file"
+
+    describe "listDirectory" $ do
+      it "lists direct children in a directory" $ do
+        withFixture $ \tmpDir tmpDir' -> do
+          result <- dryRunIO $ listDirectory tmpDir
+          result `shouldBe` Right [bar, baz, foo]
+          () <- Prelude.writeFile (tmpDir' `combine` "corge") ""
+          result' <- dryRunIO $ do
+            Right () <- writeFile (tmpDir </> qux) ""
+            Right () <- createDirectory (tmpDir </> quux)
+            Right () <- writeFile (tmpDir </> corge) ""
+            Right () <- writeFile (dropFileName tmpDir </> foo) ""
+            listDirectory tmpDir
+          result' `shouldBe` Right [bar, baz, corge, foo, quux, qux]
+
+      it "lists direct children in a virtual directory" $ do
+        result <- dryRunIO $ do
+          Right () <- createDirectory nonExistentP
+          Right () <- writeFile (nonExistentP </> foo) ""
+          Right () <- createDirectory (nonExistentP </> bar)
+          Right () <- createDirectory (nonExistentP </> baz)
+          Right () <- createDirectory (nonExistentP </> baz </> qux)
+          listDirectory nonExistentP
+        result `shouldBe` Right [bar, baz, foo]
+
+      it "hides removed files in the sandbox" $ withFixture $ \tmpDir _ -> do
+        result <- dryRunIO $ do
+          Right () <- removeFile (tmpDir </> foo)
+          listDirectory tmpDir
+        result `shouldBe` Right [bar, baz]
+
+      it "fails if a specified path does not exist" $ do
+        Left e <- dryRunIO $ listDirectory nonExistentP
+        ioeGetFileName e `shouldBe` Just nonExistentFP
+        ioeGetErrorType e `shouldBe` doesNotExistErrorType
+        Left e' <- dryRunIO $ do
+          Right () <- removeFile packageYamlP
+          listDirectory packageYamlP
+        ioeGetFileName e' `shouldBe` Just packageYamlFP
+        ioeGetErrorString e' `shouldBe` "listDirectory: no such directory"
+
+      it "fails if a specified path is a regular file" $ do
+        Left e <- dryRunIO $ listDirectory packageYamlP
+        ioeGetFileName e `shouldBe` Just packageYamlFP
+        Left e' <- dryRunIO $ do
+          Right () <- writeFile nonExistentP ""
+          listDirectory nonExistentP
+        ioeGetFileName e' `shouldBe` Just nonExistentFP
+        ioeGetErrorString e' `shouldBe` "listDirectory: not a directory"
+        Left e'' <- dryRunIO $ do
+          Right () <- copyFile packageYamlP nonExistentP
+          listDirectory nonExistentP
+        ioeGetFileName e'' `shouldBe` Just nonExistentFP
+        ioeGetErrorString e'' `shouldBe` "listDirectory: not a directory"

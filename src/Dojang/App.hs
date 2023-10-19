@@ -105,6 +105,7 @@ instance forall i. (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) whe
   copyFile src = App . lift . lift . copyFile src
   createDirectory = App . lift . lift . createDirectory
   removeFile = App . lift . lift . removeFile
+  listDirectory = App . lift . lift . listDirectory
 
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment

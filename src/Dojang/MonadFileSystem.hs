@@ -4,6 +4,7 @@
 module Dojang.MonadFileSystem (DryRunIO, MonadFileSystem (..), dryRunIO) where
 
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List (isPrefixOf, sort)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import System.IO.Error (ioeSetFileName, tryIOError)
 import Prelude hiding (filter, readFile, writeFile)
@@ -17,14 +18,29 @@ import Control.Monad.State.Strict
   )
 import Data.ByteString (ByteString)
 import Data.ByteString qualified (readFile, writeFile)
-import Data.Map.Strict (Map, alter, (!?))
+import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
 import System.Directory.OsPath
   ( doesDirectoryExist
   , doesFileExist
   , doesPathExist
   )
-import System.Directory.OsPath qualified (copyFile, createDirectory, removeFile)
-import System.OsPath (OsPath, decodeFS, encodeFS, normalise, takeDirectory)
+import System.Directory.OsPath qualified
+  ( copyFile
+  , createDirectory
+  , listDirectory
+  , removeFile
+  )
+import System.OsPath
+  ( OsPath
+  , decodeFS
+  , encodeFS
+  , makeRelative
+  , normalise
+  , splitDirectories
+  , takeDirectory
+  , takeFileName
+  , (</>)
+  )
 
 
 -- | A monad that can perform filesystem operations.  It's also based on
@@ -97,7 +113,13 @@ class (Monad m) => MonadFileSystem m where
               Right _ -> createDirectory path
 
 
+  -- | Removes a file.
   removeFile :: OsPath -> m (Either IOError ())
+
+
+  -- | Lists all files and directories in a directory except for @.@ and @..@,
+  -- without recursing into subdirectories.
+  listDirectory :: OsPath -> m (Either IOError [OsPath])
 
 
 instance MonadFileSystem IO where
@@ -133,6 +155,9 @@ instance MonadFileSystem IO where
   removeFile = tryIOError . System.Directory.OsPath.removeFile
 
 
+  listDirectory = tryIOError . System.Directory.OsPath.listDirectory
+
+
 type SeqNo = Int
 
 
@@ -146,6 +171,7 @@ data OverlaidFile
     Gone
   | -- | A file that was copied from the given path.
     Copied OsPath
+  deriving (Eq)
 
 
 -- | Internal state of 'DryRun'.
@@ -481,6 +507,58 @@ instance MonadFileSystem DryRunIO where
       _ -> do
         addChangeToFile path Gone
         return $ Right ()
+
+
+  listDirectory path = do
+    let normalizedPath = normalise path
+    oFiles <- gets overlaidFiles
+    path' <- decodePath path
+    case oFiles !? normalizedPath of
+      Just ((_, Gone) :| _) ->
+        return
+          $ Left
+          $ userError "listDirectory: no such directory"
+          `ioeSetFileName` path'
+      Just ((_, Contents _) :| _) ->
+        return
+          $ Left
+          $ userError "listDirectory: not a directory"
+          `ioeSetFileName` path'
+      Just ((_, Copied _) :| _) ->
+        return
+          $ Left
+          $ userError "listDirectory: not a directory"
+          `ioeSetFileName` path'
+      Just ((_, Directory) :| _) ->
+        return $ Right $ map takeFileName $ keys $ directOChildren oFiles
+      Nothing -> do
+        list <- liftIO $ tryIOError $ System.Directory.OsPath.listDirectory path
+        case list of
+          Left e -> return $ Left e
+          Right files -> do
+            let directOChildren' = directOChildren oFiles
+            let result =
+                  [f | f <- files, directOChildren' !? (path </> f) /= Just Gone]
+                    ++ [ filename
+                       | (filePath, f) <- toAscList directOChildren'
+                       , f /= Gone
+                       , let filename = makeRelative path filePath
+                       , filename `notElem` files
+                       ]
+            return $ Right $ sort result
+   where
+    pathDirs :: [OsPath]
+    pathDirs = splitDirectories path
+    directOChildren
+      :: Map OsPath (NonEmpty (SeqNo, OverlaidFile)) -> Map OsPath OverlaidFile
+    directOChildren oFiles =
+      fromList
+        [ (filePath, f)
+        | (filePath, (_, f) :| []) <- toAscList oFiles
+        , let split = splitDirectories filePath
+        , pathDirs `isPrefixOf` split
+        , length pathDirs + 1 == length split
+        ]
 
 
 dryRunIO :: DryRunIO a -> IO a
