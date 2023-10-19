@@ -7,17 +7,18 @@ module Dojang.Syntax.Manifest.Writer
   , writeManifestFile
   ) where
 
-import Data.Bifunctor (Bifunctor (second))
+import Data.Bifunctor (Bifunctor (bimap, second))
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty ((:|)), length, toList)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import GHC.IsList (IsList (fromList))
+import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (all, any, writeFile)
 
 import Data.CaseInsensitive (CI (original))
 import Data.Text (Text, unpack)
 import Data.Text.Encoding (encodeUtf8)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, decodeFS)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Toml (encode)
 
@@ -79,16 +80,18 @@ mapManifest' manifest =
 
 mapFiles :: FileRouteMap -> MonikerMap -> (FileRouteMap', FileRouteMap')
 mapFiles fileRouteMap monikers =
-  ( fromList (second (`mapFileRoute'` monikers) <$> dirs)
-  , fromList (second (`mapFileRoute'` monikers) <$> files)
+  ( fromList (bimap decodePath (`mapFileRoute'` monikers) <$> dirs)
+  , fromList (bimap decodePath (`mapFileRoute'` monikers) <$> files)
   )
  where
-  dirs :: [(Text, FileRoute)]
-  files :: [(Text, FileRoute)]
+  dirs :: [(OsPath, FileRoute)]
+  files :: [(OsPath, FileRoute)]
   (dirs, files) =
     partition
       ((== Directory) . fileType . snd)
       $ Dojang.Types.FileRouteMap.toList fileRouteMap
+  decodePath :: OsPath -> FilePath
+  decodePath = unsafePerformIO . decodeFS
 
 
 mapFileRoute' :: FileRoute -> MonikerMap -> FileRoute'

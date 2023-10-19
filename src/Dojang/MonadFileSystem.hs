@@ -20,12 +20,16 @@ import Data.ByteString qualified (readFile, writeFile)
 import Data.Map.Strict (Map, alter, (!?))
 import System.Directory (doesDirectoryExist, doesFileExist, doesPathExist)
 import System.Directory qualified (copyFile, createDirectory, removeFile)
-import System.OsPath (OsPath, decodeFS, normalise, takeDirectory)
+import System.OsPath (OsPath, decodeFS, encodeFS, normalise, takeDirectory)
 
 
 -- | A monad that can perform filesystem operations.  It's also based on
 -- 'OsPath' instead of 'FilePath'.
 class (Monad m) => MonadFileSystem m where
+  -- | Encodes a 'FilePath' into an 'OsPath'.
+  encodePath :: FilePath -> m OsPath
+
+
   -- | Decodes a 'OsPath' into a 'FilePath'.
   decodePath :: OsPath -> m FilePath
 
@@ -93,6 +97,9 @@ class (Monad m) => MonadFileSystem m where
 
 
 instance MonadFileSystem IO where
+  encodePath = encodeFS
+
+
   decodePath = decodeFS
 
 
@@ -213,6 +220,9 @@ readFileFromDryRunIO seqOffset src = do
 
 
 instance MonadFileSystem DryRunIO where
+  encodePath = liftIO . encodeFS
+
+
   decodePath = liftIO . decodeFS
 
 

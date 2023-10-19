@@ -95,6 +95,7 @@ newtype (MonadFileSystem i, MonadIO i) => App i v = App
 
 
 instance forall i. (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
+  encodePath = App . lift . lift . encodePath
   decodePath = App . lift . lift . decodePath
   exists = App . lift . lift . exists
   isFile = App . lift . lift . isFile

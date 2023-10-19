@@ -16,13 +16,14 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
 import Data.Void (Void)
+import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (readFile)
 
-import Data.HashMap.Strict (fromList)
-import Data.Map.Strict (toList)
+import Data.HashMap.Strict as HashMap (fromList)
+import Data.Map.Strict as Map (fromList, toList)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, encodeFS)
 import Toml (Result (..), decode)
 
 import Dojang.MonadFileSystem (MonadFileSystem (readFile))
@@ -127,7 +128,7 @@ mapMonikerMap :: MonikerMap' -> Either Error MonikerMap
 mapMonikerMap m =
   case errors of
     e : _ -> Left e
-    _ -> Right $ fromList [(name, pred') | (name, Right pred') <- results]
+    _ -> Right $ HashMap.fromList [(name, pred') | (name, Right pred') <- results]
  where
   results :: [(MonikerName, Either Error EnvironmentPredicate)]
   results =
@@ -183,18 +184,20 @@ mapFileRouteMap
 mapFileRouteMap monikerMap dirs files =
   case errors of
     e : _ -> Left e
-    _ -> Right $ fromList [(name, route) | (name, Right route) <- results]
+    _ -> Right $ Map.fromList [(name, route) | (name, Right route) <- results]
  where
-  results :: [(Text, Either Error FileRoute)]
+  results :: [(OsPath, Either Error FileRoute)]
   results =
-    [ (name, mapFileRoute monikerMap route File)
+    [ (encodePath name, mapFileRoute monikerMap route File)
     | (name, route) <- toList dirs
     ]
-      ++ [ (name, mapFileRoute monikerMap route Directory)
+      ++ [ (encodePath name, mapFileRoute monikerMap route Directory)
          | (name, route) <- toList files
          ]
   errors :: [Error]
   errors = lefts [r | (_, r) <- results]
+  encodePath :: String -> OsPath
+  encodePath = unsafePerformIO . encodeFS
 
 
 mapFileRoute

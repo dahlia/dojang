@@ -19,10 +19,10 @@ import Data.List.NonEmpty (NonEmpty)
 import GHC.Generics (Generic)
 import Prelude hiding (all, any)
 
-import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Data.CaseInsensitive (CI (original))
 import Data.Map.Strict (Map)
 import Data.Text (Text, pack, unpack)
+import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Toml (Value (..))
 import Toml.FromValue (FromKey (..), FromValue (..), parseTableFromValue)
 import Toml.FromValue.Generic (genericParseTable)
@@ -130,7 +130,7 @@ type MonikerMap' = Map MonikerName EnvironmentPredicate'
 type FileRoute' = Map MonikerName Text
 
 
-type FileRouteMap' = Map Text FileRoute'
+type FileRouteMap' = Map FilePath FileRoute'
 
 
 data Manifest' = Manifest'

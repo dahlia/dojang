@@ -9,12 +9,11 @@ module Dojang.Types.FilePathExpression
   ) where
 
 import Data.Char (isAlphaNum, isAscii)
+import Data.String (IsString (..))
+import Prelude hiding (head, null, (++))
+
 import Data.Hashable (Hashable (hashWithSalt))
 import Data.Text (Text, head, null, pack)
-
-import Data.String (IsString)
-import GHC.Exts (IsString (..))
-import Prelude hiding (head, null, (++))
 
 
 -- | An environment variable.

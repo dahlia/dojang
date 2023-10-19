@@ -146,9 +146,10 @@ init presets noInteractive = do
                  ]
       let route = fileRoute monikers
       let dirRoute = (`route` Directory)
+      homePath <- encodePath "HOME"
       let homeRoutes =
             FileRouteMap.singleton
-              "HOME"
+              homePath
               ( dirRoute
                   $ [ ( monikerNames ! (Windows, Nothing)
                       , Just windowsUserProfile
@@ -159,11 +160,12 @@ init presets noInteractive = do
                      | Linux `member` oses || MacOS `member` oses
                      ]
               )
+      xdgConfigHomePath <- encodePath "XDG_CONFIG_HOME"
       let xdgConfigHomRoutes =
             if Linux `member` oses || MacOS `member` oses
               then
                 FileRouteMap.singleton
-                  "XDG_CONFIG_HOME"
+                  xdgConfigHomePath
                   ( dirRoute
                       $ [ ( monikerNames ! (Windows, Nothing)
                           , Just windowsXdgConfigHome
@@ -175,11 +177,12 @@ init presets noInteractive = do
                          ]
                   )
               else FileRouteMap.empty
+      applicationSupportPath <- encodePath "ApplicationSupport"
       let applicationSupportRoutes =
             if MacOS `member` oses
               then
                 FileRouteMap.singleton
-                  "ApplicationSupport"
+                  applicationSupportPath
                   ( dirRoute
                       $ [ ( monikerNames ! (MacOS, Nothing)
                           , Just macosApplicationSupport
@@ -196,11 +199,12 @@ init presets noInteractive = do
                          ]
                   )
               else FileRouteMap.empty
+      appDataPath <- encodePath "AppData"
       let appDataRoutes =
             if Windows `member` oses
               then
                 FileRouteMap.singleton
-                  "AppData"
+                  appDataPath
                   ( dirRoute
                       $ [ ( monikerNames ! (Windows, Nothing)
                           , Just windowsAppData

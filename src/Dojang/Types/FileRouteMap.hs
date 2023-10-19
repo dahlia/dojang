@@ -15,8 +15,8 @@ module Dojang.Types.FileRouteMap
 
 import Prelude hiding (lookup)
 
-import Data.HashMap.Strict qualified as HashMap
-  ( HashMap
+import Data.Map.Strict qualified as Map
+  ( Map
   , empty
   , fromList
   , keys
@@ -27,33 +27,33 @@ import Data.HashMap.Strict qualified as HashMap
   , union
   , (!?)
   )
-import Data.Text (Text)
+import System.OsPath (OsPath)
 
 import Dojang.Types.FileRoute (FileRoute)
 
 
 -- | A map of directories and their routes.
-type FileRouteMap = HashMap.HashMap Text FileRoute
+type FileRouteMap = Map.Map OsPath FileRoute
 
 
 -- | An empty 'FileRouteMap'.
 empty :: FileRouteMap
-empty = HashMap.empty
+empty = Map.empty
 
 
 -- | Makes a 'FileRouteMap' with a single directory name and its route.
-singleton :: Text -> FileRoute -> FileRouteMap
-singleton = HashMap.singleton
+singleton :: OsPath -> FileRoute -> FileRouteMap
+singleton = Map.singleton
 
 
 -- | Looks up a 'FileRoute' by its directory name.
-lookup :: Text -> FileRouteMap -> Maybe FileRoute
-lookup = HashMap.lookup
+lookup :: OsPath -> FileRouteMap -> Maybe FileRoute
+lookup = Map.lookup
 
 
 -- | Flipped version of 'lookup'.
-(!?) :: FileRouteMap -> Text -> Maybe FileRoute
-(!?) = (HashMap.!?)
+(!?) :: FileRouteMap -> OsPath -> Maybe FileRoute
+(!?) = (Map.!?)
 {-# INLINE (!?) #-}
 
 
@@ -61,25 +61,25 @@ infixl 9 !?
 
 
 -- | Makes a 'FileRouteMap' from a list of directory names and their routes.
-fromList :: [(Text, FileRoute)] -> FileRouteMap
-fromList = HashMap.fromList
+fromList :: [(OsPath, FileRoute)] -> FileRouteMap
+fromList = Map.fromList
 
 
 -- | Gets the directory names from a 'FileRouteMap'.
-keys :: FileRouteMap -> [Text]
-keys = HashMap.keys
+keys :: FileRouteMap -> [OsPath]
+keys = Map.keys
 
 
 -- | Makes pairs of directory names and their routes from a 'FileRouteMap'.
-toList :: FileRouteMap -> [(Text, FileRoute)]
-toList = HashMap.toList
+toList :: FileRouteMap -> [(OsPath, FileRoute)]
+toList = Map.toList
 
 
 -- | Gets the number of directory mappings in a 'FileRouteMap'.
 size :: FileRouteMap -> Int
-size = HashMap.size
+size = Map.size
 
 
 -- | Merges two 'FileRouteMap's.
 union :: FileRouteMap -> FileRouteMap -> FileRouteMap
-union = HashMap.union
+union = Map.union
