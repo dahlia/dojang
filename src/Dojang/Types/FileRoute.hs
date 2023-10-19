@@ -39,7 +39,7 @@ data FileType
 -- Each 'EnvironmentPredicate' represents a condition that must be met for the
 -- 'FilePathExpression' to be dispatched.  The 'FilePathExpression' is
 -- the path to the directory that should be dispatched to.  If it is 'Nothing',
--- then it is considered a "null route" and will not be dispatched.
+-- then it is considered a "null route" and will be ignored.
 --
 -- Note that a null route will still be considered a match, and will be
 -- dispatched as 'Nothing'.
@@ -48,8 +48,8 @@ data FileRoute = FileRoute
   -- ^ The 'MonikerResolver' used to resolve 'MonikerName's.
   , predicates :: [(EnvironmentPredicate, Maybe FilePathExpression)]
   -- ^ The pairs of 'EnvironmentPredicate's and 'FilePathExpression's that make
-  -- up the 'FileRoute'.  If the 'FilePathExpression' is 'Nothing', then it is
-  -- considered a "null route" and will not be dispatched.
+  -- up the 'FileRoute'.  If the file path expression is 'Nothing', then it is
+  -- considered a "null route" and will be ignored.
   , fileType :: FileType
   -- ^ Whether the 'FileRoute' represents a file or a directory.
   }
@@ -84,7 +84,8 @@ fileRoute
   -- ^ The 'MonikerMap' to resolve 'MonikerName's against.
   -> [(MonikerName, Maybe FilePathExpression)]
   -- ^ The pairs of 'MonikerName's and 'FilePathExpression's that make up the
-  -- 'FileRoute'.
+  -- 'FileRoute'.  If the file path expression is 'Nothing', then it is
+  -- considered a "null route" and will be ignored.
   -> FileType
   -- ^ Whether the 'FileRoute' represents a file or a directory.
   -> FileRoute
@@ -103,7 +104,8 @@ fileRoute'
   -- ^ A function that resolves a 'MonikerName' to an 'EnvironmentPredicate'.
   -> [(EnvironmentPredicate, Maybe FilePathExpression)]
   -- ^ The pairs of 'EnvironmentPredicate's and 'FilePathExpression's that make
-  -- up the 'FileRoute'.
+  -- up the 'FileRoute'.  If the file path expression is 'Nothing', then it is
+  -- considered a "null route" and will be ignored.
   -> FileType
   -- ^ Whether the 'FileRoute' represents a file or a directory.
   -> FileRoute
