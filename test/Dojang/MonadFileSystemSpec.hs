@@ -16,7 +16,11 @@ import System.Info (os)
 import Prelude hiding (readFile, writeFile)
 
 import Data.ByteString qualified (readFile, writeFile)
-import System.Directory (doesDirectoryExist, doesFileExist, doesPathExist)
+import System.Directory.OsPath
+  ( doesDirectoryExist
+  , doesFileExist
+  , doesPathExist
+  )
 import System.FilePath (combine)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (OsPath, encodeFS, (</>))
@@ -94,17 +98,17 @@ spec = do
         contents `shouldBe` original
 
     specify "createDirectory" $ do
-      withTempDir $ \tmpDirP tmpDirFP -> do
+      withTempDir $ \tmpDirP _ -> do
         Right () <- createDirectory (tmpDirP </> nonExistentP)
-        doesDirectoryExist (tmpDirFP `combine` nonExistentFP)
+        doesDirectoryExist (tmpDirP </> nonExistentP)
           `shouldReturn` True
 
     specify "removeFile" $ do
       withTempDir $ \tmpDirP tmpDirFP -> do
         Data.ByteString.writeFile (tmpDirFP `combine` nonExistentFP) ""
-        doesFileExist (tmpDirFP `combine` nonExistentFP) `shouldReturn` True
+        doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` True
         Right () <- removeFile (tmpDirP </> nonExistentP)
-        doesFileExist (tmpDirFP `combine` nonExistentFP) `shouldReturn` False
+        doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` False
 
   describe "DryRunIO" $ do
     describe "isFile" $ do
@@ -293,7 +297,7 @@ spec = do
           Right () <- writeFile nonExistentP "baz"
           readFile nonExistentP
         data'' `shouldBe` "baz"
-        doesFileExist nonExistentFP `shouldReturn` False
+        doesFileExist nonExistentP `shouldReturn` False
 
       it "can't write data to a directory" $ do
         Left failToWriteToTest <- dryRunIO $ writeFile testP "foo"
@@ -351,19 +355,19 @@ spec = do
           readFile nonExistentP
         packageYamlData <- Data.ByteString.readFile packageYamlFP
         data' `shouldBe` packageYamlData
-        doesFileExist nonExistentFP `shouldReturn` False
+        doesFileExist nonExistentP `shouldReturn` False
         Right data'' <- dryRunIO $ do
           Right () <- writeFile nonExistentP "foo"
           Right () <- copyFile nonExistentP nonExistentP'
           readFile nonExistentP'
         data'' `shouldBe` "foo"
-        doesFileExist nonExistentFP' `shouldReturn` False
+        doesFileExist nonExistentP' `shouldReturn` False
         Right data''' <- dryRunIO $ do
           Right () <- copyFile packageYamlP nonExistentP
           Right () <- copyFile nonExistentP nonExistentP'
           readFile nonExistentP'
         data''' `shouldBe` packageYamlData
-        doesFileExist nonExistentFP' `shouldReturn` False
+        doesFileExist nonExistentP' `shouldReturn` False
 
       it "can copy a source file to an existing file by overwriting it" $ do
         Right data' <- dryRunIO $ do
@@ -372,7 +376,7 @@ spec = do
           readFile nonExistentP
         packageYamlData <- Data.ByteString.readFile packageYamlFP
         data' `shouldBe` packageYamlData
-        doesPathExist nonExistentFP `shouldReturn` False
+        doesPathExist nonExistentP `shouldReturn` False
 
       it "can't copy a non-existent file" $ do
         Left failToCopy <- dryRunIO $ copyFile nonExistentP nonExistentP'
@@ -391,14 +395,14 @@ spec = do
         ioeGetFileName failToCopy `shouldBe` Just testFP
         ioeGetErrorString failToCopy
           `shouldBe` "copyFile: source is a directory"
-        doesPathExist nonExistentFP `shouldReturn` False
+        doesPathExist nonExistentP `shouldReturn` False
         Left failToCopy' <- dryRunIO $ do
           Right () <- createDirectory nonExistentP
           copyFile nonExistentP nonExistentP'
         ioeGetFileName failToCopy' `shouldBe` Just nonExistentFP
         ioeGetErrorString failToCopy'
           `shouldBe` "copyFile: source is a directory"
-        doesPathExist nonExistentFP' `shouldReturn` False
+        doesPathExist nonExistentP' `shouldReturn` False
 
       it "can't copy a file to a file path that has no parent directory" $ do
         Left failToCopy <- dryRunIO $ do
@@ -443,7 +447,7 @@ spec = do
         ioeGetFileName failToCopy `shouldBe` Just testFP
         ioeGetErrorString failToCopy
           `shouldBe` "copyFile: destination is a directory"
-        doesDirectoryExist testFP `shouldReturn` True
+        doesDirectoryExist testP `shouldReturn` True
         Left failToCopy' <- dryRunIO $ do
           Right () <- createDirectory nonExistentP
           copyFile packageYamlP nonExistentP
@@ -479,7 +483,7 @@ spec = do
           `shouldBe` Just (packageYamlFP `combine` nonExistentFP)
         ioeGetErrorString failToCreate
           `shouldBe` "createDirectory: destination must be inside a directory"
-        doesFileExist packageYamlFP `shouldReturn` True
+        doesFileExist packageYamlP `shouldReturn` True
         Left failToCreate' <- dryRunIO $ do
           Right () <- writeFile nonExistentP ""
           createDirectory (nonExistentP </> nonExistentP)
@@ -501,7 +505,7 @@ spec = do
         ioeGetFileName failToCreate `shouldBe` Just packageYamlFP
         ioeGetErrorString failToCreate
           `shouldBe` "createDirectory: destination is already a file"
-        doesFileExist packageYamlFP `shouldReturn` True
+        doesFileExist packageYamlP `shouldReturn` True
         Left failToCreate' <- dryRunIO $ do
           Right () <- writeFile nonExistentP ""
           createDirectory nonExistentP
@@ -521,7 +525,7 @@ spec = do
         ioeGetFileName failToCreate `shouldBe` Just testFP
         ioeGetErrorString failToCreate
           `shouldBe` "createDirectory: destination is already a directory"
-        doesDirectoryExist testFP `shouldReturn` True
+        doesDirectoryExist testP `shouldReturn` True
         Left failToCreate' <- dryRunIO $ do
           Right () <- createDirectory nonExistentP
           createDirectory nonExistentP
@@ -533,7 +537,7 @@ spec = do
       it "removes an existing file" $ do
         dryRunIO (removeFile packageYamlP >> exists packageYamlP)
           `shouldReturn` False
-        doesFileExist packageYamlFP `shouldReturn` True
+        doesFileExist packageYamlP `shouldReturn` True
         fileExists <- dryRunIO $ do
           Right () <- writeFile nonExistentP ""
           Right () <- removeFile nonExistentP
@@ -562,7 +566,7 @@ spec = do
         ioeGetFileName failToRemove `shouldBe` Just testFP
         ioeGetErrorString failToRemove
           `shouldBe` "removeFile: it is a directory"
-        doesDirectoryExist testFP `shouldReturn` True
+        doesDirectoryExist testP `shouldReturn` True
         Left failToRemove' <- dryRunIO $ do
           Right () <- createDirectory nonExistentP
           removeFile nonExistentP
@@ -576,7 +580,7 @@ spec = do
           Right () <- createDirectories (nonExistentP </> nonExistentP)
           isDirectory (nonExistentP </> nonExistentP)
         result `shouldBe` True
-        doesDirectoryExist nonExistentFP `shouldReturn` False
+        doesDirectoryExist nonExistentP `shouldReturn` False
 
       it "can't create a directory if any of its ancestors is a file" $ do
         Left failToCreate <- dryRunIO $ do

@@ -9,3 +9,6 @@ max_line_length = 80
 
 [*.{json,yaml,yml}]
 indent_size = 2
+
+[*.hs]
+indent_size = 2

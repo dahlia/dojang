@@ -18,8 +18,12 @@ import Control.Monad.State.Strict
 import Data.ByteString (ByteString)
 import Data.ByteString qualified (readFile, writeFile)
 import Data.Map.Strict (Map, alter, (!?))
-import System.Directory (doesDirectoryExist, doesFileExist, doesPathExist)
-import System.Directory qualified (copyFile, createDirectory, removeFile)
+import System.Directory.OsPath
+  ( doesDirectoryExist
+  , doesFileExist
+  , doesPathExist
+  )
+import System.Directory.OsPath qualified (copyFile, createDirectory, removeFile)
 import System.OsPath (OsPath, decodeFS, encodeFS, normalise, takeDirectory)
 
 
@@ -103,13 +107,13 @@ instance MonadFileSystem IO where
   decodePath = decodeFS
 
 
-  exists path = decodePath path >>= doesPathExist
+  exists = doesPathExist
 
 
-  isFile path = decodePath path >>= doesFileExist
+  isFile = doesFileExist
 
 
-  isDirectory path = decodePath path >>= doesDirectoryExist
+  isDirectory = doesDirectoryExist
 
 
   readFile src = decodePath src >>= tryIOError . Data.ByteString.readFile
@@ -120,20 +124,13 @@ instance MonadFileSystem IO where
     tryIOError $ Data.ByteString.writeFile dst' contents
 
 
-  copyFile src dst = do
-    src' <- decodePath src
-    dst' <- decodePath dst
-    tryIOError $ System.Directory.copyFile src' dst'
+  copyFile src = tryIOError . System.Directory.OsPath.copyFile src
 
 
-  createDirectory path = do
-    path' <- decodePath path
-    tryIOError $ System.Directory.createDirectory path'
+  createDirectory = tryIOError . System.Directory.OsPath.createDirectory
 
 
-  removeFile path = do
-    path' <- decodePath path
-    tryIOError $ System.Directory.removeFile path'
+  removeFile = tryIOError . System.Directory.OsPath.removeFile
 
 
 type SeqNo = Int
@@ -231,9 +228,7 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> return False
       Just (_ :| _) -> return True
-      Nothing -> do
-        path' <- decodePath path
-        liftIO $ doesPathExist path'
+      Nothing -> liftIO $ doesPathExist path
 
 
   isFile path = do
@@ -242,9 +237,7 @@ instance MonadFileSystem DryRunIO where
       Just ((_, Contents _) :| _) -> return True
       Just ((_, Copied _) :| _) -> return True
       Just (_ :| _) -> return False
-      Nothing -> do
-        path' <- decodePath path
-        liftIO $ doesFileExist path'
+      Nothing -> liftIO $ doesFileExist path
 
 
   isDirectory path = do
@@ -252,9 +245,7 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Directory) :| _) -> return True
       Just (_ :| _) -> return False
-      Nothing -> do
-        path' <- decodePath path
-        liftIO $ doesDirectoryExist path'
+      Nothing -> liftIO $ doesDirectoryExist path
 
 
   readFile src = do
@@ -265,11 +256,10 @@ instance MonadFileSystem DryRunIO where
   writeFile dst contents = do
     oFiles <- gets overlaidFiles
     let dstDir = normalise $ takeDirectory dst
-    dstDir' <- decodePath dstDir
-    dstParentExists <- liftIO $ doesPathExist dstDir'
-    dstDirExists <- liftIO $ doesDirectoryExist dstDir'
+    dstParentExists <- liftIO $ doesPathExist dstDir
+    dstDirExists <- liftIO $ doesDirectoryExist dstDir
     dst' <- decodePath dst
-    dstIsDir <- liftIO $ doesDirectoryExist dst'
+    dstIsDir <- liftIO $ doesDirectoryExist dst
     case (oFiles !? dstDir, oFiles !? normalise dst) of
       (Just ((_, Gone) :| _), _) ->
         return
@@ -317,14 +307,13 @@ instance MonadFileSystem DryRunIO where
   copyFile src dst = do
     oFiles <- gets overlaidFiles
     src' <- decodePath src
-    srcExists <- liftIO $ doesPathExist src'
-    srcIsDir <- liftIO $ doesDirectoryExist src'
+    srcExists <- liftIO $ doesPathExist src
+    srcIsDir <- liftIO $ doesDirectoryExist src
     let dstDir = normalise $ takeDirectory dst
-    dstDir' <- decodePath dstDir
-    dstDirExists <- liftIO $ doesPathExist dstDir'
-    dstDirIsDir <- liftIO $ doesDirectoryExist dstDir'
+    dstDirExists <- liftIO $ doesPathExist dstDir
+    dstDirIsDir <- liftIO $ doesDirectoryExist dstDir
     dst' <- decodePath dst
-    dstIsDir <- liftIO $ doesDirectoryExist dst'
+    dstIsDir <- liftIO $ doesDirectoryExist dst
     case oFiles !? normalise src of
       Just ((_, Gone) :| _) ->
         return
@@ -395,12 +384,11 @@ instance MonadFileSystem DryRunIO where
   createDirectory dst = do
     oFiles <- gets overlaidFiles
     dst' <- decodePath dst
-    isFile' <- liftIO $ doesFileExist dst'
-    isDir <- liftIO $ doesDirectoryExist dst'
+    isFile' <- liftIO $ doesFileExist dst
+    isDir <- liftIO $ doesDirectoryExist dst
     let parent = normalise $ takeDirectory dst
-    parent' <- decodePath parent
-    parentExists <- liftIO $ doesPathExist parent'
-    parentIsDir <- liftIO $ doesDirectoryExist parent'
+    parentExists <- liftIO $ doesPathExist parent
+    parentIsDir <- liftIO $ doesDirectoryExist parent
     case (oFiles !? parent, oFiles !? normalise dst) of
       (Just ((_, Gone) :| _), _) ->
         return
@@ -465,8 +453,8 @@ instance MonadFileSystem DryRunIO where
   removeFile path = do
     oFiles <- gets overlaidFiles
     path' <- decodePath path
-    exists' <- liftIO $ doesPathExist path'
-    isDir <- liftIO $ doesDirectoryExist path'
+    exists' <- liftIO $ doesPathExist path
+    isDir <- liftIO $ doesDirectoryExist path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) ->
         return
