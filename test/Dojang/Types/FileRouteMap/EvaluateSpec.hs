@@ -16,7 +16,10 @@ import Dojang.Types.Environment
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..))
 import Dojang.Types.FileRoute (FileRoute, FileType (..), fileRoute)
-import Dojang.Types.FileRouteMap.Evaluate (evaluateRoutes)
+import Dojang.Types.FileRouteMap.Evaluate
+  ( evaluateRoutes
+  , evaluateRoutesWithFileTypes
+  )
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.MonikerName (parseMonikerName)
 
@@ -71,6 +74,24 @@ spec = do
       `shouldBe` (
                    [ (foo, Substitution "FOO")
                    , (bar, Substitution "BAR")
+                   ]
+                 , []
+                 )
+
+  specify "evaluateRoutesWithFileTypes" $ do
+    let eval = evaluateRoutesWithFileTypes
+    eval [] (Environment Linux X86_64) `shouldBe` ([], [])
+    eval routes (Environment Windows X86_64)
+      `shouldBe` (
+                   [ (bar, (Root $ Just 'B', Directory))
+                   , (baz, (Substitution "BAZ", File))
+                   ]
+                 , [UndefinedMoniker undefined']
+                 )
+    eval routes (Environment Linux AArch64)
+      `shouldBe` (
+                   [ (foo, (Substitution "FOO", Directory))
+                   , (bar, (Substitution "BAR", Directory))
                    ]
                  , []
                  )
