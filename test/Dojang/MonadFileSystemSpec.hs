@@ -1,10 +1,8 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.MonadFileSystemSpec (spec) where
 
-import Control.Concurrent (myThreadId)
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (sort)
@@ -29,14 +27,13 @@ import System.Directory.OsPath
   )
 import System.Directory.OsPath qualified (createDirectory)
 import System.FilePath (combine)
-import System.IO.Temp (withSystemTempDirectory)
-import System.OsPath (OsPath, dropFileName, encodeFS, (</>))
-import System.Random (genWord64, newStdGen)
+import System.OsPath (dropFileName, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, runIO, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotReturn, shouldReturn)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
+import Dojang.TestUtils (withTempDir)
 
 
 packageYamlFP :: FilePath
@@ -53,17 +50,6 @@ nonExistentFP = "---non-existent---"
 
 nonExistentFP' :: FilePath
 nonExistentFP' = "---non-existent-2---"
-
-
-withTempDir :: (OsPath -> FilePath -> IO a) -> IO a
-withTempDir action = do
-  stdGen <- newStdGen
-  let (uniqNo, _) = genWord64 stdGen
-  tid <- myThreadId
-  let uniqName = "dojang-spec-" ++ show uniqNo ++ "-" ++ show tid
-  withSystemTempDirectory uniqName $ \tmpDir -> do
-    tmpDir' <- encodeFS tmpDir
-    action tmpDir' tmpDir
 
 
 spec :: Spec

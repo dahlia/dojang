@@ -21,7 +21,7 @@ data Manifest = Manifest
   , fileRoutes :: FileRouteMap
   -- ^ The directory routes that are resolved by the monikers.
   }
-  deriving (Eq, Show)
+  deriving (Show)
 
 
 -- | Makes a 'Manifest' from definitions of monikers and directory routes.
