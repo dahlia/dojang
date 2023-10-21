@@ -24,6 +24,8 @@ spec = do
       predicate <- forAll Gen.environmentPredicate
       predicate' <- forAll Gen.environmentPredicate
       (predicate == predicate') /== (predicate /= predicate')
+      And [predicate, predicate'] === And [predicate', predicate]
+      Or [predicate, predicate'] === Or [predicate', predicate]
 
     specify "Hashable" $ hedgehog $ do
       predicate <- forAll Gen.environmentPredicate
@@ -137,3 +139,8 @@ spec = do
       normalizePredicate (Not $ Not $ Not Always) `shouldBe` Not Always
       normalizePredicate (Not $ Not $ OperatingSystem "linux")
         `shouldBe` OperatingSystem "linux"
+
+    it "is idempotent" $ hedgehog $ do
+      predicate <- forAll Gen.environmentPredicate
+      normalizePredicate (normalizePredicate predicate)
+        === normalizePredicate predicate

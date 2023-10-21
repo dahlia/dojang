@@ -11,12 +11,13 @@ module Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   ) where
 
-import Data.List.NonEmpty (NonEmpty, filter, nonEmpty, toList)
+import Data.List.NonEmpty (NonEmpty, filter, nonEmpty, nub, sortWith, toList)
 import Prelude hiding (filter)
 
 import Data.Hashable (Hashable (hashWithSalt))
 import Data.Text (Text)
 
+import Data.Ord (Down (..))
 import Dojang.Types.Environment (Architecture, OperatingSystem)
 import Dojang.Types.MonikerName (MonikerName)
 
@@ -40,7 +41,24 @@ data EnvironmentPredicate
   | -- | A predicate that matches to the given architecture (e.g. @x86_64@).
     -- For a list of possible values, see the 'System.Info.arch' field.
     Architecture Architecture
-  deriving (Eq, Show)
+  deriving (Show)
+
+
+instance Eq EnvironmentPredicate where
+  Always == Always = True
+  Always == _ = False
+  Not p == Not p' = p == p'
+  Not _ == _ = False
+  And ps == And ps' = normalizePredicateList ps == normalizePredicateList ps'
+  And _ == _ = False
+  Or ps == Or ps' = normalizePredicateList ps == normalizePredicateList ps'
+  Or _ == _ = False
+  Moniker monikerName == Moniker monikerName' = monikerName == monikerName'
+  Moniker _ == _ = False
+  OperatingSystem os == OperatingSystem os' = os == os'
+  OperatingSystem _ == _ = False
+  Architecture arch == Architecture arch' = arch == arch'
+  Architecture _ == _ = False
 
 
 instance Hashable EnvironmentPredicate where
@@ -49,15 +67,24 @@ instance Hashable EnvironmentPredicate where
   hashWithSalt salt (Not predicate) =
     salt `hashWithSalt` ("Not" :: Text) `hashWithSalt` predicate
   hashWithSalt salt (And predicates) =
-    salt `hashWithSalt` ("And" :: Text) `hashWithSalt` predicates
+    salt
+      `hashWithSalt` ("And" :: Text)
+      `hashWithSalt` normalizePredicateList predicates
   hashWithSalt salt (Or predicates) =
-    salt `hashWithSalt` ("Or" :: Text) `hashWithSalt` predicates
+    salt
+      `hashWithSalt` ("Or" :: Text)
+      `hashWithSalt` normalizePredicateList predicates
   hashWithSalt salt (Moniker monikerName) =
     salt `hashWithSalt` ("Moniker" :: Text) `hashWithSalt` monikerName
   hashWithSalt salt (OperatingSystem os') =
     salt `hashWithSalt` ("OperatingSystem" :: Text) `hashWithSalt` os'
   hashWithSalt salt (Architecture arch') =
     salt `hashWithSalt` ("Architecture" :: Text) `hashWithSalt` arch'
+
+
+normalizePredicateList
+  :: NonEmpty EnvironmentPredicate -> NonEmpty EnvironmentPredicate
+normalizePredicateList = nub . sortWith (Down . hashWithSalt 1)
 
 
 -- | Normalize an environment predicate by removing redundant predicates.
@@ -78,8 +105,19 @@ instance Hashable EnvironmentPredicate where
 -- >>> normalizePredicate $ And [Moniker a, And [Moniker b, Moniker c]]
 -- And (Moniker (MonikerName "a") :| [Moniker (MonikerName "b"),Moniker (MonikerName "c")])
 normalizePredicate :: EnvironmentPredicate -> EnvironmentPredicate
-normalizePredicate (And [p]) = normalizePredicate p
-normalizePredicate (And ps) =
+normalizePredicate pred'
+  | normalized == normalized2 = normalized
+  | otherwise = normalizePredicate normalized2
+ where
+  normalized :: EnvironmentPredicate
+  normalized = normalizePredicate' pred'
+  normalized2 :: EnvironmentPredicate
+  normalized2 = normalizePredicate' normalized
+
+
+normalizePredicate' :: EnvironmentPredicate -> EnvironmentPredicate
+normalizePredicate' (And [p]) = normalizePredicate' p
+normalizePredicate' (And ps) =
   if Not Always `elem` ps'
     then Not Always
     else
@@ -93,7 +131,7 @@ normalizePredicate (And ps) =
                       [ p'
                       | p <- filtered
                       , p' <- case p of
-                          And ps'' -> normalizePredicate <$> toList ps''
+                          And ps'' -> normalizePredicate' <$> toList ps''
                           p'' -> [p'']
                       ]
             in case reduced of
@@ -101,9 +139,9 @@ normalizePredicate (And ps) =
                 _ -> reduced
  where
   ps' :: NonEmpty EnvironmentPredicate
-  ps' = normalizePredicate <$> ps
-normalizePredicate (Or [p]) = normalizePredicate p
-normalizePredicate (Or ps) =
+  ps' = normalizePredicate' <$> ps
+normalizePredicate' (Or [p]) = normalizePredicate' p
+normalizePredicate' (Or ps) =
   if Always `elem` ps'
     then Always
     else
@@ -117,7 +155,7 @@ normalizePredicate (Or ps) =
                       [ p'
                       | p <- filtered
                       , p' <- case p of
-                          Or ps'' -> normalizePredicate <$> toList ps''
+                          Or ps'' -> normalizePredicate' <$> toList ps''
                           p'' -> [p'']
                       ]
             in case reduced of
@@ -125,7 +163,7 @@ normalizePredicate (Or ps) =
                 _ -> reduced
  where
   ps' :: NonEmpty EnvironmentPredicate
-  ps' = normalizePredicate <$> ps
-normalizePredicate (Not (Not p)) = normalizePredicate p
-normalizePredicate (Not p) = Not $ normalizePredicate p
-normalizePredicate p = p
+  ps' = normalizePredicate' <$> ps
+normalizePredicate' (Not (Not p)) = normalizePredicate' p
+normalizePredicate' (Not p) = Not $ normalizePredicate' p
+normalizePredicate' p = p
