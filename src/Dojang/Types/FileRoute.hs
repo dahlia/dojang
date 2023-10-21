@@ -12,7 +12,7 @@ module Dojang.Types.FileRoute
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning, evaluate')
-import Dojang.Types.EnvironmentPredicate.Specificity (specificity)
+import Dojang.Types.EnvironmentPredicate.Specificity (Specificity, specificity)
 import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
@@ -111,7 +111,12 @@ fileRoute'
   -> FileRoute
   -- ^ The resulting 'FileRoute'.
 fileRoute' resolver predicates' =
-  FileRoute resolver $ sortOn (Down . specificity resolver . fst) predicates'
+  FileRoute resolver $ sortOn sortKey predicates'
+ where
+  sortKey
+    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    -> Down (Specificity, String)
+  sortKey (pred', _) = Down (specificity resolver pred', show pred')
 
 
 -- | Dispatches the given 'FileRoute' against the given 'Environment' and

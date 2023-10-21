@@ -7,6 +7,7 @@
 module Dojang.Syntax.Manifest.Parser
   ( Error (..)
   , formatError
+  , readManifest
   , readManifestFile
   ) where
 
@@ -188,10 +189,10 @@ mapFileRouteMap monikerMap dirs files =
  where
   results :: [(OsPath, Either Error FileRoute)]
   results =
-    [ (encodePath name, mapFileRoute monikerMap route File)
+    [ (encodePath name, mapFileRoute monikerMap route Directory)
     | (name, route) <- toList dirs
     ]
-      ++ [ (encodePath name, mapFileRoute monikerMap route Directory)
+      ++ [ (encodePath name, mapFileRoute monikerMap route File)
          | (name, route) <- toList files
          ]
   errors :: [Error]

@@ -1,17 +1,21 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Dojang.Types.Gen
   ( architecture
   , ciText
   , fileRoute
   , fileRoute'
+  , fileRouteMap
   , emptyMonikerNameText
   , environment
   , environmentPredicate
   , environmentVariable
   , filePathExpression
   , invalidMonikerNameText
+  , manifest
+  , manifest'
   , monikerMap
   , monikerMap'
   , monikerName
@@ -21,31 +25,43 @@ module Dojang.Types.Gen
   , monikerNameWithCIText
   , monikerNameError
   , operatingSystem
+  , osPath
+  , osString
   , specificity
   ) where
 
 import Data.Char (isAlpha, isAlphaNum, isAscii, isControl, toUpper)
+import Data.List (nub)
+import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (lookup)
 
 import Data.CaseInsensitive (CI, mk)
-import Data.HashMap.Strict (HashMap, fromList, lookup)
-import Data.Text (Text, cons, length)
+import Data.HashMap.Strict (HashMap, fromList, keys, lookup)
+import Data.Text (Text, cons, length, pack)
 import Hedgehog.Gen qualified as Gen
-import Hedgehog.Range (constant, constantFrom)
-import Test.Hspec.Hedgehog (MonadGen, Range)
+import Hedgehog.Range (Range, constant, constantFrom, singleton)
+import System.OsPath (OsPath, joinPath)
+import System.OsString (OsString, encodeFS)
+import Test.Hspec.Hedgehog (MonadGen)
 
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
   , OperatingSystem (..)
   )
-import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate
+  ( EnvironmentPredicate (..)
+  , normalizePredicate
+  )
 import Dojang.Types.EnvironmentPredicate.Specificity (Specificity (..))
 import Dojang.Types.FilePathExpression
   ( EnvironmentVariable
   , FilePathExpression (..)
   )
 import Dojang.Types.FileRoute qualified as FileRoute
+import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName
   ( MonikerName
   , MonikerNameError (..)
@@ -234,7 +250,7 @@ filePathExpression' maxDepth =
             osChar
         )
   root :: (MonadGen m) => m FilePathExpression
-  root = Root <$> fmap toUpper <$> Gen.maybe Gen.alpha
+  root = Root . fmap toUpper <$> Gen.maybe Gen.alpha
   concatenation :: (MonadGen m) => m FilePathExpression
   concatenation =
     Gen.filterT
@@ -254,10 +270,9 @@ filePathExpression' maxDepth =
   pathSeparator =
     PathSeparator
       <$> filePathExpr
-      <*> ( Gen.filterT
-              (\case PathSeparator _ _ -> False; e -> not $ containsRoot e)
-              filePathExpr
-          )
+      <*> Gen.filterT
+        (\case PathSeparator _ _ -> False; e -> not $ containsRoot e)
+        filePathExpr
   envVar :: (MonadGen m) => m EnvironmentVariable
   envVar = do
     first <- Gen.filterT (\c -> isAscii c && isAlpha c || c == '_') osChar
@@ -292,28 +307,84 @@ filePathExpression' maxDepth =
 
 
 monikerMap :: (MonadGen m) => m (HashMap MonikerName EnvironmentPredicate)
-monikerMap = monikerMap' 10
+monikerMap = monikerMap' (constantFrom 0 0 10)
 
 
 monikerMap'
-  :: (MonadGen m) => Int -> m (HashMap MonikerName EnvironmentPredicate)
-monikerMap' maxMonikers = do
-  keys' <- Gen.list (constantFrom 0 0 maxMonikers) monikerName
+  :: (MonadGen m) => Range Int -> m (HashMap MonikerName EnvironmentPredicate)
+monikerMap' sizeRange = do
+  keys' <- Gen.list sizeRange monikerName
   let cardinality = Prelude.length keys'
-  values <- Gen.list (constant cardinality cardinality) environmentPredicate
+  values <-
+    Gen.list (constant cardinality cardinality)
+      $ normalizePredicate
+      <$> environmentPredicate
   return $ fromList $ zip keys' values
 
 
 fileRoute :: (MonadGen m) => m FileRoute.FileRoute
-fileRoute = fileRoute' 5 5
+fileRoute = do
+  mm <- monikerMap' (constant 0 5)
+  fileRoute' (constant 0 5) mm environmentPredicate
 
 
-fileRoute' :: (MonadGen m) => Int -> Int -> m FileRoute.FileRoute
-fileRoute' maxMonikers maxPredicates' = do
-  mm <- monikerMap' maxMonikers
-  predicates <- Gen.list (constantFrom 0 0 maxPredicates') environmentPredicate
+fileRoute'
+  :: (MonadGen m)
+  => Range Int
+  -> MonikerMap
+  -> m EnvironmentPredicate
+  -> m FileRoute.FileRoute
+fileRoute' predicatesNumberRange mm predGen = do
+  predicates <-
+    nub . map normalizePredicate <$> Gen.list predicatesNumberRange predGen
   let cardinality = Prelude.length predicates
   paths <-
     Gen.list (constant cardinality cardinality) $ Gen.maybe filePathExpression
   fileOrDir <- Gen.element [FileRoute.File, FileRoute.Directory]
   return $ FileRoute.fileRoute' (`lookup` mm) (predicates `zip` paths) fileOrDir
+
+
+osString :: (MonadGen m) => Range Int -> m Char -> m OsString
+osString range = fmap (unsafePerformIO . encodeFS) . Gen.string range
+
+
+osPath :: (MonadGen m) => Range Int -> m OsPath
+osPath range =
+  joinPath
+    <$> Gen.list
+      range
+      ( osString
+          (constant 1 100)
+          ( Gen.filterT
+              (\c -> c `notElem` "/\\:" && not (isControl c))
+              Gen.unicode
+          )
+      )
+
+
+fileRouteMap :: (MonadGen m) => Range Int -> MonikerMap -> m FileRouteMap
+fileRouteMap range monikers =
+  Gen.map range $ do
+    key <- osPath (singleton 1)
+    value <-
+      fileRoute' (constant 0 5) monikers
+        $ Gen.choice
+        $ map return
+        $ fmap Moniker
+        $ case keys monikers of
+          [] ->
+            let Right undefined' = parseMonikerName $ pack "undefined"
+            in [undefined']
+          names -> names
+    return (key, value)
+
+
+manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
+manifest' monikerMapRange fileRouteMapRange = do
+  monikers <- monikerMap' monikerMapRange
+  fileRoutes <- fileRouteMap fileRouteMapRange monikers
+  return $ Manifest monikers fileRoutes
+
+
+manifest :: (MonadGen m) => m Manifest
+manifest = manifest' (constantFrom 0 0 5) (constantFrom 0 0 5)
