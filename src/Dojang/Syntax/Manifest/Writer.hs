@@ -16,6 +16,8 @@ import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (all, any, writeFile)
 
 import Data.CaseInsensitive (CI (original))
+import Data.HashMap.Strict (toList)
+import Data.Map.Strict (toList)
 import Data.Text (Text, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import System.OsPath (OsPath, decodeFS)
@@ -39,9 +41,9 @@ import Dojang.Types.EnvironmentPredicate
   )
 import Dojang.Types.FilePathExpression (toPathText)
 import Dojang.Types.FileRoute (FileRoute (..), FileType (Directory))
-import Dojang.Types.FileRouteMap (FileRouteMap, toList)
+import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.MonikerMap (MonikerMap, toList)
+import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 
 
@@ -89,7 +91,7 @@ mapFiles fileRouteMap monikers =
   (dirs, files) =
     partition
       ((== Directory) . fileType . snd)
-      $ Dojang.Types.FileRouteMap.toList fileRouteMap
+      $ Data.Map.Strict.toList fileRouteMap
   decodePath :: OsPath -> FilePath
   decodePath = unsafePerformIO . decodeFS
 
@@ -110,7 +112,7 @@ lookBack :: MonikerMap -> EnvironmentPredicate -> Maybe MonikerName
 lookBack monikers predicate =
   listToMaybe
     [ n
-    | (n, p) <- Dojang.Types.MonikerMap.toList monikers
+    | (n, p) <- Data.HashMap.Strict.toList monikers
     , normalizePredicate p == normalizedPred
     ]
  where
@@ -122,7 +124,7 @@ mapMonikers' :: MonikerMap -> MonikerMap'
 mapMonikers' monikers =
   fromList
     $ second (mapEnvironmentPredicate' . normalizePredicate)
-    <$> Dojang.Types.MonikerMap.toList monikers
+    <$> Data.HashMap.Strict.toList monikers
 
 
 mapEnvironmentPredicate' :: EnvironmentPredicate -> EnvironmentPredicate'

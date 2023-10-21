@@ -22,6 +22,7 @@ import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo)
 import Data.CaseInsensitive (CI (original))
+import Data.HashMap.Strict qualified as HashMap (fromList)
 import Data.Map.Strict
   ( Map
   , fromList
@@ -31,6 +32,7 @@ import Data.Map.Strict
   , toAscList
   , (!)
   )
+import Data.Map.Strict qualified as Map (empty, singleton, union)
 import Data.Set (singleton, size, toAscList, union)
 import Data.Text (pack)
 import FortyTwo.Prompts.Multiselect (multiselect)
@@ -42,13 +44,7 @@ import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FileRoute (FileType (..), fileRoute)
-import Dojang.Types.FileRouteMap qualified as FileRouteMap
-  ( empty
-  , singleton
-  , union
-  )
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.MonikerMap qualified as MonikerMap (fromList)
 import Dojang.Types.MonikerName (parseMonikerName)
 
 
@@ -122,7 +118,7 @@ init presets noInteractive = do
       let posixName = head $ rights [parseMonikerName "posix"]
       let needsPosix = Linux `member` oses && MacOS `member` oses
       let monikers =
-            MonikerMap.fromList
+            HashMap.fromList
               $ [ (monikerNames ! (os, Nothing), OperatingSystem os)
                 | os <- keys oses
                 ]
@@ -148,7 +144,7 @@ init presets noInteractive = do
       let dirRoute = (`route` Directory)
       homePath <- encodePath "HOME"
       let homeRoutes =
-            FileRouteMap.singleton
+            Map.singleton
               homePath
               ( dirRoute
                   $ [ ( monikerNames ! (Windows, Nothing)
@@ -164,7 +160,7 @@ init presets noInteractive = do
       let xdgConfigHomRoutes =
             if Linux `member` oses || MacOS `member` oses
               then
-                FileRouteMap.singleton
+                Map.singleton
                   xdgConfigHomePath
                   ( dirRoute
                       $ [ ( monikerNames ! (Windows, Nothing)
@@ -176,12 +172,12 @@ init presets noInteractive = do
                          | Linux `member` oses || MacOS `member` oses
                          ]
                   )
-              else FileRouteMap.empty
+              else Map.empty
       applicationSupportPath <- encodePath "ApplicationSupport"
       let applicationSupportRoutes =
             if MacOS `member` oses
               then
-                FileRouteMap.singleton
+                Map.singleton
                   applicationSupportPath
                   ( dirRoute
                       $ [ ( monikerNames ! (MacOS, Nothing)
@@ -198,12 +194,12 @@ init presets noInteractive = do
                          | Windows `member` oses
                          ]
                   )
-              else FileRouteMap.empty
+              else Map.empty
       appDataPath <- encodePath "AppData"
       let appDataRoutes =
             if Windows `member` oses
               then
-                FileRouteMap.singleton
+                Map.singleton
                   appDataPath
                   ( dirRoute
                       $ [ ( monikerNames ! (Windows, Nothing)
@@ -215,12 +211,12 @@ init presets noInteractive = do
                          | Linux `member` oses || MacOS `member` oses
                          ]
                   )
-              else FileRouteMap.empty
+              else Map.empty
       let fileRoutes =
             homeRoutes
-              `FileRouteMap.union` xdgConfigHomRoutes
-              `FileRouteMap.union` applicationSupportRoutes
-              `FileRouteMap.union` appDataRoutes
+              `Map.union` xdgConfigHomRoutes
+              `Map.union` applicationSupportRoutes
+              `Map.union` appDataRoutes
       let manifest = Manifest monikers fileRoutes
       filename <- saveManifest manifest
       filename' <- decodePath filename
