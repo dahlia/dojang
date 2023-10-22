@@ -135,6 +135,16 @@ spec = do
       Right result <- listDirectory tmpDir
       sort result `shouldBe` [bar, baz, foo]
 
+    specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
+      Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"
+      getFileSize (tmpDir </> foo) `shouldReturn` Right 4
+      Left e <- getFileSize (tmpDir </> nonExistentP)
+      ioeGetErrorType e `shouldBe` doesNotExistErrorType
+      ioeGetFileName e `shouldBe` Just (tmpDirFP `combine` nonExistentFP)
+      Left e' <- getFileSize tmpDir
+      ioeGetErrorString e' `shouldBe` "getFileSize: it is a directory"
+      ioeGetFileName e' `shouldBe` Just tmpDirFP
+
   describe "DryRunIO" $ do
     specify "encodePath" $ hedgehog $ do
       filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicodeAll
@@ -672,3 +682,37 @@ spec = do
           listDirectory nonExistentP
         ioeGetFileName e'' `shouldBe` Just nonExistentFP
         ioeGetErrorString e'' `shouldBe` "listDirectory: not a directory"
+
+    describe "getFileSize" $ do
+      it "returns the size of a file" $ withTempDir $ \tmpDir tmpDirFP -> do
+        Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"
+        dryRunIO (getFileSize $ tmpDir </> foo) `shouldReturn` Right 4
+        Right size <- dryRunIO $ do
+          Right () <- writeFile (tmpDir </> bar) "asdf asdf"
+          getFileSize $ tmpDir </> bar
+        size `shouldBe` 9
+        Right size' <- dryRunIO $ do
+          Right () <- writeFile (tmpDir </> bar) "asdf"
+          Right () <- copyFile (tmpDir </> bar) (tmpDir </> baz)
+          getFileSize $ tmpDir </> baz
+        size' `shouldBe` 4
+
+      it "fails if path doesn't exist" $ withTempDir $ \tmpDir tmpDirFP -> do
+        Left e <- dryRunIO $ getFileSize $ tmpDir </> nonExistentP
+        ioeGetFileName e `shouldBe` Just (tmpDirFP `combine` nonExistentFP)
+        ioeGetErrorType e `shouldBe` doesNotExistErrorType
+        Left e' <- dryRunIO $ do
+          Right () <- removeFile packageYamlP
+          getFileSize packageYamlP
+        ioeGetFileName e' `shouldBe` Just packageYamlFP
+        ioeGetErrorString e' `shouldBe` "getFileSize: no such file"
+
+      it "fails if path is a directory" $ withTempDir $ \tmpDir tmpDirFP -> do
+        Left e <- dryRunIO $ getFileSize tmpDir
+        ioeGetFileName e `shouldBe` Just tmpDirFP
+        ioeGetErrorString e `shouldBe` "getFileSize: it is a directory"
+        Left e' <- dryRunIO $ do
+          Right () <- createDirectory nonExistentP
+          getFileSize nonExistentP
+        ioeGetFileName e' `shouldBe` Just nonExistentFP
+        ioeGetErrorString e' `shouldBe` "getFileSize: it is a directory"

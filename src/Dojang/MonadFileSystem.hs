@@ -17,7 +17,7 @@ import Control.Monad.State.Strict
   , modify'
   )
 import Data.ByteString (ByteString)
-import Data.ByteString qualified (readFile, writeFile)
+import Data.ByteString qualified (length, readFile, writeFile)
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
 import System.Directory.OsPath
   ( doesDirectoryExist
@@ -27,6 +27,7 @@ import System.Directory.OsPath
 import System.Directory.OsPath qualified
   ( copyFile
   , createDirectory
+  , getFileSize
   , listDirectory
   , removeFile
   )
@@ -122,6 +123,11 @@ class (Monad m) => MonadFileSystem m where
   listDirectory :: OsPath -> m (Either IOError [OsPath])
 
 
+  -- | Gets the size of a file in bytes.  If the file doesn't exist or is
+  -- a directory, then it returns 'Left'.
+  getFileSize :: OsPath -> m (Either IOError Integer)
+
+
 instance MonadFileSystem IO where
   encodePath = encodeFS
 
@@ -156,6 +162,18 @@ instance MonadFileSystem IO where
 
 
   listDirectory = tryIOError . System.Directory.OsPath.listDirectory
+
+
+  getFileSize path = do
+    isDir <- isDirectory path
+    if isDir
+      then do
+        path' <- decodePath path
+        return
+          $ Left
+          $ userError "getFileSize: it is a directory"
+          `ioeSetFileName` path'
+      else tryIOError $ System.Directory.OsPath.getFileSize path
 
 
 type SeqNo = Int
@@ -559,6 +577,47 @@ instance MonadFileSystem DryRunIO where
         , pathDirs `isPrefixOf` split
         , length pathDirs + 1 == length split
         ]
+
+
+  getFileSize path = do
+    oFiles <- gets overlaidFiles
+    path' <- decodePath path
+    case oFiles !? normalise path of
+      Just ((_, Gone) :| _) ->
+        return
+          $ Left
+          $ userError "getFileSize: no such file"
+          `ioeSetFileName` path'
+      Just ((_, Directory) :| _) ->
+        return
+          $ Left
+          $ userError "getFileSize: it is a directory"
+          `ioeSetFileName` path'
+      Just _ -> do
+        result <- readFile path
+        case result of
+          Left e -> return $ Left e
+          Right contents ->
+            return
+              $ Right
+              $ fromIntegral
+              $ Data.ByteString.length contents
+      Nothing -> do
+        isDir <- isDirectory path
+        if isDir
+          then
+            return
+              $ Left
+              $ userError "getFileSize: it is a directory"
+              `ioeSetFileName` path'
+          else do
+            size <-
+              liftIO
+                $ tryIOError
+                $ System.Directory.OsPath.getFileSize path
+            case size of
+              Left e -> return $ Left e
+              Right size' -> return $ Right size'
 
 
 dryRunIO :: DryRunIO a -> IO a

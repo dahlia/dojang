@@ -106,6 +106,7 @@ instance forall i. (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) whe
   createDirectory = App . lift . lift . createDirectory
   removeFile = App . lift . lift . removeFile
   listDirectory = App . lift . lift . listDirectory
+  getFileSize = App . lift . lift . getFileSize
 
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
