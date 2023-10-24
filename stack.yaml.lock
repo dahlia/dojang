@@ -96,6 +96,13 @@ packages:
   original:
     hackage: toml-parser-1.3.0.0
 - completed:
+    hackage: unix-2.8.2.1@sha256:433396e6087bbe6433ea4a743600bddd29d0e6cd701ea688d6d637ebae7b7bac,9318
+    pantry-tree:
+      sha256: 1be1c56da093b0db76374ed0692109a8ebb7a0e5a44b660d186ac759e2b5bd94
+      size: 5752
+  original:
+    hackage: unix-2.8.2.1
+- completed:
     hackage: Win32-2.13.4.0@sha256:9b8a82743985f8a95c03b2bc64be33ad1cd603e2493cb8b48d3cb923556dbb61,5585
     pantry-tree:
       sha256: aec6e0f00f4cc90416e3a6cb4bf972ebdf8927784900579acf72bfe4febb7744
@@ -104,7 +111,7 @@ packages:
     hackage: Win32-2.13.4.0
 snapshots:
 - completed:
-    sha256: 1d663bec402f77fa09fa3e8cf288c3c7eb18a1f28a5e0c331ac47adeacd21346
-    size: 640034
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/21/16.yaml
-  original: lts-21.16
+    sha256: 85d2382958c178491d3fe50d770a624621f5ab456beef7d31ac7521f780c9bc7
+    size: 640042
+    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/21/17.yaml
+  original: lts-21.17
