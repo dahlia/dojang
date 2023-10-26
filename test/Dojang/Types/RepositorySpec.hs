@@ -1,3 +1,4 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -5,38 +6,20 @@
 module Dojang.Types.RepositorySpec (spec) where
 
 import Data.List (sort)
+import System.IO.Error (ioeGetErrorString, ioeGetFileName)
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (writeFile)
 
-import Data.Either (isLeft)
-import Data.Map.Strict (Map)
+import Data.Map.Strict (Map, fromList)
 import System.FilePath (combine)
-import System.IO.Error
-  ( doesNotExistErrorType
-  , ioeGetErrorString
-  , ioeGetErrorType
-  , ioeGetFileName
-  )
-import System.OsPath (OsPath, encodeFS, normalise, pack, pathSeparator, (</>))
+import System.OsPath (OsPath, encodeFS, normalise, (</>))
 import System.OsString (OsString)
 import Test.Hspec (Spec, describe, it, runIO, specify)
-import Test.Hspec.Expectations.Pretty
-  ( shouldBe
-  , shouldNotSatisfy
-  , shouldSatisfy
-  )
+import Test.Hspec.Expectations.Pretty (shouldBe)
 
-import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
+import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
-import Dojang.TestUtils (withTempDir)
-import Dojang.Types.Environment
-  ( Architecture (..)
-  , Environment (Environment)
-  , OperatingSystem (..)
-  )
-import Dojang.Types.EnvironmentPredicate.Evaluate
-  ( EvaluationWarning (UndefinedMoniker)
-  )
+import Dojang.TestUtils (Entry (..), makeFixtureTree, withTempDir)
 import Dojang.Types.FilePathExpression
   ( EnvironmentVariable
   , FilePathExpression (..)
@@ -45,7 +28,13 @@ import Dojang.Types.FilePathExpression
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
-import Dojang.Types.Repository (FilePair (..), Repository (..), pairFiles)
+import Dojang.Types.Repository
+  ( FileEntry (..)
+  , FileStat (..)
+  , Repository (..)
+  , listFiles
+  , makeCorrespondBetweenTwoDirs
+  )
 
 
 spec :: Spec
@@ -53,6 +42,7 @@ spec = do
   foo <- runIO $ encodeFS "foo"
   bar <- runIO $ encodeFS "bar"
   baz <- runIO $ encodeFS "baz"
+  intermediateDir <- runIO $ encodeFS ".dojang"
   manifestFilename' <- runIO $ encodeFS "dojang.toml"
 
   let Right posix = parseMonikerName "posix"
@@ -98,128 +88,147 @@ spec = do
         -- Total 4 directories and 5 files
         Right () <- writeManifestFile manifest' $ tmpDir </> manifestFilename'
         Right () <- createDirectory $ tmpDir </> foo
-        Right () <- writeFile (tmpDir </> foo </> foo) ""
+        Right () <- writeFile (tmpDir </> foo </> foo) "asdf"
         Right () <- createDirectory $ tmpDir </> foo </> bar
-        Right () <- writeFile (tmpDir </> foo </> bar </> foo) ""
+        Right () <- writeFile (tmpDir </> foo </> bar </> foo) "asdf asdf"
         Right () <- createDirectory $ tmpDir </> foo </> baz
         Right () <- createDirectory $ tmpDir </> bar
-        Right () <- writeFile (tmpDir </> bar </> foo) ""
-        Right () <- writeFile (tmpDir </> baz) ""
-        let repo = Repository tmpDir manifestFilename' manifest'
+        Right () <- writeFile (tmpDir </> bar </> foo) "foobar"
+        Right () <- writeFile (tmpDir </> baz) "foo bar baz"
+        let repo = Repository tmpDir (tmpDir </> intermediateDir) manifestFilename' manifest'
         repo.manifestFilename `shouldBe` manifestFilename'
         return repo
 
-  describe "pairFiles" $ do
-    specify "POSIX" $ withTempDir $ \tmpDir _ -> do
-      repo <- repositoryFixture tmpDir
-      let env = Environment Linux AArch64
-      (Right files, warnings) <- pairFiles repo env getEnv
-      warnings `shouldBe` []
+  describe "listFiles" $ do
+    it "lists files recursively" $ withTempDir $ \tmpDir _ -> do
+      _ <- repositoryFixture tmpDir
+      Right files <- listFiles tmpDir
       sort files
-        `shouldBe` [ dirPair (tmpDir </> bar) (osPath "/var/bar")
-                   , filePair (tmpDir </> bar </> foo) (osPath "/var/bar/foo")
-                   , dirPair (tmpDir </> foo) (osPath "/opt/foo")
-                   , dirPair (tmpDir </> foo </> bar) (osPath "/opt/foo/bar")
-                   , filePair
-                      (tmpDir </> foo </> bar </> foo)
-                      (osPath "/opt/foo/bar/foo")
-                   , dirPair (tmpDir </> foo </> baz) (osPath "/opt/foo/baz")
-                   , filePair (tmpDir </> foo </> foo) (osPath "/opt/foo/foo")
+        `shouldBe` [ FileEntry bar Directory
+                   , FileEntry (bar </> foo) $ File 6
+                   , FileEntry baz $ File 11
+                   , FileEntry manifestFilename' $ File 235
+                   , FileEntry foo Directory
+                   , FileEntry (foo </> bar) Directory
+                   , FileEntry (foo </> bar </> foo) $ File 9
+                   , FileEntry (foo </> baz) Directory
+                   , FileEntry (foo </> foo) $ File 4
                    ]
 
-    specify "Windows" $ withTempDir $ \tmpDir _ -> do
-      repo <- repositoryFixture tmpDir
-      let env = Environment Windows X86_64
-      (Right files, warnings) <- pairFiles repo env getEnv
-      warnings `shouldBe` [UndefinedMoniker undefined']
-      sort files
-        `shouldBe` [ dirPair
-                      (tmpDir </> bar)
-                      (osPath "B:" <> pack [pathSeparator])
-                   , filePair
-                      (tmpDir </> bar </> foo)
-                      (osPath "B:" </> osPath "foo")
-                   , filePair (tmpDir </> baz) (osPath "C:\\baz")
-                   ]
+    it "only accepts a directory path" $ withTempDir $ \tmpDir tmpDir' -> do
+      Right () <- writeFile (tmpDir </> foo) "foo"
+      Left e <- listFiles $ tmpDir </> foo
+      ioeGetErrorString e `shouldBe` "listFiles: path is not a directory"
+      ioeGetFileName e `shouldBe` Just (tmpDir' `combine` "foo")
 
-    it "fails if no corresponding file" $ withTempDir $ \tmpDir tmpDir' -> do
-      -- When the file does not exist:
-      repo <- repositoryFixture tmpDir
-      Right () <- removeFile $ tmpDir </> baz
-      let env = Environment Windows X86_64
-      (result, _) <- pairFiles repo env getEnv
-      result `shouldSatisfy` isLeft
-      let (Left e) = result
-      ioeGetErrorString e `shouldBe` "No such file"
-      ioeGetFileName e `shouldBe` Just (tmpDir' `combine` "baz")
-
-      -- When the file is a directory:
-      Right () <- createDirectory $ tmpDir </> baz
-      (Left e', _) <- pairFiles repo env getEnv
-      ioeGetErrorString e' `shouldBe` "Is a directory"
-      ioeGetFileName e' `shouldBe` Just (tmpDir' `combine` "baz")
-
-    it "fails if no corresponding dir" $ withTempDir $ \tmpDir tmpDir' -> do
-      -- When the directory does not exist:
-      let repo = Repository tmpDir manifestFilename' manifest'
-      let env = Environment Linux X86_64
-      (Left e, _) <- pairFiles repo env getEnv
-      ioeGetErrorType e `shouldBe` doesNotExistErrorType
-      ioeGetFileName e `shouldBe` Just (tmpDir' `combine` "bar")
-
-      -- When the directory is a file:
-      Right () <- writeFile (tmpDir </> bar) ""
-      (Left e', _) <- pairFiles repo env getEnv
-      ioeGetFileName e' `shouldBe` Just (tmpDir' `combine` "bar")
-
-  describe "FilePair" $ do
-    let fooBar = FilePair foo bar File
-    let barBaz = FilePair bar baz File
-    let bazFoo = FilePair baz foo Directory
-
-    specify "source" $ do
-      source fooBar `shouldBe` foo
-      source barBaz `shouldBe` bar
-      source bazFoo `shouldBe` baz
-
-    specify "destination" $ do
-      destination fooBar `shouldBe` bar
-      destination barBaz `shouldBe` baz
-      destination bazFoo `shouldBe` foo
-
-    specify "fileType" $ do
-      fileType fooBar `shouldBe` File
-      fileType barBaz `shouldBe` File
-      fileType bazFoo `shouldBe` Directory
-
-    specify "Eq" $ do
-      fooBar `shouldSatisfy` (== fooBar)
-      fooBar `shouldNotSatisfy` (== barBaz)
-      fooBar `shouldNotSatisfy` (== bazFoo)
-      fooBar `shouldNotSatisfy` (/= fooBar)
-      fooBar `shouldSatisfy` (/= barBaz)
-      fooBar `shouldSatisfy` (/= bazFoo)
-
-    specify "Ord" $ do
-      sort [fooBar, barBaz, bazFoo] `shouldBe` [barBaz, bazFoo, fooBar]
-      max fooBar fooBar `shouldBe` fooBar
-      max fooBar barBaz `shouldBe` fooBar
-      min fooBar fooBar `shouldBe` fooBar
-      min fooBar barBaz `shouldBe` barBaz
-
-    specify "Show" $ do
-      show fooBar
-        `shouldBe` ( "FilePair {source = \"foo\", "
-                      ++ "destination = \"bar\", fileType = File}"
-                   )
-      show ([fooBar, barBaz, bazFoo] :: [FilePair])
-        `shouldBe` ( "[FilePair {source = \"foo\", destination = \"bar\", "
-                      ++ "fileType = File}"
-                      ++ ",FilePair {source = \"bar\", destination = \"baz\", "
-                      ++ "fileType = File}"
-                      ++ ",FilePair {source = \"baz\", destination = \"foo\", "
-                      ++ "fileType = Directory}]"
-                   )
+  specify "makeCorrespondBetweenTwoDirs" $ withTempDir $ \tmpDir _ -> do
+    -- cSpell:ignore quux
+    qux <- encodePath "qux"
+    quux <- encodePath "quux"
+    Right () <-
+      makeFixtureTree
+        (tmpDir </> foo)
+        [ (foo, F "foo")
+        ,
+          ( bar
+          , D
+              [ (foo, F "bar/foo")
+              , (bar, F "bar/bar")
+              , (baz, D [])
+              ]
+          )
+        , (baz, F "baz")
+        ,
+          ( qux
+          , D
+              [ (foo, F "qux/foo")
+              , (quux, F "qux/quux")
+              ]
+          )
+        ]
+    Right () <-
+      makeFixtureTree
+        (tmpDir </> bar)
+        [ (foo, F "foo 2")
+        ,
+          ( bar
+          , D
+              [ (foo, F "bar/foo")
+              , (baz, D [(bar, F "bar/baz/bar")])
+              ]
+          )
+        , (baz, F "baz")
+        ,
+          ( qux
+          , D
+              [ (foo, F "qux/foo")
+              , (quux, F "qux/quux 2")
+              ]
+          )
+        ]
+    Right map' <- makeCorrespondBetweenTwoDirs (tmpDir </> foo) (tmpDir </> bar)
+    map'
+      `shouldBe` fromList
+        [ (foo, (Just $ FileEntry foo $ File 3, Just $ FileEntry foo $ File 5))
+        , (bar, (Just $ FileEntry bar Directory, Just $ FileEntry bar Directory))
+        ,
+          ( bar </> foo
+          ,
+            ( Just $ FileEntry (bar </> foo) $ File 7
+            , Just $ FileEntry (bar </> foo) $ File 7
+            )
+          )
+        , (bar </> bar, (Just $ FileEntry (bar </> bar) $ File 7, Nothing))
+        ,
+          ( bar </> baz
+          ,
+            ( Just $ FileEntry (bar </> baz) Directory
+            , Just $ FileEntry (bar </> baz) Directory
+            )
+          )
+        ,
+          ( bar </> baz </> bar
+          , (Nothing, Just $ FileEntry (bar </> baz </> bar) $ File 11)
+          )
+        , (baz, (Just $ FileEntry baz $ File 3, Just $ FileEntry baz $ File 3))
+        ,
+          ( qux
+          , (Just $ FileEntry qux Directory, Just $ FileEntry qux Directory)
+          )
+        ,
+          ( qux </> foo
+          ,
+            ( Just $ FileEntry (qux </> foo) $ File 7
+            , Just $ FileEntry (qux </> foo) $ File 7
+            )
+          )
+        ,
+          ( qux </> quux
+          ,
+            ( Just $ FileEntry (qux </> quux) $ File 8
+            , Just $ FileEntry (qux </> quux) $ File 10
+            )
+          )
+        ]
+    Right map'' <-
+      makeCorrespondBetweenTwoDirs
+        (tmpDir </> baz) -- This dir does not exist
+        (tmpDir </> bar)
+    map''
+      `shouldBe` fromList
+        [ (foo, (Nothing, Just $ FileEntry foo $ File 5))
+        , (bar, (Nothing, Just $ FileEntry bar Directory))
+        , (bar </> foo, (Nothing, Just $ FileEntry (bar </> foo) $ File 7))
+        , (bar </> baz, (Nothing, Just $ FileEntry (bar </> baz) Directory))
+        ,
+          ( bar </> baz </> bar
+          , (Nothing, Just $ FileEntry (bar </> baz </> bar) $ File 11)
+          )
+        , (baz, (Nothing, Just $ FileEntry baz $ File 3))
+        , (qux, (Nothing, Just $ FileEntry qux Directory))
+        , (qux </> foo, (Nothing, Just $ FileEntry (qux </> foo) $ File 7))
+        , (qux </> quux, (Nothing, Just $ FileEntry (qux </> quux) $ File 10))
+        ]
 
 
 getEnv :: (MonadFileSystem m) => EnvironmentVariable -> m (Maybe OsString)
@@ -234,9 +243,5 @@ osPath :: String -> OsPath
 osPath = normalise . unsafePerformIO . encodeFS
 
 
-filePair :: OsPath -> OsPath -> FilePair
-filePair src dst = FilePair src dst File
-
-
-dirPair :: OsPath -> OsPath -> FilePair
-dirPair src dst = FilePair src dst Directory
+_t :: (EnvironmentVariable -> IO (Maybe OsString), String -> OsPath)
+_t = (getEnv, osPath)

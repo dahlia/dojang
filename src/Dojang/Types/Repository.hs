@@ -1,22 +1,28 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
-module Dojang.Types.Repository (Repository (..), FilePair (..), pairFiles) where
+module Dojang.Types.Repository
+  ( Repository (..)
+  , FileEntry (..)
+  , FileStat (..)
+  , listFiles
+  , makeCorrespondBetweenTwoDirs
+  ) where
 
 import Control.Monad (forM)
+import Data.Either (partitionEithers)
 import System.IO.Error (ioeSetFileName)
 
-import Data.Text (unpack)
-import System.OsPath (OsPath, makeRelative, normalise, (</>))
-import System.OsString (OsString)
+import Data.Map.Strict (Map, filter, fromList, unionWith)
+import System.OsPath (OsPath, (</>))
 
-import Data.Map.Strict (Map, toList)
-import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
+import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
-import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
-import Dojang.Types.FilePathExpression (EnvironmentVariable, FilePathExpression)
-import Dojang.Types.FilePathExpression.Expansion (expandFilePath)
-import Dojang.Types.FileRouteMap.Evaluate (evaluateRoutesWithFileTypes)
 import Dojang.Types.Manifest (Manifest (..))
 
 
@@ -24,6 +30,9 @@ import Dojang.Types.Manifest (Manifest (..))
 data Repository = Repository
   { path :: OsPath
   -- ^ The path to the repository.
+  , intermediatePath :: OsPath
+  -- ^ The path to the intermediate directory, which is managed by Dojang and
+  -- contains the post-processed files.
   , manifestFilename :: OsPath
   -- ^ The filename of the manifest file.  This is relative to the repository
   -- 'path'.
@@ -32,128 +41,91 @@ data Repository = Repository
   }
 
 
--- | A pairing of a source file and a destination file.
-data FilePair = FilePair
-  { source :: OsPath
-  -- ^ The source file path.
-  , destination :: OsPath
-  -- ^ The destination file path.
-  , fileType :: FileType
-  -- ^ Whether the file is a file or a directory.
+-- | The small stat of a file.
+data FileStat
+  = -- | The file is missing.
+    Missing
+  | -- | The file is a directory.
+    Directory
+  | -- | The file is a file, and this is its size in bytes.
+    File Integer
+  deriving (Eq, Ord, Show)
+
+
+-- | A file/directory in the repository or the destination directory.
+data FileEntry = FileEntry
+  { path :: OsPath
+  -- ^ The path to the file.
+  , stat :: FileStat
+  -- ^ Whether the file is a file, a directory, or missing.
   }
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 
-instance Ord FilePair where
-  compare a b = compare a.source b.source
-
-
--- | Corresponds source files to destination files, that is a blueprint for
--- copying files.
-pairFiles
-  :: (MonadFileSystem m)
-  => Repository
-  -- ^ The repository that contains the 'Manifest' and dotfiles.
-  -> Environment
-  -- ^ The environment to evaluate the 'Manifest' against.
-  -> (EnvironmentVariable -> m (Maybe OsString))
-  -- ^ A function that can look up an environment variable.  Used for expanding
-  -- 'FilePathExpression's.
-  -> m (Either IOError [FilePair], [EvaluationWarning])
-  -- ^ The paired files and the warnings that occurred during evaluation.
-  -- Either it fails due to an 'IOError' or it succeeds with the paired files,
-  -- there could be warnings.
-pairFiles repo env lookupEnv = do
-  let (evaluatedRoutes, warnings) =
-        evaluateRoutesWithFileTypes repo.manifest.fileRoutes env
-  files <- pairFiles' evaluatedRoutes repo.path lookupEnv
-  return (files, warnings)
-
-
-pairFiles'
-  :: forall m
-   . (MonadFileSystem m)
-  => Map OsPath (FilePathExpression, FileType)
-  -> OsPath
-  -> (EnvironmentVariable -> m (Maybe OsString))
-  -> m (Either IOError [FilePair])
-pairFiles' evaluatedRoutes repoRoot lookupEnv = do
-  files <- forM (toList evaluatedRoutes) $ \(srcBase, (expr, fType)) -> do
-    dstBase <- expandFilePath expr lookupEnv (encodePath . unpack)
-    let base =
-          FilePair
-            { source = normalise $ repoRoot </> srcBase
-            , destination = normalise dstBase
-            , fileType = fType
-            }
-    case fType of
-      File -> do
-        exists' <- exists (repoRoot </> srcBase)
-        isDir <- isDirectory (repoRoot </> srcBase)
-        decodedName <- decodePath (repoRoot </> srcBase)
-        return $ case (exists', isDir) of
-          (False, _) ->
-            Left $ userError "No such file" `ioeSetFileName` decodedName
-          (_, True) ->
-            Left $ userError "Is a directory" `ioeSetFileName` decodedName
-          (_, _) -> Right [base]
-      Directory -> do
-        result <- listFiles (repoRoot </> srcBase) (repoRoot </> srcBase)
-        case result of
-          Left e -> return $ Left e
-          Right files' -> do
-            return
-              $ Right
-              $ base
-              : [ FilePair
-                  { source = normalise $ repoRoot </> srcBase </> relPath
-                  , destination = normalise $ dstBase </> relPath
-                  , fileType = fType'
-                  }
-                | (fType', relPath) <- files'
-                ]
-  return $ foldl combine (Right []) files
- where
-  combine
-    :: Either IOError [FilePair]
-    -> Either IOError [FilePair]
-    -> Either IOError [FilePair]
-  combine (Left e) _ = Left e
-  combine _ (Left e) = Left e
-  combine (Right files1) (Right files2) = Right $ files1 ++ files2
-
-
-listFiles
+makeCorrespondBetweenTwoDirs
   :: (MonadFileSystem m)
   => OsPath
   -> OsPath
-  -> m (Either IOError [(FileType, OsPath)])
-listFiles root dir = do
-  result <- listDirectory dir'
-  case result of
-    Left e -> return $ Left e
-    Right files -> list files
+  -> m (Either IOError (Map OsPath (Maybe FileEntry, Maybe FileEntry)))
+makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
+  intermediateDirExists <- exists intermediatePath
+  intermediateResult <-
+    if intermediateDirExists
+      then listFiles intermediatePath
+      else return $ Right []
+  targetResult <- listFiles targetPath
+  case (intermediateResult, targetResult) of
+    (Left e, _) -> return $ Left e
+    (_, Left e) -> return $ Left e
+    (Right intermediateFiles, Right targetFiles) -> do
+      let intermediateEntries =
+            fromList
+              [(p, (Just e, Nothing)) | e@(FileEntry p _) <- intermediateFiles]
+          targetEntries =
+            fromList
+              [(p, (Nothing, Just e)) | e@(FileEntry p _) <- targetFiles]
+          allEntries = unionWith combinePairs intermediateEntries targetEntries
+      return $ Right $ Data.Map.Strict.filter eitherExists allEntries
  where
-  list
-    :: (MonadFileSystem m) => [OsPath] -> m (Either IOError [(FileType, OsPath)])
-  list [] = return $ Right []
-  list (f : fs) = do
-    isDir <- isDirectory (dir' </> f)
-    rest <- list fs
-    if isDir
-      then do
-        result <- listFiles root' (dir' </> f)
-        case (result, rest) of
-          (Left e, _) -> return $ Left e
-          (_, Left e) -> return $ Left e
-          (Right files, Right rest') -> do
-            return $ Right $ (Directory, relDir </> f) : files ++ rest'
-      else return $ case rest of
-        Left e -> Left e
-        Right rest' -> Right $ (File, relDir </> f) : rest'
-  root' :: OsPath
-  root' = normalise root
-  dir' :: OsPath
-  dir' = normalise dir
-  relDir :: OsPath
-  relDir = makeRelative root' dir'
+  combinePairs
+    :: (Maybe FileEntry, Maybe FileEntry)
+    -> (Maybe FileEntry, Maybe FileEntry)
+    -> (Maybe FileEntry, Maybe FileEntry)
+  combinePairs (Just a, _) (_, Just b) = (Just a, Just b)
+  combinePairs (_, Just b) (Just a, _) = (Just a, Just b)
+  combinePairs (Just a, _) (_, Nothing) = (Just a, Nothing)
+  combinePairs (_, Just b) (Nothing, _) = (Nothing, Just b)
+  combinePairs (Nothing, Nothing) pair = pair
+  eitherExists :: (Maybe FileEntry, Maybe FileEntry) -> Bool
+  eitherExists (Just _, _) = True
+  eitherExists (_, Just _) = True
+  eitherExists _ = False
+
+
+listFiles :: (MonadFileSystem m) => OsPath -> m (Either IOError [FileEntry])
+listFiles path = do
+  isDir <- isDirectory path
+  if not isDir
+    then do
+      path' <- decodePath path
+      return
+        $ Left
+        $ userError "listFiles: path is not a directory"
+        `ioeSetFileName` path'
+    else do
+      result <- listDirectoryRecursively path
+      case result of
+        Left err -> return $ Left err
+        Right entries -> do
+          files <- forM entries $ \case
+            (Dojang.MonadFileSystem.Directory, d) ->
+              return $ Right $ FileEntry d Directory
+            (Dojang.MonadFileSystem.File, f) -> do
+              size <- getFileSize $ path </> f
+              return $ case size of
+                Right size' -> Right $ FileEntry f $ File size'
+                Left e -> Left e
+          let (fails, files') = partitionEithers files
+          case fails of
+            [] -> return $ Right files'
+            e : _ -> return $ Left e
