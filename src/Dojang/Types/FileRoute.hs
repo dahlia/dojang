@@ -3,12 +3,19 @@
 
 module Dojang.Types.FileRoute
   ( FileRoute (..)
-  , FileType (..)
   , fileRoute
   , fileRoute'
   , dispatch
   ) where
 
+import Data.List (sortOn)
+import Data.Ord (Down (Down))
+import Prelude hiding (lookup)
+
+import Data.HashMap.Strict (lookup)
+import Data.HashSet (HashSet, singleton, union, unions)
+
+import Dojang.MonadFileSystem (FileType)
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning, evaluate')
@@ -16,22 +23,6 @@ import Dojang.Types.EnvironmentPredicate.Specificity (Specificity, specificity)
 import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
-
-import Data.HashMap.Strict (lookup)
-import Data.HashSet (HashSet, singleton, union, unions)
-import Data.List (sortOn)
-import Data.Ord (Down (Down))
-
-import Prelude hiding (lookup)
-
-
--- | A type that represents a file or directory.
-data FileType
-  = -- | A file.
-    File
-  | -- | A directory.
-    Directory
-  deriving (Eq, Show)
 
 
 -- | A route that maps 'EnvironmentPredicate's to 'FilePathExpression's.

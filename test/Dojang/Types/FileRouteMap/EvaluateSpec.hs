@@ -8,6 +8,7 @@ import System.OsPath (OsPath, encodeFS)
 import Test.Hspec (Spec, runIO, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
+import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
@@ -15,7 +16,7 @@ import Dojang.Types.Environment
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..))
-import Dojang.Types.FileRoute (FileRoute, FileType (..), fileRoute)
+import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap.Evaluate
   ( evaluateRoutes
   , evaluateRoutesWithFileTypes

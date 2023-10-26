@@ -44,6 +44,7 @@ import System.OsPath (OsPath, joinPath)
 import System.OsString (OsString, encodeFS)
 import Test.Hspec.Hedgehog (MonadGen)
 
+import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
@@ -340,7 +341,7 @@ fileRoute' predicatesNumberRange mm predGen = do
   let cardinality = Prelude.length predicates
   paths <-
     Gen.list (constant cardinality cardinality) $ Gen.maybe filePathExpression
-  fileOrDir <- Gen.element [FileRoute.File, FileRoute.Directory]
+  fileOrDir <- Gen.element [File, Directory]
   return $ FileRoute.fileRoute' (`lookup` mm) (predicates `zip` paths) fileOrDir
 
 

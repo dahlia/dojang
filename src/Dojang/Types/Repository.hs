@@ -11,12 +11,11 @@ import System.OsPath (OsPath, makeRelative, normalise, (</>))
 import System.OsString (OsString)
 
 import Data.Map.Strict (Map, toList)
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression (EnvironmentVariable, FilePathExpression)
 import Dojang.Types.FilePathExpression.Expansion (expandFilePath)
-import Dojang.Types.FileRoute (FileType (..))
 import Dojang.Types.FileRouteMap.Evaluate (evaluateRoutesWithFileTypes)
 import Dojang.Types.Manifest (Manifest (..))
 

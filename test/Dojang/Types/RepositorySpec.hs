@@ -17,7 +17,7 @@ import System.IO.Error
   , ioeGetErrorType
   , ioeGetFileName
   )
-import System.OsPath (OsPath, encodeFS, normalise, (</>))
+import System.OsPath (OsPath, encodeFS, normalise, pack, pathSeparator, (</>))
 import System.OsString (OsString)
 import Test.Hspec (Spec, describe, it, runIO, specify)
 import Test.Hspec.Expectations.Pretty
@@ -26,7 +26,7 @@ import Test.Hspec.Expectations.Pretty
   , shouldSatisfy
   )
 
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Environment
@@ -42,7 +42,6 @@ import Dojang.Types.FilePathExpression
   , FilePathExpression (..)
   , (+/+)
   )
-import Dojang.Types.FileRoute (FileType (..))
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -134,8 +133,12 @@ spec = do
       (Right files, warnings) <- pairFiles repo env getEnv
       warnings `shouldBe` [UndefinedMoniker undefined']
       sort files
-        `shouldBe` [ dirPair (tmpDir </> bar) (osPath "B:\\")
-                   , filePair (tmpDir </> bar </> foo) (osPath "B:\\foo")
+        `shouldBe` [ dirPair
+                      (tmpDir </> bar)
+                      (osPath "B:" <> pack [pathSeparator])
+                   , filePair
+                      (tmpDir </> bar </> foo)
+                      (osPath "B:" </> osPath "foo")
                    , filePair (tmpDir </> baz) (osPath "C:\\baz")
                    ]
 

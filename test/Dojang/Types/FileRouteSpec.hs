@@ -11,6 +11,7 @@ import Test.Hspec (Spec, describe, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotBe)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
+import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment (Environment (Environment))
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Moniker, OperatingSystem, Or)
@@ -23,7 +24,6 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FileRoute
   ( FileRoute (monikerResolver, predicates)
-  , FileType (Directory)
   , dispatch
   , fileRoute
   , fileRoute'

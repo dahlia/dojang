@@ -1,14 +1,23 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE TupleSections #-}
 
-module Dojang.MonadFileSystem (DryRunIO, MonadFileSystem (..), dryRunIO) where
+module Dojang.MonadFileSystem
+  ( DryRunIO
+  , FileType (..)
+  , MonadFileSystem (..)
+  , dryRunIO
+  ) where
 
+import Control.Monad (forM)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.Either (partitionEithers)
 import Data.List (isPrefixOf, sort)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import System.IO.Error (ioeSetFileName, tryIOError)
 import Prelude hiding (filter, readFile, writeFile)
 
+import Control.Monad.Extra (partitionM)
 import Control.Monad.State.Strict
   ( MonadState
   , StateT
@@ -42,6 +51,15 @@ import System.OsPath
   , takeFileName
   , (</>)
   )
+
+
+-- | A type that represents a file or directory.
+data FileType
+  = -- | A directory.
+    Directory
+  | -- | A file.
+    File
+  deriving (Eq, Ord, Show)
 
 
 -- | A monad that can perform filesystem operations.  It's also based on
@@ -123,6 +141,28 @@ class (Monad m) => MonadFileSystem m where
   listDirectory :: OsPath -> m (Either IOError [OsPath])
 
 
+  -- | Lists all files and directories in a directory recursively.  It doesn't
+  -- include @.@ and @..@.  Paths are relative to the given directory,
+  -- and directories always go before their contents.
+  listDirectoryRecursively :: OsPath -> m (Either IOError [(FileType, OsPath)])
+  listDirectoryRecursively path = do
+    result <- listDirectory path
+    case result of
+      Left e -> return $ Left e
+      Right entries -> do
+        (dirs, files) <- partitionM (isDirectory . (path </>)) entries
+        files' <- forM files $ \file -> return (File, file)
+        dirs' <- forM dirs $ \dir -> do
+          result' <- listDirectoryRecursively (path </> dir)
+          case result' of
+            Left e -> return $ Left e
+            Right entries' ->
+              return $ Right $ (Directory, dir) : (fmap (dir </>) <$> entries')
+        case partitionEithers dirs' of
+          ([], dirs'') -> return $ Right $ files' ++ concat dirs''
+          (e : _, _) -> return $ Left e
+
+
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
   -- a directory, then it returns 'Left'.
   getFileSize :: OsPath -> m (Either IOError Integer)
@@ -184,7 +224,7 @@ data OverlaidFile
   = -- | A file with the given contents.
     Contents ByteString
   | -- | A directory.
-    Directory
+    Directory'
   | -- | A file that doesn't exist (i.e., it was deleted).
     Gone
   | -- | A file that was copied from the given path.
@@ -247,7 +287,7 @@ readFileFromDryRunIO seqOffset src = do
               $ Left
               $ userError "readFile: no such file"
               `ioeSetFileName` src'
-          (_, Directory) : _ -> do
+          (_, Directory') : _ -> do
             src' <- decodePath src
             return
               $ Left
@@ -287,7 +327,7 @@ instance MonadFileSystem DryRunIO where
   isDirectory path = do
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
-      Just ((_, Directory) :| _) -> return True
+      Just ((_, Directory') :| _) -> return True
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesDirectoryExist path
 
@@ -332,7 +372,7 @@ instance MonadFileSystem DryRunIO where
               $ Left
               $ userError "writeFile: destination must be inside a directory"
               `ioeSetFileName` dst'
-      (_, Just ((_, Directory) :| _)) ->
+      (_, Just ((_, Directory') :| _)) ->
         return
           $ Left
           $ userError "writeFile: destination is a directory"
@@ -370,7 +410,7 @@ instance MonadFileSystem DryRunIO where
               $ Left
               $ userError "copyFile: source does not exist"
               `ioeSetFileName` src'
-      Just ((_, Directory) :| _) ->
+      Just ((_, Directory') :| _) ->
         return
           $ Left
           $ userError "copyFile: source is a directory"
@@ -409,7 +449,7 @@ instance MonadFileSystem DryRunIO where
                 $ Left
                 $ userError "copyFile: destination must be inside a directory"
                 `ioeSetFileName` dst'
-        (_, Just ((_, Directory) :| _)) ->
+        (_, Just ((_, Directory') :| _)) ->
           return
             $ Left
             $ userError "copyFile: destination is a directory"
@@ -478,7 +518,7 @@ instance MonadFileSystem DryRunIO where
               $ Left
               $ userError "createDirectory: destination is already a file"
               `ioeSetFileName` dst'
-      (_, Just ((_, Directory) :| _)) ->
+      (_, Just ((_, Directory') :| _)) ->
         return
           $ Left
           $ userError "createDirectory: destination is already a directory"
@@ -490,7 +530,7 @@ instance MonadFileSystem DryRunIO where
               $ userError "createDirectory: destination is already a directory"
               `ioeSetFileName` dst'
       _ -> do
-        addChangeToFile dst Directory
+        addChangeToFile dst Directory'
         return $ Right ()
 
 
@@ -511,7 +551,7 @@ instance MonadFileSystem DryRunIO where
               $ Left
               $ userError "removeFile: no such file"
               `ioeSetFileName` path'
-      Just ((_, Directory) :| _) ->
+      Just ((_, Directory') :| _) ->
         return
           $ Left
           $ userError "removeFile: it is a directory"
@@ -547,7 +587,7 @@ instance MonadFileSystem DryRunIO where
           $ Left
           $ userError "listDirectory: not a directory"
           `ioeSetFileName` path'
-      Just ((_, Directory) :| _) ->
+      Just ((_, Directory') :| _) ->
         return $ Right $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
         list <- liftIO $ tryIOError $ System.Directory.OsPath.listDirectory path
@@ -588,7 +628,7 @@ instance MonadFileSystem DryRunIO where
           $ Left
           $ userError "getFileSize: no such file"
           `ioeSetFileName` path'
-      Just ((_, Directory) :| _) ->
+      Just ((_, Directory') :| _) ->
         return
           $ Left
           $ userError "getFileSize: it is a directory"

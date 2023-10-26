@@ -39,11 +39,11 @@ import FortyTwo.Prompts.Multiselect (multiselect)
 
 import Dojang.App (App, doesManifestExist, saveManifest)
 import Dojang.Commands (Admonition (Error), printStderr, printStderr')
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
-import Dojang.Types.FileRoute (FileType (..), fileRoute)
+import Dojang.Types.FileRoute (fileRoute)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerName (parseMonikerName)
 

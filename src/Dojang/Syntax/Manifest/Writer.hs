@@ -24,7 +24,10 @@ import System.OsPath (OsPath, decodeFS)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Toml (encode)
 
-import Dojang.MonadFileSystem (MonadFileSystem (writeFile))
+import Dojang.MonadFileSystem
+  ( FileType (Directory)
+  , MonadFileSystem (writeFile)
+  )
 import Dojang.Syntax.EnvironmentPredicate.Writer (writeEnvironmentPredicate)
 import Dojang.Syntax.Manifest.Internal
   ( EnvironmentPredicate' (..)
@@ -40,7 +43,7 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (toPathText)
-import Dojang.Types.FileRoute (FileRoute (..), FileType (Directory))
+import Dojang.Types.FileRoute (FileRoute (..))
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)

@@ -5,7 +5,7 @@ module Dojang.MonadFileSystemSpec (spec) where
 
 import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (sort)
+import Data.List (sort, sortOn)
 import System.IO.Error
   ( doesNotExistErrorType
   , ioeGetErrorString
@@ -32,7 +32,7 @@ import Test.Hspec (Spec, describe, it, runIO, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotReturn, shouldReturn)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
-import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
+import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..), dryRunIO)
 import Dojang.TestUtils (withTempDir)
 
 
@@ -78,7 +78,7 @@ spec = do
 
   describe "MonadFileSystem IO" $ do
     specify "encodePath" $ hedgehog $ do
-      filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicodeAll
+      filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicode
       filePath' <- liftIO $ encodePath filePath >>= decodePath
       filePath' === filePath
 
@@ -135,6 +135,19 @@ spec = do
       Right result <- listDirectory tmpDir
       sort result `shouldBe` [bar, baz, foo]
 
+    specify "listDirectoryRecursively" $ withFixture $ \tmpDir tmpDir' -> do
+      () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
+      () <- Prelude.writeFile (tmpDir' `combine` "baz" `combine` "corge") ""
+      Right result <- listDirectoryRecursively tmpDir
+      sortOn snd result
+        `shouldBe` [ (Directory, bar)
+                   , (File, bar </> quux)
+                   , (Directory, baz)
+                   , (File, baz </> corge)
+                   , (Directory, baz </> qux)
+                   , (File, foo)
+                   ]
+
     specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
       Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"
       getFileSize (tmpDir </> foo) `shouldReturn` Right 4
@@ -147,7 +160,7 @@ spec = do
 
   describe "DryRunIO" $ do
     specify "encodePath" $ hedgehog $ do
-      filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicodeAll
+      filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicode
       filePath' <- liftIO $ dryRunIO (encodePath filePath >>= decodePath)
       filePath' === filePath
 

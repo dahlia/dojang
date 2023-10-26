@@ -46,6 +46,7 @@ library:
   source-dirs: src
   dependencies:
     deepseq: ">=1.4 && <2"
+    extra: ">=1.7 && <2"
     fortytwo: ">=2 && < 2.1"
     mtl: ">=2 && <3"
     parser-combinators: ">=1 && <2"

@@ -27,7 +27,7 @@ import Data.Text.Encoding (decodeUtf8Lenient)
 import System.OsPath (OsPath, encodeFS)
 import Toml (Result (..), decode)
 
-import Dojang.MonadFileSystem (MonadFileSystem (readFile))
+import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (readFile))
 import Dojang.Syntax.EnvironmentPredicate.Parser
   ( ParseErrorBundle
   , errorBundlePretty
@@ -50,7 +50,7 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (FilePathExpression)
-import Dojang.Types.FileRoute (FileRoute, FileType (..), fileRoute)
+import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.MonikerMap (MonikerMap)

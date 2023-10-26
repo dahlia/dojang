@@ -6,8 +6,9 @@ module Dojang.Types.Manifest (Manifest (..), manifest) where
 import Data.Map.Strict (Map, fromList, toList)
 import System.OsPath (OsPath)
 
+import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.FilePathExpression (FilePathExpression)
-import Dojang.Types.FileRoute (FileRoute, FileType (..), fileRoute)
+import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)

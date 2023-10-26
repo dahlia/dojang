@@ -6,12 +6,14 @@ module Dojang.Types.FileRouteMap.Evaluate
   ) where
 
 import Data.Map.Strict (Map, fromList, mapWithKey, toList, (!?))
+import System.OsPath (OsPath)
+
+import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression (FilePathExpression)
-import Dojang.Types.FileRoute (FileRoute (..), FileType (..), dispatch)
+import Dojang.Types.FileRoute (FileRoute (..), dispatch)
 import Dojang.Types.FileRouteMap (FileRouteMap)
-import System.OsPath (OsPath)
 
 
 -- | Evaluates the 'FileRouteMap' against an 'Environment'.
