@@ -1,9 +1,12 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
 -- | The application monad for Dojang.
 module Dojang.App
@@ -29,6 +32,7 @@ import Data.String (IsString (fromString))
 import System.IO.Error (isDoesNotExistError, tryIOError)
 import Prelude hiding (readFile, writeFile)
 
+import Control.Monad.Except (MonadError (..))
 import Control.Monad.Logger
   ( Loc
   , LogLevel
@@ -52,7 +56,7 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Control.Monad.Trans (MonadTrans (lift))
 import Dojang.Commands (die)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Syntax.Env (EnvFileError (..), readEnvFile)
+import Dojang.Syntax.Env (readEnvFile)
 import Dojang.Syntax.Manifest.Parser (Error, formatError, readManifestFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.Types.Environment (Environment (..))
@@ -81,7 +85,7 @@ data AppEnv = AppEnv
 
 
 -- | The application monad for Dojang.
-newtype (MonadFileSystem i, MonadIO i) => App i v = App
+newtype (MonadFileSystem i, MonadError IOError i, MonadIO i) => App i v = App
   { unApp :: ReaderT AppEnv (LoggingT i) v
   }
   deriving
@@ -94,7 +98,15 @@ newtype (MonadFileSystem i, MonadIO i) => App i v = App
     )
 
 
-instance forall i. (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
+instance
+  (MonadFileSystem i, MonadError IOError i, MonadIO i)
+  => MonadError IOError (App i)
+  where
+  throwError = App . throwError
+  catchError action handler = App $ catchError (unApp action) (unApp . handler)
+
+
+instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   encodePath = App . lift . lift . encodePath
   decodePath = App . lift . lift . decodePath
   exists = App . lift . lift . exists
@@ -115,14 +127,18 @@ currentEnvironment' = do
   envFile' <- asks (.envFile)
   let filePath = sourceDir </> envFile'
   $(logDebug) $ "Environment file path: " <> showt (FromStringShow filePath)
-  result <- readEnvFile filePath
+  result <-
+    readEnvFile filePath `catchError` \e -> do
+      if isDoesNotExistError e
+        then do
+          $(logWarn)
+            $ "Environment file not found: "
+            <> showt (FromStringShow e)
+          env <- liftIO currentEnvironment
+          return $ Right (env, [])
+        else die $ showt e
   case result of
-    Left (IOError e) | isDoesNotExistError e -> do
-      $(logWarn) $ "Environment file not found: " <> showt (FromStringShow e)
-      liftIO currentEnvironment
-    Left (IOError e) -> do
-      die $ showt e
-    Left (TomlErrors errors) -> do
+    Left errors -> do
       let formattedErrors =
             Data.Text.concat
               ["\n  " <> pack e | e <- toList errors]
@@ -166,7 +182,7 @@ runAppWithStderrLogging
 runAppWithStderrLogging env = runStderrLoggingT . (`runReaderT` env) . unApp
 
 
-manifestPath :: (MonadFileSystem i, MonadIO i) => App i OsPath
+manifestPath :: (MonadIO i) => App i OsPath
 manifestPath = do
   sourceDir <- asks (.sourceDirectory)
   manifestFile' <- asks (.manifestFile)
@@ -175,8 +191,7 @@ manifestPath = do
   return path
 
 
-loadManifest
-  :: (MonadFileSystem i, MonadIO i) => App i (Either Error (Maybe Manifest))
+loadManifest :: (MonadIO i) => App i (Either Error (Maybe Manifest))
 loadManifest = do
   filename <- manifestPath
   result <- liftIO $ tryIOError (readManifestFile filename)
@@ -197,7 +212,7 @@ loadManifest = do
       return $ Right $ Just manifest
 
 
-doesManifestExist :: (MonadFileSystem i, MonadIO i) => App i Bool
+doesManifestExist :: (MonadIO i) => App i Bool
 doesManifestExist = do
   filePath <- manifestPath
   exists' <- liftIO $ exists filePath
@@ -213,14 +228,11 @@ saveManifest :: (MonadFileSystem i, MonadIO i) => Manifest -> App i OsPath
 saveManifest manifest = do
   filename <- manifestPath
   $(logDebugSH) manifest
-  writeResult <- writeManifestFile manifest filename
-  case writeResult of
-    Left e -> do
-      $(logError) $ "Error writing manifest file: " <> showt (FromStringShow e)
-      liftIO $ ioError e
-    Right () -> do
-      $(logInfo)
-        $ "Manifest file "
-        <> showt (FromStringShow filename)
-        <> " written"
-      return filename
+  writeManifestFile manifest filename `catchError` \e -> do
+    $(logError) $ "Error writing manifest file: " <> showt (FromStringShow e)
+    throwError e
+  $(logInfo)
+    $ "Manifest file "
+    <> showt (FromStringShow filename)
+    <> " written"
+  return filename

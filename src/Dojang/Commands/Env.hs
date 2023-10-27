@@ -9,6 +9,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import System.Exit (ExitCode (..))
 import Prelude hiding (putStr)
 
+import Control.Monad.Except (MonadError (..))
 import Control.Monad.Logger (logDebugSH, logError)
 import Data.Text.IO (putStr)
 import Options.Applicative.Path (hyphen)
@@ -30,10 +31,11 @@ env ignoreEnvFile outputPath = do
     then do
       liftIO $ putStr $ writeEnvironment currentEnv
       return ExitSuccess
-    else do
-      writeResult <- writeEnvFile currentEnv outputPath
-      case writeResult of
-        Left err -> do
+    else
+      ( do
+          () <- writeEnvFile currentEnv outputPath
+          return ExitSuccess
+      )
+        `catchError` \err -> do
           $(logError) $ showt err
           return $ ExitFailure 1
-        Right () -> return ExitSuccess

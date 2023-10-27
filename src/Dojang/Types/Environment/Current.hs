@@ -69,9 +69,7 @@ class MonadEnvironment m where
 
 
 instance
-  ( MonadOperatingSystem m
-  , MonadArchitecture m
-  )
+  (MonadOperatingSystem m, MonadArchitecture m)
   => MonadEnvironment m
   where
   currentEnvironment = do

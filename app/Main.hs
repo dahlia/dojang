@@ -219,7 +219,7 @@ parserPrefs :: ParserPrefs
 parserPrefs = defaultPrefs
 
 
-versionCmd :: (MonadFileSystem i, MonadIO i) => App i ExitCode
+versionCmd :: (MonadIO i) => App i ExitCode
 versionCmd = do
   liftIO $ putStrLn $ "dojang " <> showVersion Meta.version
   return ExitSuccess

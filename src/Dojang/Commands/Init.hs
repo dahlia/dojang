@@ -251,7 +251,7 @@ windowsAppData :: FilePathExpression
 windowsAppData = Substitution "AppData"
 
 
-askPresets :: (MonadFileSystem i, MonadIO i) => App i [InitPreset]
+askPresets :: (MonadIO i) => App i [InitPreset]
 askPresets = do
   -- FIXME: It doesn't seem to work on Windows...
   -- https://github.com/GianlucaGuarini/fortytwo/issues/7

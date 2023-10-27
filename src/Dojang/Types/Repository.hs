@@ -13,16 +13,15 @@ module Dojang.Types.Repository
   , makeCorrespondBetweenTwoDirs
   ) where
 
-import Control.Monad (forM)
-import Data.Either (partitionEithers)
+import Control.Monad (forM, unless)
 import System.IO.Error (ioeSetFileName)
 
+import Control.Monad.Except (MonadError (..))
 import Data.Map.Strict (Map, filter, fromList, unionWith)
 import System.OsPath (OsPath, (</>))
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
-import Dojang.Types.Environment (Environment)
 import Dojang.Types.Manifest (Manifest (..))
 
 
@@ -66,26 +65,22 @@ makeCorrespondBetweenTwoDirs
   :: (MonadFileSystem m)
   => OsPath
   -> OsPath
-  -> m (Either IOError (Map OsPath (Maybe FileEntry, Maybe FileEntry)))
+  -> m (Map OsPath (Maybe FileEntry, Maybe FileEntry))
 makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
   intermediateDirExists <- exists intermediatePath
-  intermediateResult <-
+  intermediateFiles <-
     if intermediateDirExists
       then listFiles intermediatePath
-      else return $ Right []
-  targetResult <- listFiles targetPath
-  case (intermediateResult, targetResult) of
-    (Left e, _) -> return $ Left e
-    (_, Left e) -> return $ Left e
-    (Right intermediateFiles, Right targetFiles) -> do
-      let intermediateEntries =
-            fromList
-              [(p, (Just e, Nothing)) | e@(FileEntry p _) <- intermediateFiles]
-          targetEntries =
-            fromList
-              [(p, (Nothing, Just e)) | e@(FileEntry p _) <- targetFiles]
-          allEntries = unionWith combinePairs intermediateEntries targetEntries
-      return $ Right $ Data.Map.Strict.filter eitherExists allEntries
+      else return []
+  targetFiles <- listFiles targetPath
+  let intermediateEntries =
+        fromList
+          [(p, (Just e, Nothing)) | e@(FileEntry p _) <- intermediateFiles]
+      targetEntries =
+        fromList
+          [(p, (Nothing, Just e)) | e@(FileEntry p _) <- targetFiles]
+      allEntries = unionWith combinePairs intermediateEntries targetEntries
+  return $ Data.Map.Strict.filter eitherExists allEntries
  where
   combinePairs
     :: (Maybe FileEntry, Maybe FileEntry)
@@ -102,30 +97,20 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
   eitherExists _ = False
 
 
-listFiles :: (MonadFileSystem m) => OsPath -> m (Either IOError [FileEntry])
+-- | Lists all 'FilEntry' values in the given directory.  Throws an 'IOError' if
+-- the directory cannot be read.
+listFiles :: (MonadFileSystem m) => OsPath -> m [FileEntry]
 listFiles path = do
   isDir <- isDirectory path
-  if not isDir
-    then do
-      path' <- decodePath path
-      return
-        $ Left
-        $ userError "listFiles: path is not a directory"
-        `ioeSetFileName` path'
-    else do
-      result <- listDirectoryRecursively path
-      case result of
-        Left err -> return $ Left err
-        Right entries -> do
-          files <- forM entries $ \case
-            (Dojang.MonadFileSystem.Directory, d) ->
-              return $ Right $ FileEntry d Directory
-            (Dojang.MonadFileSystem.File, f) -> do
-              size <- getFileSize $ path </> f
-              return $ case size of
-                Right size' -> Right $ FileEntry f $ File size'
-                Left e -> Left e
-          let (fails, files') = partitionEithers files
-          case fails of
-            [] -> return $ Right files'
-            e : _ -> return $ Left e
+  unless isDir $ do
+    path' <- decodePath path
+    throwError
+      $ userError "listFiles: path is not a directory"
+      `ioeSetFileName` path'
+  entries <- listDirectoryRecursively path
+  forM entries $ \case
+    (Dojang.MonadFileSystem.Directory, d) ->
+      return $ FileEntry d Directory
+    (Dojang.MonadFileSystem.File, f) -> do
+      size <- getFileSize $ path </> f
+      return $ FileEntry f $ File size

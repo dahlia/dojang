@@ -15,7 +15,7 @@ import System.FilePath (combine)
 import System.OsPath (OsPath, encodeFS, normalise, (</>))
 import System.OsString (OsString)
 import Test.Hspec (Spec, describe, it, runIO, specify)
-import Test.Hspec.Expectations.Pretty (shouldBe)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
@@ -86,15 +86,15 @@ spec = do
         --     ├── baz/
         --     └── foo
         -- Total 4 directories and 5 files
-        Right () <- writeManifestFile manifest' $ tmpDir </> manifestFilename'
-        Right () <- createDirectory $ tmpDir </> foo
-        Right () <- writeFile (tmpDir </> foo </> foo) "asdf"
-        Right () <- createDirectory $ tmpDir </> foo </> bar
-        Right () <- writeFile (tmpDir </> foo </> bar </> foo) "asdf asdf"
-        Right () <- createDirectory $ tmpDir </> foo </> baz
-        Right () <- createDirectory $ tmpDir </> bar
-        Right () <- writeFile (tmpDir </> bar </> foo) "foobar"
-        Right () <- writeFile (tmpDir </> baz) "foo bar baz"
+        () <- writeManifestFile manifest' $ tmpDir </> manifestFilename'
+        () <- createDirectory $ tmpDir </> foo
+        () <- writeFile (tmpDir </> foo </> foo) "asdf"
+        () <- createDirectory $ tmpDir </> foo </> bar
+        () <- writeFile (tmpDir </> foo </> bar </> foo) "asdf asdf"
+        () <- createDirectory $ tmpDir </> foo </> baz
+        () <- createDirectory $ tmpDir </> bar
+        () <- writeFile (tmpDir </> bar </> foo) "foobar"
+        () <- writeFile (tmpDir </> baz) "foo bar baz"
         let repo = Repository tmpDir (tmpDir </> intermediateDir) manifestFilename' manifest'
         repo.manifestFilename `shouldBe` manifestFilename'
         return repo
@@ -102,7 +102,7 @@ spec = do
   describe "listFiles" $ do
     it "lists files recursively" $ withTempDir $ \tmpDir _ -> do
       _ <- repositoryFixture tmpDir
-      Right files <- listFiles tmpDir
+      files <- listFiles tmpDir
       sort files
         `shouldBe` [ FileEntry bar Directory
                    , FileEntry (bar </> foo) $ File 6
@@ -116,16 +116,16 @@ spec = do
                    ]
 
     it "only accepts a directory path" $ withTempDir $ \tmpDir tmpDir' -> do
-      Right () <- writeFile (tmpDir </> foo) "foo"
-      Left e <- listFiles $ tmpDir </> foo
-      ioeGetErrorString e `shouldBe` "listFiles: path is not a directory"
-      ioeGetFileName e `shouldBe` Just (tmpDir' `combine` "foo")
+      () <- writeFile (tmpDir </> foo) "foo"
+      listFiles (tmpDir </> foo) `shouldThrow` \e ->
+        (ioeGetErrorString e == "listFiles: path is not a directory")
+          && (ioeGetFileName e == Just (tmpDir' `combine` "foo"))
 
   specify "makeCorrespondBetweenTwoDirs" $ withTempDir $ \tmpDir _ -> do
     -- cSpell:ignore quux
     qux <- encodePath "qux"
     quux <- encodePath "quux"
-    Right () <-
+    () <-
       makeFixtureTree
         (tmpDir </> foo)
         [ (foo, F "foo")
@@ -146,7 +146,7 @@ spec = do
               ]
           )
         ]
-    Right () <-
+    () <-
       makeFixtureTree
         (tmpDir </> bar)
         [ (foo, F "foo 2")
@@ -166,9 +166,8 @@ spec = do
               ]
           )
         ]
-    Right map' <- makeCorrespondBetweenTwoDirs (tmpDir </> foo) (tmpDir </> bar)
-    map'
-      `shouldBe` fromList
+    makeCorrespondBetweenTwoDirs (tmpDir </> foo) (tmpDir </> bar)
+      `shouldReturn` fromList
         [ (foo, (Just $ FileEntry foo $ File 3, Just $ FileEntry foo $ File 5))
         , (bar, (Just $ FileEntry bar Directory, Just $ FileEntry bar Directory))
         ,
@@ -210,12 +209,10 @@ spec = do
             )
           )
         ]
-    Right map'' <-
-      makeCorrespondBetweenTwoDirs
-        (tmpDir </> baz) -- This dir does not exist
-        (tmpDir </> bar)
-    map''
-      `shouldBe` fromList
+    makeCorrespondBetweenTwoDirs
+      (tmpDir </> baz) -- This dir does not exist
+      (tmpDir </> bar)
+      `shouldReturn` fromList
         [ (foo, (Nothing, Just $ FileEntry foo $ File 5))
         , (bar, (Nothing, Just $ FileEntry bar Directory))
         , (bar </> foo, (Nothing, Just $ FileEntry (bar </> foo) $ File 7))

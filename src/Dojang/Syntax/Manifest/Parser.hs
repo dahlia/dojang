@@ -65,8 +65,6 @@ data Error
     EnvironmentPredicateError (ParseErrorBundle Text Void)
   | -- | An error made during parsing a 'FilePathExpression'.
     FilePathExpressionError (ParseErrorBundle Text Void)
-  | -- | An I/O-related error made during reading a file.
-    IOError IOError
 
 
 -- | A warning message made during parsing.
@@ -89,7 +87,7 @@ readManifest toml = case decode $ unpack toml of
 
 
 -- | Reads a 'Manifest' file from the given path.  It assumes that the file
--- is encoded in UTF-8.
+-- is encoded in UTF-8.  Throws an 'IOError' if the file cannot be read.
 readManifestFile
   :: (MonadFileSystem m)
   => OsPath
@@ -98,9 +96,7 @@ readManifestFile
   -- ^ A decoded manifest with warnings, or a list of errors.
 readManifestFile filePath = do
   content <- readFile filePath
-  return $ case content of
-    Left e -> Left $ IOError e
-    Right content' -> readManifest $ decodeUtf8Lenient content'
+  return $ readManifest $ decodeUtf8Lenient content
 
 
 formatError :: Error -> Text
@@ -109,7 +105,6 @@ formatError (EnvironmentPredicateError e) =
   Dojang.Syntax.EnvironmentPredicate.Parser.errorBundlePretty e
 formatError (FilePathExpressionError e) =
   Dojang.Syntax.FilePathExpression.Parser.errorBundlePretty e
-formatError (IOError e) = pack $ show e
 
 
 mapManifest :: Manifest' -> Either Error Manifest

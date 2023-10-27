@@ -40,12 +40,12 @@ packages:
   original:
     hackage: directory-1.3.8.1
 - completed:
-    hackage: doctest-0.21.1@sha256:51c06806207d7123d0581cdc0cf014e22c60f76c6ae18c4a8ac85bed8f6b53ef,6849
+    hackage: exceptions-0.10.7@sha256:60ccc2277f8fa98a1a03c42afd9c589ba33ce208eaaef7d69bfbb42ce09d1816,2803
     pantry-tree:
-      sha256: 754f637cfe4500b769d88cde0a5013cb69355c6859d6b7162c12edd44aeb373a
-      size: 8088
+      sha256: d120a93fe716375208630bd9a2079d325d230dfa4d4909c00ac8d110da42c05c
+      size: 739
   original:
-    hackage: doctest-0.21.1
+    hackage: exceptions-0.10.7
 - completed:
     hackage: filepath-1.4.100.4@sha256:2de84756d3907308230e34fcc7c1917a73f218f6d53838618b7d5b95dd33e2c3,5536
     pantry-tree:
@@ -67,6 +67,20 @@ packages:
       size: 2713
   original:
     hackage: hedgehog-1.4
+- completed:
+    hackage: mtl-2.3.1@sha256:5377696d7315e2ef31a8d15d67b22d733c20cac2caf8b26756ff8524c8217e6d,1868
+    pantry-tree:
+      sha256: ac3cf1dc9ef397512d4bf8f2c3fbe4d64fb8aabd253288b34bf86c09ae234d4f
+      size: 1853
+  original:
+    hackage: mtl-2.3.1
+- completed:
+    hackage: parsec-3.1.17.0@sha256:6cf18e59d9f1c5b40385457b82ab679dc18d3c5bd3c2c67b2f94e1e8732e6624,5119
+    pantry-tree:
+      sha256: cca87377fcfe25583e1f7aadc4971111a86c2e66002dffa304be92f294db32c8
+      size: 2810
+  original:
+    hackage: parsec-3.1.17.0
 - completed:
     hackage: process-1.6.16.0@sha256:1b9c267e475d4492b80edc1f58d08c458d4a10d17ea95294356443855b125616,2845
     pantry-tree:

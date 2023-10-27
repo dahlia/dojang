@@ -59,15 +59,15 @@ writeManifest manifest =
   manifest' = mapManifest' manifest
 
 
--- | Writes a 'Manifest' file to the given path.
+-- | Writes a 'Manifest' file to the given path.  Throw an 'IOError' if the
+-- an occurs while writing the file.
 writeManifestFile
   :: (MonadFileSystem m)
   => Manifest
   -- ^ The 'Manifest' to write.
   -> OsPath
   -- ^ The path to write the 'Manifest' to.
-  -> m (Either IOError ())
-  -- ^ The error, if any, that occurred while writing the 'Manifest'.
+  -> m ()
 writeManifestFile manifest filePath =
   writeFile filePath $ encodeUtf8 $ writeManifest manifest
 

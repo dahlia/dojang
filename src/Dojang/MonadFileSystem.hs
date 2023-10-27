@@ -1,22 +1,23 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE TupleSections #-}
 
 module Dojang.MonadFileSystem
   ( DryRunIO
   , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
+  , tryDryRunIO
   ) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.Either (partitionEithers)
 import Data.List (isPrefixOf, sort)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
-import System.IO.Error (ioeSetFileName, tryIOError)
+import System.IO.Error (ioeSetFileName)
 import Prelude hiding (filter, readFile, writeFile)
 
+import Control.Monad.Except (MonadError (..), tryError)
 import Control.Monad.Extra (partitionM)
 import Control.Monad.State.Strict
   ( MonadState
@@ -64,7 +65,7 @@ data FileType
 
 -- | A monad that can perform filesystem operations.  It's also based on
 -- 'OsPath' instead of 'FilePath'.
-class (Monad m) => MonadFileSystem m where
+class (MonadError IOError m) => MonadFileSystem m where
   -- | Encodes a 'FilePath' into an 'OsPath'.
   encodePath :: FilePath -> m OsPath
 
@@ -89,11 +90,11 @@ class (Monad m) => MonadFileSystem m where
 
 
   -- | Reads contents from a file.
-  readFile :: OsPath -> m (Either IOError ByteString)
+  readFile :: OsPath -> m ByteString
 
 
   -- | Writes contents into a file.
-  writeFile :: OsPath -> ByteString -> m (Either IOError ())
+  writeFile :: OsPath -> ByteString -> m ()
 
 
   -- | Copies a file from one path to another.
@@ -102,15 +103,15 @@ class (Monad m) => MonadFileSystem m where
     -- ^ Source path.
     -> OsPath
     -- ^ Destination path.
-    -> m (Either IOError ())
+    -> m ()
 
 
   -- | Creates a directory at the given path.
-  createDirectory :: OsPath -> m (Either IOError ())
+  createDirectory :: OsPath -> m ()
 
 
   -- | Creates a directory at the given path, including all parent directories.
-  createDirectories :: OsPath -> m (Either IOError ())
+  createDirectories :: OsPath -> m ()
   createDirectories path = do
     let parent = takeDirectory path
     parent' <- decodePath parent
@@ -119,53 +120,40 @@ class (Monad m) => MonadFileSystem m where
       then createDirectory path
       else do
         parentIsFile <- isFile parent
-        if parentIsFile
-          then
-            return
-              $ Left
-              $ userError "createDirectories: one of its ancestors is a file"
-              `ioeSetFileName` parent'
-          else do
-            result <- createDirectories parent
-            case result of
-              Left e -> return $ Left e
-              Right _ -> createDirectory path
+        when parentIsFile
+          $ throwError
+          $ userError "createDirectories: one of its ancestors is a file"
+          `ioeSetFileName` parent'
+        createDirectories parent
+        createDirectory path
 
 
   -- | Removes a file.
-  removeFile :: OsPath -> m (Either IOError ())
+  removeFile :: OsPath -> m ()
 
 
   -- | Lists all files and directories in a directory except for @.@ and @..@,
   -- without recursing into subdirectories.
-  listDirectory :: OsPath -> m (Either IOError [OsPath])
+  listDirectory :: OsPath -> m [OsPath]
 
 
   -- | Lists all files and directories in a directory recursively.  It doesn't
   -- include @.@ and @..@.  Paths are relative to the given directory,
   -- and directories always go before their contents.
-  listDirectoryRecursively :: OsPath -> m (Either IOError [(FileType, OsPath)])
+  listDirectoryRecursively :: OsPath -> m [(FileType, OsPath)]
   listDirectoryRecursively path = do
-    result <- listDirectory path
-    case result of
-      Left e -> return $ Left e
-      Right entries -> do
-        (dirs, files) <- partitionM (isDirectory . (path </>)) entries
-        files' <- forM files $ \file -> return (File, file)
-        dirs' <- forM dirs $ \dir -> do
-          result' <- listDirectoryRecursively (path </> dir)
-          case result' of
-            Left e -> return $ Left e
-            Right entries' ->
-              return $ Right $ (Directory, dir) : (fmap (dir </>) <$> entries')
-        case partitionEithers dirs' of
-          ([], dirs'') -> return $ Right $ files' ++ concat dirs''
-          (e : _, _) -> return $ Left e
+    entries <- listDirectory path
+    (dirs, files) <- partitionM (isDirectory . (path </>)) entries
+    files' <- forM files $ \file -> return (File, file)
+    dirs' <- forM dirs $ \dir -> do
+      entries' <- listDirectoryRecursively (path </> dir)
+      return $ (Directory, dir) : (fmap (dir </>) <$> entries')
+    return $ files' ++ concat dirs'
 
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
-  -- a directory, then it returns 'Left'.
-  getFileSize :: OsPath -> m (Either IOError Integer)
+  -- a directory, then it throws an 'IOError'.
+  getFileSize :: OsPath -> m Integer
 
 
 instance MonadFileSystem IO where
@@ -184,36 +172,34 @@ instance MonadFileSystem IO where
   isDirectory = doesDirectoryExist
 
 
-  readFile src = decodePath src >>= tryIOError . Data.ByteString.readFile
+  readFile src = decodePath src >>= Data.ByteString.readFile
 
 
   writeFile dst contents = do
     dst' <- decodePath dst
-    tryIOError $ Data.ByteString.writeFile dst' contents
+    Data.ByteString.writeFile dst' contents
 
 
-  copyFile src = tryIOError . System.Directory.OsPath.copyFile src
+  createDirectory = System.Directory.OsPath.createDirectory
 
 
-  createDirectory = tryIOError . System.Directory.OsPath.createDirectory
+  removeFile = System.Directory.OsPath.removeFile
 
 
-  removeFile = tryIOError . System.Directory.OsPath.removeFile
-
-
-  listDirectory = tryIOError . System.Directory.OsPath.listDirectory
+  listDirectory = System.Directory.OsPath.listDirectory
 
 
   getFileSize path = do
     isDir <- isDirectory path
-    if isDir
-      then do
-        path' <- decodePath path
-        return
-          $ Left
-          $ userError "getFileSize: it is a directory"
-          `ioeSetFileName` path'
-      else tryIOError $ System.Directory.OsPath.getFileSize path
+    when isDir $ do
+      path' <- decodePath path
+      throwError
+        $ userError "getFileSize: it is a directory"
+        `ioeSetFileName` path'
+    System.Directory.OsPath.getFileSize path
+
+
+  copyFile = System.Directory.OsPath.copyFile
 
 
 type SeqNo = Int
@@ -251,7 +237,14 @@ currentSequenceNumber state = nextSequenceNumber state - 1
 -- class by using 'liftIO'.
 newtype DryRunIO a = DryRunIO {unDryRunIO :: StateT DryRunState IO a}
   deriving
-    (Functor, Applicative, Monad, MonadFail, MonadIO, MonadState DryRunState)
+    ( Functor
+    , Applicative
+    , Monad
+    , MonadFail
+    , MonadError IOError
+    , MonadIO
+    , MonadState DryRunState
+    )
 
 
 addChangeToFile :: OsPath -> OverlaidFile -> DryRunIO ()
@@ -269,7 +262,7 @@ addChangeToFile path change = modify' $ \state ->
   appendChange seqNo Nothing = Just $ singleton (seqNo, change)
 
 
-readFileFromDryRunIO :: SeqNo -> OsPath -> DryRunIO (Either IOError ByteString)
+readFileFromDryRunIO :: SeqNo -> OsPath -> DryRunIO ByteString
 readFileFromDryRunIO seqOffset src = do
   oFiles <- gets overlaidFiles
   case oFiles !? normalise src of
@@ -278,24 +271,22 @@ readFileFromDryRunIO seqOffset src = do
       let filteredChanges = filter (\(no, _) -> no <= seqOffset) changes
       in case filteredChanges of
           [] -> fallback
-          (_, Contents contents) : _ -> return $ Right contents
+          (_, Contents contents) : _ -> return contents
           (seqNo, Copied src') : _ ->
             readFileFromDryRunIO seqNo src'
           (_, Gone) : _ -> do
             src' <- decodePath src
-            return
-              $ Left
+            throwError
               $ userError "readFile: no such file"
               `ioeSetFileName` src'
           (_, Directory') : _ -> do
             src' <- decodePath src
-            return
-              $ Left
+            throwError
               $ userError "readFile: it is a directory"
               `ioeSetFileName` src'
  where
-  fallback :: DryRunIO (Either IOError ByteString)
-  fallback = liftIO $ tryIOError $ do
+  fallback :: DryRunIO ByteString
+  fallback = liftIO $ do
     src' <- decodeFS src
     Data.ByteString.readFile src'
 
@@ -346,46 +337,39 @@ instance MonadFileSystem DryRunIO where
     dstIsDir <- liftIO $ doesDirectoryExist dst
     case (oFiles !? dstDir, oFiles !? normalise dst) of
       (Just ((_, Gone) :| _), _) ->
-        return
-          $ Left
+        throwError
           $ userError "writeFile: no parent directory"
           `ioeSetFileName` dst'
       (Nothing, _)
         | not dstParentExists ->
-            return
-              $ Left
+            throwError
               $ userError "writeFile: no parent directory"
               `ioeSetFileName` dst'
       (Just ((_, Contents _) :| _), _) ->
-        return
-          $ Left
+        throwError
           $ userError "writeFile: destination must be inside a directory"
           `ioeSetFileName` dst'
       (Just ((_, Copied _) :| _), _) ->
-        return
-          $ Left
+        throwError
           $ userError "writeFile: destination must be inside a directory"
           `ioeSetFileName` dst'
       (Nothing, _)
         | not dstDirExists ->
-            return
-              $ Left
+            throwError
               $ userError "writeFile: destination must be inside a directory"
               `ioeSetFileName` dst'
       (_, Just ((_, Directory') :| _)) ->
-        return
-          $ Left
+        throwError
           $ userError "writeFile: destination is a directory"
           `ioeSetFileName` dst'
       (_, Nothing)
         | dstIsDir ->
-            return
-              $ Left
+            throwError
               $ userError "writeFile: destination is a directory"
               `ioeSetFileName` dst'
       _ -> do
         addChangeToFile dst $ Contents contents
-        return $ Right ()
+        return ()
 
 
   copyFile src dst = do
@@ -400,69 +384,58 @@ instance MonadFileSystem DryRunIO where
     dstIsDir <- liftIO $ doesDirectoryExist dst
     case oFiles !? normalise src of
       Just ((_, Gone) :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "copyFile: source does not exist"
           `ioeSetFileName` src'
       Nothing
         | not srcExists ->
-            return
-              $ Left
+            throwError
               $ userError "copyFile: source does not exist"
               `ioeSetFileName` src'
       Just ((_, Directory') :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "copyFile: source is a directory"
           `ioeSetFileName` src'
       Nothing
         | srcIsDir ->
-            return
-              $ Left
+            throwError
               $ userError "copyFile: source is a directory"
               `ioeSetFileName` src'
       _ -> case (oFiles !? dstDir, oFiles !? normalise dst) of
         (Just ((_, Gone) :| _), _) ->
-          return
-            $ Left
+          throwError
             $ userError "copyFile: destination has no parent directory"
             `ioeSetFileName` dst'
         (Nothing, _)
           | not dstDirExists ->
-              return
-                $ Left
+              throwError
                 $ userError "copyFile: destination has no parent directory"
                 `ioeSetFileName` dst'
         (Just ((_, Contents _) :| _), _) ->
-          return
-            $ Left
+          throwError
             $ userError "copyFile: destination must be inside a directory"
             `ioeSetFileName` dst'
         (Just ((_, Copied _) :| _), _) ->
-          return
-            $ Left
+          throwError
             $ userError "copyFile: destination must be inside a directory"
             `ioeSetFileName` dst'
         (Nothing, _)
           | not dstDirIsDir ->
-              return
-                $ Left
+              throwError
                 $ userError "copyFile: destination must be inside a directory"
                 `ioeSetFileName` dst'
         (_, Just ((_, Directory') :| _)) ->
-          return
-            $ Left
+          throwError
             $ userError "copyFile: destination is a directory"
             `ioeSetFileName` dst'
         (_, Nothing)
           | dstIsDir ->
-              return
-                $ Left
+              throwError
                 $ userError "copyFile: destination is a directory"
                 `ioeSetFileName` dst'
         _ -> do
           addChangeToFile dst $ Copied src
-          return $ Right ()
+          return ()
 
 
   createDirectory dst = do
@@ -475,63 +448,53 @@ instance MonadFileSystem DryRunIO where
     parentIsDir <- liftIO $ doesDirectoryExist parent
     case (oFiles !? parent, oFiles !? normalise dst) of
       (Just ((_, Gone) :| _), _) ->
-        return
-          $ Left
+        throwError
           $ userError "createDirectory: no parent directory"
           `ioeSetFileName` dst'
       (Nothing, _)
         | not parentExists ->
-            return
-              $ Left
+            throwError
               $ userError "createDirectory: no parent directory"
               `ioeSetFileName` dst'
       (Just ((_, Contents _) :| _), _) ->
-        return
-          $ Left
+        throwError
           $ userError "createDirectory: destination must be inside a directory"
           `ioeSetFileName` dst'
       (Just ((_, Copied _) :| _), _) ->
-        return
-          $ Left
+        throwError
           $ userError "createDirectory: destination must be inside a directory"
           `ioeSetFileName` dst'
       (Nothing, _)
         | not parentIsDir ->
-            return
-              $ Left
+            throwError
               $ userError
                 "createDirectory: destination must be inside a directory"
               `ioeSetFileName` dst'
       (_, Just ((_, Contents _) :| _)) ->
-        return
-          $ Left
+        throwError
           $ userError "createDirectory: destination is already a file"
           `ioeSetFileName` dst'
       (_, Just ((_, Copied _) :| _)) ->
-        return
-          $ Left
+        throwError
           $ userError "createDirectory: destination is already a file"
           `ioeSetFileName` dst'
       (Nothing, _)
         | isFile' ->
-            return
-              $ Left
+            throwError
               $ userError "createDirectory: destination is already a file"
               `ioeSetFileName` dst'
       (_, Just ((_, Directory') :| _)) ->
-        return
-          $ Left
+        throwError
           $ userError "createDirectory: destination is already a directory"
           `ioeSetFileName` dst'
       _
         | isDir ->
-            return
-              $ Left
+            throwError
               $ userError "createDirectory: destination is already a directory"
               `ioeSetFileName` dst'
       _ -> do
         addChangeToFile dst Directory'
-        return $ Right ()
+        return ()
 
 
   removeFile path = do
@@ -541,30 +504,26 @@ instance MonadFileSystem DryRunIO where
     isDir <- liftIO $ doesDirectoryExist path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "removeFile: no such file"
           `ioeSetFileName` path'
       Nothing
         | not exists' ->
-            return
-              $ Left
+            throwError
               $ userError "removeFile: no such file"
               `ioeSetFileName` path'
       Just ((_, Directory') :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "removeFile: it is a directory"
           `ioeSetFileName` path'
       Nothing
         | isDir ->
-            return
-              $ Left
+            throwError
               $ userError "removeFile: it is a directory"
               `ioeSetFileName` path'
       _ -> do
         addChangeToFile path Gone
-        return $ Right ()
+        return ()
 
 
   listDirectory path = do
@@ -573,37 +532,31 @@ instance MonadFileSystem DryRunIO where
     path' <- decodePath path
     case oFiles !? normalizedPath of
       Just ((_, Gone) :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "listDirectory: no such directory"
           `ioeSetFileName` path'
       Just ((_, Contents _) :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "listDirectory: not a directory"
           `ioeSetFileName` path'
       Just ((_, Copied _) :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "listDirectory: not a directory"
           `ioeSetFileName` path'
       Just ((_, Directory') :| _) ->
-        return $ Right $ map takeFileName $ keys $ directOChildren oFiles
+        return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
-        list <- liftIO $ tryIOError $ System.Directory.OsPath.listDirectory path
-        case list of
-          Left e -> return $ Left e
-          Right files -> do
-            let directOChildren' = directOChildren oFiles
-            let result =
-                  [f | f <- files, directOChildren' !? (path </> f) /= Just Gone]
-                    ++ [ filename
-                       | (filePath, f) <- toAscList directOChildren'
-                       , f /= Gone
-                       , let filename = makeRelative path filePath
-                       , filename `notElem` files
-                       ]
-            return $ Right $ sort result
+        files <- liftIO $ System.Directory.OsPath.listDirectory path
+        let directOChildren' = directOChildren oFiles
+        let result =
+              [f | f <- files, directOChildren' !? (path </> f) /= Just Gone]
+                ++ [ filename
+                   | (filePath, f) <- toAscList directOChildren'
+                   , f /= Gone
+                   , let filename = makeRelative path filePath
+                   , filename `notElem` files
+                   ]
+        return $ sort result
    where
     pathDirs :: [OsPath]
     pathDirs = splitDirectories path
@@ -624,43 +577,34 @@ instance MonadFileSystem DryRunIO where
     path' <- decodePath path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "getFileSize: no such file"
           `ioeSetFileName` path'
       Just ((_, Directory') :| _) ->
-        return
-          $ Left
+        throwError
           $ userError "getFileSize: it is a directory"
           `ioeSetFileName` path'
       Just _ -> do
-        result <- readFile path
-        case result of
-          Left e -> return $ Left e
-          Right contents ->
-            return
-              $ Right
-              $ fromIntegral
-              $ Data.ByteString.length contents
+        contents <- readFile path
+        return
+          $ fromIntegral
+          $ Data.ByteString.length contents
       Nothing -> do
         isDir <- isDirectory path
         if isDir
           then
-            return
-              $ Left
+            throwError
               $ userError "getFileSize: it is a directory"
               `ioeSetFileName` path'
           else do
-            size <-
-              liftIO
-                $ tryIOError
-                $ System.Directory.OsPath.getFileSize path
-            case size of
-              Left e -> return $ Left e
-              Right size' -> return $ Right size'
+            liftIO $ System.Directory.OsPath.getFileSize path
 
 
 dryRunIO :: DryRunIO a -> IO a
 dryRunIO action = evalStateT (unDryRunIO action) initialState
  where
   initialState = DryRunState{overlaidFiles = mempty, nextSequenceNumber = 0}
+
+
+tryDryRunIO :: DryRunIO a -> IO (Either IOError a)
+tryDryRunIO action = dryRunIO $ tryError action

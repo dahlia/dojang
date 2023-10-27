@@ -2,8 +2,7 @@
 
 module Dojang.TestUtils (Entry (..), Tree, makeFixtureTree, withTempDir) where
 
-import Control.Monad (forM, unless, void)
-import Data.Either (partitionEithers)
+import Control.Monad (forM_, unless, void)
 
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (OsPath, encodeFS, (</>))
@@ -26,14 +25,10 @@ type Tree = [(OsPath, Entry)]
 
 
 makeFixtureTree
-  :: (MonadFileSystem m) => OsPath -> Tree -> m (Either IOError ())
+  :: (MonadFileSystem m) => OsPath -> Tree -> m ()
 makeFixtureTree path tree = do
   pathExists <- exists path
   unless pathExists $ void $ createDirectories path
-  results <- forM tree $ \case
+  forM_ tree $ \case
     (p, F bytes) -> Dojang.MonadFileSystem.writeFile (path </> p) bytes
     (p, D tree') -> makeFixtureTree (path </> p) tree'
-  let (errors, _) = partitionEithers results
-  case errors of
-    [] -> return $ Right ()
-    (e : _) -> return $ Left e
