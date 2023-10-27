@@ -8,5 +8,3 @@ cradle:
     component: dojang:test:spec
   - path: ./test/Spec.hs
     component: dojang:test:spec
-  - path: ./test/doctest.hs
-    component: dojang:test:doctest

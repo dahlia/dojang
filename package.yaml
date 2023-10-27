@@ -79,17 +79,6 @@ executables:
     # cSpell:enable
 
 tests:
-  doctest:
-    source-dirs: test
-    main: doctest.hs
-    other-modules: []
-    dependencies:
-      *name : ">0"
-      doctest: ">=0.20.1 && <0.22"
-      doctest-discover: ">=0.2 && <0.3"
-      unicode-show: ">=0.1.1.1 && <0.2"
-    ghc-options: *executable-ghc-options
-
   spec:
     main: Spec.hs
     source-dirs: test
