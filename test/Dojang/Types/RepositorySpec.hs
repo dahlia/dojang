@@ -168,44 +168,44 @@ spec = do
         ]
     makeCorrespondBetweenTwoDirs (tmpDir </> foo) (tmpDir </> bar)
       `shouldReturn` fromList
-        [ (foo, (Just $ FileEntry foo $ File 3, Just $ FileEntry foo $ File 5))
-        , (bar, (Just $ FileEntry bar Directory, Just $ FileEntry bar Directory))
+        [ (foo, (FileEntry foo $ File 3, FileEntry foo $ File 5))
+        , (bar, (FileEntry bar Directory, FileEntry bar Directory))
         ,
           ( bar </> foo
-          ,
-            ( Just $ FileEntry (bar </> foo) $ File 7
-            , Just $ FileEntry (bar </> foo) $ File 7
-            )
+          , (FileEntry (bar </> foo) $ File 7, FileEntry (bar </> foo) $ File 7)
           )
-        , (bar </> bar, (Just $ FileEntry (bar </> bar) $ File 7, Nothing))
+        ,
+          ( bar </> bar
+          , (FileEntry (bar </> bar) $ File 7, FileEntry (bar </> bar) Missing)
+          )
         ,
           ( bar </> baz
           ,
-            ( Just $ FileEntry (bar </> baz) Directory
-            , Just $ FileEntry (bar </> baz) Directory
+            ( FileEntry (bar </> baz) Directory
+            , FileEntry (bar </> baz) Directory
             )
           )
         ,
           ( bar </> baz </> bar
-          , (Nothing, Just $ FileEntry (bar </> baz </> bar) $ File 11)
+          ,
+            ( FileEntry (bar </> baz </> bar) Missing
+            , FileEntry (bar </> baz </> bar) $ File 11
+            )
           )
-        , (baz, (Just $ FileEntry baz $ File 3, Just $ FileEntry baz $ File 3))
+        , (baz, (FileEntry baz $ File 3, FileEntry baz $ File 3))
         ,
           ( qux
-          , (Just $ FileEntry qux Directory, Just $ FileEntry qux Directory)
+          , (FileEntry qux Directory, FileEntry qux Directory)
           )
         ,
           ( qux </> foo
-          ,
-            ( Just $ FileEntry (qux </> foo) $ File 7
-            , Just $ FileEntry (qux </> foo) $ File 7
-            )
+          , (FileEntry (qux </> foo) $ File 7, FileEntry (qux </> foo) $ File 7)
           )
         ,
           ( qux </> quux
           ,
-            ( Just $ FileEntry (qux </> quux) $ File 8
-            , Just $ FileEntry (qux </> quux) $ File 10
+            ( FileEntry (qux </> quux) $ File 8
+            , FileEntry (qux </> quux) $ File 10
             )
           )
         ]
@@ -213,18 +213,42 @@ spec = do
       (tmpDir </> baz) -- This dir does not exist
       (tmpDir </> bar)
       `shouldReturn` fromList
-        [ (foo, (Nothing, Just $ FileEntry foo $ File 5))
-        , (bar, (Nothing, Just $ FileEntry bar Directory))
-        , (bar </> foo, (Nothing, Just $ FileEntry (bar </> foo) $ File 7))
-        , (bar </> baz, (Nothing, Just $ FileEntry (bar </> baz) Directory))
+        [ (foo, (FileEntry foo Missing, FileEntry foo $ File 5))
+        , (bar, (FileEntry bar Missing, FileEntry bar Directory))
+        ,
+          ( bar </> foo
+          ,
+            ( FileEntry (bar </> foo) Missing
+            , FileEntry (bar </> foo) $ File 7
+            )
+          )
+        ,
+          ( bar </> baz
+          ,
+            ( FileEntry (bar </> baz) Missing
+            , FileEntry (bar </> baz) Directory
+            )
+          )
         ,
           ( bar </> baz </> bar
-          , (Nothing, Just $ FileEntry (bar </> baz </> bar) $ File 11)
+          ,
+            ( FileEntry (bar </> baz </> bar) Missing
+            , FileEntry (bar </> baz </> bar) $ File 11
+            )
           )
-        , (baz, (Nothing, Just $ FileEntry baz $ File 3))
-        , (qux, (Nothing, Just $ FileEntry qux Directory))
-        , (qux </> foo, (Nothing, Just $ FileEntry (qux </> foo) $ File 7))
-        , (qux </> quux, (Nothing, Just $ FileEntry (qux </> quux) $ File 10))
+        , (baz, (FileEntry baz Missing, FileEntry baz $ File 3))
+        , (qux, (FileEntry qux Missing, FileEntry qux Directory))
+        ,
+          ( qux </> foo
+          , (FileEntry (qux </> foo) Missing, FileEntry (qux </> foo) $ File 7)
+          )
+        ,
+          ( qux </> quux
+          ,
+            ( FileEntry (qux </> quux) Missing
+            , FileEntry (qux </> quux) $ File 10
+            )
+          )
         ]
 
 

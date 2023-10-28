@@ -65,7 +65,7 @@ makeCorrespondBetweenTwoDirs
   :: (MonadFileSystem m)
   => OsPath
   -> OsPath
-  -> m (Map OsPath (Maybe FileEntry, Maybe FileEntry))
+  -> m (Map OsPath (FileEntry, FileEntry))
 makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
   intermediateDirExists <- exists intermediatePath
   intermediateFiles <-
@@ -75,26 +75,31 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
   targetFiles <- listFiles targetPath
   let intermediateEntries =
         fromList
-          [(p, (Just e, Nothing)) | e@(FileEntry p _) <- intermediateFiles]
+          [(p, (e, e{stat = Missing})) | e@(FileEntry p _) <- intermediateFiles]
       targetEntries =
         fromList
-          [(p, (Nothing, Just e)) | e@(FileEntry p _) <- targetFiles]
+          [(p, (e{stat = Missing}, e)) | e@(FileEntry p _) <- targetFiles]
       allEntries = unionWith combinePairs intermediateEntries targetEntries
   return $ Data.Map.Strict.filter eitherExists allEntries
  where
   combinePairs
-    :: (Maybe FileEntry, Maybe FileEntry)
-    -> (Maybe FileEntry, Maybe FileEntry)
-    -> (Maybe FileEntry, Maybe FileEntry)
-  combinePairs (Just a, _) (_, Just b) = (Just a, Just b)
-  combinePairs (_, Just b) (Just a, _) = (Just a, Just b)
-  combinePairs (Just a, _) (_, Nothing) = (Just a, Nothing)
-  combinePairs (_, Just b) (Nothing, _) = (Nothing, Just b)
-  combinePairs (Nothing, Nothing) pair = pair
-  eitherExists :: (Maybe FileEntry, Maybe FileEntry) -> Bool
-  eitherExists (Just _, _) = True
-  eitherExists (_, Just _) = True
-  eitherExists _ = False
+    :: (FileEntry, FileEntry)
+    -> (FileEntry, FileEntry)
+    -> (FileEntry, FileEntry)
+  combinePairs (a1, b1) (a2, b2)
+    | isNotMissing a1 && isNotMissing b2 = (a1, b2)
+    | isNotMissing a2 && isNotMissing b1 = (a2, b1)
+    | isMissing a1 && isNotMissing b2 = (a2, b2)
+    | otherwise = (a1, b1)
+   where
+    isMissing :: FileEntry -> Bool
+    isMissing (FileEntry _ Missing) = True
+    isMissing _ = False
+    isNotMissing :: FileEntry -> Bool
+    isNotMissing = not . isMissing
+  eitherExists :: (FileEntry, FileEntry) -> Bool
+  eitherExists (FileEntry _ Missing, FileEntry _ Missing) = False
+  eitherExists _ = True
 
 
 -- | Lists all 'FilEntry' values in the given directory.  Throws an 'IOError' if
