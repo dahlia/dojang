@@ -5,43 +5,57 @@
 
 module Dojang.Types.RepositorySpec (spec) where
 
-import Data.List (sort)
+import Data.List (sort, sortOn)
 import System.IO.Error (ioeGetErrorString, ioeGetFileName)
-import System.IO.Unsafe (unsafePerformIO)
-import Prelude hiding (writeFile)
+import Prelude hiding (readFile, writeFile)
 
+import Data.ByteString qualified (length)
 import Data.Map.Strict (Map, fromList)
 import System.FilePath (combine)
-import System.OsPath (OsPath, encodeFS, normalise, (</>))
-import System.OsString (OsString)
+import System.OsPath (OsPath, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, runIO, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (Entry (..), makeFixtureTree, withTempDir)
-import Dojang.Types.FilePathExpression
-  ( EnvironmentVariable
-  , FilePathExpression (..)
-  , (+/+)
+import Dojang.Types.Environment
+  ( Architecture (..)
+  , Environment (..)
+  , OperatingSystem (..)
   )
+import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
+import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Dojang.Types.Repository
-  ( FileEntry (..)
+  ( FileCorrespondence (..)
+  , FileCorrespondenceWarning (..)
+  , FileDeltaKind (..)
+  , FileEntry (..)
   , FileStat (..)
   , Repository (..)
   , listFiles
+  , makeCorrespond
+  , makeCorrespondBetweenThreeDirs
+  , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
   )
 
 
 spec :: Spec
 spec = do
+  src <- runIO $ encodeFS "src"
+  inter <- runIO $ encodeFS "inter"
+  dst <- runIO $ encodeFS "dst"
   foo <- runIO $ encodeFS "foo"
   bar <- runIO $ encodeFS "bar"
   baz <- runIO $ encodeFS "baz"
+  qux <- runIO $ encodeFS "qux"
+  -- cSpell:ignore quux corge
+  quux <- runIO $ encodeFS "quux"
+  corge <- runIO $ encodeFS "corge"
   intermediateDir <- runIO $ encodeFS ".dojang"
   manifestFilename' <- runIO $ encodeFS "dojang.toml"
 
@@ -53,7 +67,10 @@ spec = do
         [
           ( baz
           ,
-            [ (undefined', Just $ Root Nothing +/+ BareComponent "baz")
+            [
+              ( undefined'
+              , Just $ Root Nothing +/+ BareComponent "__dojang_test_baz__"
+              )
             , (windows, Just $ Substitution "BAZ")
             ]
           )
@@ -73,7 +90,7 @@ spec = do
 
   let manifest' = Dojang.Types.Manifest.manifest monikerMap fileRoutes dirRoutes
 
-  let repositoryFixture tmpDir = do
+  let repositoryFixture repoPath = do
         -- The tree of the repository fixture looks like this:
         -- .
         -- ├── bar/
@@ -86,28 +103,114 @@ spec = do
         --     ├── baz/
         --     └── foo
         -- Total 4 directories and 5 files
-        () <- writeManifestFile manifest' $ tmpDir </> manifestFilename'
-        () <- createDirectory $ tmpDir </> foo
-        () <- writeFile (tmpDir </> foo </> foo) "asdf"
-        () <- createDirectory $ tmpDir </> foo </> bar
-        () <- writeFile (tmpDir </> foo </> bar </> foo) "asdf asdf"
-        () <- createDirectory $ tmpDir </> foo </> baz
-        () <- createDirectory $ tmpDir </> bar
-        () <- writeFile (tmpDir </> bar </> foo) "foobar"
-        () <- writeFile (tmpDir </> baz) "foo bar baz"
-        let repo = Repository tmpDir (tmpDir </> intermediateDir) manifestFilename' manifest'
-        repo.manifestFilename `shouldBe` manifestFilename'
+        writeManifestFile manifest' $ repoPath </> manifestFilename'
+        createDirectory $ repoPath </> foo
+        writeFile (repoPath </> foo </> foo) "asdf"
+        createDirectory $ repoPath </> foo </> bar
+        writeFile (repoPath </> foo </> bar </> foo) "asdf asdf"
+        createDirectory $ repoPath </> foo </> baz
+        createDirectory $ repoPath </> bar
+        writeFile (repoPath </> bar </> foo) "foobar"
+        writeFile (repoPath </> baz) "foo bar baz"
+        let repo =
+              Repository
+                repoPath
+                (repoPath </> intermediateDir)
+                manifest'
         return repo
+
+  specify "makeCorrespond" $ withTempDir $ \tmpDir _ -> do
+    createDirectory $ tmpDir </> src
+    createDirectory $ tmpDir </> foo
+    repo <- repositoryFixture (tmpDir </> src)
+    (corresponds, ws) <- makeCorrespond repo (Environment Linux X86_64) $ \e ->
+      return $ case e of
+        "FOO" -> Just $ tmpDir </> foo
+        "BAR" -> Just $ tmpDir </> bar
+        _ -> Nothing
+    ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+    sortOn (.source.path) corresponds
+      `shouldBe` [ FileCorrespondence
+                    { source =
+                        FileEntry
+                          (tmpDir </> src </> bar </> foo)
+                          (File 6)
+                    , sourceDelta = Added
+                    , intermediate =
+                        FileEntry
+                          (tmpDir </> src </> intermediateDir </> bar </> foo)
+                          Missing
+                    , destination = FileEntry (tmpDir </> bar </> foo) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source =
+                        FileEntry
+                          (tmpDir </> src </> foo </> bar)
+                          Directory
+                    , sourceDelta = Added
+                    , intermediate =
+                        FileEntry
+                          (tmpDir </> src </> intermediateDir </> foo </> bar)
+                          Missing
+                    , destination = FileEntry (tmpDir </> foo </> bar) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source =
+                        FileEntry
+                          (tmpDir </> src </> foo </> bar </> foo)
+                          (File 9)
+                    , sourceDelta = Added
+                    , intermediate =
+                        FileEntry
+                          ( tmpDir
+                              </> src
+                              </> intermediateDir
+                              </> foo
+                              </> bar
+                              </> foo
+                          )
+                          Missing
+                    , destination =
+                        FileEntry (tmpDir </> foo </> bar </> foo) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source =
+                        FileEntry (tmpDir </> src </> foo </> baz) Directory
+                    , sourceDelta = Added
+                    , intermediate =
+                        FileEntry
+                          (tmpDir </> src </> intermediateDir </> foo </> baz)
+                          Missing
+                    , destination = FileEntry (tmpDir </> foo </> baz) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source =
+                        FileEntry (tmpDir </> src </> foo </> foo) (File 4)
+                    , sourceDelta = Added
+                    , intermediate =
+                        FileEntry
+                          (tmpDir </> src </> intermediateDir </> foo </> foo)
+                          Missing
+                    , destination = FileEntry (tmpDir </> foo </> foo) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 ]
 
   describe "listFiles" $ do
     it "lists files recursively" $ withTempDir $ \tmpDir _ -> do
       _ <- repositoryFixture tmpDir
       files <- listFiles tmpDir
+      manifestData <- readFile $ tmpDir </> manifestFilename'
+      let manifestSize = toEnum $ Data.ByteString.length manifestData
       sort files
         `shouldBe` [ FileEntry bar Directory
                    , FileEntry (bar </> foo) $ File 6
                    , FileEntry baz $ File 11
-                   , FileEntry manifestFilename' $ File 235
+                   , FileEntry manifestFilename' $ File manifestSize
                    , FileEntry foo Directory
                    , FileEntry (foo </> bar) Directory
                    , FileEntry (foo </> bar </> foo) $ File 9
@@ -121,10 +224,314 @@ spec = do
         (ioeGetErrorString e == "listFiles: path is not a directory")
           && (ioeGetFileName e == Just (tmpDir' `combine` "foo"))
 
+  specify "makeCorrespondBetweenThreeFiles" $ withTempDir $ \tmpDir _ -> do
+    let makeCorrespond' =
+          makeCorrespondBetweenThreeFiles
+            (tmpDir </> inter)
+            (tmpDir </> src)
+            (tmpDir </> dst)
+
+    writeFile (tmpDir </> inter) "unchanged"
+    writeFile (tmpDir </> src) "unchanged"
+    writeFile (tmpDir </> dst) "unchanged"
+    makeCorrespond'
+      `shouldReturn` FileCorrespondence
+        { source = FileEntry (tmpDir </> src) $ File 9
+        , sourceDelta = Unchanged
+        , intermediate = FileEntry (tmpDir </> inter) $ File 9
+        , destination = FileEntry (tmpDir </> dst) $ File 9
+        , destinationDelta = Unchanged
+        }
+
+    writeFile (tmpDir </> src) "modified!"
+    writeFile (tmpDir </> dst) "modified"
+    makeCorrespond'
+      `shouldReturn` FileCorrespondence
+        { source = FileEntry (tmpDir </> src) $ File 9
+        , sourceDelta = Modified
+        , intermediate = FileEntry (tmpDir </> inter) $ File 9
+        , destination = FileEntry (tmpDir </> dst) $ File 8
+        , destinationDelta = Modified
+        }
+
+    removeFile (tmpDir </> inter)
+    writeFile (tmpDir </> src) "added"
+    writeFile (tmpDir </> dst) "added"
+    makeCorrespond'
+      `shouldReturn` FileCorrespondence
+        { source = FileEntry (tmpDir </> src) $ File 5
+        , sourceDelta = Added
+        , intermediate = FileEntry (tmpDir </> inter) Missing
+        , destination = FileEntry (tmpDir </> dst) $ File 5
+        , destinationDelta = Added
+        }
+
+    writeFile (tmpDir </> inter) "removed"
+    removeFile (tmpDir </> src)
+    removeFile (tmpDir </> dst)
+    makeCorrespond'
+      `shouldReturn` FileCorrespondence
+        { source = FileEntry (tmpDir </> src) Missing
+        , sourceDelta = Removed
+        , intermediate = FileEntry (tmpDir </> inter) $ File 7
+        , destination = FileEntry (tmpDir </> dst) Missing
+        , destinationDelta = Removed
+        }
+
+    writeFile (tmpDir </> inter) "dir is disallowed"
+    createDirectory (tmpDir </> src)
+    filename <- decodePath $ tmpDir </> src
+    makeCorrespond' `shouldThrow` \e ->
+      ( ioeGetErrorString e
+          == "makeCorrespondBetweenThreeFiles: "
+          ++ "expected a file, but got a directory"
+      )
+        && (ioeGetFileName e == Just filename)
+
+  specify "makeCorrespondBetweenThreeDirs" $ withTempDir $ \tmpDir _ -> do
+    () <-
+      makeFixtureTree
+        (tmpDir </> foo)
+        [ (inter, D [])
+        , (src, D [])
+        , (dst, D [])
+        ]
+    emptyCorresponds <-
+      makeCorrespondBetweenThreeDirs
+        (tmpDir </> foo </> inter)
+        (tmpDir </> foo </> src)
+        (tmpDir </> foo </> dst)
+    sortOn (.source.path) emptyCorresponds `shouldBe` []
+
+    unchanged <- encodePath "unchanged"
+    added <- encodePath "added"
+    removed <- encodePath "removed"
+    modified <- encodePath "modified"
+    () <-
+      makeFixtureTree
+        (tmpDir </> bar)
+        [
+          ( inter
+          , D
+              [ (unchanged, D [(foo, F "foo-unchanged")])
+              , (added, D [])
+              ,
+                ( removed
+                , D
+                    [ (foo, F "foo-src-removed")
+                    , (bar, F "bar-dst-removed")
+                    , (baz, F "baz-both-removed")
+                    , (qux, D [])
+                    ]
+                )
+              ,
+                ( modified
+                , D
+                    [ (foo, F "foo")
+                    , (bar, F "bar")
+                    , (baz, F "baz")
+                    , (qux, F "qux-file-to-dir")
+                    , (quux, D [])
+                    , (corge, F "same-size-but-different-content")
+                    ]
+                )
+              ]
+          )
+        ,
+          ( src
+          , D
+              [ (unchanged, D [(foo, F "foo-unchanged")])
+              ,
+                ( added
+                , D
+                    [ (foo, F "foo-src-added")
+                    , (baz, F "baz-both-added")
+                    , (qux, D [])
+                    ]
+                )
+              , (removed, D [(bar, F "bar-dst-removed")])
+              ,
+                ( modified
+                , D
+                    [ (foo, F "foo-src-modified")
+                    , (bar, F "bar")
+                    , (baz, F "baz-src-modified")
+                    , (qux, D [])
+                    , (quux, F "qux-dir-to-file")
+                    , (corge, F "same-length-but--different-body")
+                    ]
+                )
+              ]
+          )
+        ,
+          ( dst
+          , D
+              [ (unchanged, D [(foo, F "foo-unchanged")])
+              ,
+                ( added
+                , D
+                    [ (bar, F "bar-dst-added")
+                    , (baz, F "baz-both-added")
+                    , (qux, D [])
+                    ]
+                )
+              , (removed, D [(foo, F "foo-src-removed")])
+              ,
+                ( modified
+                , D
+                    [ (foo, F "foo")
+                    , (bar, F "bar-dst-modified")
+                    , (baz, F "baz-dst-modified")
+                    , (qux, F "qux-file-to-dir")
+                    , (quux, D [])
+                    , (corge, F "equivalent-length-but-different")
+                    ]
+                )
+              ]
+          )
+        ]
+    corresponds <-
+      makeCorrespondBetweenThreeDirs
+        (tmpDir </> bar </> inter)
+        (tmpDir </> bar </> src)
+        (tmpDir </> bar </> dst)
+    sortOn (.source.path) corresponds
+      `shouldBe` [ FileCorrespondence
+                    { source = FileEntry added Directory
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry added Directory
+                    , destination = FileEntry added Directory
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (added </> bar) Missing
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry (added </> bar) Missing
+                    , destination = FileEntry (added </> bar) (File 13)
+                    , destinationDelta = Added
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (added </> baz) (File 14)
+                    , sourceDelta = Added
+                    , intermediate = FileEntry (added </> baz) Missing
+                    , destination = FileEntry (added </> baz) (File 14)
+                    , destinationDelta = Added
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (added </> foo) (File 13)
+                    , sourceDelta = Added
+                    , intermediate = FileEntry (added </> foo) Missing
+                    , destination = FileEntry (added </> foo) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (added </> qux) Directory
+                    , sourceDelta = Added
+                    , intermediate = FileEntry (added </> qux) Missing
+                    , destination = FileEntry (added </> qux) Directory
+                    , destinationDelta = Added
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry modified Directory
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry modified Directory
+                    , destination = FileEntry modified Directory
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (modified </> bar) (File 3)
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry (modified </> bar) (File 3)
+                    , destination = FileEntry (modified </> bar) (File 16)
+                    , destinationDelta = Modified
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (modified </> baz) (File 16)
+                    , sourceDelta = Modified
+                    , intermediate = FileEntry (modified </> baz) (File 3)
+                    , destination = FileEntry (modified </> baz) (File 16)
+                    , destinationDelta = Modified
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (modified </> corge) (File 31)
+                    , sourceDelta = Modified
+                    , intermediate = FileEntry (modified </> corge) (File 31)
+                    , destination = FileEntry (modified </> corge) (File 31)
+                    , destinationDelta = Modified
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (modified </> foo) (File 16)
+                    , sourceDelta = Modified
+                    , intermediate = FileEntry (modified </> foo) (File 3)
+                    , destination = FileEntry (modified </> foo) (File 3)
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (modified </> quux) (File 15)
+                    , sourceDelta = Modified
+                    , intermediate = FileEntry (modified </> quux) Directory
+                    , destination = FileEntry (modified </> quux) Directory
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (modified </> qux) Directory
+                    , sourceDelta = Modified
+                    , intermediate = FileEntry (modified </> qux) (File 15)
+                    , destination = FileEntry (modified </> qux) (File 15)
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry removed Directory
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry removed Directory
+                    , destination = FileEntry removed Directory
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (removed </> bar) (File 15)
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry (removed </> bar) (File 15)
+                    , destination = FileEntry (removed </> bar) Missing
+                    , destinationDelta = Removed
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (removed </> baz) Missing
+                    , sourceDelta = Removed
+                    , intermediate = FileEntry (removed </> baz) (File 16)
+                    , destination = FileEntry (removed </> baz) Missing
+                    , destinationDelta = Removed
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (removed </> foo) Missing
+                    , sourceDelta = Removed
+                    , intermediate = FileEntry (removed </> foo) (File 15)
+                    , destination = FileEntry (removed </> foo) (File 15)
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (removed </> qux) Missing
+                    , sourceDelta = Removed
+                    , intermediate = FileEntry (removed </> qux) Directory
+                    , destination = FileEntry (removed </> qux) Missing
+                    , destinationDelta = Removed
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry unchanged Directory
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry unchanged Directory
+                    , destination = FileEntry unchanged Directory
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (unchanged </> foo) (File 13)
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry (unchanged </> foo) (File 13)
+                    , destination = FileEntry (unchanged </> foo) (File 13)
+                    , destinationDelta = Unchanged
+                    }
+                 ]
+
   specify "makeCorrespondBetweenTwoDirs" $ withTempDir $ \tmpDir _ -> do
-    -- cSpell:ignore quux
-    qux <- encodePath "qux"
-    quux <- encodePath "quux"
     () <-
       makeFixtureTree
         (tmpDir </> foo)
@@ -250,19 +657,3 @@ spec = do
             )
           )
         ]
-
-
-getEnv :: (MonadFileSystem m) => EnvironmentVariable -> m (Maybe OsString)
-getEnv envVar = case envVar of
-  "FOO" -> Just <$> encodePath "/opt/foo"
-  "BAR" -> Just <$> encodePath "/var/bar"
-  "BAZ" -> Just <$> encodePath "C:\\baz"
-  _ -> return Nothing
-
-
-osPath :: String -> OsPath
-osPath = normalise . unsafePerformIO . encodeFS
-
-
-_t :: (EnvironmentVariable -> IO (Maybe OsString), String -> OsPath)
-_t = (getEnv, osPath)

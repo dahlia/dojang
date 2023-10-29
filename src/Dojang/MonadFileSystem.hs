@@ -14,6 +14,7 @@ import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, sort)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
+import GHC.Stack (HasCallStack)
 import System.IO.Error (ioeSetFileName)
 import Prelude hiding (filter, readFile, writeFile)
 
@@ -67,39 +68,40 @@ data FileType
 -- 'OsPath' instead of 'FilePath'.
 class (MonadError IOError m) => MonadFileSystem m where
   -- | Encodes a 'FilePath' into an 'OsPath'.
-  encodePath :: FilePath -> m OsPath
+  encodePath :: (HasCallStack) => FilePath -> m OsPath
 
 
   -- | Decodes a 'OsPath' into a 'FilePath'.
-  decodePath :: OsPath -> m FilePath
+  decodePath :: (HasCallStack) => OsPath -> m FilePath
 
 
   -- | Checks if a file (or directory) exists.
-  exists :: OsPath -> m Bool
+  exists :: (HasCallStack) => OsPath -> m Bool
   exists path = do
     isFile' <- isFile path
     if isFile' then return True else isDirectory path
 
 
   -- | Checks if a path exists and is a file.
-  isFile :: OsPath -> m Bool
+  isFile :: (HasCallStack) => OsPath -> m Bool
 
 
   -- | Checks if a path exists and is a directory.
-  isDirectory :: OsPath -> m Bool
+  isDirectory :: (HasCallStack) => OsPath -> m Bool
 
 
   -- | Reads contents from a file.
-  readFile :: OsPath -> m ByteString
+  readFile :: (HasCallStack) => OsPath -> m ByteString
 
 
   -- | Writes contents into a file.
-  writeFile :: OsPath -> ByteString -> m ()
+  writeFile :: (HasCallStack) => OsPath -> ByteString -> m ()
 
 
   -- | Copies a file from one path to another.
   copyFile
-    :: OsPath
+    :: (HasCallStack)
+    => OsPath
     -- ^ Source path.
     -> OsPath
     -- ^ Destination path.
@@ -107,11 +109,11 @@ class (MonadError IOError m) => MonadFileSystem m where
 
 
   -- | Creates a directory at the given path.
-  createDirectory :: OsPath -> m ()
+  createDirectory :: (HasCallStack) => OsPath -> m ()
 
 
   -- | Creates a directory at the given path, including all parent directories.
-  createDirectories :: OsPath -> m ()
+  createDirectories :: (HasCallStack) => OsPath -> m ()
   createDirectories path = do
     let parent = takeDirectory path
     parent' <- decodePath parent
@@ -129,18 +131,18 @@ class (MonadError IOError m) => MonadFileSystem m where
 
 
   -- | Removes a file.
-  removeFile :: OsPath -> m ()
+  removeFile :: (HasCallStack) => OsPath -> m ()
 
 
   -- | Lists all files and directories in a directory except for @.@ and @..@,
   -- without recursing into subdirectories.
-  listDirectory :: OsPath -> m [OsPath]
+  listDirectory :: (HasCallStack) => OsPath -> m [OsPath]
 
 
   -- | Lists all files and directories in a directory recursively.  It doesn't
   -- include @.@ and @..@.  Paths are relative to the given directory,
   -- and directories always go before their contents.
-  listDirectoryRecursively :: OsPath -> m [(FileType, OsPath)]
+  listDirectoryRecursively :: (HasCallStack) => OsPath -> m [(FileType, OsPath)]
   listDirectoryRecursively path = do
     entries <- listDirectory path
     (dirs, files) <- partitionM (isDirectory . (path </>)) entries
@@ -153,7 +155,7 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
   -- a directory, then it throws an 'IOError'.
-  getFileSize :: OsPath -> m Integer
+  getFileSize :: (HasCallStack) => OsPath -> m Integer
 
 
 instance MonadFileSystem IO where
