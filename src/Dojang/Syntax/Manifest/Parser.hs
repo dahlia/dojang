@@ -6,7 +6,7 @@
 
 module Dojang.Syntax.Manifest.Parser
   ( Error (..)
-  , formatError
+  , formatErrors
   , readManifest
   , readManifestFile
   ) where
@@ -99,12 +99,13 @@ readManifestFile filePath = do
   return $ readManifest $ decodeUtf8Lenient content
 
 
-formatError :: Error -> Text
-formatError (TomlErrors es) = pack $ unlines $ Data.List.NonEmpty.toList es
-formatError (EnvironmentPredicateError e) =
-  Dojang.Syntax.EnvironmentPredicate.Parser.errorBundlePretty e
-formatError (FilePathExpressionError e) =
-  Dojang.Syntax.FilePathExpression.Parser.errorBundlePretty e
+-- | Format error messages.
+formatErrors :: Error -> [Text]
+formatErrors (TomlErrors es) = Data.List.NonEmpty.toList $ fmap pack es
+formatErrors (EnvironmentPredicateError e) =
+  [Dojang.Syntax.EnvironmentPredicate.Parser.errorBundlePretty e]
+formatErrors (FilePathExpressionError e) =
+  [Dojang.Syntax.FilePathExpression.Parser.errorBundlePretty e]
 
 
 mapManifest :: Manifest' -> Either Error Manifest

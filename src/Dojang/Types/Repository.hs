@@ -22,7 +22,7 @@ module Dojang.Types.Repository
 import Control.Monad (forM, when)
 import Data.List (unzip4)
 import GHC.Stack (HasCallStack)
-import System.IO.Error (ioeSetFileName)
+import System.IO.Error (ioeSetFileName, isPermissionError)
 import Prelude hiding (readFile)
 
 import Control.Monad.Except (MonadError (..))
@@ -52,9 +52,6 @@ data Repository = Repository
   , intermediatePath :: OsPath
   -- ^ The path to the intermediate directory, which is managed by Dojang and
   -- contains the post-processed files.
-  , manifestFilename :: OsPath
-  -- ^ The filename of the manifest file.  This is relative to the repository
-  -- 'path'.
   , manifest :: Manifest
   -- ^ The manifest of the repository.
   }
@@ -226,6 +223,7 @@ makeCorrespondBetweenThreeFiles intermediatePath srcPath dstPath = do
   getDelta :: FileEntry -> FileEntry -> m FileDeltaKind
   getDelta (FileEntry _ Missing) (FileEntry _ File{}) = return Added
   getDelta (FileEntry _ File{}) (FileEntry _ Missing) = return Removed
+  getDelta (FileEntry _ Missing) (FileEntry _ Missing) = return Unchanged
   getDelta interEntry targetEntry = do
     if interEntry.stat /= targetEntry.stat
       then return Modified
@@ -350,7 +348,11 @@ listFiles path = do
   exists' <- exists path
   if exists'
     then do
-      entries <- listDirectoryRecursively path
+      entries <-
+        listDirectoryRecursively path `catchError` \e ->
+          if isPermissionError e
+            then return []
+            else throwError e
       forM entries $ \case
         (Dojang.MonadFileSystem.Directory, d) ->
           return $ FileEntry d Directory

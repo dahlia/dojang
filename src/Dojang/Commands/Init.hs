@@ -39,6 +39,7 @@ import FortyTwo.Prompts.Multiselect (multiselect)
 
 import Dojang.App (App, doesManifestExist, saveManifest)
 import Dojang.Commands (Admonition (Error), printStderr, printStderr')
+import Dojang.ExitCodes (manifestAlreadyExists)
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
@@ -84,7 +85,7 @@ init presets noInteractive = do
   if manifestExists
     then do
       printStderr' Error "Manifest already exists."
-      return $ ExitFailure 1
+      return $ manifestAlreadyExists
     else do
       $(logInfo) "No manifest found."
       presets' <-

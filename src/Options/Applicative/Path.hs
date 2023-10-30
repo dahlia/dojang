@@ -22,10 +22,12 @@ import System.OsPath (OsPath, encodeFS)
 
 hyphen :: OsPath
 hyphen = unsafePerformIO $ encodeFS "-"
+{-# NOINLINE hyphen #-}
 
 
 period :: OsPath
 period = unsafePerformIO $ encodeFS "."
+{-# NOINLINE period #-}
 
 
 path :: ReadM OsPath

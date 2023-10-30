@@ -17,6 +17,7 @@ import System.OsPath (OsPath)
 import TextShow (TextShow (showt))
 
 import Dojang.App (App, currentEnvironment')
+import Dojang.ExitCodes (fileWriteError)
 import Dojang.MonadFileSystem (MonadFileSystem)
 import Dojang.Syntax.Env (writeEnvFile, writeEnvironment)
 import Dojang.Types.Environment.Current (MonadEnvironment (..))
@@ -38,4 +39,4 @@ env ignoreEnvFile outputPath = do
       )
         `catchError` \err -> do
           $(logError) $ showt err
-          return $ ExitFailure 1
+          return fileWriteError

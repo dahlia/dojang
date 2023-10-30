@@ -19,6 +19,7 @@ module Dojang.App
   , currentEnvironment'
   , doesManifestExist
   , loadManifest
+  , loadRepository
   , runAppWithLogging
   , runAppWithStderrLogging
   , runAppWithoutLogging
@@ -29,10 +30,10 @@ import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
-import System.IO.Error (isDoesNotExistError, tryIOError)
+import System.IO.Error (isDoesNotExistError)
 import Prelude hiding (readFile, writeFile)
 
-import Control.Monad.Except (MonadError (..))
+import Control.Monad.Except (MonadError (..), tryError)
 import Control.Monad.Logger
   ( Loc
   , LogLevel
@@ -48,16 +49,17 @@ import Control.Monad.Logger
   , runStderrLoggingT
   )
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
-import Data.Text (concat, pack)
-import System.OsPath ((</>))
+import Control.Monad.Trans (MonadTrans (lift))
+import Data.Text (concat, pack, unlines)
+import System.OsPath (normalise, (</>))
 import System.OsPath.Types (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
-import Control.Monad.Trans (MonadTrans (lift))
-import Dojang.Commands (die)
+import Dojang.Commands (die')
+import Dojang.ExitCodes (envFileReadError, noEnvFile)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Env (readEnvFile)
-import Dojang.Syntax.Manifest.Parser (Error, formatError, readManifestFile)
+import Dojang.Syntax.Manifest.Parser (Error, formatErrors, readManifestFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Environment.Current
@@ -66,12 +68,16 @@ import Dojang.Types.Environment.Current
   , MonadOperatingSystem (currentOperatingSystem)
   )
 import Dojang.Types.Manifest (Manifest)
+import Dojang.Types.Repository (Repository (..))
 
 
 -- | The environment for the application monad.
 data AppEnv = AppEnv
   { sourceDirectory :: OsPath
   -- ^ The source directory (i.e., repository).
+  , intermediateDirectory :: OsPath
+  -- ^ The intermediate directory which is managed by Dojang.  It's normally
+  -- @.dojang@ in the source directory.
   , manifestFile :: OsPath
   -- ^ The manifest file.
   , envFile :: OsPath
@@ -136,13 +142,13 @@ currentEnvironment' = do
             <> showt (FromStringShow e)
           env <- liftIO currentEnvironment
           return $ Right (env, [])
-        else die $ showt e
+        else die' noEnvFile $ showt e
   case result of
     Left errors -> do
       let formattedErrors =
             Data.Text.concat
               ["\n  " <> pack e | e <- toList errors]
-      die $ "Syntax errors in environment file:" <> formattedErrors
+      die' envFileReadError $ "Syntax errors in environment file:" <> formattedErrors
     Right (env, warnings) -> do
       $(logDebugSH) env
       forM_ warnings $ \w -> $(logWarn) $ fromString w
@@ -191,10 +197,11 @@ manifestPath = do
   return path
 
 
-loadManifest :: (MonadIO i) => App i (Either Error (Maybe Manifest))
+loadManifest
+  :: (MonadFileSystem i, MonadIO i) => App i (Either Error (Maybe Manifest))
 loadManifest = do
   filename <- manifestPath
-  result <- liftIO $ tryIOError (readManifestFile filename)
+  result <- tryError (readManifestFile filename)
   case result of
     Left e
       | isDoesNotExistError e -> do
@@ -202,9 +209,11 @@ loadManifest = do
           return $ Right Nothing
     Left e -> do
       $(logError) $ "Error reading manifest file: " <> showt (FromStringShow e)
-      liftIO $ ioError e
+      throwError e
     Right (Left err) -> do
-      $(logError) $ "Error parsing manifest file: " <> formatError err
+      $(logError)
+        $ "Error parsing manifest file: "
+        <> Data.Text.unlines (formatErrors err)
       return $ Left err
     Right (Right (manifest, warnings)) -> do
       forM_ warnings $ \w -> $(logWarn) w
@@ -212,10 +221,10 @@ loadManifest = do
       return $ Right $ Just manifest
 
 
-doesManifestExist :: (MonadIO i) => App i Bool
+doesManifestExist :: (MonadFileSystem i, MonadIO i) => App i Bool
 doesManifestExist = do
   filePath <- manifestPath
-  exists' <- liftIO $ exists filePath
+  exists' <- exists filePath
   $(logInfo)
     $ "Manifest file "
     <> showt (FromStringShow filePath)
@@ -236,3 +245,19 @@ saveManifest manifest = do
     <> showt (FromStringShow filename)
     <> " written"
   return filename
+
+
+loadRepository
+  :: (MonadFileSystem i, MonadIO i) => App i (Either Error (Maybe Repository))
+loadRepository = do
+  sourceDir <- asks (normalise . (.sourceDirectory))
+  intermediateDir <- asks (normalise . (.intermediateDirectory))
+  result <- loadManifest
+  case result of
+    Left err -> return $ Left err
+    Right Nothing -> return $ Right Nothing
+    Right (Just manifest) -> do
+      return
+        $ Right
+        $ Just
+        $ Repository sourceDir (sourceDir </> intermediateDir) manifest

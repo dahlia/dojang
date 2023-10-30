@@ -18,6 +18,7 @@ import System.IO.CodePage (withCP65001)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
 
+import Control.Monad.Except (MonadError (catchError))
 import Options.Applicative
   ( Parser
   , ParserInfo
@@ -49,6 +50,7 @@ import Options.Applicative
   )
 import Options.Applicative.Path (hyphen, pathOption, period)
 import System.OsPath (OsPath, encodeFS)
+import TextShow (TextShow (showt))
 
 import Dojang.App
   ( App
@@ -56,20 +58,29 @@ import Dojang.App
   , runAppWithStderrLogging
   , runAppWithoutLogging
   )
-import Dojang.Commands (Admonition (Note), printStderr')
+import Dojang.Commands (Admonition (Error, Note), printStderr')
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
+import Dojang.Commands.Status qualified (status)
+import Dojang.ExitCodes (unhandledError)
 import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO)
 import Paths_dojang qualified as Meta
 
 
+intermediateDirname :: OsPath
+intermediateDirname = unsafePerformIO $ encodeFS ".dojang"
+{-# NOINLINE intermediateDirname #-}
+
+
 manifestFilename :: OsPath
 manifestFilename = unsafePerformIO $ encodeFS "dojang.toml"
+{-# NOINLINE manifestFilename #-}
 
 
 envFilename :: OsPath
 envFilename = unsafePerformIO $ encodeFS "dojang-env.toml"
+{-# NOINLINE envFilename #-}
 
 
 appP :: (MonadFileSystem i, MonadIO i) => Parser (AppEnv, App i ExitCode)
@@ -82,6 +93,19 @@ appP = do
           <> value period
           <> showDefault
           <> help "Source tree directory"
+      )
+  intermediateDirectory' <-
+    pathOption
+      ( long "intermediate-dir"
+          <> short 'i'
+          <> metavar "PATH"
+          <> value intermediateDirname
+          <> showDefault
+          <> help
+            ( "Intermediate directory which is managed by Dojang.  "
+                ++ "Relative to source tree directory (-s/--source-dir) "
+                ++ "if not absolute"
+            )
       )
   manifestFile' <-
     pathOption
@@ -111,11 +135,23 @@ appP = do
   dryRun' <-
     switch
       ( long "dry-run"
-          <> help "Do not actually perform actions, but just print them"
+          <> help
+            ( "Do not actually perform actions, but just print them.  "
+                ++ "This option probably lets the program run much slower"
+            )
       )
   debug' <- switch (long "debug" <> short 'd' <> help "Enable debug logging")
   cmd <- cmdP
-  return (AppEnv sourceDirectory' manifestFile' envFile' dryRun' debug', cmd)
+  return
+    ( AppEnv
+        sourceDirectory'
+        intermediateDirectory'
+        manifestFile'
+        envFile'
+        dryRun'
+        debug'
+    , cmd
+    )
 
 
 initPresetP :: Parser [InitPreset]
@@ -183,6 +219,12 @@ cmdP =
                   $ "Show environment in TOML format, "
                   ++ "which can be used with -e/--env-file"
               )
+          )
+        <> command
+          "status"
+          ( info
+              (pure Dojang.Commands.Status.status <**> helper)
+              (progDesc "Show status of repository and target tree")
           )
     )
     <|> subparser
@@ -254,4 +296,9 @@ main = withCP65001 $ do
     (_, cmd) <- liftIO $ customExecParser parserPrefs parser
     (if appEnv.debug then runAppWithStderrLogging else runAppWithoutLogging)
       appEnv
-      cmd
+      $ cmd
+      `catchError` \e -> do
+        printStderr' Error
+          $ "An unexpected error occurred; you may report this as a bug: "
+          <> showt e
+        return unhandledError
