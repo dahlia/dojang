@@ -11,26 +11,29 @@ import System.IO.Error
   , ioeGetErrorString
   , ioeGetErrorType
   , ioeGetFileName
+  , isDoesNotExistError
   , permissionErrorType
   )
 import System.Info (os)
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
-import Control.Monad.Except (tryError)
+import Control.Monad.Except (MonadError (catchError), tryError)
 import Data.ByteString qualified (readFile, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
-  ( doesDirectoryExist
+  ( createDirectoryLink
+  , createFileLink
+  , doesDirectoryExist
   , doesFileExist
   , doesPathExist
   )
 import System.Directory.OsPath qualified (createDirectory)
 import System.FilePath (combine)
 import System.OsPath (dropFileName, encodeFS, (</>))
-import Test.Hspec (Spec, describe, it, runIO, specify)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn)
+import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem
@@ -73,6 +76,16 @@ spec = do
   quux <- runIO $ encodeFS "quux"
   corge <- runIO $ encodeFS "corge"
 
+  symlinkAvailable <- runIO $ withTempDir $ \tmpDir tmpDir' ->
+    ( do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        createFileLink foo (tmpDir </> bar)
+        return True
+    )
+      `catchError` const (return False)
+  let symIt = if symlinkAvailable then it else xit
+  let symSpecify = if symlinkAvailable then specify else xspecify
+
   let withFixture action = withTempDir $ \tmpDir tmpDir' -> do
         () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
         () <- System.Directory.OsPath.createDirectory $ tmpDir </> bar
@@ -103,6 +116,15 @@ spec = do
       isDirectory testP `shouldReturn` True
       isDirectory nonExistentP `shouldReturn` False
 
+    symSpecify "isSymlink" $ do
+      isSymlink packageYamlP `shouldReturn` False
+      isSymlink testP `shouldReturn` False
+      isSymlink nonExistentP `shouldReturn` False
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        createFileLink foo (tmpDir </> bar)
+        isSymlink (tmpDir </> bar) `shouldReturn` True
+
     specify "readFile" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
       contents <- readFile $ tmpDir </> foo
@@ -115,6 +137,16 @@ spec = do
       () <- writeFile (tmpDirP </> nonExistentP) "foo"
       Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
         `shouldReturn` "foo"
+
+    describe "readSymlinkTarget" $ do
+      symIt "tells the target path of a symbolic link" $ withTempDir $ \tmpDir tmpDir' -> do
+        () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
+        createFileLink foo (tmpDir </> bar)
+        readSymlinkTarget (tmpDir </> bar) `shouldReturn` foo
+
+      it "fails with IOError if the path does not exist" $ do
+        readSymlinkTarget nonExistentP `shouldThrow` \e -> do
+          isDoesNotExistError e && ioeGetFileName e == Just nonExistentFP
 
     specify "copyFile" $ withTempDir $ \tmpDirP tmpDirFP -> do
       () <- copyFile packageYamlP (tmpDirP </> nonExistentP)
@@ -137,18 +169,36 @@ spec = do
       result <- listDirectory tmpDir
       sort result `shouldBe` [bar, baz, foo]
 
-    specify "listDirectoryRecursively" $ withFixture $ \tmpDir tmpDir' -> do
-      () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
-      () <- Prelude.writeFile (tmpDir' `combine` "baz" `combine` "corge") ""
-      result <- listDirectoryRecursively tmpDir
-      sortOn snd result
-        `shouldBe` [ (Directory, bar)
-                   , (File, bar </> quux)
-                   , (Directory, baz)
-                   , (File, baz </> corge)
-                   , (Directory, baz </> qux)
-                   , (File, foo)
-                   ]
+    describe "listDirectoryRecursively" $ do
+      specify "basic behavior" $ withFixture $ \tmpDir tmpDir' -> do
+        () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
+        () <- Prelude.writeFile (tmpDir' `combine` "baz" `combine` "corge") ""
+        result <- listDirectoryRecursively tmpDir
+        sortOn snd result
+          `shouldBe` [ (Directory, bar)
+                     , (File, bar </> quux)
+                     , (Directory, baz)
+                     , (File, baz </> corge)
+                     , (Directory, baz </> qux)
+                     , (File, foo)
+                     ]
+
+      symIt "distinguishes symlinks from regular files and directories"
+        $ withFixture
+        $ \tmpDir tmpDir' -> do
+          () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
+          () <- createFileLink quux (tmpDir </> baz </> corge)
+          () <- createDirectoryLink baz (tmpDir </> corge)
+          result <- listDirectoryRecursively tmpDir
+          sortOn snd result
+            `shouldBe` [ (Directory, bar)
+                       , (File, bar </> quux)
+                       , (Directory, baz)
+                       , (Symlink, baz </> corge)
+                       , (Directory, baz </> qux)
+                       , (Symlink, corge)
+                       , (File, foo)
+                       ]
 
     specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
       Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"
@@ -239,6 +289,23 @@ spec = do
           () <- removeFile packageYamlP
           isDirectory packageYamlP
         packageYamlIsFile `shouldBe` False
+
+    describe "isSymlink" $ do
+      symIt "checks an actual symlink that exists on the real file system"
+        $ withTempDir
+        $ \tmpDir tmpDir' -> do
+          () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
+          createFileLink foo (tmpDir </> bar)
+          dryRunIO (isSymlink $ tmpDir </> bar) `shouldReturn` True
+
+      it "return False if a path does not exist" $ do
+        dryRunIO (isSymlink nonExistentP) `shouldReturn` False
+
+      it "checks a virtual file that exists in memory" $ do
+        nonExistentExists' <- dryRunIO $ do
+          () <- writeFile nonExistentP ""
+          isSymlink nonExistentP
+        nonExistentExists' `shouldBe` False
 
     describe "exists" $ do
       it "checks an actual file that exists on the real file system" $ do
@@ -413,6 +480,35 @@ spec = do
           `shouldBe` Just (nonExistentFP `combine` nonExistentFP)
         ioeGetErrorString failToWrite''
           `shouldBe` "writeFile: destination must be inside a directory"
+
+    describe "readSymlinkTarget" $ do
+      symIt "returns the target path of a symbolic link"
+        $ withTempDir
+        $ \tmpDir tmpDir' -> do
+          () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
+          createFileLink foo (tmpDir </> bar)
+          dryRunIO (readSymlinkTarget $ tmpDir </> bar) `shouldReturn` foo
+
+      it "fails with non-existent file" $ do
+        dryRunIO (readSymlinkTarget nonExistentP) `shouldThrow` \e ->
+          isDoesNotExistError e && ioeGetFileName e == Just nonExistentFP
+
+      it "just fails with any virtual files as they can't be a symlink" $ do
+        Left failToReadSymlink <- tryDryRunIO $ do
+          () <- writeFile nonExistentP ""
+          readSymlinkTarget nonExistentP
+        ioeGetFileName failToReadSymlink `shouldBe` Just nonExistentFP
+        ioeGetErrorString failToReadSymlink
+          `shouldBe` "readSymlinkTarget: it is not a symbolic link"
+
+      it "fails with an overlaid removal tag" $ do
+        Left failToReadSymlink <- tryDryRunIO $ do
+          () <- writeFile nonExistentP ""
+          () <- removeFile nonExistentP
+          readSymlinkTarget nonExistentP
+        ioeGetFileName failToReadSymlink `shouldBe` Just nonExistentFP
+        ioeGetErrorString failToReadSymlink
+          `shouldBe` "readSymlinkTarget: no such file"
 
     describe "copyFile" $ do
       it "copies a source file to a destination path" $ do

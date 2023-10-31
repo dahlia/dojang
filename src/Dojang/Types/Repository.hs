@@ -63,8 +63,10 @@ data FileStat
     Missing
   | -- | The file is a directory.
     Directory
-  | -- | The file is a file, and this is its size in bytes.
+  | -- | The file is a regular file, and this is its size in bytes.
     File Integer
+  | -- | The file is a symlink, and this is the path to the symlink target.
+    Symlink OsPath
   deriving (Eq, Ord, Show)
 
 
@@ -165,7 +167,7 @@ makeCorrespond repo env lookupEnvVar = do
             }
           | correspond <- fs
           ]
-      Dojang.MonadFileSystem.File -> do
+      _ -> do
         f <- makeCorrespondBetweenThreeFiles interAbsPath srcAbsPath dstAbsPath
         return [f]
   let evalWarnings =
@@ -221,10 +223,15 @@ makeCorrespondBetweenThreeFiles intermediatePath srcPath dstPath = do
         return $ File size
       else return Missing
   getDelta :: FileEntry -> FileEntry -> m FileDeltaKind
-  getDelta (FileEntry _ Missing) (FileEntry _ File{}) = return Added
-  getDelta (FileEntry _ File{}) (FileEntry _ Missing) = return Removed
   getDelta (FileEntry _ Missing) (FileEntry _ Missing) = return Unchanged
-  getDelta interEntry targetEntry = do
+  getDelta (FileEntry _ Missing) (FileEntry _ _) = return Added
+  getDelta (FileEntry _ File{}) (FileEntry _ Missing) = return Removed
+  getDelta (FileEntry _ Symlink{}) (FileEntry _ Missing) = return Removed
+  getDelta (FileEntry _ (Symlink path)) (FileEntry _ (Symlink path')) =
+    if path == path'
+      then return Unchanged
+      else return Modified
+  getDelta interEntry targetEntry =
     if interEntry.stat /= targetEntry.stat
       then return Modified
       else do
@@ -280,16 +287,23 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath = do
     -- \^ A target (source or destination) file stat.
     -> m FileDeltaKind
   getDelta _ _ Directory Directory = return Unchanged
-  getDelta _ _ Directory (File _) = return Modified
   getDelta _ _ Directory Missing = return Removed
-  getDelta _ _ (File _) Directory = return Modified
-  getDelta path targetPath (File size) (File size')
-    | size /= size' = return Modified
-    | otherwise = do
+  getDelta _ _ Directory _ = return Modified
+  getDelta path targetPath (File size) (File size') =
+    if size /= size'
+      then return Modified
+      else do
         interData <- readFile (intermediatePath </> path)
         targetData <- readFile (targetPath </> path)
         return $ if interData == targetData then Unchanged else Modified
   getDelta _ _ (File _) Missing = return Removed
+  getDelta _ _ (File _) _ = return Modified
+  getDelta _ _ (Symlink path) (Symlink path') =
+    if path == path'
+      then return Unchanged
+      else return Modified
+  getDelta _ _ (Symlink _) Missing = return Added
+  getDelta _ _ (Symlink _) _ = return Modified
   getDelta _ _ Missing Missing = return Unchanged
   getDelta _ _ Missing _ = return Added
 
@@ -359,4 +373,7 @@ listFiles path = do
         (Dojang.MonadFileSystem.File, f) -> do
           size <- getFileSize $ path </> f
           return $ FileEntry f $ File size
+        (Dojang.MonadFileSystem.Symlink, s) -> do
+          target <- readSymlinkTarget $ path </> s
+          return $ FileEntry s $ Symlink target
     else return []

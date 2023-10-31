@@ -15,7 +15,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, sort)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import GHC.Stack (HasCallStack)
-import System.IO.Error (ioeSetFileName)
+import System.IO.Error (ioeSetFileName, isDoesNotExistError)
 import Prelude hiding (filter, readFile, writeFile)
 
 import Control.Monad.Except (MonadError (..), tryError)
@@ -34,6 +34,8 @@ import System.Directory.OsPath
   ( doesDirectoryExist
   , doesFileExist
   , doesPathExist
+  , getSymbolicLinkTarget
+  , pathIsSymbolicLink
   )
 import System.Directory.OsPath qualified
   ( copyFile
@@ -61,6 +63,8 @@ data FileType
     Directory
   | -- | A file.
     File
+  | -- | A symbolic link.
+    Symlink
   deriving (Eq, Ord, Show)
 
 
@@ -75,19 +79,23 @@ class (MonadError IOError m) => MonadFileSystem m where
   decodePath :: (HasCallStack) => OsPath -> m FilePath
 
 
-  -- | Checks if a file (or directory) exists.
+  -- | Checks if a file (or directory) exists.  If a path is a symbolic link,
+  -- then it tells whether the target of the symbolic link exists.
   exists :: (HasCallStack) => OsPath -> m Bool
-  exists path = do
-    isFile' <- isFile path
-    if isFile' then return True else isDirectory path
 
 
-  -- | Checks if a path exists and is a file.
+  -- | Checks if a path exists and is a file.  If a path is a symbolic link,
+  -- then it tells whether the target of the symbolic link is a file.
   isFile :: (HasCallStack) => OsPath -> m Bool
 
 
-  -- | Checks if a path exists and is a directory.
+  -- | Checks if a path exists and is a directory.  If a path is a symbolic
+  -- link, then it tells whether the target of the symbolic link is a directory.
   isDirectory :: (HasCallStack) => OsPath -> m Bool
+
+
+  -- | Checks if a path exists and is a symbolic link.
+  isSymlink :: (HasCallStack) => OsPath -> m Bool
 
 
   -- | Reads contents from a file.
@@ -96,6 +104,13 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Writes contents into a file.
   writeFile :: (HasCallStack) => OsPath -> ByteString -> m ()
+
+
+  -- | Tells the target path of a symbolic link.  If the path is not a symbolic
+  -- link, then it throws an 'IOError'.  The target path is relative to the
+  -- symbolic link (i.e., resolved from the directory that contains the
+  -- symbolic link).
+  readSymlinkTarget :: OsPath -> m OsPath
 
 
   -- | Copies a file from one path to another.
@@ -142,15 +157,20 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- | Lists all files and directories in a directory recursively.  It doesn't
   -- include @.@ and @..@.  Paths are relative to the given directory,
   -- and directories always go before their contents.
+  --
+  -- Note that it doesn't follow symbolic links.  Instead, it returns the
+  -- symbolic links themselves with the 'Symlink' file type.
   listDirectoryRecursively :: (HasCallStack) => OsPath -> m [(FileType, OsPath)]
   listDirectoryRecursively path = do
     entries <- listDirectory path
-    (dirs, files) <- partitionM (isDirectory . (path </>)) entries
+    (symlinks, entries') <- partitionM (isSymlink . (path </>)) entries
+    (dirs, files) <- partitionM (isDirectory . (path </>)) entries'
+    symlinks' <- forM symlinks $ \symlink -> return (Symlink, symlink)
     files' <- forM files $ \file -> return (File, file)
     dirs' <- forM dirs $ \dir -> do
-      entries' <- listDirectoryRecursively (path </> dir)
-      return $ (Directory, dir) : (fmap (dir </>) <$> entries')
-    return $ files' ++ concat dirs'
+      subentries <- listDirectoryRecursively (path </> dir)
+      return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
+    return $ files' ++ symlinks' ++ concat dirs'
 
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
@@ -174,12 +194,20 @@ instance MonadFileSystem IO where
   isDirectory = doesDirectoryExist
 
 
+  isSymlink path =
+    pathIsSymbolicLink path `catchError` \e ->
+      if isDoesNotExistError e then return False else throwError e
+
+
   readFile src = decodePath src >>= Data.ByteString.readFile
 
 
   writeFile dst contents = do
     dst' <- decodePath dst
     Data.ByteString.writeFile dst' contents
+
+
+  readSymlinkTarget = getSymbolicLinkTarget
 
 
   createDirectory = System.Directory.OsPath.createDirectory
@@ -325,6 +353,16 @@ instance MonadFileSystem DryRunIO where
       Nothing -> liftIO $ doesDirectoryExist path
 
 
+  isSymlink path = do
+    oFiles <- gets overlaidFiles
+    case oFiles !? normalise path of
+      Just _ -> return False
+      Nothing ->
+        liftIO (pathIsSymbolicLink path)
+          `catchError` \e ->
+            if isDoesNotExistError e then return False else throwError e
+
+
   readFile src = do
     seqNo <- gets currentSequenceNumber
     readFileFromDryRunIO seqNo src
@@ -372,6 +410,22 @@ instance MonadFileSystem DryRunIO where
       _ -> do
         addChangeToFile dst $ Contents contents
         return ()
+
+
+  readSymlinkTarget path = do
+    oFiles <- gets overlaidFiles
+    case oFiles !? normalise path of
+      Just ((_, Gone) :| _) -> do
+        path' <- decodePath path
+        throwError
+          $ userError "readSymlinkTarget: no such file"
+          `ioeSetFileName` path'
+      Just _ -> do
+        path' <- decodePath path
+        throwError
+          $ userError "readSymlinkTarget: it is not a symbolic link"
+          `ioeSetFileName` path'
+      Nothing -> liftIO $ getSymbolicLinkTarget path
 
 
   copyFile src dst = do
