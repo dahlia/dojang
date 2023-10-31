@@ -1,4 +1,4 @@
-resolver: lts-21.17
+resolver: lts-21.19
 require-stack-version: ">=2.11.1"
 packages:
 - .
