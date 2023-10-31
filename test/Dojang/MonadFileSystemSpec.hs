@@ -15,7 +15,7 @@ import System.IO.Error
   )
 import System.Info (os)
 import Prelude hiding (readFile, writeFile)
-import Prelude qualified (writeFile)
+import Prelude qualified (readFile, writeFile)
 
 import Control.Monad.Except (tryError)
 import Data.ByteString qualified (readFile, writeFile)
@@ -30,7 +30,7 @@ import System.Directory.OsPath qualified (createDirectory)
 import System.FilePath (combine)
 import System.OsPath (dropFileName, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, runIO, specify)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotReturn, shouldReturn)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem
@@ -103,39 +103,35 @@ spec = do
       isDirectory testP `shouldReturn` True
       isDirectory nonExistentP `shouldReturn` False
 
-    specify "readFile" $ do
-      contents <- readFile packageYamlP
-      contents' <- Data.ByteString.readFile packageYamlFP
-      contents `shouldBe` contents'
+    specify "readFile" $ withTempDir $ \tmpDir tmpDir' -> do
+      () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+      contents <- readFile $ tmpDir </> foo
+      contents `shouldBe` "Foo contents"
       Left error' <- tryError $ readFile nonExistentP
       ioeGetErrorType error' `shouldBe` doesNotExistErrorType
       ioeGetFileName error' `shouldBe` Just nonExistentFP
 
-    specify "writeFile" $ do
-      withTempDir $ \tmpDirP tmpDirFP -> do
-        () <- writeFile (tmpDirP </> nonExistentP) "foo"
-        Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
-          `shouldReturn` "foo"
+    specify "writeFile" $ withTempDir $ \tmpDirP tmpDirFP -> do
+      () <- writeFile (tmpDirP </> nonExistentP) "foo"
+      Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
+        `shouldReturn` "foo"
 
-    specify "copyFile" $ do
-      withTempDir $ \tmpDirP tmpDirFP -> do
-        () <- copyFile packageYamlP (tmpDirP </> nonExistentP)
-        contents <- Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
-        original <- Data.ByteString.readFile packageYamlFP
-        contents `shouldBe` original
+    specify "copyFile" $ withTempDir $ \tmpDirP tmpDirFP -> do
+      () <- copyFile packageYamlP (tmpDirP </> nonExistentP)
+      contents <- Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
+      original <- Data.ByteString.readFile packageYamlFP
+      contents `shouldBe` original
 
-    specify "createDirectory" $ do
-      withTempDir $ \tmpDirP _ -> do
-        () <- createDirectory (tmpDirP </> nonExistentP)
-        doesDirectoryExist (tmpDirP </> nonExistentP)
-          `shouldReturn` True
+    specify "createDirectory" $ withTempDir $ \tmpDirP _ -> do
+      () <- createDirectory (tmpDirP </> nonExistentP)
+      doesDirectoryExist (tmpDirP </> nonExistentP)
+        `shouldReturn` True
 
-    specify "removeFile" $ do
-      withTempDir $ \tmpDirP tmpDirFP -> do
-        Data.ByteString.writeFile (tmpDirFP `combine` nonExistentFP) ""
-        doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` True
-        () <- removeFile (tmpDirP </> nonExistentP)
-        doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` False
+    specify "removeFile" $ withTempDir $ \tmpDirP tmpDirFP -> do
+      Data.ByteString.writeFile (tmpDirFP `combine` nonExistentFP) ""
+      doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` True
+      () <- removeFile (tmpDirP </> nonExistentP)
+      doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` False
 
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir
@@ -282,10 +278,12 @@ spec = do
         packageYamlIsFile `shouldBe` False
 
     describe "readFile" $ do
-      it "can read an actual file that exists on the real file system" $ do
-        packageYamlData <- dryRunIO $ readFile packageYamlP
-        packageYamlData' <- Data.ByteString.readFile packageYamlFP
-        packageYamlData `shouldBe` packageYamlData'
+      it "can read an actual file that exists on the real file system"
+        $ withTempDir
+        $ \tmpDir tmpDir' -> do
+          () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+          packageYamlData <- dryRunIO $ readFile $ tmpDir </> foo
+          packageYamlData `shouldBe` "Foo contents"
 
       it "can't read a directory that exists on the real file system" $ do
         Left failToReadTest <- tryDryRunIO $ readFile testP
@@ -305,15 +303,17 @@ spec = do
           readFile nonExistentP
         nonExistentData `shouldBe` "foo"
 
-      it "can read a virtual file (Copied) that exists in memory" $ do
-        nonExistentData <- dryRunIO $ do
-          () <- copyFile packageYamlP nonExistentP
-          () <- writeFile packageYamlP "foo" -- must not affect the result
-          () <- copyFile nonExistentP nonExistentP'
-          () <- writeFile nonExistentP "bar" -- must not affect the result
-          readFile nonExistentP'
-        packageYamlData <- Data.ByteString.readFile packageYamlFP
-        nonExistentData `shouldBe` packageYamlData
+      it "can read a virtual file (Copied) that exists in memory"
+        $ withTempDir
+        $ \tmpDir tmpDir' -> do
+          Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+          nonExistentData <- dryRunIO $ do
+            () <- copyFile (tmpDir </> foo) nonExistentP
+            () <- writeFile packageYamlP "foo" -- must not affect the result
+            () <- copyFile nonExistentP nonExistentP'
+            () <- writeFile nonExistentP "bar" -- must not affect the result
+            readFile nonExistentP'
+          nonExistentData `shouldBe` "Foo contents"
 
       it "can't read a virtual directory that exists in memory" $ do
         Left failToReadNonExistent' <- tryDryRunIO $ do
@@ -338,25 +338,32 @@ spec = do
           () <- writeFile nonExistentP "foo"
           readFile nonExistentP
         data' `shouldBe` "foo"
-        data'' <- dryRunIO $ do
-          () <- removeFile packageYamlP
-          () <- writeFile packageYamlP "bar"
-          readFile packageYamlP
-        data'' `shouldBe` "bar"
-        Data.ByteString.readFile packageYamlFP `shouldNotReturn` "bar"
+        withTempDir $ \tmpDir tmpDir' -> do
+          () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+          data'' <- dryRunIO $ do
+            () <- removeFile $ tmpDir </> foo
+            () <- writeFile (tmpDir </> foo) "bar"
+            readFile $ tmpDir </> foo
+          data'' `shouldBe` "bar"
+          Prelude.readFile (tmpDir' `combine` "foo")
+            `shouldReturn` "Foo contents"
 
-      it "can write data to an existing file" $ do
-        data' <- dryRunIO $ do
-          () <- writeFile packageYamlP "foo"
-          readFile packageYamlP
-        data' `shouldBe` "foo"
-        Data.ByteString.readFile packageYamlFP `shouldNotReturn` "foo"
-        data'' <- dryRunIO $ do
-          () <- writeFile nonExistentP "bar"
-          () <- writeFile nonExistentP "baz"
-          readFile nonExistentP
-        data'' `shouldBe` "baz"
-        doesFileExist nonExistentP `shouldReturn` False
+      it "can write data to an existing file"
+        $ withTempDir
+        $ \tmpDir tmpDir' -> do
+          () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+          data' <- dryRunIO $ do
+            () <- writeFile (tmpDir </> foo) "modified"
+            readFile (tmpDir </> foo)
+          data' `shouldBe` "modified"
+          Prelude.readFile (tmpDir' `combine` "foo")
+            `shouldReturn` "Foo contents"
+          data'' <- dryRunIO $ do
+            () <- writeFile nonExistentP "bar"
+            () <- writeFile nonExistentP "baz"
+            readFile nonExistentP
+          data'' `shouldBe` "baz"
+          doesFileExist nonExistentP `shouldReturn` False
 
       it "can't write data to a directory" $ do
         Left failToWriteToTest <- tryDryRunIO $ writeFile testP "foo"
