@@ -14,7 +14,7 @@ import Data.CaseInsensitive (original)
 import Data.Text (Text, pack, unpack)
 import System.Console.Pretty (Color (..))
 import System.Directory.OsPath (makeAbsolute)
-import System.OsPath (makeRelative)
+import System.OsPath (addTrailingPathSeparator, makeRelative)
 import System.OsString (OsString)
 
 import Dojang.App (App, currentEnvironment', loadRepository)
@@ -36,13 +36,14 @@ import Dojang.Types.Repository
   , FileCorrespondenceWarning (..)
   , FileDeltaKind (..)
   , FileEntry (..)
+  , FileStat (..)
   , Repository (..)
   , makeCorrespond
   )
 
 
-status :: (MonadFileSystem i, MonadIO i) => App i ExitCode
-status = do
+status :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
+status noTrailingSlash = do
   repository <- loadRepository
   case repository of
     Left e ->
@@ -59,13 +60,23 @@ status = do
       rows <- forM files $ \file -> do
         path <- liftIO $ makeAbsolute file.source.path
         let relPath = makeRelative sourcePath path
-        relPath' <- decodePath relPath
+        let relPathS =
+              if not noTrailingSlash
+                && ( (file.source.stat == Directory)
+                      || (file.source.stat == Missing)
+                      && (file.destination.stat == Directory)
+                   )
+                then addTrailingPathSeparator relPath
+                else relPath
+        relPath' <- decodePath relPathS
         return
           [ renderDeltaKind file.sourceDelta
+          , renderFileStat file.source.stat
           , renderDeltaKind file.destinationDelta
+          , renderFileStat file.destination.stat
           , (Default, pack relPath')
           ]
-      printTable ["Source", "Destination", "File"] rows
+      printTable ["Source", "ST", "Destination", "DT", "File"] rows
       forM_ ws $ printStderr' Warning . formatWarning
       return ExitSuccess
 
@@ -75,6 +86,13 @@ renderDeltaKind Unchanged = (Default, "unchanged")
 renderDeltaKind Added = (Green, "added")
 renderDeltaKind Removed = (Red, "removed")
 renderDeltaKind Modified = (Yellow, "modified")
+
+
+renderFileStat :: FileStat -> (Color, Text)
+renderFileStat Missing = (Red, "-")
+renderFileStat Directory = (Default, "D")
+renderFileStat (File _) = (Default, "F")
+renderFileStat (Symlink _) = (Default, "L")
 
 
 lookupEnv'

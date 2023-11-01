@@ -223,7 +223,17 @@ cmdP =
         <> command
           "status"
           ( info
-              (pure Dojang.Commands.Status.status <**> helper)
+              ( Dojang.Commands.Status.status
+                  <$> switch
+                    ( long "no-trailing-slash"
+                        <> short 'S'
+                        <> help
+                          ( "Do not append trailing slash (or backslash "
+                              ++ "on Windows) to directory paths"
+                          )
+                    )
+                  <**> helper
+              )
               (progDesc "Show status of repository and target tree")
           )
     )
