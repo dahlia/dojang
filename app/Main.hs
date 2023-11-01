@@ -14,6 +14,7 @@ import Data.Maybe (catMaybes, maybeToList)
 import Data.Version (showVersion)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import System.Exit (ExitCode (..), exitWith)
+import System.IO (stderr)
 import System.IO.CodePage (withCP65001)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
@@ -58,7 +59,12 @@ import Dojang.App
   , runAppWithStderrLogging
   , runAppWithoutLogging
   )
-import Dojang.Commands (Admonition (Error, Note), printStderr')
+import Dojang.Commands
+  ( Admonition (Error, Note)
+  , Color (Yellow)
+  , colorFor
+  , printStderr'
+  )
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
@@ -295,9 +301,12 @@ main = withCP65001 $ do
     liftIO $ customExecParser parserPrefs parser
       :: IO (AppEnv, App DryRunIO ExitCode)
   exitCode <- if appEnv.dryRun then dryRunIO $ run appEnv else run appEnv
+  color <- colorFor stderr
   when appEnv.dryRun
     $ printStderr' Note
-    $ "Since --dry-run was specified, no changes were committed "
+    $ "Since "
+    <> color Yellow "--dry-run"
+    <> " was specified, no changes were committed "
     <> "to the file system."
   exitWith exitCode
  where

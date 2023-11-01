@@ -2,12 +2,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Dojang.Commands.Status (status) where
+module Dojang.Commands.Status (formatWarning, lookupEnv', status) where
 
 import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
+import System.IO (stderr)
 
 import Control.Monad.Logger (logDebugSH)
 import Data.CaseInsensitive (original)
@@ -20,6 +21,7 @@ import System.OsString (OsString)
 import Dojang.App (App, currentEnvironment', loadRepository)
 import Dojang.Commands
   ( Admonition (..)
+  , colorFor
   , dieWithErrors
   , printStderr'
   , printTable
@@ -50,7 +52,10 @@ status noTrailingSlash = do
       dieWithErrors manifestReadError $ formatErrors e
     Right Nothing -> do
       printStderr' Error "No manifest found."
-      printStderr' Note "Run `dojang init' to create one."
+      color <- colorFor stderr
+      printStderr'
+        Note
+        ("Run `" <> color Yellow "dojang init" <> "' to create one.")
       return manifestUninitialized
     Right (Just repo) -> do
       currentEnv <- currentEnvironment'
@@ -95,6 +100,7 @@ renderFileStat (File _) = (Default, "F")
 renderFileStat (Symlink _) = (Default, "L")
 
 
+-- TODO: This should be in a separate module:
 lookupEnv'
   :: (MonadFileSystem i, MonadIO i) => EnvironmentVariable -> i (Maybe OsString)
 lookupEnv' env = do
@@ -105,6 +111,7 @@ lookupEnv' env = do
     Nothing -> return Nothing
 
 
+-- TODO: This should be in a separate module:
 formatWarning :: FileCorrespondenceWarning -> Text
 formatWarning (EnvironmentPredicateWarning (UndefinedMoniker moniker)) =
   "Reference to an undefined moniker: " <> original moniker.name

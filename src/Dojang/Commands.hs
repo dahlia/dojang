@@ -1,8 +1,11 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Dojang.Commands
   ( Admonition (..)
+  , Color (..)
+  , colorFor
   , die'
   , dieWithErrors
   , printStderr
@@ -12,6 +15,7 @@ module Dojang.Commands
 
 import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode, exitWith)
 import System.IO.Extra (Handle, hIsTerminalDevice, stderr, stdout)
 import Prelude hiding (putStr, replicate)
@@ -19,8 +23,21 @@ import Prelude hiding (putStr, replicate)
 import Data.List (transpose)
 import Data.Text (Text, length, replicate)
 import Data.Text.IO (hPutStr, hPutStrLn, putStr)
-import System.Console.Pretty (Color (..), color)
+import System.Console.Pretty (Color (..), Pretty)
+import System.Console.Pretty qualified (color)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
+
+
+colorFor :: (Pretty a, MonadIO m) => Handle -> m (Color -> a -> a)
+colorFor handle = liftIO $ do
+  term <- lookupEnv "TERM"
+  noColor <- lookupEnv "NO_COLOR"
+  case (term, noColor) of
+    (Just "dumb", _) -> return $ const id
+    (_, Just (_ : _)) -> return $ const id
+    _ -> do
+      isATty <- hIsTerminalDevice handle
+      return $ if isATty then System.Console.Pretty.color else const id
 
 
 printStderr :: (MonadIO m) => Text -> m ()
@@ -33,10 +50,8 @@ data Admonition = Hint | Note | Warning | Error
 
 printStderr' :: (MonadIO m) => Admonition -> Text -> m ()
 printStderr' admonition message = do
-  isATty <- liftIO $ hIsTerminalDevice stderr
-  printStderr
-    $ (if isATty then colorPrefix else plainPrefix)
-    <> message
+  color <- colorFor stderr
+  printStderr $ color color' prefix <> message
  where
   color' :: Color
   color' = case admonition of
@@ -44,10 +59,8 @@ printStderr' admonition message = do
     Note -> Yellow
     Warning -> Yellow
     Error -> Red
-  colorPrefix :: Text
-  colorPrefix = color color' plainPrefix
-  plainPrefix :: Text
-  plainPrefix = showt (FromStringShow admonition) <> ": "
+  prefix :: Text
+  prefix = showt (FromStringShow admonition) <> ": "
 
 
 die' :: (MonadIO m) => ExitCode -> Text -> m a
@@ -88,10 +101,8 @@ printTable headers rows = do
   columnWidths = map maximum $ transpose valueWidths
   putCol :: Handle -> Color -> Text -> Int -> m ()
   putCol h color' value width = do
-    isATty <- liftIO $ hIsTerminalDevice h
-    if isATty
-      then liftIO $ hPutStr h $ color color' value
-      else liftIO $ hPutStr h value
+    color <- colorFor stdout
+    liftIO $ hPutStr h $ color color' value
     liftIO $ hPutStr h $ replicate (width - Data.Text.length value) " "
   putLn :: m ()
   putLn = liftIO $ putStrLn mempty
