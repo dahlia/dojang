@@ -10,6 +10,7 @@ module Dojang.Syntax.Manifest.Internal
   , FileRouteMap'
   , EnvironmentPredicate' (..)
   , FlatOrNonEmptyStrings (..)
+  , IgnoreMap'
   , Manifest' (..)
   , MonikerMap'
   , always
@@ -23,6 +24,7 @@ import Data.CaseInsensitive (CI (original))
 import Data.Map.Strict (Map)
 import Data.Text (Text, pack, unpack)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
+import System.FilePattern (FilePattern)
 import Toml (Value (..))
 import Toml.FromValue (FromKey (..), FromValue (..), parseTableFromValue)
 import Toml.FromValue.Generic (genericParseTable)
@@ -133,10 +135,14 @@ type FileRoute' = Map MonikerName Text
 type FileRouteMap' = Map FilePath FileRoute'
 
 
+type IgnoreMap' = Map FilePath [FilePattern]
+
+
 data Manifest' = Manifest'
   { monikers :: MonikerMap'
   , dirs :: FileRouteMap'
   , files :: FileRouteMap'
+  , ignores :: IgnoreMap'
   }
   deriving (Eq, Show, Generic)
 

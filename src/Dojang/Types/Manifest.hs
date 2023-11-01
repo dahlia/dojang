@@ -1,10 +1,11 @@
 {-# LANGUAGE OverloadedRecordUpdate #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Dojang.Types.Manifest (Manifest (..), manifest) where
+module Dojang.Types.Manifest (IgnoreMap, Manifest (..), manifest) where
 
-import Data.Map.Strict (Map, fromList, toList)
-import System.OsPath (OsPath)
+import Data.Map.Strict (Map, fromList, toAscList, toList)
+import System.FilePattern (FilePattern)
+import System.OsPath (OsPath, normalise)
 
 import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.FilePathExpression (FilePathExpression)
@@ -14,6 +15,10 @@ import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 
 
+-- | A map of directory routes to file patterns that should be ignored.
+type IgnoreMap = Map OsPath [FilePattern]
+
+
 -- | A manifest of the directory routes and the definitions of monikers that
 -- are used to resolve them.
 data Manifest = Manifest
@@ -21,6 +26,8 @@ data Manifest = Manifest
   -- ^ The definitions of monikers that are used to resolve the directory routes.
   , fileRoutes :: FileRouteMap
   -- ^ The directory routes that are resolved by the monikers.
+  , ignorePatterns :: IgnoreMap
+  -- ^ The file patterns that should be ignored for each directory route.
   }
   deriving (Eq, Show)
 
@@ -43,16 +50,28 @@ manifest
   -- If the same 'MonikerName' is used more than once, then the latest one
   -- will be used.  If the same file name appears in the file routes
   -- (the previous parameter), then the directory route will take precedence.
+  -> IgnoreMap
+  -- ^ The file patterns that should be ignored for each directory route.
   -> Manifest
   -- ^ The made 'Manifest'.
-manifest monikers' fileRoutes' dirRoutes' =
-  Manifest{monikers = monikers', fileRoutes = fromList $ files ++ dirs}
+manifest monikers' fileRoutes' dirRoutes' ignorePatterns' =
+  Manifest
+    { monikers = monikers'
+    , fileRoutes = fromList $ files ++ dirs
+    , ignorePatterns = ignores
+    }
  where
   files :: [(OsPath, FileRoute)]
   files = do
-    (dirName, monikerPairs) <- toList fileRoutes'
-    pure (dirName, fileRoute monikers' monikerPairs File)
+    (filename, monikerPairs) <- toList fileRoutes'
+    pure (normalise filename, fileRoute monikers' monikerPairs File)
   dirs :: [(OsPath, FileRoute)]
   dirs = do
     (dirName, monikerPairs) <- toList dirRoutes'
-    pure (dirName, fileRoute monikers' monikerPairs Directory)
+    pure (normalise dirName, fileRoute monikers' monikerPairs Directory)
+  ignores :: IgnoreMap
+  ignores =
+    fromList
+      [ (normalise p, pattern)
+      | (p, pattern) <- toAscList ignorePatterns'
+      ]

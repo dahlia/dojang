@@ -21,9 +21,10 @@ import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (readFile)
 
 import Data.HashMap.Strict as HashMap (fromList)
-import Data.Map.Strict as Map (fromList, toList)
+import Data.Map.Strict as Map (Map, fromList, toList)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient)
+import System.FilePattern (FilePattern)
 import System.OsPath (OsPath, encodeFS)
 import Toml (Result (..), decode)
 
@@ -109,23 +110,32 @@ formatErrors (FilePathExpressionError e) =
 
 
 mapManifest :: Manifest' -> Either Error Manifest
-mapManifest _manifest' =
+mapManifest manifest' =
   case monikersResult of
     Left e -> Left e
     Right monikers' ->
-      case mapFileRouteMap monikers' _manifest'.dirs _manifest'.files of
+      case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
         Left e -> Left e
-        Right fileRoutes' -> Right $ Manifest monikers' fileRoutes'
+        Right fileRoutes' -> Right $ Manifest monikers' fileRoutes' ignores'
  where
   monikersResult :: Either Error MonikerMap
-  monikersResult = mapMonikerMap _manifest'.monikers
+  monikersResult = mapMonikerMap manifest'.monikers
+  ignores' :: Map OsPath [FilePattern]
+  ignores' =
+    Map.fromList
+      [ (encodePath path, pattern)
+      | (path, pattern) <- Map.toList manifest'.ignores
+      ]
 
 
 mapMonikerMap :: MonikerMap' -> Either Error MonikerMap
 mapMonikerMap m =
   case errors of
     e : _ -> Left e
-    _ -> Right $ HashMap.fromList [(name, pred') | (name, Right pred') <- results]
+    _ ->
+      Right
+        $ HashMap.fromList
+          [(name, pred') | (name, Right pred') <- results]
  where
   results :: [(MonikerName, Either Error EnvironmentPredicate)]
   results =
@@ -193,8 +203,10 @@ mapFileRouteMap monikerMap dirs files =
          ]
   errors :: [Error]
   errors = lefts [r | (_, r) <- results]
-  encodePath :: String -> OsPath
-  encodePath = unsafePerformIO . encodeFS
+
+
+encodePath :: String -> OsPath
+encodePath = unsafePerformIO . encodeFS
 
 
 mapFileRoute

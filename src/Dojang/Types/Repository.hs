@@ -26,9 +26,18 @@ import System.IO.Error (ioeSetFileName, isPermissionError)
 import Prelude hiding (readFile)
 
 import Control.Monad.Except (MonadError (..))
-import Data.Map.Strict (Map, filter, fromList, keysSet, toList, unionWith, (!?))
+import Data.Map.Strict
+  ( Map
+  , filter
+  , findWithDefault
+  , fromList
+  , keysSet
+  , toList
+  , unionWith
+  , (!?)
+  )
 import Data.Text (unpack)
-import System.OsPath (OsPath, (</>))
+import System.OsPath (OsPath, normalise, (</>))
 import System.OsString (OsString)
 
 import Data.Set (toList, union)
@@ -43,6 +52,7 @@ import Dojang.Types.FilePathExpression.Expansion
   )
 import Dojang.Types.FileRoute (FileRoute (..), dispatch)
 import Dojang.Types.Manifest (Manifest (..))
+import System.FilePattern (FilePattern)
 
 
 -- | A repository, which is a directory containing a manifest file and dotfiles.
@@ -151,7 +161,12 @@ makeCorrespond repo env lookupEnvVar = do
     let interAbsPath = repo.intermediatePath </> srcPath
     case fileType' of
       Dojang.MonadFileSystem.Directory -> do
-        fs <- makeCorrespondBetweenThreeDirs interAbsPath srcAbsPath dstAbsPath
+        fs <-
+          makeCorrespondBetweenThreeDirs
+            interAbsPath
+            srcAbsPath
+            dstAbsPath
+            (findWithDefault [] (normalise srcPath) manifest.ignorePatterns)
         return
           [ correspond
             { source =
@@ -246,10 +261,12 @@ makeCorrespondBetweenThreeDirs
   => OsPath
   -> OsPath
   -> OsPath
+  -> [FilePattern]
   -> m [FileCorrespondence]
-makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath = do
-  srcEntries <- makeCorrespondBetweenTwoDirs intermediatePath srcPath
-  dstEntries <- makeCorrespondBetweenTwoDirs intermediatePath dstPath
+makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
+  srcEntries <- makeCorrespondBetweenTwoDirs intermediatePath srcPath []
+  dstEntries <-
+    makeCorrespondBetweenTwoDirs intermediatePath dstPath ignores
   let paths = keysSet srcEntries `union` keysSet dstEntries
   forM (Data.Set.toList paths) $ \path -> do
     let missing = FileEntry path Missing
@@ -312,14 +329,15 @@ makeCorrespondBetweenTwoDirs
   :: (HasCallStack, MonadFileSystem m)
   => OsPath
   -> OsPath
+  -> [FilePattern]
   -> m (Map OsPath (FileEntry, FileEntry))
-makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
+makeCorrespondBetweenTwoDirs intermediatePath targetPath ignorePatterns = do
   intermediateDirExists <- exists intermediatePath
   intermediateFiles <-
     if intermediateDirExists
-      then listFiles intermediatePath
+      then listFiles intermediatePath []
       else return []
-  targetFiles <- listFiles targetPath
+  targetFiles <- listFiles targetPath ignorePatterns
   let intermediateEntries =
         fromList
           [(p, (e, e{stat = Missing})) | e@(FileEntry p _) <- intermediateFiles]
@@ -351,8 +369,16 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath = do
 
 -- | Lists all 'FilEntry' values in the given directory.  Throws an 'IOError' if
 -- the directory cannot be read.
-listFiles :: (MonadFileSystem m) => OsPath -> m [FileEntry]
-listFiles path = do
+listFiles
+  :: (MonadFileSystem m)
+  => OsPath
+  -- ^ The path to the directory to list entries in.
+  -> [FilePattern]
+  -- ^ The file patterns to ignore.  If a directory matches one of these
+  -- patterns, then its contents will not be listed either.
+  -> m [FileEntry]
+  -- ^ The list of 'FileEntry' values in the directory.
+listFiles path ignorePatterns = do
   isFile' <- isFile path
   when isFile' $ do
     path' <- decodePath path
@@ -363,7 +389,7 @@ listFiles path = do
   if exists'
     then do
       entries <-
-        listDirectoryRecursively path `catchError` \e ->
+        listDirectoryRecursively path ignorePatterns `catchError` \e ->
           if isPermissionError e
             then return []
             else throwError e

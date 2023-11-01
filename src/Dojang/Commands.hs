@@ -71,7 +71,7 @@ printTable headers rows = do
     liftIO $ hPutStr stderr " "
   putLnStderr
   forM_ columnWidths $ \width -> do
-    putCol stderr Cyan (replicate width "-") width
+    putCol stderr Cyan (replicate width "\x2500") width
     liftIO $ hPutStr stderr " "
   putLnStderr
   forM_ rows $ \row -> do

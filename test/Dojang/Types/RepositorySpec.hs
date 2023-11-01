@@ -88,7 +88,12 @@ spec = do
         ]
           :: Map OsPath [(MonikerName, Maybe FilePathExpression)]
 
-  let manifest' = Dojang.Types.Manifest.manifest monikerMap fileRoutes dirRoutes
+  let manifest' =
+        Dojang.Types.Manifest.manifest
+          monikerMap
+          fileRoutes
+          dirRoutes
+          []
 
   let repositoryFixture repoPath = do
         -- The tree of the repository fixture looks like this:
@@ -203,7 +208,7 @@ spec = do
   describe "listFiles" $ do
     it "lists files recursively" $ withTempDir $ \tmpDir _ -> do
       _ <- repositoryFixture tmpDir
-      files <- listFiles tmpDir
+      files <- listFiles tmpDir []
       manifestData <- readFile $ tmpDir </> manifestFilename'
       let manifestSize = toEnum $ Data.ByteString.length manifestData
       sort files
@@ -218,9 +223,23 @@ spec = do
                    , FileEntry (foo </> foo) $ File 4
                    ]
 
+    it "filters out files by ignorePatterns" $ withTempDir $ \tmpDir _ -> do
+      _ <- repositoryFixture tmpDir
+      files <- listFiles tmpDir ["foo/b*"]
+      manifestData <- readFile $ tmpDir </> manifestFilename'
+      let manifestSize = toEnum $ Data.ByteString.length manifestData
+      sort files
+        `shouldBe` [ FileEntry bar Directory
+                   , FileEntry (bar </> foo) $ File 6
+                   , FileEntry baz $ File 11
+                   , FileEntry manifestFilename' $ File manifestSize
+                   , FileEntry foo Directory
+                   , FileEntry (foo </> foo) $ File 4
+                   ]
+
     it "only accepts a directory path" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- writeFile (tmpDir </> foo) "foo"
-      listFiles (tmpDir </> foo) `shouldThrow` \e ->
+      listFiles (tmpDir </> foo) [] `shouldThrow` \e ->
         (ioeGetErrorString e == "listFiles: path is not a directory")
           && (ioeGetFileName e == Just (tmpDir' `combine` "foo"))
 
@@ -301,12 +320,14 @@ spec = do
         (tmpDir </> foo </> inter)
         (tmpDir </> foo </> src)
         (tmpDir </> foo </> dst)
+        []
     sortOn (.source.path) emptyCorresponds `shouldBe` []
 
     unchanged <- encodePath "unchanged"
     added <- encodePath "added"
     removed <- encodePath "removed"
     modified <- encodePath "modified"
+    ignored <- encodePath "ignored"
     () <-
       makeFixtureTree
         (tmpDir </> bar)
@@ -335,6 +356,13 @@ spec = do
                     , (corge, F "same-size-but-different-content")
                     ]
                 )
+              ,
+                ( ignored
+                , D
+                    [ (foo, F "foo-ignored-but-tracked")
+                    , (baz, F "baz-ignored-but-indexed")
+                    ]
+                )
               ]
           )
         ,
@@ -359,6 +387,13 @@ spec = do
                     , (qux, D [])
                     , (quux, F "qux-dir-to-file")
                     , (corge, F "same-length-but--different-body")
+                    ]
+                )
+              ,
+                ( ignored
+                , D
+                    [ (foo, F "foo-ignored-but-tracked")
+                    , (bar, F "bar-ignored-but-added")
                     ]
                 )
               ]
@@ -387,6 +422,14 @@ spec = do
                     , (corge, F "equivalent-length-but-different")
                     ]
                 )
+              ,
+                ( ignored
+                , D
+                    [ (foo, F "foo-ignored-but-tracked")
+                    , (bar, F "bar-ignored-but-added")
+                    , (baz, F "baz-ignored-but-indexed")
+                    ]
+                )
               ]
           )
         ]
@@ -395,6 +438,7 @@ spec = do
         (tmpDir </> bar </> inter)
         (tmpDir </> bar </> src)
         (tmpDir </> bar </> dst)
+        ["ignored"]
     sortOn (.source.path) corresponds
       `shouldBe` [ FileCorrespondence
                     { source = FileEntry added Directory
@@ -430,6 +474,34 @@ spec = do
                     , intermediate = FileEntry (added </> qux) Missing
                     , destination = FileEntry (added </> qux) Directory
                     , destinationDelta = Added
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry ignored Directory
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry ignored Directory
+                    , destination = FileEntry ignored Missing
+                    , destinationDelta = Removed
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (ignored </> bar) (File 21)
+                    , sourceDelta = Added
+                    , intermediate = FileEntry (ignored </> bar) Missing
+                    , destination = FileEntry (ignored </> bar) Missing
+                    , destinationDelta = Unchanged
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (ignored </> baz) Missing
+                    , sourceDelta = Removed
+                    , intermediate = FileEntry (ignored </> baz) (File 23)
+                    , destination = FileEntry (ignored </> baz) Missing
+                    , destinationDelta = Removed
+                    }
+                 , FileCorrespondence
+                    { source = FileEntry (ignored </> foo) (File 23)
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry (ignored </> foo) (File 23)
+                    , destination = FileEntry (ignored </> foo) Missing
+                    , destinationDelta = Removed
                     }
                  , FileCorrespondence
                     { source = FileEntry modified Directory
@@ -573,7 +645,7 @@ spec = do
               ]
           )
         ]
-    makeCorrespondBetweenTwoDirs (tmpDir </> foo) (tmpDir </> bar)
+    makeCorrespondBetweenTwoDirs (tmpDir </> foo) (tmpDir </> bar) []
       `shouldReturn` fromList
         [ (foo, (FileEntry foo $ File 3, FileEntry foo $ File 5))
         , (bar, (FileEntry bar Directory, FileEntry bar Directory))
@@ -619,6 +691,7 @@ spec = do
     makeCorrespondBetweenTwoDirs
       (tmpDir </> baz) -- This dir does not exist
       (tmpDir </> bar)
+      []
       `shouldReturn` fromList
         [ (foo, (FileEntry foo Missing, FileEntry foo $ File 5))
         , (bar, (FileEntry bar Missing, FileEntry bar Directory))

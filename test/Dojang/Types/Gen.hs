@@ -37,6 +37,7 @@ import Prelude hiding (lookup)
 
 import Data.CaseInsensitive (CI, mk)
 import Data.HashMap.Strict (HashMap, fromList, keys, lookup)
+import Data.Map.Strict (empty)
 import Data.Text (Text, cons, length, pack)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (Range, constant, constantFrom, singleton)
@@ -384,7 +385,7 @@ manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
 manifest' monikerMapRange fileRouteMapRange = do
   monikers <- monikerMap' monikerMapRange
   fileRoutes <- fileRouteMap fileRouteMapRange monikers
-  return $ Manifest monikers fileRoutes
+  return $ Manifest monikers fileRoutes Data.Map.Strict.empty
 
 
 manifest :: (MonadGen m) => m Manifest

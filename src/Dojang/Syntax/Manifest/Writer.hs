@@ -34,6 +34,7 @@ import Dojang.Syntax.Manifest.Internal
   , FileRoute'
   , FileRouteMap'
   , FlatOrNonEmptyStrings (..)
+  , IgnoreMap'
   , Manifest' (Manifest')
   , MonikerMap'
   , always
@@ -74,13 +75,19 @@ writeManifestFile manifest filePath =
 
 mapManifest' :: Manifest -> Manifest'
 mapManifest' manifest =
-  Manifest' monikers' dirs files
+  Manifest' monikers' dirs files ignores
  where
   dirs :: FileRouteMap'
   files :: FileRouteMap'
   (dirs, files) = mapFiles manifest.fileRoutes manifest.monikers
   monikers' :: MonikerMap'
   monikers' = mapMonikers' manifest.monikers
+  ignores :: IgnoreMap'
+  ignores =
+    fromList
+      [ (decodePath path, pattern)
+      | (path, pattern) <- Data.Map.Strict.toList manifest.ignorePatterns
+      ]
 
 
 mapFiles :: FileRouteMap -> MonikerMap -> (FileRouteMap', FileRouteMap')
@@ -95,8 +102,10 @@ mapFiles fileRouteMap monikers =
     partition
       ((== Directory) . fileType . snd)
       $ Data.Map.Strict.toList fileRouteMap
-  decodePath :: OsPath -> FilePath
-  decodePath = unsafePerformIO . decodeFS
+
+
+decodePath :: OsPath -> FilePath
+decodePath = unsafePerformIO . decodeFS
 
 
 mapFileRoute' :: FileRoute -> MonikerMap -> FileRoute'

@@ -45,6 +45,7 @@ import System.Directory.OsPath qualified
   , listDirectory
   , removeFile
   )
+import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
 import System.OsPath
   ( OsPath
   , decodeFS
@@ -161,22 +162,50 @@ class (MonadError IOError m) => MonadFileSystem m where
   --
   -- Note that it doesn't follow symbolic links.  Instead, it returns the
   -- symbolic links themselves with the 'Symlink' file type.
-  listDirectoryRecursively :: (HasCallStack) => OsPath -> m [(FileType, OsPath)]
-  listDirectoryRecursively path = do
-    entries <- listDirectory path
-    (symlinks, entries') <- partitionM (isSymlink . (path </>)) entries
-    (dirs, files) <- partitionM (isDirectory . (path </>)) entries'
-    symlinks' <- forM symlinks $ \symlink -> return (Symlink, symlink)
-    files' <- forM files $ \file -> return (File, file)
-    dirs' <- forM dirs $ \dir -> do
-      subentries <- listDirectoryRecursively (path </> dir)
-      return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
-    return $ files' ++ symlinks' ++ concat dirs'
+  listDirectoryRecursively
+    :: (HasCallStack)
+    => OsPath
+    -- ^ The directory to list recursively.
+    -> [FilePattern]
+    -- ^ The file patterns to ignore.  If a directory matches one of these
+    -- patterns, then its contents will not be listed recursively either.
+    -> m [(FileType, OsPath)]
+    -- ^ The list of pairs of file types and paths.  The paths are relative
+    -- to the given directory.
+  listDirectoryRecursively path ignorePatterns =
+    listDirectoryRecursively' path $ step_ ignorePatterns
 
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
   -- a directory, then it throws an 'IOError'.
   getFileSize :: (HasCallStack) => OsPath -> m Integer
+
+
+listDirectoryRecursively'
+  :: (HasCallStack, MonadFileSystem m)
+  => OsPath
+  -> Step ()
+  -> m [(FileType, OsPath)]
+listDirectoryRecursively' path ptnStep = do
+  unfilteredEntries <- listDirectory path
+  entriesWithSteps <- forM unfilteredEntries $ \entry -> do
+    decoded <- decodePath entry
+    let nextStep = stepApply ptnStep decoded
+    return (entry, nextStep)
+  let filteredEntries =
+        [ (entry, step)
+        | (entry, step) <- entriesWithSteps
+        , null $ stepDone step
+        ]
+  (symlinks, entries') <-
+    partitionM (isSymlink . (path </>) . fst) filteredEntries
+  (dirs, files) <- partitionM (isDirectory . (path </>) . fst) entries'
+  symlinks' <- forM symlinks $ \(symlink, _) -> return (Symlink, symlink)
+  files' <- forM files $ \(file, _) -> return (File, file)
+  dirs' <- forM dirs $ \(dir, step) -> do
+    subentries <- listDirectoryRecursively' (path </> dir) step
+    return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
+  return $ files' ++ symlinks' ++ concat dirs'
 
 
 instance MonadFileSystem IO where

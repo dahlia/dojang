@@ -218,7 +218,7 @@ init presets noInteractive = do
               `Map.union` xdgConfigHomRoutes
               `Map.union` applicationSupportRoutes
               `Map.union` appDataRoutes
-      let manifest = Manifest monikers fileRoutes
+      let manifest = Manifest monikers fileRoutes []
       filename <- saveManifest manifest
       filename' <- decodePath filename
       printStderr $ "Manifest created: " <> pack filename'

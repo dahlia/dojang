@@ -173,7 +173,7 @@ spec = do
       specify "basic behavior" $ withFixture $ \tmpDir tmpDir' -> do
         () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
         () <- Prelude.writeFile (tmpDir' `combine` "baz" `combine` "corge") ""
-        result <- listDirectoryRecursively tmpDir
+        result <- listDirectoryRecursively tmpDir []
         sortOn snd result
           `shouldBe` [ (Directory, bar)
                      , (File, bar </> quux)
@@ -183,13 +183,19 @@ spec = do
                      , (File, foo)
                      ]
 
+      it "filters out files by ignorePatterns" $ withFixture $ \tmpDir tmpDir' -> do
+        () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
+        () <- Prelude.writeFile (tmpDir' `combine` "baz" `combine` "corge") ""
+        result <- listDirectoryRecursively tmpDir ["bar/q*", "baz"]
+        sortOn snd result `shouldBe` [(Directory, bar), (File, foo)]
+
       symIt "distinguishes symlinks from regular files and directories"
         $ withFixture
         $ \tmpDir tmpDir' -> do
           () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
           () <- createFileLink quux (tmpDir </> baz </> corge)
           () <- createDirectoryLink baz (tmpDir </> corge)
-          result <- listDirectoryRecursively tmpDir
+          result <- listDirectoryRecursively tmpDir []
           sortOn snd result
             `shouldBe` [ (Directory, bar)
                        , (File, bar </> quux)

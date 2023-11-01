@@ -46,6 +46,7 @@
     "elif",
     "etok",
     "etoks",
+    "filepattern",
     "fmap",
     "foldl",
     "fortytwo",
