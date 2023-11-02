@@ -12,9 +12,9 @@ module Dojang.MonadFileSystem
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (isPrefixOf, sort, sortOn)
+import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
 import GHC.IO.Exception (IOErrorType (InappropriateType))
@@ -50,12 +50,14 @@ import System.Directory.OsPath
   , doesPathExist
   , getSymbolicLinkTarget
   , pathIsSymbolicLink
+  , removeDirectoryRecursive
   )
 import System.Directory.OsPath qualified
   ( copyFile
   , createDirectory
   , getFileSize
   , listDirectory
+  , removeDirectory
   , removeFile
   )
 import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
@@ -63,6 +65,7 @@ import System.OsPath
   ( OsPath
   , decodeFS
   , encodeFS
+  , joinPath
   , makeRelative
   , normalise
   , splitDirectories
@@ -144,24 +147,57 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Creates a directory at the given path, including all parent directories.
   createDirectories :: (HasCallStack) => OsPath -> m ()
-  createDirectories path = do
-    let parent = takeDirectory path
-    parent' <- decodePath parent
-    parentExists <- isDirectory parent
-    if parentExists
-      then createDirectory path
-      else do
-        parentIsFile <- isFile parent
-        when parentIsFile
-          $ throwError
-          $ userError "createDirectories: one of its ancestors is a file"
-          `ioeSetFileName` parent'
-        createDirectories parent
-        createDirectory path
+  createDirectories path =
+    ( do
+        forM_ ancestors $ \ancestor -> do
+          isSymlink' <- isSymlink ancestor
+          when isSymlink' $ do
+            ancestor' <- decodePath ancestor
+            throwError $ fileError ancestor'
+          isDir <- isDirectory ancestor
+          unless isDir $ do
+            exists' <- isFile ancestor
+            if exists'
+              then do
+                ancestor' <- decodePath ancestor
+                throwError $ fileError ancestor'
+              else createDirectory ancestor
+    )
+      `catchError` \e ->
+        throwError $ e `ioeSetLocation` "createDirectories"
+   where
+    split :: [OsPath]
+    split = splitDirectories path
+    ancestors :: [OsPath]
+    ancestors = map joinPath $ tail (inits split)
+    fileError :: FilePath -> IOError
+    fileError path' =
+      mkIOError InappropriateType "createDirectories" Nothing (Just path')
+        `ioeSetErrorString` "one of its ancestors is a non-directory file"
 
 
   -- | Removes a regular file.
   removeFile :: (HasCallStack) => OsPath -> m ()
+
+
+  -- | Removes a directory.  It must be empty.
+  removeDirectory :: (HasCallStack) => OsPath -> m ()
+
+
+  -- | Removes a directory entirely, including all its contents.
+  removeDirectoryRecursively :: (HasCallStack) => OsPath -> m ()
+  removeDirectoryRecursively path =
+    ( do
+        entries <- listDirectoryRecursively path []
+        forM_ (sortOn (Down . snd) entries) $ \(fileType, entry) ->
+          case fileType of
+            Directory -> removeDirectoryRecursively $ path </> entry
+            File -> removeFile $ path </> entry
+            Symlink -> removeFile $ path </> entry
+        removeDirectory path
+    )
+      `catchError` \e ->
+        throwError $ e `ioeSetLocation` "removeDirectoryRecursively"
 
 
   -- | Lists all files and directories in a directory except for @.@ and @..@,
@@ -257,6 +293,26 @@ instance MonadFileSystem IO where
 
 
   removeFile = System.Directory.OsPath.removeFile
+
+
+  removeDirectory = System.Directory.OsPath.removeDirectory
+
+
+  removeDirectoryRecursively =
+    retryOnPermissionErrorsOnWindows 10 . removeDirectoryRecursive
+   where
+    -- See also: https://github.com/jaspervdj/hakyll/pull/783
+    retryOnPermissionErrorsOnWindows :: Int -> IO () -> IO ()
+    retryOnPermissionErrorsOnWindows retry action
+      | os /= "mingw32" = action
+      | retry < 1 = action
+      | otherwise =
+          action `catchError` \e ->
+            if isPermissionError e
+              then do
+                threadDelay 100
+                retryOnPermissionErrorsOnWindows (retry - 1) action
+              else throwError e
 
 
   listDirectory = System.Directory.OsPath.listDirectory
@@ -461,7 +517,10 @@ instance MonadFileSystem DryRunIO where
         throwError
           $ mkIOError InappropriateType "readSymlinkTarget" Nothing (Just path')
           `ioeSetErrorString` "not a symbolic link"
-      Nothing -> liftIO $ getSymbolicLinkTarget path
+      Nothing ->
+        liftIO
+          $ getSymbolicLinkTarget path
+          `catchError` \e -> throwError $ e `ioeSetLocation` "readSymlinkTarget"
 
 
   copyFile src dst = do
@@ -518,7 +577,11 @@ instance MonadFileSystem DryRunIO where
     dst' <- decodePath dst
     isFile' <- liftIO $ doesFileExist dst
     isDir <- liftIO $ doesDirectoryExist dst
-    let parent = normalise $ takeDirectory dst
+    isSymlink' <-
+      liftIO $ pathIsSymbolicLink dst `catchError` \e ->
+        if isDoesNotExistError e
+          then return False
+          else throwError $ e `ioeSetLocation` "createDirectory"
     parentExists <- liftIO $ doesPathExist parent
     parentIsDir <- liftIO $ doesDirectoryExist parent
     case (oFiles !? parent, oFiles !? normalise dst) of
@@ -531,11 +594,13 @@ instance MonadFileSystem DryRunIO where
       (_, Just ((_, Copied _) :| _)) -> throwError $ dstIsFileError dst'
       (Nothing, _) | isFile' -> throwError $ dstIsFileError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
-      _ | isDir -> throwError $ dstIsDirError dst'
+      _ | isDir && not isSymlink' -> throwError $ dstIsDirError dst'
       _ -> do
         addChangeToFile dst Directory'
         return ()
    where
+    parent :: OsPath
+    parent = normalise $ takeDirectory dst
     noParentDirError :: FilePath -> IOError
     noParentDirError dst' =
       mkIOError doesNotExistErrorType "createDirectory" Nothing (Just dst')
@@ -558,12 +623,19 @@ instance MonadFileSystem DryRunIO where
     oFiles <- gets overlaidFiles
     path' <- decodePath path
     exists' <- liftIO $ doesPathExist path
+    isSymlink' <-
+      liftIO
+        $ pathIsSymbolicLink path
+        `catchError` \e ->
+          if isDoesNotExistError e
+            then return False
+            else throwError $ e `ioeSetLocation` "removeFile"
     isDir <- liftIO $ doesDirectoryExist path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> throwError $ noFileError path'
       Nothing | not exists' -> throwError $ noFileError path'
       Just ((_, Directory') :| _) -> throwError $ dirError path'
-      Nothing | isDir -> throwError $ dirError path'
+      Nothing | isDir && not isSymlink' -> throwError $ dirError path'
       _ -> do
         addChangeToFile path Gone
         return ()
@@ -576,6 +648,46 @@ instance MonadFileSystem DryRunIO where
     dirError path' =
       mkIOError InappropriateType "removeFile" Nothing (Just path')
         `ioeSetErrorString` "is a directory"
+
+
+  removeDirectory path = do
+    oFiles <- gets overlaidFiles
+    path' <- decodePath path
+    exists' <- liftIO $ doesPathExist path
+    isDir <- liftIO $ doesDirectoryExist path
+    case oFiles !? normalise path of
+      Just ((_, Gone) :| _) ->
+        throwError $ noDirError path'
+      Nothing
+        | not exists' ->
+            throwError $ noDirError path'
+      Just ((_, Contents _) :| _) ->
+        throwError $ nonDirError path'
+      Just ((_, Copied _) :| _) ->
+        throwError $ nonDirError path'
+      Nothing
+        | not isDir ->
+            throwError $ nonDirError path'
+      _ -> do
+        addChangeToFile path Gone
+        return ()
+   where
+    noDirError :: FilePath -> IOError
+    noDirError path' =
+      mkIOError
+        doesNotExistErrorType
+        "removeDirectory"
+        Nothing
+        (Just path')
+        `ioeSetErrorString` "no such directory"
+    nonDirError :: FilePath -> IOError
+    nonDirError path' =
+      mkIOError
+        InappropriateType
+        "removeDirectory"
+        Nothing
+        (Just path')
+        `ioeSetErrorString` "not a directory"
 
 
   listDirectory path = do

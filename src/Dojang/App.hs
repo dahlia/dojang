@@ -125,6 +125,7 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   copyFile src = App . lift . lift . copyFile src
   createDirectory = App . lift . lift . createDirectory
   removeFile = App . lift . lift . removeFile
+  removeDirectory = App . lift . lift . removeDirectory
   listDirectory = App . lift . lift . listDirectory
   getFileSize = App . lift . lift . getFileSize
 

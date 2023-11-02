@@ -171,6 +171,21 @@ spec = do
       () <- removeFile (tmpDirP </> nonExistentP)
       doesFileExist (tmpDirP </> nonExistentP) `shouldReturn` False
 
+    specify "removeDirectory" $ withTempDir $ \tmpDirP tmpDirFP -> do
+      () <- createDirectory (tmpDirP </> nonExistentP)
+      () <- removeDirectory (tmpDirP </> nonExistentP)
+      doesDirectoryExist (tmpDirP </> nonExistentP)
+        `shouldReturn` False
+      removeDirectory (tmpDirP </> nonExistentP) `shouldThrow` \e ->
+        isDoesNotExistError e
+          && (ioeGetFileName e == Just (tmpDirFP `combine` nonExistentFP))
+
+    specify "removeDirectoryRecursively" $ withFixture $ \tmpDirP tmpDirFP -> do
+      removeDirectoryRecursively tmpDirP
+      doesPathExist tmpDirP `shouldReturn` False
+      removeDirectoryRecursively tmpDirP `shouldThrow` \e ->
+        isDoesNotExistError e && ioeGetFileName e == Just tmpDirFP
+
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir
       sort result `shouldBe` [bar, baz, foo]
@@ -682,7 +697,6 @@ spec = do
         ioeGetFileName failToCreate
           `shouldBe` Just (packageYamlFP `combine` nonExistentFP)
         ioeGetLocation failToCreate `shouldBe` "createDirectory"
-        show failToCreate `shouldContain` "not inside a directory"
         doesFileExist packageYamlP `shouldReturn` True
         Left failToCreate' <- tryDryRunIO $ do
           () <- writeFile nonExistentP ""
@@ -785,6 +799,78 @@ spec = do
         ioeGetLocation failToRemove' `shouldBe` "removeFile"
         show failToRemove' `shouldContain` "is a directory"
 
+    describe "removeDirectory" $ do
+      it "removes an existing directory" $ do
+        result <- dryRunIO $ do
+          createDirectory nonExistentP
+          removeDirectory nonExistentP
+          exists nonExistentP
+        result `shouldBe` False
+
+      it "can't remove a non-existent directory" $ do
+        Left failToRemove <- tryDryRunIO $ removeDirectory nonExistentP
+        failToRemove `shouldSatisfy` isDoesNotExistError
+        ioeGetFileName failToRemove `shouldBe` Just nonExistentFP
+        Left failToRemove' <- tryDryRunIO $ do
+          () <- removeFile packageYamlP
+          removeDirectory packageYamlP
+        failToRemove' `shouldSatisfy` isDoesNotExistError
+        ioeGetFileName failToRemove' `shouldBe` Just packageYamlFP
+
+      it "can't remove a non-directory" $ do
+        Left failToRemove <- tryDryRunIO $ removeDirectory packageYamlP
+        ioeGetErrorType failToRemove `shouldBe` InappropriateType
+        ioeGetFileName failToRemove `shouldBe` Just packageYamlFP
+        doesFileExist packageYamlP `shouldReturn` True
+        Left failToRemove' <- tryDryRunIO $ do
+          () <- writeFile nonExistentP ""
+          removeDirectory nonExistentP
+        ioeGetErrorType failToRemove' `shouldBe` InappropriateType
+        ioeGetFileName failToRemove' `shouldBe` Just nonExistentFP
+        Left failToRemove'' <- tryDryRunIO $ do
+          () <- copyFile packageYamlP nonExistentP
+          removeDirectory nonExistentP
+        ioeGetErrorType failToRemove'' `shouldBe` InappropriateType
+        ioeGetFileName failToRemove'' `shouldBe` Just nonExistentFP
+
+    describe "removeDirectoryRecursively" $ do
+      it "removes an existing directory recursively" $ do
+        result <- dryRunIO $ do
+          createDirectory nonExistentP
+          writeFile (nonExistentP </> foo) ""
+          createDirectory (nonExistentP </> bar)
+          writeFile (nonExistentP </> bar </> baz) ""
+          removeDirectoryRecursively nonExistentP
+          exists nonExistentP
+        result `shouldBe` False
+
+      it "can't remove a non-existent directory" $ do
+        Left failToRemove <- tryDryRunIO $ do
+          removeDirectoryRecursively nonExistentP
+        failToRemove `shouldSatisfy` isDoesNotExistError
+        ioeGetFileName failToRemove `shouldBe` Just nonExistentFP
+        Left failToRemove' <- tryDryRunIO $ do
+          () <- removeFile packageYamlP
+          removeDirectoryRecursively packageYamlP
+        failToRemove' `shouldSatisfy` isDoesNotExistError
+        ioeGetFileName failToRemove' `shouldBe` Just packageYamlFP
+
+      it "can't remove a non-directory" $ do
+        Left failToRemove <- tryDryRunIO $ removeDirectoryRecursively packageYamlP
+        ioeGetErrorType failToRemove `shouldBe` InappropriateType
+        ioeGetFileName failToRemove `shouldBe` Just packageYamlFP
+        doesFileExist packageYamlP `shouldReturn` True
+        Left failToRemove' <- tryDryRunIO $ do
+          () <- writeFile nonExistentP ""
+          removeDirectoryRecursively nonExistentP
+        ioeGetErrorType failToRemove' `shouldBe` InappropriateType
+        ioeGetFileName failToRemove' `shouldBe` Just nonExistentFP
+        Left failToRemove'' <- tryDryRunIO $ do
+          () <- copyFile packageYamlP nonExistentP
+          removeDirectoryRecursively nonExistentP
+        ioeGetErrorType failToRemove'' `shouldBe` InappropriateType
+        ioeGetFileName failToRemove'' `shouldBe` Just nonExistentFP
+
     describe "createDirectories" $ do
       it "creates a directory and its ancestors if needed" $ do
         result <- dryRunIO $ do
@@ -796,9 +882,11 @@ spec = do
       it "can't create a directory if any of its ancestors is a file" $ do
         Left failToCreate <- tryDryRunIO $ do
           createDirectories (packageYamlP </> nonExistentP </> nonExistentP)
+        ioeGetErrorType failToCreate `shouldBe` InappropriateType
         ioeGetFileName failToCreate `shouldBe` Just packageYamlFP
-        ioeGetErrorString failToCreate
-          `shouldBe` "createDirectories: one of its ancestors is a file"
+        ioeGetLocation failToCreate `shouldBe` "createDirectories"
+        show failToCreate
+          `shouldContain` "one of its ancestors is a non-directory file"
 
     describe "listDirectory" $ do
       it "lists direct children in a directory" $ do
