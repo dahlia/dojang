@@ -18,6 +18,7 @@ import Data.Bifunctor (Bifunctor (second))
 import Data.Either (rights)
 import Data.String (IsString)
 import System.Exit (ExitCode (..))
+import System.IO (stderr)
 import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo)
@@ -38,7 +39,12 @@ import Data.Text (pack)
 import FortyTwo.Prompts.Multiselect (multiselect)
 
 import Dojang.App (App, doesManifestExist, saveManifest)
-import Dojang.Commands (Admonition (Error), printStderr, printStderr')
+import Dojang.Commands
+  ( Admonition (Error)
+  , pathStyleFor
+  , printStderr
+  , printStderr'
+  )
 import Dojang.ExitCodes (manifestAlreadyExists)
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
@@ -85,7 +91,7 @@ init presets noInteractive = do
   if manifestExists
     then do
       printStderr' Error "Manifest already exists."
-      return $ manifestAlreadyExists
+      return manifestAlreadyExists
     else do
       $(logInfo) "No manifest found."
       presets' <-
@@ -221,7 +227,8 @@ init presets noInteractive = do
       let manifest = Manifest monikers fileRoutes []
       filename <- saveManifest manifest
       filename' <- decodePath filename
-      printStderr $ "Manifest created: " <> pack filename'
+      pathStyle <- pathStyleFor stderr
+      printStderr $ "Manifest created: " <> pathStyle (pack filename')
       return ExitSuccess
 
 

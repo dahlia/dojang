@@ -21,7 +21,7 @@ import System.OsString (OsString)
 import Dojang.App (App, currentEnvironment', loadRepository)
 import Dojang.Commands
   ( Admonition (..)
-  , colorFor
+  , codeStyleFor
   , dieWithErrors
   , printStderr'
   , printTable
@@ -52,10 +52,10 @@ status noTrailingSlash = do
       dieWithErrors manifestReadError $ formatErrors e
     Right Nothing -> do
       printStderr' Error "No manifest found."
-      color <- colorFor stderr
+      codeStyle <- codeStyleFor stderr
       printStderr'
         Note
-        ("Run `" <> color Yellow "dojang init" <> "' to create one.")
+        ("Run `" <> codeStyle "dojang init" <> "' to create one.")
       return manifestUninitialized
     Right (Just repo) -> do
       currentEnv <- currentEnvironment'

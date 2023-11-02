@@ -59,12 +59,7 @@ import Dojang.App
   , runAppWithStderrLogging
   , runAppWithoutLogging
   )
-import Dojang.Commands
-  ( Admonition (Error, Note)
-  , Color (Yellow)
-  , colorFor
-  , printStderr'
-  )
+import Dojang.Commands (Admonition (Error, Note), codeStyleFor, printStderr')
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
@@ -301,12 +296,12 @@ main = withCP65001 $ do
     liftIO $ customExecParser parserPrefs parser
       :: IO (AppEnv, App DryRunIO ExitCode)
   exitCode <- if appEnv.dryRun then dryRunIO $ run appEnv else run appEnv
-  color <- colorFor stderr
+  codeColor <- codeStyleFor stderr
   when appEnv.dryRun
     $ printStderr' Note
-    $ "Since "
-    <> color Yellow "--dry-run"
-    <> " was specified, no changes were committed "
+    $ "Since `"
+    <> codeColor "--dry-run"
+    <> "' was specified, no changes were committed "
     <> "to the file system."
   exitWith exitCode
  where

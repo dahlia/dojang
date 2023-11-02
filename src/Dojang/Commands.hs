@@ -5,9 +5,11 @@
 module Dojang.Commands
   ( Admonition (..)
   , Color (..)
+  , codeStyleFor
   , colorFor
   , die'
   , dieWithErrors
+  , pathStyleFor
   , printStderr
   , printStderr'
   , printTable
@@ -23,21 +25,55 @@ import Prelude hiding (putStr, replicate)
 import Data.List (transpose)
 import Data.Text (Text, length, replicate)
 import Data.Text.IO (hPutStr, hPutStrLn, putStr)
-import System.Console.Pretty (Color (..), Pretty)
+import System.Console.Pretty
+  ( Color (..)
+  , Pretty
+  , Style (Bold, Underline)
+  , bgColor
+  , style
+  )
 import System.Console.Pretty qualified (color)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 
-colorFor :: (Pretty a, MonadIO m) => Handle -> m (Color -> a -> a)
-colorFor handle = liftIO $ do
+isColorAvailable :: (MonadIO m) => Handle -> m Bool
+isColorAvailable handle = liftIO $ do
   term <- lookupEnv "TERM"
   noColor <- lookupEnv "NO_COLOR"
   case (term, noColor) of
-    (Just "dumb", _) -> return $ const id
-    (_, Just (_ : _)) -> return $ const id
-    _ -> do
-      isATty <- hIsTerminalDevice handle
-      return $ if isATty then System.Console.Pretty.color else const id
+    (Just "dumb", _) -> return False
+    (_, Just (_ : _)) -> return False
+    _ -> hIsTerminalDevice handle
+
+
+colorFor
+  :: forall a m. (Pretty a, MonadIO m) => Handle -> m (Color -> Color -> a -> a)
+colorFor handle = do
+  colorAvailable <- isColorAvailable handle
+  return $ if colorAvailable then color else dumb
+ where
+  dumb :: Color -> Color -> a -> a
+  dumb _ _ = id
+  color :: Color -> Color -> a -> a
+  color bg text v = bgColor bg $ System.Console.Pretty.color text v
+
+
+codeStyleFor :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
+codeStyleFor handle = do
+  colorAvailable <- isColorAvailable handle
+  return
+    $ if colorAvailable
+      then style Bold
+      else id
+
+
+pathStyleFor :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
+pathStyleFor handle = do
+  colorAvailable <- isColorAvailable handle
+  return
+    $ if colorAvailable
+      then style Underline
+      else id
 
 
 printStderr :: (MonadIO m) => Text -> m ()
@@ -51,7 +87,7 @@ data Admonition = Hint | Note | Warning | Error
 printStderr' :: (MonadIO m) => Admonition -> Text -> m ()
 printStderr' admonition message = do
   color <- colorFor stderr
-  printStderr $ color color' prefix <> message
+  printStderr $ color Default color' prefix <> message
  where
   color' :: Color
   color' = case admonition of
@@ -102,7 +138,7 @@ printTable headers rows = do
   putCol :: Handle -> Color -> Text -> Int -> m ()
   putCol h color' value width = do
     color <- colorFor stdout
-    liftIO $ hPutStr h $ color color' value
+    liftIO $ hPutStr h $ color Default color' value
     liftIO $ hPutStr h $ replicate (width - Data.Text.length value) " "
   putLn :: m ()
   putLn = liftIO $ putStrLn mempty
