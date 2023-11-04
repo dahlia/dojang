@@ -326,7 +326,8 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
 
 
 makeCorrespondBetweenTwoDirs
-  :: (HasCallStack, MonadFileSystem m)
+  :: forall m
+   . (HasCallStack, MonadFileSystem m)
   => OsPath
   -> OsPath
   -> [FilePattern]
@@ -345,7 +346,20 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath ignorePatterns = do
         fromList
           [(p, (e{stat = Missing}, e)) | e@(FileEntry p _) <- targetFiles]
       allEntries = unionWith combinePairs intermediateEntries targetEntries
-  return $ Data.Map.Strict.filter eitherExists allEntries
+  let entryMap = Data.Map.Strict.filter eitherExists allEntries
+  entryMap' <-
+    if not (null $ ignorePatterns)
+      then do
+        newKvs <- forM (Data.Map.Strict.toList entryMap) $ \(path', pair) ->
+          case pair of
+            (interEntry, FileEntry targetEntryPath Missing) -> do
+              let tp = targetPath </> targetEntryPath
+              stat <- getFileStat tp
+              return (path', (interEntry, FileEntry targetEntryPath stat))
+            _ -> return (path', pair)
+        return $ Data.Map.Strict.fromList newKvs
+      else return entryMap
+  return entryMap'
  where
   combinePairs
     :: (FileEntry, FileEntry)
@@ -365,6 +379,24 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath ignorePatterns = do
   eitherExists :: (FileEntry, FileEntry) -> Bool
   eitherExists (FileEntry _ Missing, FileEntry _ Missing) = False
   eitherExists _ = True
+  getFileStat :: OsPath -> m FileStat
+  getFileStat path' = do
+    isSym <- isSymlink path'
+    if isSym
+      then do
+        target <- readSymlinkTarget path'
+        return $ Symlink target
+      else do
+        isDir <- isDirectory path'
+        if isDir
+          then return Directory
+          else do
+            isFle <- isFile path'
+            if isFle
+              then do
+                size <- getFileSize path'
+                return $ File size
+              else return Missing
 
 
 -- | Lists all 'FilEntry' values in the given directory.  Throws an 'IOError' if

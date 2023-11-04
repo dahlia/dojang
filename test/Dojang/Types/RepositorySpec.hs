@@ -479,8 +479,8 @@ spec = do
                     { source = FileEntry ignored Directory
                     , sourceDelta = Unchanged
                     , intermediate = FileEntry ignored Directory
-                    , destination = FileEntry ignored Missing
-                    , destinationDelta = Removed
+                    , destination = FileEntry ignored Directory
+                    , destinationDelta = Unchanged
                     }
                  , FileCorrespondence
                     { source = FileEntry (ignored </> bar) (File 21)
@@ -493,15 +493,15 @@ spec = do
                     { source = FileEntry (ignored </> baz) Missing
                     , sourceDelta = Removed
                     , intermediate = FileEntry (ignored </> baz) (File 23)
-                    , destination = FileEntry (ignored </> baz) Missing
-                    , destinationDelta = Removed
+                    , destination = FileEntry (ignored </> baz) (File 23)
+                    , destinationDelta = Unchanged
                     }
                  , FileCorrespondence
                     { source = FileEntry (ignored </> foo) (File 23)
                     , sourceDelta = Unchanged
                     , intermediate = FileEntry (ignored </> foo) (File 23)
-                    , destination = FileEntry (ignored </> foo) Missing
-                    , destinationDelta = Removed
+                    , destination = FileEntry (ignored </> foo) (File 23)
+                    , destinationDelta = Unchanged
                     }
                  , FileCorrespondence
                     { source = FileEntry modified Directory
