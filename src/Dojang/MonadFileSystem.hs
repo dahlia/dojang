@@ -22,6 +22,7 @@ import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
+  , ioeGetLocation
   , ioeSetErrorString
   , ioeSetFileName
   , ioeSetLocation
@@ -164,7 +165,7 @@ class (MonadError IOError m) => MonadFileSystem m where
               else createDirectory ancestor
     )
       `catchError` \e ->
-        throwError $ e `ioeSetLocation` "createDirectories"
+        throwError $ e `ioePrependLocation` "createDirectories"
    where
     split :: [OsPath]
     split = splitDirectories path
@@ -197,7 +198,7 @@ class (MonadError IOError m) => MonadFileSystem m where
         removeDirectory path
     )
       `catchError` \e ->
-        throwError $ e `ioeSetLocation` "removeDirectoryRecursively"
+        throwError $ e `ioePrependLocation` "removeDirectoryRecursively"
 
 
   -- | Lists all files and directories in a directory except for @.@ and @..@,
@@ -222,7 +223,8 @@ class (MonadError IOError m) => MonadFileSystem m where
     -- ^ The list of pairs of file types and paths.  The paths are relative
     -- to the given directory.
   listDirectoryRecursively path ignorePatterns =
-    listDirectoryRecursively' path $ step_ ignorePatterns
+    listDirectoryRecursively' path (step_ ignorePatterns) `catchError` \e ->
+      throwError $ e `ioePrependLocation` "listDirectoryRecursively"
 
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
@@ -410,14 +412,18 @@ readFileFromDryRunIO seqOffset src = do
               `ioeSetErrorString` "no such file"
           (_, Directory') : _ -> do
             src' <- decodePath src
-            throwError
-              $ mkIOError InappropriateType "readFile" Nothing (Just src')
-              `ioeSetErrorString` "is a directory"
+            throwError $ nonDirError src'
  where
   fallback :: DryRunIO ByteString
   fallback = liftIO $ do
+    isDir <- doesDirectoryExist src
     src' <- decodeFS src
+    when isDir $ throwError (nonDirError src')
     Data.ByteString.readFile src'
+  nonDirError :: FilePath -> IOError
+  nonDirError src' =
+    mkIOError InappropriateType "readFile" Nothing (Just src')
+      `ioeSetErrorString` "is a directory"
 
 
 instance MonadFileSystem DryRunIO where
@@ -520,7 +526,8 @@ instance MonadFileSystem DryRunIO where
       Nothing ->
         liftIO
           $ getSymbolicLinkTarget path
-          `catchError` \e -> throwError $ e `ioeSetLocation` "readSymlinkTarget"
+          `catchError` \e ->
+            throwError $ e `ioePrependLocation` "readSymlinkTarget"
 
 
   copyFile src dst = do
@@ -581,7 +588,7 @@ instance MonadFileSystem DryRunIO where
       liftIO $ pathIsSymbolicLink dst `catchError` \e ->
         if isDoesNotExistError e
           then return False
-          else throwError $ e `ioeSetLocation` "createDirectory"
+          else throwError $ e `ioePrependLocation` "createDirectory"
     parentExists <- liftIO $ doesPathExist parent
     parentIsDir <- liftIO $ doesDirectoryExist parent
     case (oFiles !? parent, oFiles !? normalise dst) of
@@ -629,7 +636,7 @@ instance MonadFileSystem DryRunIO where
         `catchError` \e ->
           if isDoesNotExistError e
             then return False
-            else throwError $ e `ioeSetLocation` "removeFile"
+            else throwError $ e `ioePrependLocation` "removeFile"
     isDir <- liftIO $ doesDirectoryExist path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> throwError $ noFileError path'
@@ -704,9 +711,18 @@ instance MonadFileSystem DryRunIO where
       Just ((_, Directory') :| _) ->
         return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
+        isSymlink' <-
+          liftIO
+            $ pathIsSymbolicLink path
+            `catchError` \e ->
+              if isDoesNotExistError e
+                then return False
+                else throwError $ e `ioePrependLocation` "listDirectory"
+        isFile' <- liftIO $ doesFileExist path
+        when (isSymlink' || isFile') $ throwError (nonDirError path')
         files <-
           liftIO $ System.Directory.OsPath.listDirectory path `catchError` \e ->
-            throwError $ e `ioeSetLocation` "listDirectory"
+            throwError $ e `ioePrependLocation` "listDirectory"
         let directOChildren' = directOChildren oFiles
         let result =
               [f | f <- files, directOChildren' !? (path </> f) /= Just Gone]
@@ -784,3 +800,13 @@ dryRunIO action = evalStateT (unDryRunIO action) initialState
 
 tryDryRunIO :: DryRunIO a -> IO (Either IOError a)
 tryDryRunIO action = dryRunIO $ tryError action
+
+
+ioePrependLocation :: IOError -> String -> IOError
+ioePrependLocation e location =
+  ioeSetLocation e $ case loc of
+    "" -> location
+    _ -> location ++ ':' : loc
+ where
+  loc :: String
+  loc = ioeGetLocation e

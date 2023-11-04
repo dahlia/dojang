@@ -38,6 +38,7 @@ import Test.Hspec.Expectations.Pretty
   , shouldContain
   , shouldReturn
   , shouldSatisfy
+  , shouldStartWith
   , shouldThrow
   )
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
@@ -696,7 +697,7 @@ spec = do
         ioeGetErrorType failToCreate `shouldBe` InappropriateType
         ioeGetFileName failToCreate
           `shouldBe` Just (packageYamlFP `combine` nonExistentFP)
-        ioeGetLocation failToCreate `shouldBe` "createDirectory"
+        ioeGetLocation failToCreate `shouldStartWith` "createDirectory"
         doesFileExist packageYamlP `shouldReturn` True
         Left failToCreate' <- tryDryRunIO $ do
           () <- writeFile nonExistentP ""
@@ -704,7 +705,7 @@ spec = do
         ioeGetErrorType failToCreate' `shouldBe` InappropriateType
         ioeGetFileName failToCreate'
           `shouldBe` Just (nonExistentFP `combine` nonExistentFP)
-        ioeGetLocation failToCreate' `shouldBe` "createDirectory"
+        ioeGetLocation failToCreate' `shouldStartWith` "createDirectory"
         show failToCreate' `shouldContain` "not inside a directory"
         Left failToCreate'' <- tryDryRunIO $ do
           () <- copyFile packageYamlP nonExistentP
@@ -712,7 +713,7 @@ spec = do
         ioeGetErrorType failToCreate'' `shouldBe` InappropriateType
         ioeGetFileName failToCreate''
           `shouldBe` Just (nonExistentFP `combine` nonExistentFP)
-        ioeGetLocation failToCreate'' `shouldBe` "createDirectory"
+        ioeGetLocation failToCreate'' `shouldStartWith` "createDirectory"
         show failToCreate'' `shouldContain` "not inside a directory"
 
       it "can't create a directory by overwriting an existing file" $ do
@@ -858,17 +859,23 @@ spec = do
       it "can't remove a non-directory" $ do
         Left failToRemove <- tryDryRunIO $ removeDirectoryRecursively packageYamlP
         ioeGetErrorType failToRemove `shouldBe` InappropriateType
+        ioeGetLocation failToRemove
+          `shouldStartWith` "removeDirectoryRecursively"
         ioeGetFileName failToRemove `shouldBe` Just packageYamlFP
         doesFileExist packageYamlP `shouldReturn` True
         Left failToRemove' <- tryDryRunIO $ do
           () <- writeFile nonExistentP ""
           removeDirectoryRecursively nonExistentP
         ioeGetErrorType failToRemove' `shouldBe` InappropriateType
+        ioeGetLocation failToRemove'
+          `shouldStartWith` "removeDirectoryRecursively"
         ioeGetFileName failToRemove' `shouldBe` Just nonExistentFP
         Left failToRemove'' <- tryDryRunIO $ do
           () <- copyFile packageYamlP nonExistentP
           removeDirectoryRecursively nonExistentP
         ioeGetErrorType failToRemove'' `shouldBe` InappropriateType
+        ioeGetLocation failToRemove''
+          `shouldStartWith` "removeDirectoryRecursively"
         ioeGetFileName failToRemove'' `shouldBe` Just nonExistentFP
 
     describe "createDirectories" $ do
@@ -884,7 +891,7 @@ spec = do
           createDirectories (packageYamlP </> nonExistentP </> nonExistentP)
         ioeGetErrorType failToCreate `shouldBe` InappropriateType
         ioeGetFileName failToCreate `shouldBe` Just packageYamlFP
-        ioeGetLocation failToCreate `shouldBe` "createDirectories"
+        ioeGetLocation failToCreate `shouldStartWith` "createDirectories"
         show failToCreate
           `shouldContain` "one of its ancestors is a non-directory file"
 
@@ -923,13 +930,13 @@ spec = do
         e `shouldSatisfy` isDoesNotExistError
         ioeGetFileName e `shouldBe` Just nonExistentFP
         ioeGetErrorType e `shouldBe` doesNotExistErrorType
-        ioeGetLocation e `shouldBe` "listDirectory"
+        ioeGetLocation e `shouldStartWith` "listDirectory"
         Left e' <- tryDryRunIO $ do
           () <- removeFile packageYamlP
           listDirectory packageYamlP
         e' `shouldSatisfy` isDoesNotExistError
         ioeGetFileName e' `shouldBe` Just packageYamlFP
-        ioeGetLocation e' `shouldBe` "listDirectory"
+        ioeGetLocation e' `shouldStartWith` "listDirectory"
         show e' `shouldContain` "no such directory"
 
       it "fails if a specified path is a regular file" $ do
