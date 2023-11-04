@@ -60,6 +60,7 @@ import Dojang.App
   , runAppWithoutLogging
   )
 import Dojang.Commands (Admonition (Error, Note), codeStyleFor, printStderr')
+import Dojang.Commands.Apply qualified (apply)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
@@ -236,6 +237,22 @@ cmdP =
                   <**> helper
               )
               (progDesc "Show status of repository and target tree")
+          )
+        <> command
+          "apply"
+          ( info
+              ( Dojang.Commands.Apply.apply
+                  <$> switch
+                    ( long "force"
+                        <> short 'f'
+                        <> help
+                          ( "Apply changes even if there are undergone "
+                              ++ "changes in the target tree too"
+                          )
+                    )
+                  <**> helper
+              )
+              (progDesc "Apply changes to target tree")
           )
     )
     <|> subparser

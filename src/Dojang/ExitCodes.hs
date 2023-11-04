@@ -35,3 +35,7 @@ noEnvFile = ExitFailure 20
 
 envFileReadError :: ExitCode
 envFileReadError = ExitFailure 21
+
+
+conflictError :: ExitCode
+conflictError = ExitFailure 30
