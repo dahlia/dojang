@@ -1,0 +1,36 @@
+# cSpell:ignore xlarge
+on:
+  push:
+    branches:
+    - "*"
+    tags:
+    - "*.*.*"
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest, macos-latest-xlarge]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
+      uses: actions/cache@v3
+      with:
+        path: ~/.stack
+        key: ${{ runner.os }}-${{ hashFiles('stack.yaml.lock') }}
+    - if: startsWith(runner.os, 'Windows')
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~\AppData\Roaming\stack
+          ~\AppData\Local\Programs\stack
+        key: ${{ runner.os }}-${{ hashFiles('stack.yaml.lock') }}
+    - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
+      shell: bash
+      run: |
+        if ! command -v stack > /dev/null; then
+          curl -sSL https://get.haskellstack.org/ | sh
+        fi
+    - run: stack build --coverage --test --no-run-tests
+    - run: stack test --coverage
