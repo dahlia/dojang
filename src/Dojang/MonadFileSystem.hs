@@ -8,6 +8,7 @@ module Dojang.MonadFileSystem
   , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
+  , dryRunIO'
   , tryDryRunIO
   ) where
 
@@ -38,9 +39,9 @@ import Control.Monad.Extra (partitionM)
 import Control.Monad.State.Strict
   ( MonadState
   , StateT
-  , evalStateT
   , gets
   , modify'
+  , runStateT
   )
 import Data.ByteString (ByteString)
 import Data.ByteString qualified (length, readFile, writeFile)
@@ -363,7 +364,7 @@ currentSequenceNumber :: DryRunState -> SeqNo
 currentSequenceNumber state = nextSequenceNumber state - 1
 
 
--- | A monad that can perform filesystem operations, but only in memory.
+-- | A monad that can perform filesystem operations, but only in a sandbox.
 -- Note that, however, it can bypass the sandboxing of the 'MonadFileSystem'
 -- class by using 'liftIO'.
 newtype DryRunIO a = DryRunIO {unDryRunIO :: StateT DryRunState IO a}
@@ -792,12 +793,23 @@ instance MonadFileSystem DryRunIO where
             liftIO $ System.Directory.OsPath.getFileSize path
 
 
+-- | Performs 'DryRunIO' action in the sandbox and returns the result.
 dryRunIO :: DryRunIO a -> IO a
-dryRunIO action = evalStateT (unDryRunIO action) initialState
+dryRunIO = fmap fst . dryRunIO'
+
+
+-- | Performs 'DryRunIO' action in the sandbox and returns the result and
+-- the total number of filesystem operations that were performed.
+dryRunIO' :: DryRunIO a -> IO (a, Int)
+dryRunIO' action = do
+  (value, state) <- runStateT (unDryRunIO action) initialState
+  return (value, nextSequenceNumber state)
  where
   initialState = DryRunState{overlaidFiles = mempty, nextSequenceNumber = 0}
 
 
+-- | Performs 'DryRunIO' action in the sandbox and returns either the result
+-- or an 'IOError' that occurred.
 tryDryRunIO :: DryRunIO a -> IO (Either IOError a)
 tryDryRunIO action = dryRunIO $ tryError action
 

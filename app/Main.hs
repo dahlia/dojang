@@ -66,7 +66,7 @@ import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
 import Dojang.Commands.Status qualified (status)
 import Dojang.ExitCodes (unhandledError)
-import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO)
+import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
 import Paths_dojang qualified as Meta
 
 
@@ -312,14 +312,20 @@ main = withCP65001 $ do
   (appEnv, _) <-
     liftIO $ customExecParser parserPrefs parser
       :: IO (AppEnv, App DryRunIO ExitCode)
-  exitCode <- if appEnv.dryRun then dryRunIO $ run appEnv else run appEnv
+  (exitCode, ops) <-
+    if appEnv.dryRun
+      then dryRunIO' $ run appEnv
+      else do
+        exitCode' <- run appEnv
+        return (exitCode', -1)
   codeColor <- codeStyleFor stderr
-  when appEnv.dryRun
-    $ printStderr' Note
-    $ "Since `"
-    <> codeColor "--dry-run"
-    <> "' was specified, no changes were committed "
-    <> "to the file system."
+  when (appEnv.dryRun && ops > 0) $ do
+    printStderr' Note
+      $ "Since `"
+      <> codeColor "--dry-run"
+      <> "' was specified, those "
+      <> showt ops
+      <> " changes were not actually committed to the filesystem."
   exitWith exitCode
  where
   run :: (MonadFileSystem i, MonadIO i) => AppEnv -> i ExitCode
