@@ -68,6 +68,13 @@ packages:
   original:
     hackage: hedgehog-1.4
 - completed:
+    hackage: hpc-0.6.2.0@sha256:6aeaff51eba6254619c869b2449cab32a25a2d4895e36ef272866519d6af26be,1282
+    pantry-tree:
+      sha256: 343ea543494886357ce1ab96ba16900323cfd1855947856d89701f89f7b983aa
+      size: 432
+  original:
+    hackage: hpc-0.6.2.0
+- completed:
     hackage: mtl-2.3.1@sha256:5377696d7315e2ef31a8d15d67b22d733c20cac2caf8b26756ff8524c8217e6d,1868
     pantry-tree:
       sha256: ac3cf1dc9ef397512d4bf8f2c3fbe4d64fb8aabd253288b34bf86c09ae234d4f
