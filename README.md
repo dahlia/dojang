@@ -5,7 +5,11 @@ Dojang: A cross-platform dotfiles manager
 [![GitHub Actions][GitHub Actions status badge]][GitHub Actions]
 [![Codecov][Codecov badge]][Codecov]
 
-Dojang is a cross-platform dotfiles manager.
+Dojang is a cross-platform dotfiles manager.  For further information, see the
+docs:
+
+ -  [English](doc/README.en.md)
+ -  [한국어](doc/README.ko.md) (Korean)
 
 Distributed under the GPL 3.0 or later.
 
