@@ -81,7 +81,7 @@ executables:
 
 tests:
   spec:
-    main: Spec.hs
+    main: Main.hs
     source-dirs: test
     ghc-options: *executable-ghc-options
     dependencies:
@@ -91,6 +91,7 @@ tests:
       hspec-discover: ">=2.10.10 && <2.11"
       hspec-expectations-pretty-diff: ">=0.7 && <0.8"
       hspec-hedgehog: ">=0.0.1.2 && <0.1"
+      hspec-junit-formatter: ">=1.1.0.2 && <1.2"
       hspec-megaparsec: ">=2.2 && <2.3"
       random: ">=1.2 && <2"
       temporary: ">=1.3 && <1.4"

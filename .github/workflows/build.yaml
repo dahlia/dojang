@@ -6,6 +6,11 @@ on:
     tags:
     - "*.*.*"
 
+permissions:
+  contents: read
+  checks: write
+  id-token: write
+
 jobs:
   test:
     strategy:
@@ -36,6 +41,15 @@ jobs:
         fi
     - run: stack build --coverage --test --no-run-tests
     - run: stack test --coverage
+      env:
+        JUNIT_ENABLED: "1"
+        JUNIT_OUTPUT_DIRECTORY: .test_report
+        JUNIT_SUITE_NAME: dojang-spec
+    - uses: mikepenz/action-junit-report@v4
+      if: success() || failure()
+      with:
+        report_paths: ".test_report/*.xml"
+        check_name: "test report"
     - uses: 8c6794b6/hpc-codecov-action@v3
       with:
         target: stack:spec
