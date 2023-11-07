@@ -16,3 +16,4 @@ how to use it.
  -  [Environment predicate](environment-predicate.en.md)
  -  [File path expression](file-path-expression.en.md)
  -  [Exit codes](exit-codes.en.md)
+ -  [Fun facts](fun-facts.en.md)

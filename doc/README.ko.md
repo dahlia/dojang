@@ -16,3 +16,4 @@ Dojang 문서: 목차
  -  [환경 서술어](environment-predicate.ko.md)
  -  [파일 경로 표현식](file-path-expression.ko.md)
  -  [종료 코드](exit-codes.ko.md)
+ -  [흥미로운 사실들](fun-facts.ko.md)
