@@ -2,50 +2,49 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Dojang.Commands.Status (formatWarning, lookupEnv', status) where
+module Dojang.Commands.Status
+  ( formatWarning
+  , printWarnings
+  , status
+  ) where
 
 import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 
-import Control.Monad.Logger (logDebugSH)
 import Data.CaseInsensitive (original)
-import Data.Text (Text, pack, unpack)
+import Data.Text (Text, pack)
 import System.Console.Pretty (Color (..))
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (addTrailingPathSeparator, makeRelative)
-import System.OsString (OsString)
 
-import Dojang.App (App, currentEnvironment', ensureRepository)
+import Dojang.App (App, ensureContext)
 import Dojang.Commands
   ( Admonition (..)
   , printStderr'
   , printTable
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
-import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
-import Dojang.Types.MonikerName ()
-import Dojang.Types.Repository
-  ( FileCorrespondence (..)
+import Dojang.Types.Context
+  ( Context (..)
+  , FileCorrespondence (..)
   , FileCorrespondenceWarning (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
-  , Repository (..)
   , makeCorrespond
   )
+import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
+import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
+import Dojang.Types.MonikerName ()
+import Dojang.Types.Repository (Repository (..))
 
 
 status :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
 status noTrailingSlash = do
-  repo <- ensureRepository
-  currentEnv <- currentEnvironment'
-  $(logDebugSH) currentEnv
-  (files, ws) <- makeCorrespond repo currentEnv lookupEnv'
-  sourcePath <- liftIO $ makeAbsolute repo.sourcePath
+  ctx <- ensureContext
+  (files, ws) <- makeCorrespond ctx
+  sourcePath <- liftIO $ makeAbsolute ctx.repository.sourcePath
   rows <- forM files $ \file -> do
     path <- liftIO $ makeAbsolute file.source.path
     let relPath = makeRelative sourcePath path
@@ -66,7 +65,7 @@ status noTrailingSlash = do
       , (Default, pack relPath')
       ]
   printTable ["Source", "ST", "Destination", "DT", "File"] rows
-  forM_ ws $ printStderr' Warning . formatWarning
+  printWarnings ws
   return ExitSuccess
 
 
@@ -85,20 +84,15 @@ renderFileStat (Symlink _) = (Default, "L")
 
 
 -- TODO: This should be in a separate module:
-lookupEnv'
-  :: (MonadFileSystem i, MonadIO i) => EnvironmentVariable -> i (Maybe OsString)
-lookupEnv' env = do
-  value <- liftIO $ lookupEnv $ unpack env
-  case value of
-    Just v -> do
-      Just <$> encodePath v
-    Nothing -> return Nothing
-
-
--- TODO: This should be in a separate module:
 formatWarning :: FileCorrespondenceWarning -> Text
 formatWarning (EnvironmentPredicateWarning (UndefinedMoniker moniker)) =
   "Reference to an undefined moniker: " <> original moniker.name
 formatWarning
   (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) =
     "Reference to an undefined environment variable: " <> envVar
+
+
+-- TODO: This should be in a separate module:
+printWarnings :: (MonadIO i) => [FileCorrespondenceWarning] -> App i ()
+printWarnings ws =
+  forM_ ws $ printStderr' Warning . formatWarning

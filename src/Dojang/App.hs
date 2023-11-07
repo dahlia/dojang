@@ -18,6 +18,7 @@ module Dojang.App
   , LogStr
   , currentEnvironment'
   , doesManifestExist
+  , ensureContext
   , ensureRepository
   , loadManifest
   , loadRepository
@@ -31,6 +32,8 @@ import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
+import Dojang.Types.FilePathExpression (EnvironmentVariable)
+import System.Environment (lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stderr)
 import System.IO.Error (isDoesNotExistError)
@@ -53,9 +56,10 @@ import Control.Monad.Logger
   )
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
 import Control.Monad.Trans (MonadTrans (lift))
-import Data.Text (concat, pack, unlines)
+import Data.Text (concat, pack, unlines, unpack)
 import System.OsPath (normalise, (</>))
 import System.OsPath.Types (OsPath)
+import System.OsString (OsString)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.Commands
@@ -75,6 +79,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Env (readEnvFile)
 import Dojang.Syntax.Manifest.Parser (Error, formatErrors, readManifestFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
+import Dojang.Types.Context (Context (..))
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Environment.Current
   ( MonadArchitecture (currentArchitecture)
@@ -294,3 +299,21 @@ ensureRepository = do
         ("Run `" <> codeStyle "dojang init" <> "' to create one.")
       liftIO $ exitWith manifestUninitialized
     Right (Just repo) -> return repo
+
+
+ensureContext :: (MonadFileSystem i, MonadIO i) => App i (Context (App i))
+ensureContext = do
+  repo <- ensureRepository
+  currentEnv <- currentEnvironment'
+  $(logDebugSH) currentEnv
+  return $ Context repo currentEnv lookupEnv'
+
+
+lookupEnv'
+  :: (MonadFileSystem i, MonadIO i) => EnvironmentVariable -> i (Maybe OsString)
+lookupEnv' env = do
+  value <- liftIO $ lookupEnv $ unpack env
+  case value of
+    Just v -> do
+      Just <$> encodePath v
+    Nothing -> return Nothing

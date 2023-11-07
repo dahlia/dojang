@@ -16,17 +16,17 @@ import Control.Monad.Logger (logDebugSH)
 import Data.Text (pack)
 import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
 
-import Dojang.App (App, AppEnv (debug), currentEnvironment', ensureRepository)
+import Dojang.App (App, AppEnv (debug), ensureContext)
 import Dojang.Commands
   ( Admonition (..)
   , pathStyleFor
   , printStderr
   , printStderr'
   )
-import Dojang.Commands.Status (formatWarning, lookupEnv', status)
+import Dojang.Commands.Status (printWarnings, status)
 import Dojang.ExitCodes (conflictError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Types.Repository
+import Dojang.Types.Context
   ( FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
@@ -37,10 +37,8 @@ import Dojang.Types.Repository
 
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
 apply force = do
-  repo <- ensureRepository
-  currentEnv <- currentEnvironment'
-  $(logDebugSH) currentEnv
-  (files, ws) <- makeCorrespond repo currentEnv lookupEnv'
+  ctx <- ensureContext
+  (files, ws) <- makeCorrespond ctx
   $(logDebugSH) files
   let conflicts = filterConflicts files
   pathStyle <- pathStyleFor stderr
@@ -67,7 +65,7 @@ apply force = do
               . sort
       forM_ ops $ \path -> printSyncOp path >> doSyncOp path
       when debug' (void $ status False)
-      (files', _) <- makeCorrespond repo currentEnv lookupEnv'
+      (files', _) <- makeCorrespond ctx
       $(logDebugSH) files'
       let ops' =
             syncIntermediateToDestination
@@ -77,7 +75,7 @@ apply force = do
               & nub
               . sort
       forM_ ops' $ \path -> printSyncOp path >> doSyncOp path
-      forM_ ws $ printStderr' Warning . formatWarning
+      printWarnings ws
       return ExitSuccess
 
 

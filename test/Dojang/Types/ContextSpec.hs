@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Dojang.Types.RepositorySpec (spec) where
+module Dojang.Types.ContextSpec (spec) where
 
 import Data.List (sort, sortOn)
 import System.IO.Error (ioeGetErrorString, ioeGetFileName)
@@ -19,6 +19,18 @@ import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (Entry (..), makeFixtureTree, withTempDir)
+import Dojang.Types.Context
+  ( FileCorrespondence (..)
+  , FileCorrespondenceWarning (..)
+  , FileDeltaKind (..)
+  , FileEntry (..)
+  , FileStat (..)
+  , listFiles
+  , makeCorrespond'
+  , makeCorrespondBetweenThreeDirs
+  , makeCorrespondBetweenThreeFiles
+  , makeCorrespondBetweenTwoDirs
+  )
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (..)
@@ -29,19 +41,7 @@ import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
-import Dojang.Types.Repository
-  ( FileCorrespondence (..)
-  , FileCorrespondenceWarning (..)
-  , FileDeltaKind (..)
-  , FileEntry (..)
-  , FileStat (..)
-  , Repository (..)
-  , listFiles
-  , makeCorrespond
-  , makeCorrespondBetweenThreeDirs
-  , makeCorrespondBetweenThreeFiles
-  , makeCorrespondBetweenTwoDirs
-  )
+import Dojang.Types.Repository (Repository (..))
 
 
 spec :: Spec
@@ -124,11 +124,11 @@ spec = do
                 manifest'
         return repo
 
-  specify "makeCorrespond" $ withTempDir $ \tmpDir _ -> do
+  specify "makeCorrespond'" $ withTempDir $ \tmpDir _ -> do
     createDirectory $ tmpDir </> src
     createDirectory $ tmpDir </> foo
     repo <- repositoryFixture (tmpDir </> src)
-    (corresponds, ws) <- makeCorrespond repo (Environment Linux X86_64) $ \e ->
+    (corresponds, ws) <- makeCorrespond' repo (Environment Linux X86_64) $ \e ->
       return $ case e of
         "FOO" -> Just $ tmpDir </> foo
         "BAR" -> Just $ tmpDir </> bar
@@ -244,7 +244,7 @@ spec = do
           && (ioeGetFileName e == Just (tmpDir' `combine` "foo"))
 
   specify "makeCorrespondBetweenThreeFiles" $ withTempDir $ \tmpDir _ -> do
-    let makeCorrespond' =
+    let makeCorrespond_ =
           makeCorrespondBetweenThreeFiles
             (tmpDir </> inter)
             (tmpDir </> src)
@@ -253,7 +253,7 @@ spec = do
     writeFile (tmpDir </> inter) "unchanged"
     writeFile (tmpDir </> src) "unchanged"
     writeFile (tmpDir </> dst) "unchanged"
-    makeCorrespond'
+    makeCorrespond_
       `shouldReturn` FileCorrespondence
         { source = FileEntry (tmpDir </> src) $ File 9
         , sourceDelta = Unchanged
@@ -264,7 +264,7 @@ spec = do
 
     writeFile (tmpDir </> src) "modified!"
     writeFile (tmpDir </> dst) "modified"
-    makeCorrespond'
+    makeCorrespond_
       `shouldReturn` FileCorrespondence
         { source = FileEntry (tmpDir </> src) $ File 9
         , sourceDelta = Modified
@@ -276,7 +276,7 @@ spec = do
     removeFile (tmpDir </> inter)
     writeFile (tmpDir </> src) "added"
     writeFile (tmpDir </> dst) "added"
-    makeCorrespond'
+    makeCorrespond_
       `shouldReturn` FileCorrespondence
         { source = FileEntry (tmpDir </> src) $ File 5
         , sourceDelta = Added
@@ -288,7 +288,7 @@ spec = do
     writeFile (tmpDir </> inter) "removed"
     removeFile (tmpDir </> src)
     removeFile (tmpDir </> dst)
-    makeCorrespond'
+    makeCorrespond_
       `shouldReturn` FileCorrespondence
         { source = FileEntry (tmpDir </> src) Missing
         , sourceDelta = Removed
@@ -300,7 +300,7 @@ spec = do
     writeFile (tmpDir </> inter) "dir is disallowed"
     createDirectory (tmpDir </> src)
     filename <- decodePath $ tmpDir </> src
-    makeCorrespond' `shouldThrow` \e ->
+    makeCorrespond_ `shouldThrow` \e ->
       ( ioeGetErrorString e
           == "makeCorrespondBetweenThreeFiles: "
           ++ "expected a file, but got a directory"
