@@ -281,6 +281,13 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
       Just (interEntry', dstEntry') -> do
         delta <- getDelta path dstPath interEntry'.stat dstEntry'.stat
         return (interEntry', dstEntry', delta)
+    (dstEntry', dstDelta') <-
+      if null ignores || dstEntry.stat /= Missing
+        then return (dstEntry, dstDelta)
+        else do
+          actualDstStat <- getFileStat (dstPath </> path)
+          actualDelta <- getDelta path dstPath interEntry2.stat actualDstStat
+          return (dstEntry{stat = actualDstStat}, actualDelta)
     return
       $ FileCorrespondence
         { source = srcEntry
@@ -289,8 +296,8 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
             if interEntry.stat == Missing
               then interEntry2
               else interEntry
-        , destination = dstEntry
-        , destinationDelta = dstDelta
+        , destination = dstEntry'
+        , destinationDelta = dstDelta'
         }
  where
   getDelta
@@ -323,6 +330,24 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
   getDelta _ _ (Symlink _) _ = return Modified
   getDelta _ _ Missing Missing = return Unchanged
   getDelta _ _ Missing _ = return Added
+  getFileStat :: OsPath -> m FileStat
+  getFileStat path' = do
+    isSym <- isSymlink path'
+    if isSym
+      then do
+        target <- readSymlinkTarget path'
+        return $ Symlink target
+      else do
+        isDir <- isDirectory path'
+        if isDir
+          then return Directory
+          else do
+            isFle <- isFile path'
+            if isFle
+              then do
+                size <- getFileSize path'
+                return $ File size
+              else return Missing
 
 
 makeCorrespondBetweenTwoDirs
@@ -346,20 +371,7 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath ignorePatterns = do
         fromList
           [(p, (e{stat = Missing}, e)) | e@(FileEntry p _) <- targetFiles]
       allEntries = unionWith combinePairs intermediateEntries targetEntries
-  let entryMap = Data.Map.Strict.filter eitherExists allEntries
-  entryMap' <-
-    if not (null $ ignorePatterns)
-      then do
-        newKvs <- forM (Data.Map.Strict.toList entryMap) $ \(path', pair) ->
-          case pair of
-            (interEntry, FileEntry targetEntryPath Missing) -> do
-              let tp = targetPath </> targetEntryPath
-              stat <- getFileStat tp
-              return (path', (interEntry, FileEntry targetEntryPath stat))
-            _ -> return (path', pair)
-        return $ Data.Map.Strict.fromList newKvs
-      else return entryMap
-  return entryMap'
+  return $ Data.Map.Strict.filter eitherExists allEntries
  where
   combinePairs
     :: (FileEntry, FileEntry)
@@ -379,24 +391,6 @@ makeCorrespondBetweenTwoDirs intermediatePath targetPath ignorePatterns = do
   eitherExists :: (FileEntry, FileEntry) -> Bool
   eitherExists (FileEntry _ Missing, FileEntry _ Missing) = False
   eitherExists _ = True
-  getFileStat :: OsPath -> m FileStat
-  getFileStat path' = do
-    isSym <- isSymlink path'
-    if isSym
-      then do
-        target <- readSymlinkTarget path'
-        return $ Symlink target
-      else do
-        isDir <- isDirectory path'
-        if isDir
-          then return Directory
-          else do
-            isFle <- isFile path'
-            if isFle
-              then do
-                size <- getFileSize path'
-                return $ File size
-              else return Missing
 
 
 -- | Lists all 'FilEntry' values in the given directory.  Throws an 'IOError' if

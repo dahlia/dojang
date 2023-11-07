@@ -486,8 +486,8 @@ spec = do
                     { source = FileEntry (ignored </> bar) (File 21)
                     , sourceDelta = Added
                     , intermediate = FileEntry (ignored </> bar) Missing
-                    , destination = FileEntry (ignored </> bar) Missing
-                    , destinationDelta = Unchanged
+                    , destination = FileEntry (ignored </> bar) (File 21)
+                    , destinationDelta = Added
                     }
                  , FileCorrespondence
                     { source = FileEntry (ignored </> baz) Missing
