@@ -2,6 +2,7 @@
 .hspec-failures
 .idea/
 .stack-work/
+dist-newstyle/
 dojang.cabal
 dojang.iml
 dojang.tix

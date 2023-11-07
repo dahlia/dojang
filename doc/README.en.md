@@ -9,6 +9,7 @@ Dojang docs: table of contents
 **Dojang** is a cross-platform dotfiles manager.  This documentation describes
 how to use it.
 
+ -  [Installation](installation.en.md)
  -  [Manifest](manifest.en.md)
  -  [Routing](routing.en.md)
  -  [Environment](environment.en.md)
