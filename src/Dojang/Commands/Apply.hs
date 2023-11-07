@@ -16,23 +16,16 @@ import Control.Monad.Logger (logDebugSH)
 import Data.Text (pack)
 import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
 
-import Dojang.App (App, AppEnv (debug), currentEnvironment', loadRepository)
+import Dojang.App (App, AppEnv (debug), currentEnvironment', ensureRepository)
 import Dojang.Commands
   ( Admonition (..)
-  , codeStyleFor
-  , dieWithErrors
   , pathStyleFor
   , printStderr
   , printStderr'
   )
 import Dojang.Commands.Status (formatWarning, lookupEnv', status)
-import Dojang.ExitCodes
-  ( conflictError
-  , manifestReadError
-  , manifestUninitialized
-  )
+import Dojang.ExitCodes (conflictError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Syntax.Manifest.Parser (formatErrors)
 import Dojang.Types.Repository
   ( FileCorrespondence (..)
   , FileDeltaKind (..)
@@ -44,60 +37,48 @@ import Dojang.Types.Repository
 
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
 apply force = do
-  $(logDebugSH) force
-  repository <- loadRepository
-  case repository of
-    Left e ->
-      dieWithErrors manifestReadError $ formatErrors e
-    Right Nothing -> do
-      codeStyle <- codeStyleFor stderr
-      printStderr' Error "No manifest found."
-      printStderr'
-        Note
-        ("Run `" <> codeStyle "dojang init" <> "' to create one.")
-      return manifestUninitialized
-    Right (Just repo) -> do
-      currentEnv <- currentEnvironment'
-      $(logDebugSH) currentEnv
-      (files, ws) <- makeCorrespond repo currentEnv lookupEnv'
-      $(logDebugSH) files
-      let conflicts = filterConflicts files
-      pathStyle <- pathStyleFor stderr
-      forM_ conflicts $ \c -> do
-        srcPath <- decodePath c.source.path
-        dstPath <- decodePath c.destination.path
-        printStderr' Error
-          $ "There is a conflict between "
-          <> pathStyle (pack srcPath)
-          <> " and "
-          <> pathStyle (pack dstPath)
-          <> "."
-      if not force && not (null conflicts)
-        then return conflictError
-        else do
-          debug' <- asks (.debug)
-          when debug' (void $ status False)
-          let ops =
-                syncSourceToIntermediate
-                  [ (fc.source, fc.intermediate, fc.sourceDelta)
-                  | fc <- files
-                  ]
-                  & nub
-                  . sort
-          forM_ ops $ \path -> printSyncOp path >> doSyncOp path
-          when debug' (void $ status False)
-          (files', _) <- makeCorrespond repo currentEnv lookupEnv'
-          $(logDebugSH) files'
-          let ops' =
-                syncIntermediateToDestination
-                  [ (fc.intermediate, fc.destination, fc.destinationDelta)
-                  | fc <- files'
-                  ]
-                  & nub
-                  . sort
-          forM_ ops' $ \path -> printSyncOp path >> doSyncOp path
-          forM_ ws $ printStderr' Warning . formatWarning
-          return ExitSuccess
+  repo <- ensureRepository
+  currentEnv <- currentEnvironment'
+  $(logDebugSH) currentEnv
+  (files, ws) <- makeCorrespond repo currentEnv lookupEnv'
+  $(logDebugSH) files
+  let conflicts = filterConflicts files
+  pathStyle <- pathStyleFor stderr
+  forM_ conflicts $ \c -> do
+    srcPath <- decodePath c.source.path
+    dstPath <- decodePath c.destination.path
+    printStderr' Error
+      $ "There is a conflict between "
+      <> pathStyle (pack srcPath)
+      <> " and "
+      <> pathStyle (pack dstPath)
+      <> "."
+  if not force && not (null conflicts)
+    then return conflictError
+    else do
+      debug' <- asks (.debug)
+      when debug' (void $ status False)
+      let ops =
+            syncSourceToIntermediate
+              [ (fc.source, fc.intermediate, fc.sourceDelta)
+              | fc <- files
+              ]
+              & nub
+              . sort
+      forM_ ops $ \path -> printSyncOp path >> doSyncOp path
+      when debug' (void $ status False)
+      (files', _) <- makeCorrespond repo currentEnv lookupEnv'
+      $(logDebugSH) files'
+      let ops' =
+            syncIntermediateToDestination
+              [ (fc.intermediate, fc.destination, fc.destinationDelta)
+              | fc <- files'
+              ]
+              & nub
+              . sort
+      forM_ ops' $ \path -> printSyncOp path >> doSyncOp path
+      forM_ ws $ printStderr' Warning . formatWarning
+      return ExitSuccess
 
 
 filterConflicts :: [FileCorrespondence] -> [FileCorrespondence]

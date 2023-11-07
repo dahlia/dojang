@@ -8,7 +8,6 @@ import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.IO (stderr)
 
 import Control.Monad.Logger (logDebugSH)
 import Data.CaseInsensitive (original)
@@ -18,17 +17,13 @@ import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (addTrailingPathSeparator, makeRelative)
 import System.OsString (OsString)
 
-import Dojang.App (App, currentEnvironment', loadRepository)
+import Dojang.App (App, currentEnvironment', ensureRepository)
 import Dojang.Commands
   ( Admonition (..)
-  , codeStyleFor
-  , dieWithErrors
   , printStderr'
   , printTable
   )
-import Dojang.ExitCodes (manifestReadError, manifestUninitialized)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Syntax.Manifest.Parser (formatErrors)
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
@@ -46,44 +41,33 @@ import Dojang.Types.Repository
 
 status :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
 status noTrailingSlash = do
-  repository <- loadRepository
-  case repository of
-    Left e ->
-      dieWithErrors manifestReadError $ formatErrors e
-    Right Nothing -> do
-      printStderr' Error "No manifest found."
-      codeStyle <- codeStyleFor stderr
-      printStderr'
-        Note
-        ("Run `" <> codeStyle "dojang init" <> "' to create one.")
-      return manifestUninitialized
-    Right (Just repo) -> do
-      currentEnv <- currentEnvironment'
-      $(logDebugSH) currentEnv
-      (files, ws) <- makeCorrespond repo currentEnv lookupEnv'
-      sourcePath <- liftIO $ makeAbsolute repo.sourcePath
-      rows <- forM files $ \file -> do
-        path <- liftIO $ makeAbsolute file.source.path
-        let relPath = makeRelative sourcePath path
-        let relPathS =
-              if not noTrailingSlash
-                && ( (file.source.stat == Directory)
-                      || (file.source.stat == Missing)
-                      && (file.destination.stat == Directory)
-                   )
-                then addTrailingPathSeparator relPath
-                else relPath
-        relPath' <- decodePath relPathS
-        return
-          [ renderDeltaKind file.sourceDelta
-          , renderFileStat file.source.stat
-          , renderDeltaKind file.destinationDelta
-          , renderFileStat file.destination.stat
-          , (Default, pack relPath')
-          ]
-      printTable ["Source", "ST", "Destination", "DT", "File"] rows
-      forM_ ws $ printStderr' Warning . formatWarning
-      return ExitSuccess
+  repo <- ensureRepository
+  currentEnv <- currentEnvironment'
+  $(logDebugSH) currentEnv
+  (files, ws) <- makeCorrespond repo currentEnv lookupEnv'
+  sourcePath <- liftIO $ makeAbsolute repo.sourcePath
+  rows <- forM files $ \file -> do
+    path <- liftIO $ makeAbsolute file.source.path
+    let relPath = makeRelative sourcePath path
+    let relPathS =
+          if not noTrailingSlash
+            && ( (file.source.stat == Directory)
+                  || (file.source.stat == Missing)
+                  && (file.destination.stat == Directory)
+               )
+            then addTrailingPathSeparator relPath
+            else relPath
+    relPath' <- decodePath relPathS
+    return
+      [ renderDeltaKind file.sourceDelta
+      , renderFileStat file.source.stat
+      , renderDeltaKind file.destinationDelta
+      , renderFileStat file.destination.stat
+      , (Default, pack relPath')
+      ]
+  printTable ["Source", "ST", "Destination", "DT", "File"] rows
+  forM_ ws $ printStderr' Warning . formatWarning
+  return ExitSuccess
 
 
 renderDeltaKind :: FileDeltaKind -> (Color, Text)

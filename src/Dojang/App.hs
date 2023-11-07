@@ -18,6 +18,7 @@ module Dojang.App
   , LogStr
   , currentEnvironment'
   , doesManifestExist
+  , ensureRepository
   , loadManifest
   , loadRepository
   , runAppWithLogging
@@ -30,6 +31,8 @@ import Control.Monad (forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
+import System.Exit (exitWith)
+import System.IO (stderr)
 import System.IO.Error (isDoesNotExistError)
 import Prelude hiding (readFile, writeFile)
 
@@ -55,8 +58,19 @@ import System.OsPath (normalise, (</>))
 import System.OsPath.Types (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
-import Dojang.Commands (die')
-import Dojang.ExitCodes (envFileReadError, noEnvFile)
+import Dojang.Commands
+  ( Admonition (..)
+  , codeStyleFor
+  , die'
+  , dieWithErrors
+  , printStderr'
+  )
+import Dojang.ExitCodes
+  ( envFileReadError
+  , manifestReadError
+  , manifestUninitialized
+  , noEnvFile
+  )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Env (readEnvFile)
 import Dojang.Syntax.Manifest.Parser (Error, formatErrors, readManifestFile)
@@ -264,3 +278,19 @@ loadRepository = do
         $ Right
         $ Just
         $ Repository sourceDir (sourceDir </> intermediateDir) manifest
+
+
+ensureRepository :: (MonadFileSystem i, MonadIO i) => App i Repository
+ensureRepository = do
+  result <- loadRepository
+  case result of
+    Left e ->
+      dieWithErrors manifestReadError $ formatErrors e
+    Right Nothing -> do
+      printStderr' Error "No manifest found."
+      codeStyle <- codeStyleFor stderr
+      printStderr'
+        Note
+        ("Run `" <> codeStyle "dojang init" <> "' to create one.")
+      liftIO $ exitWith manifestUninitialized
+    Right (Just repo) -> return repo
