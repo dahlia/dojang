@@ -7,8 +7,9 @@ module Dojang.Types.FileRouteSpec (monikerMap, paths, spec) where
 
 import Data.HashMap.Strict (HashMap, fromList)
 import Data.Text (Text)
+import System.OsPath (encodeFS)
 import Test.Hspec (Spec, describe, specify)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotBe)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotBe, shouldReturn)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (..))
@@ -16,17 +17,16 @@ import Dojang.Types.Environment (Environment (Environment))
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Moniker, OperatingSystem, Or)
   )
-import Dojang.Types.EnvironmentPredicate.Evaluate
-  ( EvaluationWarning (UndefinedMoniker)
-  )
-import Dojang.Types.FilePathExpression
-  ( FilePathExpression (Root, Substitution)
-  )
+import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
+import Dojang.Types.FilePathExpression (FilePathExpression (Root, Substitution))
+import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
 import Dojang.Types.FileRoute
   ( FileRoute (monikerResolver, predicates)
+  , RouteWarning (..)
   , dispatch
   , fileRoute
   , fileRoute'
+  , routePath
   )
 import Dojang.Types.Gen qualified as Gen
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -143,3 +143,20 @@ spec = do
       `shouldBe` ( [Just $ Substitution "HOME"]
                  , [UndefinedMoniker (moniker "non-existent")]
                  )
+
+  specify "routePath" $ do
+    routePath route (Environment "freebsd" "x86_64") (const $ return Nothing)
+      `shouldReturn` (Nothing, [])
+    routePath route (Environment "linux" "x86_64") (const $ return Nothing)
+      `shouldReturn` ( Just mempty
+                     ,
+                       [ FilePathExpressionWarning
+                          (UndefinedEnvironmentVariable "HOME")
+                       ]
+                     )
+    home <- encodeFS "/home/hong"
+    routePath
+      route
+      (Environment "linux" "aarch64")
+      (const $ return $ Just $ home)
+      `shouldReturn` (Just home, [])

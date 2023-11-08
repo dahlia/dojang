@@ -3,9 +3,11 @@
 
 module Dojang.Types.FileRoute
   ( FileRoute (..)
+  , RouteWarning (..)
   , fileRoute
   , fileRoute'
   , dispatch
+  , routePath
   ) where
 
 import Data.List (sortOn)
@@ -14,13 +16,20 @@ import Prelude hiding (lookup)
 
 import Data.HashMap.Strict (lookup)
 import Data.HashSet (HashSet, singleton, union, unions)
+import Data.Text (unpack)
+import System.OsPath (OsPath)
+import System.OsString (OsString)
 
-import Dojang.MonadFileSystem (FileType)
+import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning, evaluate')
 import Dojang.Types.EnvironmentPredicate.Specificity (Specificity, specificity)
-import Dojang.Types.FilePathExpression (FilePathExpression)
+import Dojang.Types.FilePathExpression (EnvironmentVariable, FilePathExpression)
+import Dojang.Types.FilePathExpression.Expansion
+  ( ExpansionWarning
+  , expandFilePath
+  )
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
 
@@ -110,8 +119,7 @@ fileRoute' resolver predicates' =
   sortKey (pred', _) = Down (specificity resolver pred', show pred')
 
 
--- | Dispatches the given 'FileRoute' against the given 'Environment' and
--- 'MonikerMap'.
+-- | Dispatches the given 'FileRoute' against the given 'Environment'.
 dispatch
   :: Environment
   -- ^ The 'Environment' to dispatch against.
@@ -135,6 +143,42 @@ dispatch environment (FileRoute resolver route _) =
   warnings = concatMap (snd . fst) evaluated
   matched :: [Maybe FilePathExpression]
   matched = [expr | ((True, _), expr) <- evaluated]
+
+
+-- | A warning that can occur during path routing.
+data RouteWarning
+  = -- | A warning that can occur during environment predicate evaluation.
+    EnvironmentPredicateWarning EvaluationWarning
+  | -- | A warning that can occur during file path expression expansion.
+    FilePathExpressionWarning ExpansionWarning
+  deriving (Eq, Show)
+
+
+-- | Routes the given 'FileRoute' against the given 'Environment', and expands
+-- the resulting 'FilePathExpression' into an 'OsPath', if any.  For null
+-- routes, returns 'Nothing'.
+routePath
+  :: (MonadFileSystem m)
+  => FileRoute
+  -- ^ The 'FileRoute' to route and expand.
+  -> Environment
+  -- ^ The environment to use when evaluating environment predicates.
+  -> (EnvironmentVariable -> m (Maybe OsString))
+  -- ^ A function that can look up an environment variable.
+  -> m (Maybe OsPath, [RouteWarning])
+  -- ^ The resulting 'OsPath', if any, and a list of warnings that occurred
+  -- during evaluation and expansion.  For null routes, returns 'Nothing',
+  -- but still returns any warnings that occurred (if any).
+routePath route env lookupEnvVar = do
+  let (matched, warnings) = dispatch env route
+  let predWarnings = map EnvironmentPredicateWarning warnings
+  case matched of
+    [] -> return (Nothing, predWarnings)
+    (Nothing : _) -> return (Nothing, predWarnings)
+    (Just pathExpr : _) -> do
+      (path, exprWarnings) <-
+        expandFilePath pathExpr lookupEnvVar (encodePath . unpack)
+      return (Just path, predWarnings ++ map FilePathExpressionWarning exprWarnings)
 
 
 instance Show FileRoute where

@@ -8,7 +8,6 @@
 module Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
-  , FileCorrespondenceWarning (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
@@ -21,7 +20,7 @@ module Dojang.Types.Context
   ) where
 
 import Control.Monad (forM, when)
-import Data.List (unzip4)
+import Data.List (nub)
 import GHC.Stack (HasCallStack)
 import System.IO.Error (ioeSetFileName, isPermissionError)
 import Prelude hiding (readFile)
@@ -37,7 +36,6 @@ import Data.Map.Strict
   , unionWith
   , (!?)
   )
-import Data.Text (unpack)
 import System.OsPath (OsPath, normalise, (</>))
 import System.OsString (OsString)
 
@@ -45,13 +43,12 @@ import Data.Set (toList, union)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
-import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import Dojang.Types.FilePathExpression.Expansion
-  ( ExpansionWarning
-  , expandFilePath
+import Dojang.Types.FileRoute
+  ( FileRoute (..)
+  , RouteWarning (..)
+  , routePath
   )
-import Dojang.Types.FileRoute (FileRoute (..), dispatch)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.Repository (Repository (..))
 import System.FilePattern (FilePattern)
@@ -113,15 +110,6 @@ data FileCorrespondence = FileCorrespondence
   deriving (Eq, Ord, Show)
 
 
--- | A warning that can occur during file correspondence.
-data FileCorrespondenceWarning
-  = -- | A warning that can occur during environment predicate evaluation.
-    EnvironmentPredicateWarning EvaluationWarning
-  | -- | A warning that can occur during file path expression expansion.
-    FilePathExpressionWarning ExpansionWarning
-  deriving (Eq, Show)
-
-
 -- | Creates a list of file correspondences between the source files, the
 -- intermediate files, and the destination files.  Throws an 'IOError' if any of
 -- the files cannot be read.
@@ -129,9 +117,9 @@ makeCorrespond
   :: (HasCallStack, MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform file correspondence.
-  -> m ([FileCorrespondence], [FileCorrespondenceWarning])
+  -> m ([FileCorrespondence], [RouteWarning])
   -- ^ The file correspondences, along with a list of warnings that occurred
-  -- during file correspondence (if any).  The file paths in the returned
+  -- during path routing (if any).  The file paths in the returned
   -- 'FileCorrespondence' values are absolute, or relative to the current
   -- working directory at least.
 makeCorrespond ctx = do
@@ -149,34 +137,20 @@ makeCorrespond'
   -- ^ The environment to use when evaluating environment predicates.
   -> (EnvironmentVariable -> m (Maybe OsString))
   -- ^ A function that can look up an environment variable.
-  -> m ([FileCorrespondence], [FileCorrespondenceWarning])
+  -> m ([FileCorrespondence], [RouteWarning])
   -- ^ The file correspondences, along with a list of warnings that occurred
-  -- during file correspondence (if any).  The file paths in the returned
+  -- during path routing (if any).  The file paths in the returned
   -- 'FileCorrespondence' values are absolute, or relative to the current
   -- working directory at least.
 makeCorrespond' repo env lookupEnvVar = do
   paths <- forM fileRoutes $ \(src, route) -> do
-    let (dstPathExprs, warnings) = dispatch env route
-    return $ case dstPathExprs of
-      (Just dstPathExpr) : _ ->
-        (src, Just dstPathExpr, route.fileType, warnings)
-      _ ->
-        (src, Nothing, route.fileType, warnings)
-  let (srcPaths, dstPathExprs, fileTypes, evalWarningLists) = unzip4 paths
-  let paths' =
-        [ (srcPath, dstPathExpr, t)
-        | (srcPath, Just dstPathExpr, t) <- zip3 srcPaths dstPathExprs fileTypes
-        ]
-  pathInfos <- forM paths' $ \(srcPath, dstPathExpr, fileType') -> do
-    (dstPath, warnings) <-
-      expandFilePath dstPathExpr lookupEnvVar (encodePath . unpack)
-    return (srcPath, dstPath, fileType', warnings)
-  let expansionWarnings =
-        [FilePathExpressionWarning w | (_, _, _, ws) <- pathInfos, w <- ws]
-  files <- forM pathInfos $ \(srcPath, dstAbsPath, fileType', _) -> do
+    (dstPath, warnings) <- routePath route env lookupEnvVar
+    return (src, dstPath, route.fileType, warnings)
+  let paths' = [(src, dst', ft) | (src, Just dst', ft, _) <- paths]
+  files <- forM paths' $ \(srcPath, dstAbsPath, ft) -> do
     let srcAbsPath = repo.sourcePath </> srcPath
     let interAbsPath = repo.intermediatePath </> srcPath
-    case fileType' of
+    case ft of
       Dojang.MonadFileSystem.Directory -> do
         fs <-
           makeCorrespondBetweenThreeDirs
@@ -202,9 +176,8 @@ makeCorrespond' repo env lookupEnvVar = do
       _ -> do
         f <- makeCorrespondBetweenThreeFiles interAbsPath srcAbsPath dstAbsPath
         return [f]
-  let evalWarnings =
-        [EnvironmentPredicateWarning w | ws <- evalWarningLists, w <- ws]
-  return (concat files, evalWarnings ++ expansionWarnings)
+  let warnings = [w | (_, _, _, ws) <- paths, w <- ws]
+  return (concat files, nub warnings)
  where
   manifest :: Manifest
   manifest = repo.manifest

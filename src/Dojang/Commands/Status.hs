@@ -28,7 +28,6 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
-  , FileCorrespondenceWarning (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
@@ -36,6 +35,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
+import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.MonikerName ()
 import Dojang.Types.Repository (Repository (..))
 
@@ -84,7 +84,7 @@ renderFileStat (Symlink _) = (Default, "L")
 
 
 -- TODO: This should be in a separate module:
-formatWarning :: FileCorrespondenceWarning -> Text
+formatWarning :: RouteWarning -> Text
 formatWarning (EnvironmentPredicateWarning (UndefinedMoniker moniker)) =
   "Reference to an undefined moniker: " <> original moniker.name
 formatWarning
@@ -93,6 +93,6 @@ formatWarning
 
 
 -- TODO: This should be in a separate module:
-printWarnings :: (MonadIO i) => [FileCorrespondenceWarning] -> App i ()
+printWarnings :: (MonadIO i) => [RouteWarning] -> App i ()
 printWarnings ws =
   forM_ ws $ printStderr' Warning . formatWarning
