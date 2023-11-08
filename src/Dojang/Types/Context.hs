@@ -11,6 +11,8 @@ module Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , RouteState (..)
+  , getRouteState
   , listFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeDirs
@@ -20,6 +22,8 @@ module Dojang.Types.Context
   ) where
 
 import Control.Monad (forM, when)
+import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List (isPrefixOf)
 import GHC.Stack (HasCallStack)
 import System.IO.Error (ioeSetFileName, isPermissionError)
 import Prelude hiding (readFile)
@@ -34,7 +38,9 @@ import Data.Map.Strict
   , unionWith
   , (!?)
   )
-import System.OsPath (OsPath, normalise, (</>))
+import System.Directory.OsPath (makeAbsolute)
+import System.FilePattern (FilePattern, matchMany)
+import System.OsPath (OsPath, joinPath, normalise, splitDirectories, (</>))
 import System.OsString (OsString)
 
 import Data.Set (toList, union)
@@ -46,7 +52,6 @@ import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 import Dojang.Types.Repository qualified (routePaths)
-import System.FilePattern (FilePattern)
 
 
 -- | The context in which repository operations are performed.
@@ -136,7 +141,7 @@ makeCorrespond
 makeCorrespond ctx = do
   (paths, warnings) <- routePaths ctx
   files <- forM paths $ \expanded -> do
-    let interAbsPath = repo.intermediatePath </> expanded.sourcePathInRepository
+    let interAbsPath = repo.intermediatePath </> expanded.routeName
     case expanded.fileType of
       Dojang.MonadFileSystem.Directory -> do
         fs <-
@@ -144,11 +149,7 @@ makeCorrespond ctx = do
             interAbsPath
             expanded.sourcePath
             expanded.destinationPath
-            ( findWithDefault
-                []
-                (normalise expanded.sourcePathInRepository)
-                ignorePatterns
-            )
+            (findWithDefault [] (normalise expanded.routeName) ignorePatterns)
         return
           [ correspond
             { source =
@@ -415,5 +416,51 @@ listFiles path ignorePatterns = do
           return $ FileEntry s $ Symlink target
     else return []
 
--- ignores :: (HasCallStack, MonadFileSystem m) => Context m -> OsPath -> m Bool
--- ignores ctx path = do
+
+-- | Represents the route state of a (potential) destination file
+-- in the repository.
+data RouteState
+  = -- | The file is routed.  The 'OsPath' is the name of the relevant route
+    -- name.
+    Routed OsPath
+  | -- | The file is routed but ignored.  The 'OsPath' is the name of
+    -- the relevant route name, and the 'FilePattern' is the ignore pattern
+    -- that matched the file.
+    Ignored OsPath FilePattern
+  | -- | The file is not routed at all.
+    NotRouted
+  deriving (Eq, Ord, Show)
+
+
+-- | Gets the route state of the given path.
+getRouteState
+  :: (HasCallStack, MonadFileSystem m, MonadIO m)
+  => Context m
+  -- ^ The context in which to perform path routing.
+  -> OsPath
+  -- ^ The path to get the route state of.
+  -> m (RouteState, [RouteWarning])
+  -- ^ The route state of the path, along with any warnings that were generated.
+getRouteState ctx path = do
+  absPath <- liftIO $ makeAbsolute path
+  let dirs = splitDirectories absPath
+  (routes, ws) <- routePaths ctx
+  states <- forM routes $ \route -> do
+    dstPath <- liftIO $ makeAbsolute route.destinationPath
+    let prefix = splitDirectories dstPath
+    if prefix `isPrefixOf` dirs
+      then do
+        let ignores =
+              findWithDefault
+                []
+                (normalise route.routeName)
+                ignorePatterns
+        relPath <- decodePath $ joinPath $ drop (length prefix) dirs
+        case matchMany [(i, i) | i <- ignores] [((), relPath)] of
+          (pattern, _, _) : _ -> return $ Ignored route.routeName pattern
+          _ -> return $ Routed route.routeName
+      else return NotRouted
+  return (minimum states, ws)
+ where
+  ignorePatterns :: Map OsPath [FilePattern]
+  ignorePatterns = ctx.repository.manifest.ignorePatterns

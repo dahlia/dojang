@@ -39,8 +39,8 @@ data RouteResult = RouteResult
   { sourcePath :: OsPath
   -- ^ The source path.  It is either absolute or relative to the current
   -- working directory.
-  , sourcePathInRepository :: OsPath
-  -- ^ The source path relative from the repository root.
+  , routeName :: OsPath
+  -- ^ The source path relative from the repository root, i.e., the route name.
   , destinationPath :: OsPath
   -- ^ The destination path.   It is either absolute or relative to
   -- the current working directory.

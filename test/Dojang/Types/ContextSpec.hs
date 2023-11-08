@@ -27,6 +27,8 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , RouteState (..)
+  , getRouteState
   , listFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeDirs
@@ -97,7 +99,7 @@ spec = do
           monikerMap
           fileRoutes
           dirRoutes
-          []
+          [(foo, ["ignore-*"])]
 
   let repositoryFixture repoPath = do
         -- The tree of the repository fixture looks like this:
@@ -146,13 +148,13 @@ spec = do
     sortOn (.sourcePath) results
       `shouldBe` [ RouteResult
                     { sourcePath = tmpDir </> src </> bar
-                    , sourcePathInRepository = bar
+                    , routeName = bar
                     , destinationPath = tmpDir </> bar
                     , fileType = Dojang.MonadFileSystem.Directory
                     }
                  , RouteResult
                     { sourcePath = tmpDir </> src </> foo
-                    , sourcePathInRepository = foo
+                    , routeName = foo
                     , destinationPath = tmpDir </> foo
                     , fileType = Dojang.MonadFileSystem.Directory
                     }
@@ -757,3 +759,15 @@ spec = do
             )
           )
         ]
+
+  specify "getRouteState" $ withContextFixture $ \ctx tmpDir -> do
+    (state, ws) <- getRouteState ctx (tmpDir </> src)
+    ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+    state `shouldBe` NotRouted
+    (state', ws') <- getRouteState ctx (tmpDir </> foo </> foo)
+    ws' `shouldBe` ws
+    state' `shouldBe` Routed foo
+    ignoreMe <- encodePath "ignore-me"
+    (state'', ws'') <- getRouteState ctx (tmpDir </> foo </> ignoreMe)
+    ws'' `shouldBe` ws
+    state'' `shouldBe` Ignored foo "ignore-*"
