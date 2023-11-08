@@ -13,14 +13,13 @@ module Dojang.Types.Context
   , FileStat (..)
   , listFiles
   , makeCorrespond
-  , makeCorrespond'
   , makeCorrespondBetweenThreeDirs
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
+  , routePaths
   ) where
 
 import Control.Monad (forM, when)
-import Data.List (nub)
 import GHC.Stack (HasCallStack)
 import System.IO.Error (ioeSetFileName, isPermissionError)
 import Prelude hiding (readFile)
@@ -32,7 +31,6 @@ import Data.Map.Strict
   , findWithDefault
   , fromList
   , keysSet
-  , toList
   , unionWith
   , (!?)
   )
@@ -44,13 +42,10 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import Dojang.Types.FileRoute
-  ( FileRoute (..)
-  , RouteWarning (..)
-  , routePath
-  )
+import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.Repository qualified (routePaths)
 import System.FilePattern (FilePattern)
 
 
@@ -63,6 +58,22 @@ data (MonadFileSystem m) => Context m = Context
   , environmentVariableGetter :: EnvironmentVariable -> m (Maybe OsString)
   -- ^ A function to look up an environment variable.
   }
+
+
+-- | Route the paths in the repository.  This will return a list of expanded
+-- paths, along with any warnings that were generated.  Null routes will be
+-- ignored.
+routePaths
+  :: (MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform path routing.
+  -> m ([RouteResult], [RouteWarning])
+  -- ^ The expanded paths, along with any warnings that were generated.
+routePaths ctx =
+  Dojang.Types.Repository.routePaths
+    ctx.repository
+    ctx.environment
+    ctx.environmentVariableGetter
 
 
 -- | The small stat of a file.
@@ -123,41 +134,18 @@ makeCorrespond
   -- 'FileCorrespondence' values are absolute, or relative to the current
   -- working directory at least.
 makeCorrespond ctx = do
-  makeCorrespond' ctx.repository ctx.environment ctx.environmentVariableGetter
-
-
--- | Creates a list of file correspondences between the source files, the
--- intermediate files, and the destination files.  Throws an 'IOError' if any of
--- the files cannot be read.
-makeCorrespond'
-  :: (HasCallStack, MonadFileSystem m)
-  => Repository
-  -- ^ The repository.
-  -> Environment
-  -- ^ The environment to use when evaluating environment predicates.
-  -> (EnvironmentVariable -> m (Maybe OsString))
-  -- ^ A function that can look up an environment variable.
-  -> m ([FileCorrespondence], [RouteWarning])
-  -- ^ The file correspondences, along with a list of warnings that occurred
-  -- during path routing (if any).  The file paths in the returned
-  -- 'FileCorrespondence' values are absolute, or relative to the current
-  -- working directory at least.
-makeCorrespond' repo env lookupEnvVar = do
-  paths <- forM fileRoutes $ \(src, route) -> do
-    (dstPath, warnings) <- routePath route env lookupEnvVar
-    return (src, dstPath, route.fileType, warnings)
-  let paths' = [(src, dst', ft) | (src, Just dst', ft, _) <- paths]
-  files <- forM paths' $ \(srcPath, dstAbsPath, ft) -> do
-    let srcAbsPath = repo.sourcePath </> srcPath
-    let interAbsPath = repo.intermediatePath </> srcPath
-    case ft of
+  (paths, warnings) <- routePaths ctx
+  files <- forM paths $ \expanded -> do
+    let srcAbsPath = repo.sourcePath </> expanded.sourcePath
+    let interAbsPath = repo.intermediatePath </> expanded.sourcePath
+    case expanded.fileType of
       Dojang.MonadFileSystem.Directory -> do
         fs <-
           makeCorrespondBetweenThreeDirs
             interAbsPath
             srcAbsPath
-            dstAbsPath
-            (findWithDefault [] (normalise srcPath) manifest.ignorePatterns)
+            expanded.destinationPath
+            (findWithDefault [] (normalise expanded.sourcePath) ignorePatterns)
         return
           [ correspond
             { source =
@@ -168,21 +156,25 @@ makeCorrespond' repo env lookupEnvVar = do
                   }
             , destination =
                 correspond.destination
-                  { path = dstAbsPath </> correspond.destination.path
+                  { path =
+                      expanded.destinationPath </> correspond.destination.path
                   }
             }
           | correspond <- fs
           ]
       _ -> do
-        f <- makeCorrespondBetweenThreeFiles interAbsPath srcAbsPath dstAbsPath
+        f <-
+          makeCorrespondBetweenThreeFiles
+            interAbsPath
+            srcAbsPath
+            expanded.destinationPath
         return [f]
-  let warnings = [w | (_, _, _, ws) <- paths, w <- ws]
-  return (concat files, nub warnings)
+  return (concat files, warnings)
  where
-  manifest :: Manifest
-  manifest = repo.manifest
-  fileRoutes :: [(OsPath, FileRoute)]
-  fileRoutes = Data.Map.Strict.toList manifest.fileRoutes
+  repo :: Repository
+  repo = ctx.repository
+  ignorePatterns :: Map OsPath [FilePattern]
+  ignorePatterns = repo.manifest.ignorePatterns
 
 
 makeCorrespondBetweenThreeFiles
@@ -419,3 +411,6 @@ listFiles path ignorePatterns = do
           target <- readSymlinkTarget $ path </> s
           return $ FileEntry s $ Symlink target
     else return []
+
+-- ignores :: (HasCallStack, MonadFileSystem m) => Context m -> OsPath -> m Bool
+-- ignores ctx path = do

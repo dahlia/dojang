@@ -1,3 +1,4 @@
+{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -17,18 +18,21 @@ import Test.Hspec (Spec, describe, it, runIO, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (Entry (..), makeFixtureTree, withTempDir)
 import Dojang.Types.Context
-  ( FileCorrespondence (..)
+  ( Context (..)
+  , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
   , listFiles
-  , makeCorrespond'
+  , makeCorrespond
   , makeCorrespondBetweenThreeDirs
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
+  , routePaths
   )
 import Dojang.Types.Environment
   ( Architecture (..)
@@ -41,7 +45,7 @@ import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
 
 
 spec :: Spec
@@ -124,15 +128,36 @@ spec = do
                 manifest'
         return repo
 
-  specify "makeCorrespond'" $ withTempDir $ \tmpDir _ -> do
-    createDirectory $ tmpDir </> src
-    createDirectory $ tmpDir </> foo
-    repo <- repositoryFixture (tmpDir </> src)
-    (corresponds, ws) <- makeCorrespond' repo (Environment Linux X86_64) $ \e ->
-      return $ case e of
-        "FOO" -> Just $ tmpDir </> foo
-        "BAR" -> Just $ tmpDir </> bar
-        _ -> Nothing
+  let withContextFixture action = withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> foo
+        repo <- repositoryFixture $ tmpDir </> src
+        let ctx = Context repo (Environment Linux X86_64) $ \e ->
+              return $ case e of
+                "FOO" -> Just $ tmpDir </> foo
+                "BAR" -> Just $ tmpDir </> bar
+                "BAZ" -> Just $ tmpDir </> baz
+                _ -> Nothing
+        action ctx tmpDir
+
+  specify "routePaths" $ withContextFixture $ \ctx tmpDir -> do
+    (results, ws) <- routePaths ctx
+    ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+    sortOn (.sourcePath) results
+      `shouldBe` [ RouteResult
+                    { sourcePath = bar
+                    , destinationPath = tmpDir </> bar
+                    , fileType = Dojang.MonadFileSystem.Directory
+                    }
+                 , RouteResult
+                    { sourcePath = foo
+                    , destinationPath = tmpDir </> foo
+                    , fileType = Dojang.MonadFileSystem.Directory
+                    }
+                 ]
+
+  specify "makeCorrespond" $ withContextFixture $ \ctx tmpDir -> do
+    (corresponds, ws) <- makeCorrespond ctx
     ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
     sortOn (.source.path) corresponds
       `shouldBe` [ FileCorrespondence
