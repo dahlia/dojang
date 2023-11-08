@@ -145,12 +145,14 @@ spec = do
     ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
     sortOn (.sourcePath) results
       `shouldBe` [ RouteResult
-                    { sourcePath = bar
+                    { sourcePath = tmpDir </> src </> bar
+                    , sourcePathInRepository = bar
                     , destinationPath = tmpDir </> bar
                     , fileType = Dojang.MonadFileSystem.Directory
                     }
                  , RouteResult
-                    { sourcePath = foo
+                    { sourcePath = tmpDir </> src </> foo
+                    , sourcePathInRepository = foo
                     , destinationPath = tmpDir </> foo
                     , fileType = Dojang.MonadFileSystem.Directory
                     }

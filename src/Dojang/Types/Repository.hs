@@ -12,7 +12,7 @@ import Control.Monad (forM)
 import Data.List (nub)
 
 import Data.Map.Strict (toList)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, (</>))
 import System.OsString (OsString)
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem)
@@ -34,9 +34,16 @@ data Repository = Repository
   }
 
 
+-- | The expanded dispatch paths of a 'FileRoute'.
 data RouteResult = RouteResult
   { sourcePath :: OsPath
+  -- ^ The source path.  It is either absolute or relative to the current
+  -- working directory.
+  , sourcePathInRepository :: OsPath
+  -- ^ The source path relative from the repository root.
   , destinationPath :: OsPath
+  -- ^ The destination path.   It is either absolute or relative to
+  -- the current working directory.
   , fileType :: FileType
   }
   deriving (Eq, Show)
@@ -59,7 +66,10 @@ routePaths repo env lookupEnvVar = do
   paths <- forM fileRoutes $ \(src, route) -> do
     (dstPath, warnings) <- routePath route env lookupEnvVar
     return (src, dstPath, route.fileType, warnings)
-  let paths' = [RouteResult src dst' ft | (src, Just dst', ft, _) <- paths]
+  let paths' =
+        [ RouteResult (repo.sourcePath </> src) src dst' ft
+        | (src, Just dst', ft, _) <- paths
+        ]
   let warnings = [w | (_, _, _, ws) <- paths, w <- ws]
   return (paths', nub warnings)
  where

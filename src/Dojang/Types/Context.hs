@@ -136,20 +136,23 @@ makeCorrespond
 makeCorrespond ctx = do
   (paths, warnings) <- routePaths ctx
   files <- forM paths $ \expanded -> do
-    let srcAbsPath = repo.sourcePath </> expanded.sourcePath
-    let interAbsPath = repo.intermediatePath </> expanded.sourcePath
+    let interAbsPath = repo.intermediatePath </> expanded.sourcePathInRepository
     case expanded.fileType of
       Dojang.MonadFileSystem.Directory -> do
         fs <-
           makeCorrespondBetweenThreeDirs
             interAbsPath
-            srcAbsPath
+            expanded.sourcePath
             expanded.destinationPath
-            (findWithDefault [] (normalise expanded.sourcePath) ignorePatterns)
+            ( findWithDefault
+                []
+                (normalise expanded.sourcePathInRepository)
+                ignorePatterns
+            )
         return
           [ correspond
             { source =
-                correspond.source{path = srcAbsPath </> correspond.source.path}
+                correspond.source{path = expanded.sourcePath </> correspond.source.path}
             , intermediate =
                 correspond.intermediate
                   { path = interAbsPath </> correspond.intermediate.path
@@ -166,7 +169,7 @@ makeCorrespond ctx = do
         f <-
           makeCorrespondBetweenThreeFiles
             interAbsPath
-            srcAbsPath
+            expanded.sourcePath
             expanded.destinationPath
         return [f]
   return (concat files, warnings)
