@@ -24,8 +24,14 @@ module Dojang.Types.Context
 import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf)
+import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
-import System.IO.Error (ioeSetFileName, isPermissionError)
+import System.IO.Error
+  ( ioeSetErrorString
+  , ioeSetFileName
+  , isPermissionError
+  , mkIOError
+  )
 import Prelude hiding (readFile)
 
 import Control.Monad.Except (MonadError (..))
@@ -391,12 +397,13 @@ listFiles
   -> m [FileEntry]
   -- ^ The list of 'FileEntry' values in the directory.
 listFiles path ignorePatterns = do
+  isSymlink' <- isSymlink path
   isFile' <- isFile path
-  when isFile' $ do
+  when (isSymlink' || isFile') $ do
     path' <- decodePath path
     throwError
-      $ userError "listFiles: path is not a directory"
-      `ioeSetFileName` path'
+      $ mkIOError InappropriateType "listFiles" Nothing (Just path')
+      `ioeSetErrorString` "not a directory"
   exists' <- exists path
   if exists'
     then do

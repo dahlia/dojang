@@ -17,6 +17,10 @@ fileWriteError :: ExitCode
 fileWriteError = ExitFailure 2
 
 
+fileNotFoundError :: ExitCode
+fileNotFoundError = ExitFailure 3
+
+
 manifestUninitialized :: ExitCode
 manifestUninitialized = ExitFailure 10
 
@@ -39,3 +43,15 @@ envFileReadError = ExitFailure 21
 
 conflictError :: ExitCode
 conflictError = ExitFailure 30
+
+
+sourceCannotBeTargetError :: ExitCode
+sourceCannotBeTargetError = ExitFailure 31
+
+
+fileNotRoutedError :: ExitCode
+fileNotRoutedError = ExitFailure 32
+
+
+ignoredFileError :: ExitCode
+ignoredFileError = ExitFailure 33

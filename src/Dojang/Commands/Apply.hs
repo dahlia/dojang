@@ -79,6 +79,7 @@ apply force = do
       return ExitSuccess
 
 
+-- TODO: This should be in another module:
 filterConflicts :: [FileCorrespondence] -> [FileCorrespondence]
 filterConflicts = filter $ \c -> case (c.sourceDelta, c.destinationDelta) of
   (Unchanged, _) -> False
@@ -114,30 +115,30 @@ printSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
 printSyncOp (RemoveDirs path) = do
   pathStyle <- pathStyleFor stderr
   path' <- decodePath $ addTrailingPathSeparator path
-  printStderr ("Removed " <> pathStyle (pack path') <> " (and its children).")
+  printStderr ("Remove " <> pathStyle (pack path') <> " (and its children)...")
 printSyncOp (RemoveFile path) = do
   pathStyle <- pathStyleFor stderr
   path' <- decodePath path
-  printStderr ("Removed " <> pathStyle (pack path') <> ".")
+  printStderr ("Remove " <> pathStyle (pack path') <> "...")
 printSyncOp (CopyFile src dst) = do
   pathStyle <- pathStyleFor stderr
   src' <- decodePath src
   dst' <- decodePath dst
   printStderr
-    ( "Copied "
+    ( "Copy "
         <> pathStyle (pack src')
         <> " to "
         <> pathStyle (pack dst')
-        <> "."
+        <> "..."
     )
 printSyncOp (CreateDir path) = do
   pathStyle <- pathStyleFor stderr
   path' <- decodePath $ addTrailingPathSeparator path
-  printStderr ("Created " <> pathStyle (pack path') <> ".")
+  printStderr ("Create " <> pathStyle (pack path') <> "...")
 printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
   path' <- decodePath $ addTrailingPathSeparator path
-  printStderr ("Created " <> pathStyle (pack path') <> " (and its ancestors).")
+  printStderr ("Create " <> pathStyle (pack path') <> " (and its ancestors)...")
 
 
 doSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()

@@ -44,6 +44,7 @@ import Options.Applicative
   , progDesc
   , short
   , showDefault
+  , some
   , str
   , subparser
   , switch
@@ -64,6 +65,7 @@ import Dojang.Commands.Apply qualified (apply)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
+import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status qualified (status)
 import Dojang.ExitCodes (unhandledError)
 import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
@@ -237,6 +239,20 @@ cmdP =
                   <**> helper
               )
               (progDesc "Show status of repository and target tree")
+          )
+        <> command
+          "reflect"
+          ( info
+              ( Dojang.Commands.Reflect.reflect
+                  <$> switch
+                    ( long "force"
+                        <> short 'f'
+                        <> help
+                          "Enforce reflecting if there are ignorable errors"
+                    )
+                  <*> some (argument str $ metavar "FILE")
+              )
+              (progDesc "Let the repository reflect the target file")
           )
         <> command
           "apply"

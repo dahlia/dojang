@@ -6,8 +6,13 @@
 
 module Dojang.Types.ContextSpec (spec) where
 
-import Data.List (sort, sortOn)
-import System.IO.Error (ioeGetErrorString, ioeGetFileName)
+import Data.List (isInfixOf, sort, sortOn)
+import System.IO.Error
+  ( ioeGetErrorString
+  , ioeGetErrorType
+  , ioeGetFileName
+  , ioeGetLocation
+  )
 import Prelude hiding (readFile, writeFile)
 
 import Data.ByteString qualified (length)
@@ -48,6 +53,7 @@ import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import GHC.IO.Exception (IOErrorType (InappropriateType))
 
 
 spec :: Spec
@@ -269,8 +275,10 @@ spec = do
     it "only accepts a directory path" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- writeFile (tmpDir </> foo) "foo"
       listFiles (tmpDir </> foo) [] `shouldThrow` \e ->
-        (ioeGetErrorString e == "listFiles: path is not a directory")
+        (ioeGetErrorType e == InappropriateType)
+          && (ioeGetLocation e == "listFiles")
           && (ioeGetFileName e == Just (tmpDir' `combine` "foo"))
+          && ("not a directory" `isInfixOf` show e)
 
   specify "makeCorrespondBetweenThreeFiles" $ withTempDir $ \tmpDir _ -> do
     let makeCorrespond_ =
