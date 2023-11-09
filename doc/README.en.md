@@ -3,8 +3,7 @@
 
 ----
 
-<img src="../cat-pow.svg" style="float:left;margin-right:0.5rem;">
-
+![](../cat-pow.svg)
 Dojang docs: table of contents
 ==============================
 

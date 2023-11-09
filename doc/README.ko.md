@@ -3,8 +3,7 @@
 
 ----
 
-<img src="../cat-pow.svg" style="float:left;margin-right:0.5rem;">
-
+![](../cat-pow.svg)
 Dojang 문서: 목차
 =================
 

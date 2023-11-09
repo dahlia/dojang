@@ -2,8 +2,7 @@
 
 ----
 
-<img src="cat-pow.svg" style="float:left;margin-right:0.5rem;">
-
+![](cat-pow.svg)
 Dojang: 크로스플랫폼 닷파일 관리자
 ==================================
 
