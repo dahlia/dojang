@@ -11,7 +11,6 @@ import Control.Applicative (Alternative ((<|>)), optional, (<**>))
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Maybe (catMaybes, maybeToList)
-import Data.Version (showVersion)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
@@ -69,7 +68,7 @@ import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status qualified (status)
 import Dojang.ExitCodes (unhandledError)
 import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
-import Paths_dojang qualified as Meta
+import Dojang.Version (toString, version)
 
 
 intermediateDirname :: OsPath
@@ -307,7 +306,7 @@ parserPrefs = defaultPrefs
 
 versionCmd :: (MonadIO i) => App i ExitCode
 versionCmd = do
-  liftIO $ putStrLn $ "dojang " <> showVersion Meta.version
+  liftIO $ putStrLn $ "dojang " <> toString version
   return ExitSuccess
 
 

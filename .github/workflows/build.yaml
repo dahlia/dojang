@@ -85,7 +85,15 @@ jobs:
         else
           curl -sSL https://get.haskellstack.org/ | sh
         fi
-    - run: >-
+    - if: github.ref_type != 'tag'
+      run: >-
+        stack build
+        --ghc-options=-O2
+        --copy-bins
+        --local-bin-path="${{ runner.temp }}/dojang-bins/"
+        --ghc-options=-DDOJANG_DEV_BUILD=${{ github.run_number }}
+    - if: github.ref_type == 'tag'
+      run: >-
         stack build
         --ghc-options=-O2
         --copy-bins
@@ -122,4 +130,4 @@ jobs:
       with:
         path: ${{ runner.temp }}/dojang-*-*-*.*
 
-# cSpell:ignore allejo codecov dasel popd pushd xlarge
+# cSpell:ignore allejo codecov dasel DDOJANG popd pushd mikepenz xlarge

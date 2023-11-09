@@ -52,6 +52,7 @@ library:
     filepattern: ">=0.1.3 && <2"
     fortytwo: ">=2 && < 2.1"
     parser-combinators: ">=1 && <2"
+    semver: ">=0.4 && <0.5"
   ghc-options:
   # cSpell:disable
   - -threaded
