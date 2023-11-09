@@ -49,7 +49,6 @@ import Options.Applicative
   , switch
   , value
   )
-import Options.Applicative.Path (hyphen, pathOption, period)
 import System.OsPath (OsPath, encodeFS)
 import TextShow (TextShow (showt))
 
@@ -69,6 +68,7 @@ import Dojang.Commands.Status qualified (status)
 import Dojang.ExitCodes (unhandledError)
 import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
 import Dojang.Version (toString, version)
+import Options.Applicative.Path (hyphen, pathArgument, pathOption, period)
 
 
 intermediateDirname :: OsPath
@@ -90,12 +90,12 @@ appP :: (MonadFileSystem i, MonadIO i) => Parser (AppEnv, App i ExitCode)
 appP = do
   sourceDirectory' <-
     pathOption
-      ( long "source-dir"
-          <> short 's'
+      ( long "repository-dir"
+          <> short 'r'
           <> metavar "PATH"
           <> value period
           <> showDefault
-          <> help "Source tree directory"
+          <> help "Repository (i.e., source tree) directory"
       )
   intermediateDirectory' <-
     pathOption
@@ -160,12 +160,12 @@ appP = do
 initPresetP :: Parser [InitPreset]
 initPresetP =
   (\a b c d e f' -> catMaybes [a, b, c, d, e, f'])
-    <$> f Amd64Linux ("linux-amd64", "linux-x86-64")
+    <$> f Amd64Linux ("linux-x86_64", "linux-arm64")
     <*> f Arm64Linux ("linux-aarch64", "linux-arm64")
     <*> f AppleSiliconMac ("macos-aarch64", "apple-silicon-mac")
     <*> f IntelMac ("macos-amd64", "intel-mac")
     <*> f Win64 ("windows-amd64", "win64")
-    <*> f WinArm64 ("windows-arm64", "win-arm64")
+    <*> f WinArm64 ("windows-aarch64", "win-arm64")
  where
   f :: InitPreset -> (String, String) -> Parser (Maybe InitPreset)
   f preset (longOpt, alias) =
@@ -249,7 +249,7 @@ cmdP =
                         <> help
                           "Enforce reflecting if there are ignorable errors"
                     )
-                  <*> some (argument str $ metavar "FILE")
+                  <*> some (pathArgument $ metavar "FILE")
               )
               (progDesc "Let the repository reflect the target file")
           )

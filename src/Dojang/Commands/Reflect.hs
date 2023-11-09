@@ -48,10 +48,9 @@ import Dojang.Types.Repository (Repository (..))
 
 
 reflect
-  :: (MonadFileSystem i, MonadIO i) => Bool -> [FilePath] -> App i ExitCode
-reflect force paths' = do
+  :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
+reflect force paths = do
   ctx <- ensureContext
-  paths <- mapM encodePath paths'
   nonExistents <- filterM (fmap not . exists) paths
   pathStyle <- pathStyleFor stderr
   unless (null nonExistents) $ do
