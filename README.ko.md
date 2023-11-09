@@ -1,4 +1,4 @@
-다른 언어로 보기: [English](README.en.md).
+*다른 언어로 보기: [English](README.en.md).*
 
 ----
 

@@ -21,6 +21,10 @@ fileNotFoundError :: ExitCode
 fileNotFoundError = ExitFailure 3
 
 
+unsupportedOnEnvError :: ExitCode
+unsupportedOnEnvError = ExitFailure 9
+
+
 manifestUninitialized :: ExitCode
 manifestUninitialized = ExitFailure 10
 

@@ -8,6 +8,7 @@ it returns the following exit codes, depending on the situation.
  -  1: Invalid command options or arguments.
  -  2: File write failure.
  -  3: File does not exist.
+ -  9: Not supported in the environment (platform).
  -  10: The manifest file is missing or the repository is not initialized.
  -  11: The manifest file cannot be read due to problems such as invalid format
     or permissions.

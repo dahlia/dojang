@@ -1,4 +1,4 @@
-Available in other languages: [한국어](README.ko.md).
+*Available in other languages: [한국어](README.ko.md).*
 
 ----
 

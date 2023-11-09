@@ -13,12 +13,14 @@ module Dojang.Commands.Init
   , initPresetName
   ) where
 
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Bifunctor (Bifunctor (second))
 import Data.Either (rights)
 import Data.String (IsString)
 import System.Exit (ExitCode (..))
 import System.IO (stderr)
+import System.Info qualified (os)
 import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo)
@@ -41,11 +43,13 @@ import FortyTwo.Prompts.Multiselect (multiselect)
 import Dojang.App (App, doesManifestExist, saveManifest)
 import Dojang.Commands
   ( Admonition (Error)
+  , codeStyleFor
+  , die'
   , pathStyleFor
   , printStderr
   , printStderr'
   )
-import Dojang.ExitCodes (manifestAlreadyExists)
+import Dojang.ExitCodes (manifestAlreadyExists, unsupportedOnEnvError)
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
@@ -94,6 +98,13 @@ init presets noInteractive = do
       return manifestAlreadyExists
     else do
       $(logInfo) "No manifest found."
+      when (System.Info.os == "mingw32" && not noInteractive) $ do
+        codeStyle <- codeStyleFor stderr
+        die' unsupportedOnEnvError
+          $ "We are sorry, but interactive mode is currently not supported on "
+          <> ("Windows.  Please use the " <> codeStyle "-I" <> "/")
+          <> (codeStyle "--no-interactive" <> " flag.  See also the issue:\n")
+          <> "\n  https://github.com/dahlia/dojang/issues/4"
       presets' <-
         if null presets && not noInteractive
           then askPresets
