@@ -216,8 +216,10 @@ init presets noInteractive = do
                       )
                     | MacOS `member` oses
                     ]
-                  ++ [ (monikerNames ! (Linux, Nothing), Nothing)
-                     | Windows `member` oses
+                  ++ [ ( monikerNames ! (Linux, Nothing)
+                       , Just posixXdgConfigHome
+                       )
+                     | Linux `member` oses
                      ]
                   ++ [ ( monikerNames ! (Windows, Nothing)
                        , Just windowsAppData
@@ -238,7 +240,7 @@ init presets noInteractive = do
                       )
                     | Windows `member` oses
                     ]
-                  ++ [ (posixName, Nothing)
+                  ++ [ (posixName, Just posixXdgConfigHome)
                      | Linux `member` oses || MacOS `member` oses
                      ]
               )
