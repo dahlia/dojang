@@ -80,6 +80,46 @@ linux = "${XDG_CONFIG_HOME:-$HOME/.config}"
       `app.getPath("appData")` API를 쓰면 환경에 따라 다른 경로를 반환합니다.
       마찬가지로, GLib의 `get_user_config_dir()` API도 비슷하게 동작합니다.
 
+### 무관한 파일 무시
+
+홈 디렉터리처럼 설정 파일 이외에도 다양한 자료가 있을 수 있는 경우,
+설정 파일과 무관한 파일들이 너무 많이 보여 `dojang status` 결과를 맨눈으로
+보기 어렵습니다.  게다가 파일이 너무 많을 경우 느려지기도 합니다.
+
+이를 피하려면 `ignores` 구획에 무시할 파일들을 지정해 주면 됩니다.
+예를 들어, 아래와 같이 `home` 라우팅을 추가했다고 합시다.
+
+~~~~ toml
+[dirs.home]
+linux = "$HOME"
+mac = "$HOME"
+win = "$UserProfile"
+~~~~
+
+이제 `home` 라우팅이 라우팅하는 디렉터리 안에 있는 파일들은 모두
+`dojang status` 결과에 나타납니다.  하지만 이 중에서도 *Documents* 디렉터리는
+무시하고 싶을 수 있습니다.  이럴 때는 아래와 같이 `ignores` 구획에 무시할
+파일들을 지정해 주면 됩니다.
+
+~~~~ toml
+[ignores]
+home = [
+  "Documents",
+]
+~~~~
+
+실제로는 홈 디렉터리에는 무시할 파일이 그렇지 않은 파일보다 훨씬 많은 탓에,
+그냥 모든 파일을 무시하는 게 대체로 더 편합니다.
+
+~~~~ toml
+[ignores]
+home = ["*"]
+~~~~
+
+이렇게 모든 파일을 무시해도 `dojang reflect -f` 커맨드로 파일을 하나씩
+지정하여 반영할 수 있습니다.  한 번 저장소에 추가된 파일은 무시 목록에
+있어도 관리됩니다.
+
 ### 라우팅이 겹치는 경우
 
 위 예시처럼 `app_config` 라우팅을 Linux에서 `XDG_CONFIG_HOME`,

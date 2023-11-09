@@ -250,7 +250,7 @@ init presets noInteractive = do
           `Map.union` xdgConfigHomRoutes
           `Map.union` applicationSupportRoutes
           `Map.union` appDataRoutes
-  let manifest = Manifest monikers fileRoutes []
+  let manifest = Manifest monikers fileRoutes [(homePath, ["*"])]
   repoDir <- asks (.sourceDirectory)
   pathStyle <- pathStyleFor stderr
   forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path, route') -> do

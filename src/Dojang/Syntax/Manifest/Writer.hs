@@ -22,7 +22,9 @@ import Data.Text (Text, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import System.OsPath (OsPath, decodeFS)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
-import Toml (encode)
+import Toml.Pretty (prettyTomlOrdered)
+import Toml.ToValue (ToTable (toTable))
+import Toml.Value (Table)
 
 import Dojang.MonadFileSystem
   ( FileType (Directory)
@@ -54,10 +56,20 @@ import Dojang.Types.MonikerName (MonikerName)
 -- | Encodes a 'Manifest' into a TOML document.
 writeManifest :: Manifest -> Text
 writeManifest manifest =
-  showt $ FromStringShow $ encode manifest'
+  showt $ FromStringShow $ prettyTomlOrdered order tbl
  where
   manifest' :: Manifest'
   manifest' = mapManifest' manifest
+  tbl :: Table
+  tbl = toTable manifest'
+  order :: [String] -> String -> Either Int String
+  order [] field = case field of
+    "dirs" -> Left 1
+    "files" -> Left 2
+    "ignores" -> Left 3
+    "monikers" -> Left 4
+    _ -> Right field
+  order _ field = Right field
 
 
 -- | Writes a 'Manifest' file to the given path.  Throw an 'IOError' if the

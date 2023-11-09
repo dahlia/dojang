@@ -82,6 +82,47 @@ expressions](file-path-expression.en.md) documentation.
       the environment.  In the same manner, GLib's `get_user_config_dir()` API
       behaves similarly.
 
+### Ignoring irrelevant files
+
+In some cases, like your home directory, where you might have a lot of stuff
+besides your config file, the results of `dojang status` can be overwhelming
+and difficult to see.  In addition, too many files can make it slow.
+
+To avoid this, you can specify which files to ignore in the `ignores` section.
+For example, suppose you added a `home` route like below:
+
+~~~~ toml
+[dirs.home]
+linux = "$HOME"
+mac = "$HOME"
+win = "$UserProfile"
+~~~~
+
+Now, any files inside the directory that the `home` routes to will appear in
+the results of `dojang status`.  However, you may want to ignore the *Documents*
+directory among them.  In this case, you can specify the files you want to
+ignore in the `ignores` section, as shown below:
+
+~~~~ toml
+[ignores]
+home = [
+  "Documents",
+]
+~~~~
+
+In practice, there are much more files in the home directory to ignore than not,
+so it's usually more convenient to just ignore everything:
+
+~~~~ toml
+[ignores]
+home = ["*"]
+~~~~
+
+Even if we ignore all the files like this, we can still reflect them by
+specifying them one by one with the `dojang reflect -f` command.
+Once added to the repository, files are managed even if they are on
+the ignore list.
+
 ### In case of overlapping routing
 
 Let's say you have routed `app_config` to `XDG_CONFIG_HOME` on Linux,

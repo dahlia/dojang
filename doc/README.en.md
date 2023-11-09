@@ -3,12 +3,15 @@
 
 ----
 
+<img src="../cat-pow.svg" style="float:left;margin-right:0.5rem;">
+
 Dojang docs: table of contents
 ==============================
 
 **Dojang** is a cross-platform dotfiles manager.  This documentation describes
 how to use it.
 
+ -  [Getting started](start.en.md)
  -  [Installation](installation.en.md)
  -  [Manifest](manifest.en.md)
  -  [Routing](routing.en.md)

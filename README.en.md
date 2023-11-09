@@ -2,6 +2,8 @@
 
 ----
 
+<img src="cat-pow.svg" style="float:left;margin-right:0.5rem;">
+
 Dojang: A cross-platform dotfiles manager
 ==========================================
 

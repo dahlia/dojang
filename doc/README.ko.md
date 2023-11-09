@@ -3,12 +3,15 @@
 
 ----
 
+<img src="../cat-pow.svg" style="float:left;margin-right:0.5rem;">
+
 Dojang 문서: 목차
 =================
 
 **Dojang**은 크로스플랫폼 닷파일(dotfiles) 관리자입니다.  이 문서는 Dojang의
 사용법을 설명합니다.
 
+ -  [시작하기](start.ko.md)
  -  [설치](installation.ko.md)
  -  [선언](manifest.ko.md)
  -  [라우팅](routing.ko.md)
