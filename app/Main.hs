@@ -337,9 +337,9 @@ main = withCP65001 $ do
   codeColor <- codeStyleFor stderr
   when (appEnv.dryRun && ops > 0) $ do
     printStderr' Note
-      $ "Since `"
+      $ "Since "
       <> codeColor "--dry-run"
-      <> "' was specified, those "
+      <> " was specified, those "
       <> showt ops
       <> " changes were not actually committed to the filesystem."
   exitWith exitCode

@@ -14,16 +14,17 @@ module Dojang.Commands.Init
   ) where
 
 import Control.Monad (when)
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bifunctor (Bifunctor (second))
 import Data.Either (rights)
 import Data.String (IsString)
-import System.Exit (ExitCode (..))
+import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import System.Info qualified (os)
 import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo)
+import Control.Monad.Reader (asks)
 import Data.CaseInsensitive (CI (original))
 import Data.HashMap.Strict qualified as HashMap (fromList)
 import Data.Map.Strict
@@ -37,20 +38,20 @@ import Data.Map.Strict
   )
 import Data.Map.Strict qualified as Map (empty, singleton, union)
 import Data.Set (singleton, size, toAscList, union)
-import Data.Text (pack)
+import Data.Text (Text, lines, pack, unlines)
 import FortyTwo.Prompts.Multiselect (multiselect)
 
-import Dojang.App (App, doesManifestExist, saveManifest)
+import Dojang.App (App, AppEnv (debug, dryRun), doesManifestExist, saveManifest)
 import Dojang.Commands
-  ( Admonition (Error)
+  ( Admonition (..)
   , codeStyleFor
-  , die'
   , pathStyleFor
   , printStderr
   , printStderr'
   )
 import Dojang.ExitCodes (manifestAlreadyExists, unsupportedOnEnvError)
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
+import Dojang.Syntax.Manifest.Writer (writeManifest)
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
@@ -100,11 +101,19 @@ init presets noInteractive = do
       $(logInfo) "No manifest found."
       when (System.Info.os == "mingw32" && not noInteractive) $ do
         codeStyle <- codeStyleFor stderr
-        die' unsupportedOnEnvError
+        printStderr' Error
           $ "We are sorry, but interactive mode is currently not supported on "
-          <> ("Windows.  Please use the " <> codeStyle "-I" <> "/")
-          <> (codeStyle "--no-interactive" <> " flag.  See also the issue:\n")
-          <> "\n  https://github.com/dahlia/dojang/issues/4"
+          <> "Windows.  See the relevant issue:\n"
+          <> "\n  https://github.com/dahlia/dojang/issues/4\n"
+        printStderr' Hint
+          $ ("Please use the " <> codeStyle "--linux-*" <> "/")
+          <> (codeStyle "--macos-*" <> "/" <> codeStyle "--windows-*")
+          <> " options with the "
+          <> (codeStyle "-I" <> "/" <> codeStyle "--no-interactive")
+          <> " flag.  See also "
+          <> (codeStyle "-h" <> "/" <> codeStyle "--help")
+          <> " for command-line options."
+        liftIO $ exitWith unsupportedOnEnvError
       presets' <-
         if null presets && not noInteractive
           then askPresets
@@ -239,7 +248,15 @@ init presets noInteractive = do
       filename <- saveManifest manifest
       filename' <- decodePath filename
       pathStyle <- pathStyleFor stderr
-      printStderr $ "Manifest created: " <> pathStyle (pack filename')
+      printStderr $ "Manifest created: " <> pathStyle (pack filename') <> "."
+      debug' <- asks (.debug)
+      dryRun' <- asks (.dryRun)
+      when (debug' || dryRun') $ do
+        let manifestText = indent $ writeManifest manifest
+        printStderr' Note
+          $ "The manifest file looks like below:\n\n"
+          <> manifestText
+          <> "\n"
       return ExitSuccess
 
 
@@ -284,3 +301,7 @@ askPresets = do
   namesToPresets =
     fromList
       [(initPresetName preset, preset) | preset <- [minBound .. maxBound]]
+
+
+indent :: Text -> Text
+indent = Data.Text.unlines . map ("  " <>) . Data.Text.lines

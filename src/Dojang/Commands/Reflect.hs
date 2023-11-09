@@ -12,11 +12,12 @@ import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
+import Control.Monad.Reader (asks)
 import Data.Text (pack)
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (OsPath, splitDirectories, takeDirectory)
 
-import Dojang.App (App, ensureContext)
+import Dojang.App (App, AppEnv (manifestFile), ensureContext)
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -84,13 +85,14 @@ reflect force paths' = do
     absPath' <- decodePath absPath
     case state of
       NotRouted -> do
+        manifestFile' <- asks (.manifestFile) >>= decodePath
         printWarnings ws
         printStderr'
           Error
           ("File " <> pathStyle (pack absPath') <> " is not routed.")
         printStderr'
           Hint
-          ("Add a route for it in " <> pathStyle "dojang.toml" <> ".")
+          ("Add a route for it in " <> pathStyle (pack manifestFile') <> ".")
         liftIO $ exitWith fileNotRoutedError
       Routed _ -> do
         return ws
