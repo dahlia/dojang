@@ -79,7 +79,7 @@ you can select everything you use.
 > **Note**
 >
 > On Windows, `dojang init` does not yet support interactive mode;
-> this will be fixed in the future (see issue #4).  Until then,
+> this will be fixed in the future (see issue [#4]).  Until then,
 > you can use the command line options to choose your device types.
 > Try `dojang init --help` to see what options are available.
 > For example, if you use both a Windows PC and an Intel Mac,
@@ -92,6 +92,8 @@ you can select everything you use.
 You can now open the manifest file and edit it as you want.
 For a detailed description of the manifest file,
 see the [manifest](manifest.en.md) docs.
+
+[#4]: https://github.com/dahlia/dojang/issues/4
 
 
 Checking things out
