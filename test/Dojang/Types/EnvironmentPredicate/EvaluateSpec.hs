@@ -11,13 +11,13 @@ import Test.Hspec.Hedgehog (forAll, hedgehog, (/==), (===))
 
 import Dojang.Gen qualified as Gen
 import Dojang.Types.Environment
-  ( Architecture (AArch64, X86_64)
+  ( Architecture (..)
   , Environment (Environment)
-  , OperatingSystem (Linux, MacOS)
+  , OperatingSystem (..)
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate
-  ( EvaluationWarning (UndefinedMoniker)
+  ( EvaluationWarning (..)
   , evaluate
   )
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -60,10 +60,18 @@ spec = do
     specify "OperatingSystem" $ do
       eval (OperatingSystem Linux) `shouldBe` (True, [])
       eval (OperatingSystem MacOS) `shouldBe` (False, [])
+      eval (OperatingSystem $ OtherOS "other")
+        `shouldBe` ( False
+                   , [UnrecognizedOperatingSystem $ OtherOS "other"]
+                   )
 
     specify "Architecture" $ do
       eval (Architecture X86_64) `shouldBe` (True, [])
       eval (Architecture AArch64) `shouldBe` (False, [])
+      eval (Architecture $ Etc "etc")
+        `shouldBe` ( False
+                   , [UnrecognizedArchitecture $ Etc "etc"]
+                   )
 
     specify "Moniker" $ do
       eval (Moniker linuxAmd64) `shouldBe` (True, [])

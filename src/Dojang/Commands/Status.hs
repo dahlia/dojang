@@ -17,6 +17,7 @@ import Data.Text (Text, pack)
 import System.Console.Pretty (Color (..))
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (addTrailingPathSeparator, makeRelative)
+import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, ensureContext)
 import Dojang.Commands
@@ -85,8 +86,13 @@ renderFileStat (Symlink _) = (Default, "L")
 
 -- TODO: This should be in a separate module:
 formatWarning :: RouteWarning -> Text
-formatWarning (EnvironmentPredicateWarning (UndefinedMoniker moniker)) =
-  "Reference to an undefined moniker: " <> original moniker.name
+formatWarning (EnvironmentPredicateWarning w) = case w of
+  (UndefinedMoniker moniker) ->
+    "Reference to an undefined moniker: " <> original moniker.name
+  (UnrecognizedOperatingSystem os) ->
+    "Unrecognized operating system: " <> showt (FromStringShow os)
+  (UnrecognizedArchitecture arch) ->
+    "Unrecognized architecture: " <> showt (FromStringShow arch)
 formatWarning
   (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) =
     "Reference to an undefined environment variable: " <> envVar

@@ -7,7 +7,11 @@ module Dojang.Types.EnvironmentPredicate.Evaluate
   , evaluate'
   ) where
 
-import Dojang.Types.Environment (Environment (architecture, operatingSystem))
+import Dojang.Types.Environment
+  ( Architecture (Etc)
+  , Environment (architecture, operatingSystem)
+  , OperatingSystem (OtherOS)
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
@@ -23,9 +27,13 @@ import Prelude hiding (lookup)
 
 
 -- | A warning that occurred during evaluation.
-newtype EvaluationWarning
+data EvaluationWarning
   = -- | A moniker was referenced that was not defined.
     UndefinedMoniker MonikerName
+  | -- | The operating system was not recognized.
+    UnrecognizedOperatingSystem OperatingSystem
+  | -- | The architecture was not recognized.
+    UnrecognizedArchitecture Architecture
   deriving (Eq, Show)
 
 
@@ -97,6 +105,14 @@ evaluate' environment resolver (Moniker monikerName) =
     Nothing -> (False, [UndefinedMoniker monikerName])
     Just predicate -> evaluate' environment resolver predicate
 evaluate' environment _ (OperatingSystem os) =
-  (os == environment.operatingSystem, [])
+  ( os == environment.operatingSystem
+  , case os of
+      OtherOS _ -> [UnrecognizedOperatingSystem os]
+      _ -> []
+  )
 evaluate' environment _ (Architecture arch) =
-  (arch == environment.architecture, [])
+  ( arch == environment.architecture
+  , case arch of
+      Etc _ -> [UnrecognizedArchitecture arch]
+      _ -> []
+  )
