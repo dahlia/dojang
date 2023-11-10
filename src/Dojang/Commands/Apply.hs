@@ -4,13 +4,14 @@
 
 module Dojang.Commands.Apply (apply) where
 
-import Control.Monad (forM_, void, when)
+import Control.Monad (filterM, forM_, void, when)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.Function ((&))
 import Data.List (nub, sort)
 import System.Exit (ExitCode (..))
 import System.IO (stderr)
+import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebugSH)
 import Data.Text (pack)
@@ -40,7 +41,7 @@ apply force = do
   ctx <- ensureContext
   (files, ws) <- makeCorrespond ctx
   $(logDebugSH) files
-  let conflicts = filterConflicts files
+  conflicts <- filterConflicts files
   pathStyle <- pathStyleFor stderr
   forM_ conflicts $ \c -> do
     srcPath <- decodePath c.source.path
@@ -80,14 +81,25 @@ apply force = do
 
 
 -- TODO: This should be in another module:
-filterConflicts :: [FileCorrespondence] -> [FileCorrespondence]
-filterConflicts = filter $ \c -> case (c.sourceDelta, c.destinationDelta) of
-  (Unchanged, _) -> False
-  (_, Unchanged) -> False
-  (Removed, Removed) -> False
-  (Added, Added) ->
-    not (c.source.stat == Directory && c.destination.stat == Directory)
-  _ -> True
+filterConflicts
+  :: (MonadFileSystem i, MonadIO i)
+  => [FileCorrespondence]
+  -> i [FileCorrespondence]
+filterConflicts = filterM $ \c -> case (c.sourceDelta, c.destinationDelta) of
+  (Unchanged, _) -> return False
+  (_, Unchanged) -> return False
+  (Removed, Removed) -> return False
+  (Added, Added) -> case (c.source.stat, c.destination.stat) of
+    (Directory, Directory) -> return False
+    (File srcSize, File dstSize) ->
+      if srcSize /= dstSize
+        then return True
+        else do
+          src <- readFile c.source.path
+          dst <- readFile c.destination.path
+          return (src /= dst)
+    _ -> return True
+  _ -> return True
 
 
 data SyncOp
