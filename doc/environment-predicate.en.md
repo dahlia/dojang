@@ -10,6 +10,7 @@ os = linux
 arch = "x86_64"
 os in (linux, freebsd, macos)
 arch not in (x86, "x86_64")
+kernel-release ^= "4.1"
 !(os in (linux, freebsd, macos) && arch = "x86_64" || os = openbsd)
 ~~~~
 
@@ -20,6 +21,8 @@ There are three fields that are subject to predication:
 
  -  `os`: operating system
  -  `arch`: processor architecture
+ -  `kernel`: kernel
+ -  `kernel-release`: kernel version
  -  `moniker`: moniker
 
 
@@ -29,13 +32,19 @@ Comparison operators
 There are four operators that can be used to compare against a target of
 a predicate:
 
-- `=`: is ...
-- `!=`: is not ...
-- `in`: is one of ...
-- not in`: not any of ...
+- `=`: is …
+- `!=`: is not …
+- `^=`: starts with … (only available for `kernel-release` field)
+- `$=`: ends with … (only available for `kernel-release` field)
+- `in`: is one of …
+- not in`: not any of …
 
 Comparison operators are always preceded by fields, followed by string literals
-after `=` and `!=`, and lists after `in` and `not in`.
+after `=`/`!=`/`^=`/`$=`, and lists after `in` and `not in`.
+
+> **Note**
+>
+> All comparison operators are case-insensitive.
 
 
 Right-hand side
@@ -46,9 +55,10 @@ Right-hand side
 String literals are representations of string values, such as `linux` and
 `"macos"`, and are of three types:
 
- -  Bare string literals: These are not enclosed in any quotation marks and can
-    consist of only alphabets and numbers.  Most values can be represented
-    this way, such as `linux`, `windows`, and `aarch64`.
+ -  Bare string literals: These are not enclosed in any quotation marks and
+    start with an alphabet, and can only contain alphabets and numbers.
+    Most values can be represented this way, such as `linux`, `windows`,
+    and `aarch64`.
  -  Double-quoted string literal: A string enclosed in double quotes, supporting
     C/Python-style escape-column syntax (e.g., `\0`, `\n`, `\"`, `\xff`,
     `\uffff`).  Double-quotes can be written literally without escape sequences.

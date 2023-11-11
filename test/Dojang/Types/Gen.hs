@@ -158,11 +158,16 @@ architecture =
     ]
 
 
+kernelName :: (MonadGen m) => m (CI Text)
+kernelName = ciText (constant 1 50) Gen.unicodeAll
+
+
+kernelRelease :: (MonadGen m) => m (CI Text)
+kernelRelease = ciText (constant 1 50) Gen.unicodeAll
+
+
 kernel :: (MonadGen m) => m Kernel
-kernel =
-  Kernel
-    <$> ciText (constant 1 50) Gen.unicodeAll
-    <*> ciText (constant 1 50) Gen.unicodeAll
+kernel = Kernel <$> kernelName <*> kernelRelease
 
 
 environment :: (MonadGen m) => m Environment
@@ -180,6 +185,10 @@ environmentPredicate' maxDepth =
       , Moniker <$> monikerName
       , OperatingSystem <$> operatingSystem
       , Architecture <$> architecture
+      , KernelName <$> kernelName
+      , KernelRelease <$> kernelRelease
+      , KernelReleasePrefix <$> (ciText (constant 0 50) Gen.unicodeAll)
+      , KernelReleaseSuffix <$> (ciText (constant 0 50) Gen.unicodeAll)
       ]
     ++ if maxDepth < 1
       then []

@@ -18,19 +18,22 @@ module Dojang.Syntax.EnvironmentPredicate.Parser
   , notEqualOp
   , notInOp
   , parse
+  , parseEnvironmentPredicate
+  , prefixOp
   , simpleExpression
   , singleQuoteStringLiteral
   , stringLiteral
   , strings
-  , parseEnvironmentPredicate
+  , suffixOp
   ) where
 
-import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
-import Dojang.Types.MonikerName (parseMonikerName)
 import Control.Applicative (optional, (<|>))
 import Control.Applicative.Combinators (choice, sepBy1, sepEndBy)
 import Control.Monad (void)
+import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.MonikerName (parseMonikerName)
 
+import Data.CaseInsensitive (mk)
 import Data.Char (isAlpha, isAlphaNum, isDigit)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.String (IsString (fromString))
@@ -111,6 +114,8 @@ simpleExpression = do
 data FieldOp
   = EqualOp Text
   | NotEqualOp Text
+  | PrefixOp Text
+  | SuffixOp Text
   | InOp [Text]
   | NotInOp [Text]
 
@@ -119,11 +124,21 @@ fieldOp :: Parser EnvironmentPredicate
 fieldOp = do
   space
   field' <- field
-  op <- choice [try equalOp, try notEqualOp, try inOp, notInOp]
+  op <-
+    choice
+      [ try equalOp
+      , try notEqualOp
+      , try inOp
+      , try notInOp
+      , if field' == KernelRelease' then try prefixOp else fail ""
+      , if field' == KernelRelease' then try suffixOp else fail ""
+      ]
   space
   return $ case op of
     EqualOp value -> makePredicate field' value
     NotEqualOp value -> Not $ makePredicate field' value
+    PrefixOp prefix -> KernelReleasePrefix $ mk prefix
+    SuffixOp suffix -> KernelReleaseSuffix $ mk suffix
     InOp [] -> Not Always
     InOp (x : xs) -> Or $ makePredicate field' <$> (x :| xs)
     NotInOp [] -> Always
@@ -132,6 +147,8 @@ fieldOp = do
   makePredicate :: Field -> Text -> EnvironmentPredicate
   makePredicate OS = OperatingSystem . fromString . unpack
   makePredicate Arch = Architecture . fromString . unpack
+  makePredicate Kernel = KernelName . fromString . unpack
+  makePredicate KernelRelease' = KernelRelease . fromString . unpack
   makePredicate Moniker' =
     either (const $ Not Always) Moniker . parseMonikerName
 
@@ -151,6 +168,22 @@ notEqualOp = do
   void $ string "!="
   space
   NotEqualOp <$> stringLiteral
+
+
+prefixOp :: Parser FieldOp
+prefixOp = do
+  space
+  void $ string "^="
+  space
+  PrefixOp <$> stringLiteral
+
+
+suffixOp :: Parser FieldOp
+suffixOp = do
+  space
+  void $ string "$="
+  space
+  SuffixOp <$> stringLiteral
 
 
 inOp :: Parser FieldOp
@@ -183,7 +216,7 @@ strings = do
   return members
 
 
-data Field = OS | Arch | Moniker'
+data Field = OS | Arch | Kernel | KernelRelease' | Moniker' deriving (Eq)
 
 
 field :: Parser Field
@@ -191,6 +224,8 @@ field =
   choice
     [ OS <$ string "os"
     , Arch <$ string "arch"
+    , KernelRelease' <$ string "kernel-release"
+    , Kernel <$ string "kernel"
     , Moniker' <$ string "moniker"
     ]
 

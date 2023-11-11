@@ -14,6 +14,7 @@ module Dojang.Types.EnvironmentPredicate
 import Data.List.NonEmpty (NonEmpty, filter, nonEmpty, nub, sortWith, toList)
 import Prelude hiding (filter)
 
+import Data.CaseInsensitive (CI)
 import Data.Hashable (Hashable (hashWithSalt))
 import Data.Text (Text)
 
@@ -41,6 +42,17 @@ data EnvironmentPredicate
   | -- | A predicate that matches to the given architecture (e.g. @x86_64@).
     -- For a list of possible values, see the 'System.Info.arch' field.
     Architecture Architecture
+  | -- | A predicate that matches to the given kernel name (e.g. @Darwin@).
+    KernelName (CI Text)
+  | -- | A predicate that exactly matches to the given kernel release
+    -- (e.g. @23.1.0@).
+    KernelRelease (CI Text)
+  | -- | A predicate that matches to the given kernel release prefix
+    -- (e.g. @23.1@ for @23.1.0@).
+    KernelReleasePrefix (CI Text)
+  | -- | A predicate that matches to the given kernel release suffix
+    -- (e.g. @amd64@ for @4.19.0-16-amd64@).
+    KernelReleaseSuffix (CI Text)
   deriving (Show)
 
 
@@ -59,6 +71,14 @@ instance Eq EnvironmentPredicate where
   OperatingSystem _ == _ = False
   Architecture arch == Architecture arch' = arch == arch'
   Architecture _ == _ = False
+  KernelName kernel == KernelName kernel' = kernel == kernel'
+  KernelName _ == _ = False
+  KernelRelease ver == KernelRelease ver' = ver == ver'
+  KernelRelease _ == _ = False
+  KernelReleasePrefix prefix == KernelReleasePrefix prefix' = prefix == prefix'
+  KernelReleasePrefix _ == _ = False
+  KernelReleaseSuffix suffix == KernelReleaseSuffix suffix' = suffix == suffix'
+  KernelReleaseSuffix _ == _ = False
 
 
 instance Hashable EnvironmentPredicate where
@@ -80,6 +100,14 @@ instance Hashable EnvironmentPredicate where
     salt `hashWithSalt` ("OperatingSystem" :: Text) `hashWithSalt` os'
   hashWithSalt salt (Architecture arch') =
     salt `hashWithSalt` ("Architecture" :: Text) `hashWithSalt` arch'
+  hashWithSalt salt (KernelName kernel) =
+    salt `hashWithSalt` ("KernelName" :: Text) `hashWithSalt` kernel
+  hashWithSalt salt (KernelRelease ver) =
+    salt `hashWithSalt` ("KernelRelease" :: Text) `hashWithSalt` ver
+  hashWithSalt salt (KernelReleasePrefix prefix) =
+    salt `hashWithSalt` ("KernelReleasePrefix" :: Text) `hashWithSalt` prefix
+  hashWithSalt salt (KernelReleaseSuffix suffix) =
+    salt `hashWithSalt` ("KernelReleaseSuffix" :: Text) `hashWithSalt` suffix
 
 
 normalizePredicateList

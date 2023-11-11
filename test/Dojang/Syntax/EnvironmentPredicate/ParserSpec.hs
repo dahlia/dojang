@@ -21,10 +21,12 @@ import Dojang.Syntax.EnvironmentPredicate.Parser
   , notEqualOp
   , notInOp
   , parseEnvironmentPredicate
+  , prefixOp
   , simpleExpression
   , singleQuoteStringLiteral
   , stringLiteral
   , strings
+  , suffixOp
   )
 import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
@@ -49,7 +51,6 @@ import Test.Hspec.Megaparsec
 import Text.Megaparsec (eof, parse)
 
 
-deriving instance Eq Field
 deriving instance Show Field
 deriving instance Eq FieldOp
 deriving instance Show FieldOp
@@ -93,16 +94,23 @@ spec = do
     parse p "" "! ( arch != aarch64 )"
       `shouldParse` Not (Not (Architecture AArch64))
 
-  specify "fieldOo" $ do
+  specify "fieldOp" $ do
     let p = fieldOp <* eof
     parse p "" "os=linux" `shouldParse` OperatingSystem Linux
     parse p "" " arch = 'x86_64' " `shouldParse` Architecture X86_64
+    parse p "" "kernel = Darwin" `shouldParse` KernelName "Darwin"
+    parse p "" "kernel-release=\"1.2.3\"" `shouldParse` KernelRelease "1.2.3"
     let Right fooBar = parseMonikerName "foo-bar"
     parse p "" " moniker == \"foo-bar\" " `shouldParse` Moniker fooBar
     parse p "" " moniker = 'invalid moniker' " `shouldParse` Not Always
     parse p "" " os != \"windows\" " `shouldParse` Not (OperatingSystem Windows)
     parse p "" "arch!=aarch64" `shouldParse` Not (Architecture AArch64)
+    parse p "" "kernel != Linux" `shouldParse` Not (KernelName "Linux")
+    parse p "" "kernel-release!='4.5.6'"
+      `shouldParse` Not (KernelRelease "4.5.6")
     parse p "" "moniker!='foo-bar'" `shouldParse` Not (Moniker fooBar)
+    parse p "" "kernel-release ^= '1.2'" `shouldParse` KernelReleasePrefix "1.2"
+    parse p "" "kernel-release$='2.3'" `shouldParse` KernelReleaseSuffix "2.3"
     parse p "" "os in ()" `shouldParse` Not Always
     parse p "" " arch  in  ( x86, \"x86_64\", ) "
       `shouldParse` Or [Architecture X86, Architecture X86_64]
@@ -117,6 +125,16 @@ spec = do
     parse p "" " arch not in () " `shouldParse` Always
     parse p "" "moniker not in ('foo-bar', baz,)"
       `shouldParse` And [Not $ Moniker fooBar, Not $ Moniker baz]
+    parse p "" "os ^= lin"
+      `shouldFailWith` err
+        3
+        ( utoks "^= "
+            <> etoks "!="
+            <> etoks "in"
+            <> etoks "not"
+            <> etoks "="
+            <> elabel "white space"
+        )
 
   specify "equalOp" $ do
     let p = equalOp <* eof
@@ -157,6 +175,44 @@ spec = do
       `shouldFailWith` err
         0
         (utoks "! " <> elabel "white space" <> etoks "!=")
+
+  specify "prefixOp" $ do
+    let p = prefixOp <* eof
+    parse p "" "^=foo" `shouldParse` PrefixOp "foo"
+    parse p "" " ^= foo" `shouldParse` PrefixOp "foo"
+    parse p "" "^='foo bar'" `shouldParse` PrefixOp "foo bar"
+    parse p "" " ^= \"foo bar\"" `shouldParse` PrefixOp "foo bar"
+    parse p "" "^="
+      `shouldFailWith` err
+        2
+        (ueof <> elabel "white space" <> elabel "string literal")
+    parse p "" "^= "
+      `shouldFailWith` err
+        3
+        (ueof <> elabel "white space" <> elabel "string literal")
+    parse p "" "^ = foo"
+      `shouldFailWith` err
+        0
+        (utoks "^ " <> elabel "white space" <> etoks "^=")
+
+  specify "suffixOp" $ do
+    let p = suffixOp <* eof
+    parse p "" "$=foo" `shouldParse` SuffixOp "foo"
+    parse p "" " $= foo" `shouldParse` SuffixOp "foo"
+    parse p "" "$='foo bar'" `shouldParse` SuffixOp "foo bar"
+    parse p "" " $= \"foo bar\"" `shouldParse` SuffixOp "foo bar"
+    parse p "" "$="
+      `shouldFailWith` err
+        2
+        (ueof <> elabel "white space" <> elabel "string literal")
+    parse p "" "$= "
+      `shouldFailWith` err
+        3
+        (ueof <> elabel "white space" <> elabel "string literal")
+    parse p "" "$ = foo"
+      `shouldFailWith` err
+        0
+        (utoks "$ " <> elabel "white space" <> etoks "$=")
 
   specify "inOp" $ do
     let p = inOp <* eof
@@ -212,11 +268,19 @@ spec = do
     let p = field <* eof
     parse p "" "os" `shouldParse` OS
     parse p "" "arch" `shouldParse` Arch
+    parse p "" "kernel" `shouldParse` Kernel
+    parse p "" "kernel-release" `shouldParse` KernelRelease'
     parse p "" "moniker" `shouldParse` Moniker'
     parse p "" "foo"
       `shouldFailWith` err
         0
-        (utoks "foo" <> etoks "arch" <> etoks "moniker" <> etoks "os")
+        ( utoks "foo"
+            <> etoks "arch"
+            <> etoks "kernel"
+            <> etoks "kernel-release"
+            <> etoks "moniker"
+            <> etoks "os"
+        )
 
   specify "stringLiteral" $ do
     let p = stringLiteral <* eof

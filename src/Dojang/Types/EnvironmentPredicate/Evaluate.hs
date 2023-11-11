@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE OverloadedRecordUpdate #-}
 
 module Dojang.Types.EnvironmentPredicate.Evaluate
   ( EvaluationWarning (..)
@@ -7,18 +6,21 @@ module Dojang.Types.EnvironmentPredicate.Evaluate
   , evaluate'
   ) where
 
+import Prelude hiding (length, lookup, take)
+
+import Data.CaseInsensitive (mk, original)
+import Data.HashMap.Strict (lookup)
+import Data.Text (Text, length, take, takeEnd)
+
 import Dojang.Types.Environment
   ( Architecture (Etc)
-  , Environment (architecture, operatingSystem)
+  , Environment (..)
+  , Kernel (..)
   , OperatingSystem (OtherOS)
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
-
-import Data.HashMap.Strict (lookup)
-
-import Prelude hiding (lookup)
 
 
 -- $setup
@@ -116,3 +118,21 @@ evaluate' environment _ (Architecture arch) =
       Etc _ -> [UnrecognizedArchitecture arch]
       _ -> []
   )
+evaluate' environment _ (KernelName kernel) =
+  (kernel == environment.kernel.name, [])
+evaluate' environment _ (KernelRelease ver) =
+  (ver == environment.kernel.release, [])
+evaluate' environment _ (KernelReleasePrefix prefix) =
+  (length rel >= prefixLen && mk (take prefixLen rel) == prefix, [])
+ where
+  rel :: Text
+  rel = original environment.kernel.release
+  prefixLen :: Int
+  prefixLen = length $ original prefix
+evaluate' environment _ (KernelReleaseSuffix suffix) =
+  (length rel >= suffixLen && mk (takeEnd suffixLen rel) == suffix, [])
+ where
+  rel :: Text
+  rel = original environment.kernel.release
+  suffixLen :: Int
+  suffixLen = length $ original suffix

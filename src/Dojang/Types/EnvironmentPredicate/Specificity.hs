@@ -75,3 +75,7 @@ specificity monikerResolver (Moniker monikerName) =
     Just predicate -> specificity monikerResolver predicate
 specificity _ (OperatingSystem _) = Specificity 1 1
 specificity _ (Architecture _) = Specificity 1 1
+specificity _ (KernelName _) = Specificity 1 1
+specificity _ (KernelRelease _) = Specificity 1 1
+specificity _ (KernelReleasePrefix _) = Specificity 1 1
+specificity _ (KernelReleaseSuffix _) = Specificity 1 1
