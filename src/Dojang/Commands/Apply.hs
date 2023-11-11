@@ -28,10 +28,13 @@ import Dojang.Commands.Status (printWarnings, status)
 import Dojang.ExitCodes (conflictError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
-  ( FileCorrespondence (..)
+  ( Context
+  , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , RouteState (..)
+  , getRouteState
   , makeCorrespond
   )
 
@@ -68,14 +71,13 @@ apply force = do
       when debug' (void $ status False)
       (files', _) <- makeCorrespond ctx
       $(logDebugSH) files'
-      let ops' =
-            syncIntermediateToDestination
-              [ (fc.intermediate, fc.destination, fc.destinationDelta)
-              | fc <- files'
-              ]
-              & nub
-              . sort
-      forM_ ops' $ \path -> printSyncOp path >> doSyncOp path
+      ops' <-
+        syncIntermediateToDestination
+          ctx
+          [ (fc.intermediate, fc.destination, fc.destinationDelta)
+          | fc <- files'
+          ]
+      forM_ (nub $ sort ops') $ \path -> printSyncOp path >> doSyncOp path
       printWarnings ws
       return ExitSuccess
 
@@ -186,21 +188,30 @@ syncSourceToIntermediate files =
 
 
 syncIntermediateToDestination
-  :: [(FileEntry, FileEntry, FileDeltaKind)]
-  -> [SyncOp]
-syncIntermediateToDestination files =
-  concat
+  :: (MonadFileSystem i, MonadIO i)
+  => Context i
+  -> [(FileEntry, FileEntry, FileDeltaKind)]
+  -> i [SyncOp]
+syncIntermediateToDestination ctx files =
+  (fmap concat . sequence)
     [ case delta of
-      Unchanged -> []
+      Unchanged -> return []
       Removed ->
         if from.stat == Directory
-          then [CreateDirs to.path]
-          else [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
+          then return [CreateDirs to.path]
+          else return [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
       Modified ->
         case (from.stat, to.stat) of
-          (Directory, _) -> [RemoveFile to.path, CreateDir to.path]
-          (_, Directory) -> [RemoveDirs to.path, CopyFile from.path to.path]
-          _ -> [CopyFile from.path to.path]
-      Added -> []
+          (Directory, _) -> return [RemoveFile to.path, CreateDir to.path]
+          (_, Directory) -> return [RemoveDirs to.path, CopyFile from.path to.path]
+          _ -> return [CopyFile from.path to.path]
+      Added -> do
+        (state, _) <- getRouteState ctx to.path
+        case state of
+          Ignored _ _ -> return []
+          _ ->
+            if to.stat == Directory
+              then return [RemoveDirs to.path]
+              else return [RemoveFile to.path]
     | (from, to, delta) <- files
     ]

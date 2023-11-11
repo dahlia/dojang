@@ -439,13 +439,13 @@ data RouteState
   deriving (Eq, Ord, Show)
 
 
--- | Gets the route state of the given path.
+-- | Gets the route state of the given path (which is a potential destination).
 getRouteState
   :: (HasCallStack, MonadFileSystem m, MonadIO m)
   => Context m
   -- ^ The context in which to perform path routing.
   -> OsPath
-  -- ^ The path to get the route state of.
+  -- ^ The path (which is a potential destination) to get the route state of.
   -> m (RouteState, [RouteWarning])
   -- ^ The route state of the path, along with any warnings that were generated.
 getRouteState ctx path = do
