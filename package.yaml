@@ -52,6 +52,7 @@ library:
     filepattern: ">=0.1.3 && <2"
     fortytwo: ">=2 && < 2.1"
     parser-combinators: ">=1 && <2"
+    process: ">=1.6 && <2"
     semver: ">=0.4 && <0.5"
   ghc-options:
   # cSpell:disable
@@ -87,6 +88,7 @@ tests:
     ghc-options: *executable-ghc-options
     dependencies:
       *name : ">0"
+      # cSpell:disable
       hedgehog: ">=1.2 && <2"
       hspec: ">=2.10.10 && <2.11"
       hspec-discover: ">=2.10.10 && <2.11"
@@ -95,4 +97,6 @@ tests:
       hspec-junit-formatter: ">=1.1.0.2 && <1.2"
       hspec-megaparsec: ">=2.2 && <2.3"
       random: ">=1.2 && <2"
+      regex-tdfa: "^>= 1.3.2"
       temporary: ">=1.3 && <1.4"
+      # cSpell:enable

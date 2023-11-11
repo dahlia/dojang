@@ -12,6 +12,7 @@ import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
+  , Kernel (..)
   , OperatingSystem (..)
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
@@ -63,15 +64,22 @@ spec = do
           :: Map OsPath FileRoute
 
   specify "evaluateRoutes" $ do
-    evaluateRoutes [] (Environment Linux X86_64) `shouldBe` ([], [])
-    evaluateRoutes routes (Environment Windows X86_64)
+    evaluateRoutes [] (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+      `shouldBe` ([], [])
+    evaluateRoutes
+      routes
+      ( Environment Windows X86_64
+          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      )
       `shouldBe` (
                    [ (bar, Root $ Just 'B')
                    , (baz, Substitution "BAZ")
                    ]
                  , [UndefinedMoniker undefined']
                  )
-    evaluateRoutes routes (Environment Linux AArch64)
+    evaluateRoutes
+      routes
+      (Environment Linux AArch64 $ Kernel "Linux" "6.5.9-300.fc35.aarch64")
       `shouldBe` (
                    [ (foo, Substitution "FOO")
                    , (bar, Substitution "BAR")
@@ -81,15 +89,22 @@ spec = do
 
   specify "evaluateRoutesWithFileTypes" $ do
     let eval = evaluateRoutesWithFileTypes
-    eval [] (Environment Linux X86_64) `shouldBe` ([], [])
-    eval routes (Environment Windows X86_64)
+    eval [] (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+      `shouldBe` ([], [])
+    eval
+      routes
+      ( Environment Windows X86_64
+          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      )
       `shouldBe` (
                    [ (bar, (Root $ Just 'B', Directory))
                    , (baz, (Substitution "BAZ", File))
                    ]
                  , [UndefinedMoniker undefined']
                  )
-    eval routes (Environment Linux AArch64)
+    eval
+      routes
+      (Environment Linux AArch64 $ Kernel "Linux" "6.5.9-300.fc35.aarch64")
       `shouldBe` (
                    [ (foo, (Substitution "FOO", Directory))
                    , (bar, (Substitution "BAR", Directory))

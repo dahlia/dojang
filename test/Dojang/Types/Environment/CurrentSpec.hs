@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Types.Environment.CurrentSpec (spec) where
@@ -5,20 +6,25 @@ module Dojang.Types.Environment.CurrentSpec (spec) where
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (..)
+  , Kernel (..)
   , OperatingSystem (..)
   )
 import Dojang.Types.Environment.Current
   ( currentArchitecture
   , currentEnvironment
+  , currentKernel
   , currentOperatingSystem
   , parseArchitecture
   , parseOperatingSystem
   )
 
+import Data.CaseInsensitive (original)
 import Data.String (IsString (fromString))
+import Data.Text (Text)
 import System.Info (arch, os)
 import Test.Hspec (Spec, specify)
-import Test.Hspec.Expectations.Pretty (shouldBe)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldSatisfy)
+import Text.Regex.TDFA ((=~))
 
 
 spec :: Spec
@@ -31,13 +37,15 @@ spec = do
     arch' <- currentArchitecture
     arch' `shouldBe` expectedArch
 
+  specify "currentKernel" $ do
+    kernel <- currentKernel
+    expectKernel kernel
+
   specify "currentEnvironment" $ do
     env <- currentEnvironment
-    env
-      `shouldBe` Environment
-        { operatingSystem = expectedOS
-        , architecture = expectedArch
-        }
+    env.operatingSystem `shouldBe` expectedOS
+    env.architecture `shouldBe` expectedArch
+    expectKernel env.kernel
 
   specify "parseOperatingSystem" $ do
     parseOperatingSystem "linux-android" `shouldBe` Android
@@ -69,3 +77,32 @@ expectedArch = case arch of
   "aarch64" -> AArch64
   "x86_64" -> X86_64
   arch' -> Etc $ fromString arch'
+
+
+expectKernel :: Kernel -> IO ()
+expectKernel = case os of
+  "darwin" -> expectMacOSKernel
+  "linux" -> expectLinuxKernel
+  "mingw32" -> expectWindowsKernel
+  _ -> \_ -> return ()
+
+
+expectMacOSKernel :: Kernel -> IO ()
+expectMacOSKernel kernel = do
+  original kernel.name `shouldBe` "Darwin"
+  original kernel.release
+    `shouldSatisfy` (=~ ("^[0-9]+\\.[0-9]+\\.[0-9]+$" :: Text))
+
+
+expectLinuxKernel :: Kernel -> IO ()
+expectLinuxKernel kernel = do
+  original kernel.name `shouldBe` "Linux"
+  original kernel.release
+    `shouldSatisfy` (=~ ("^[0-9]+\\.[0-9]+\\.?[0-9]+\\.[0-9]+(-|$)" :: Text))
+
+
+expectWindowsKernel :: Kernel -> IO ()
+expectWindowsKernel kernel = do
+  original kernel.name `shouldBe` "Microsoft Windows"
+  original kernel.release
+    `shouldSatisfy` (=~ ("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" :: Text))

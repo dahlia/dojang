@@ -7,13 +7,17 @@ Environment
 
 An **environment** is a set of basic attributes to distinguish between
 different devices to which config files will be applied,
-currently consisting of two things: the operating system (`os`) and
-the processor architecture (`arch`).[^1]  For example, a typical Windows PC
-probably has the following environment:
+currently consisting of three things: **operating system** (`os`), **processor
+architecture** (`arch`), and **kernel** (`kernel`).[^1]  For example,
+a typical Windows PC probably has the following environment:
 
 ~~~~ toml
 os = "windows"
 arch = "x86_64" # a 64-bit CPU from the Intel or AMD family
+
+[kernel]
+
+release = "10.0.23585.1001"  # Windows 11 22H2
 ~~~~
 
 Or, if you have a MacBook bought in 2022 or later, you probably have something
@@ -22,6 +26,10 @@ like below:
 ~~~~ toml
 os = "macos"
 arch = "aarch64" # Apple silicon
+
+[kernel]
+name = "Darwin"
+release = "23.1.0"  # macOS 14.1
 ~~~~
 
 [^1]: More may be added in the future.  For example, it could contain
@@ -38,6 +46,10 @@ your device as by running the `dojang env` command.
 $ dojang env
 os = "linux"
 arch = "x86_64"
+
+[kernel]
+name = "Linux"
+release = "5.10.0-8"
 ~~~~
 
 
@@ -70,6 +82,13 @@ the keywords that refer to them in Dojang:[^2].
 - Intel/AMD 64-bit: `x86_64`
 
 
+Kernel recognition
+------------------
+
+Dojang recognizes the kernel of the device it's running on.  The recognized
+kernel is derived from `uname -sr` for POSIX systems and `ver` for Windows.
+
+
 Overriding environment
 ----------------------
 
@@ -84,6 +103,10 @@ of `dojang env`:
 ~~~~ toml
 os = "linux"
 arch = "aarch64"
+
+[kernel]
+name = "Linux"
+release = "6.5.9-300.fc35.aarch64"
 ~~~~
 
 For your information, you can also use command `dojang env -o dojang-env.toml`

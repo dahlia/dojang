@@ -44,6 +44,7 @@ import Dojang.Types.Context
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (..)
+  , Kernel (..)
   , OperatingSystem (..)
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
@@ -140,12 +141,15 @@ spec = do
         createDirectory $ tmpDir </> src
         createDirectory $ tmpDir </> foo
         repo <- repositoryFixture $ tmpDir </> src
-        let ctx = Context repo (Environment Linux X86_64) $ \e ->
-              return $ case e of
-                "FOO" -> Just $ tmpDir </> foo
-                "BAR" -> Just $ tmpDir </> bar
-                "BAZ" -> Just $ tmpDir </> baz
-                _ -> Nothing
+        let ctx = Context
+              repo
+              (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ \e ->
+                return $ case e of
+                  "FOO" -> Just $ tmpDir </> foo
+                  "BAR" -> Just $ tmpDir </> bar
+                  "BAZ" -> Just $ tmpDir </> baz
+                  _ -> Nothing
         action ctx tmpDir
 
   specify "routePaths" $ withContextFixture $ \ctx tmpDir -> do

@@ -2,8 +2,8 @@ Environment predicate
 =====================
 
 An **environment predicate** is a small grammar that describes conditions on
-an environment.  Here are some examples of different environment predicates.
-One predicate per line:
+an [environment](environment.en.md).  Here are some examples of different
+environment predicates.  One predicate per line:
 
 ~~~~
 os = linux

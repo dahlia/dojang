@@ -1,3 +1,4 @@
+{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -39,6 +40,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Environment
   ( Architecture
   , Environment (..)
+  , Kernel (..)
   , OperatingSystem
   )
 
@@ -59,12 +61,33 @@ instance ToValue Architecture where
   toValue = toValue . original . (.identifier)
 
 
+instance FromValue Kernel where
+  fromValue =
+    parseTableFromValue
+      $ Kernel
+      <$> (fromString <$> reqKey "name")
+      <*> (fromString <$> reqKey "version")
+
+
+instance ToValue Kernel where
+  toValue = defaultTableToValue
+
+
+instance ToTable Kernel where
+  toTable kernel =
+    table
+      [ "name" .= original kernel.name
+      , "release" .= original kernel.release
+      ]
+
+
 instance FromValue Environment where
   fromValue =
     parseTableFromValue
       $ Environment
       <$> reqKey "os"
       <*> reqKey "arch"
+      <*> reqKey "kernel"
 
 
 instance ToValue Environment where
@@ -76,6 +99,7 @@ instance ToTable Environment where
     table
       [ "os" .= env.operatingSystem
       , "arch" .= env.architecture
+      , "kernel" .= env.kernel
       ]
 
 

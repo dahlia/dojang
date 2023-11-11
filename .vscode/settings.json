@@ -75,6 +75,7 @@
     "subexpression",
     "subparser",
     "systeminfo",
+    "TDFA",
     "ueof",
     "uncons",
     "unlines",

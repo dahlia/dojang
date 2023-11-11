@@ -13,7 +13,7 @@ import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotBe, shouldReturn)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (..))
-import Dojang.Types.Environment (Environment (Environment))
+import Dojang.Types.Environment (Environment (Environment), Kernel (Kernel))
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Moniker, OperatingSystem, Or)
   )
@@ -126,28 +126,44 @@ spec = do
         `shouldBe` ("[FileRoute " ++ show (route.predicates) ++ " Directory]")
 
   specify "dispatch" $ do
-    dispatch (Environment "linux" "x86_64") route
+    dispatch (Environment "linux" "x86_64" $ Kernel "Linux" "5.10.0-8") route
       `shouldBe` ([Just $ Substitution "HOME"], [])
-    dispatch (Environment "macos" "aarch64") route
+    dispatch (Environment "macos" "aarch64" $ Kernel "Darwin" "23.1.0") route
       `shouldBe` ([Just $ Substitution "HOME"], [])
-    dispatch (Environment "windows" "x86_64") route
+    dispatch
+      ( Environment "windows" "x86_64"
+          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      )
+      route
       `shouldBe` ([Just $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
-    dispatch (Environment "windows" "x86_64") route
+    dispatch
+      ( Environment "windows" "x86_64"
+          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      )
+      route
       `shouldBe` ([Just $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
     let withWarnings =
           fileRoute
             monikerMap
             (paths ++ [(moniker "non-existent", Just $ Root Nothing)])
             Directory
-    dispatch (Environment "linux" "x86_64") withWarnings
+    dispatch
+      (Environment "linux" "x86_64" $ Kernel "Linux" "5.10.0-8")
+      withWarnings
       `shouldBe` ( [Just $ Substitution "HOME"]
                  , [UndefinedMoniker (moniker "non-existent")]
                  )
 
   specify "routePath" $ do
-    routePath route (Environment "freebsd" "x86_64") (const $ return Nothing)
+    routePath
+      route
+      (Environment "freebsd" "x86_64" $ Kernel "FreeBSD" "13.2-RELEASE-p4")
+      (const $ return Nothing)
       `shouldReturn` (Nothing, [])
-    routePath route (Environment "linux" "x86_64") (const $ return Nothing)
+    routePath
+      route
+      (Environment "linux" "x86_64" $ Kernel "Linux" "5.10.0-8")
+      (const $ return Nothing)
       `shouldReturn` ( Just mempty
                      ,
                        [ FilePathExpressionWarning
@@ -157,6 +173,6 @@ spec = do
     home <- encodeFS "/home/hong"
     routePath
       route
-      (Environment "linux" "aarch64")
+      (Environment "linux" "aarch64" $ Kernel "Linux" "5.10.0-8")
       (const $ return $ Just $ home)
       `shouldReturn` (Just home, [])

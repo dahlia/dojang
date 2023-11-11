@@ -13,6 +13,7 @@ import Dojang.Gen qualified as Gen
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
+  , Kernel (..)
   , OperatingSystem (..)
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
@@ -50,7 +51,8 @@ spec = do
           , (linuxAmd64', Moniker linuxAmd64)
           ]
             :: HashMap MonikerName EnvironmentPredicate
-    let environment = Environment Linux X86_64
+    let kernel = Kernel "Linux" "5.10.0-8"
+    let environment = Environment Linux X86_64 kernel
     let eval = evaluate environment monikerMap
 
     specify "Always"

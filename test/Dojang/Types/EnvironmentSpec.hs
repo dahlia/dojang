@@ -113,6 +113,32 @@ spec = do
       arch' <- forAll Gen.architecture
       (hashWithSalt 0 arch == hashWithSalt 0 arch') === (arch == arch')
 
+  describe "Kernel" $ do
+    specify "Eq" $ hedgehog $ do
+      kernel <- forAll Gen.kernel
+      kernel' <- forAll Gen.kernel
+      (kernel == kernel') /== (kernel /= kernel')
+
+    specify "Ord" $ hedgehog $ do
+      kernel <- forAll Gen.kernel
+      kernel' <- forAll Gen.kernel
+      (kernel <= kernel') /== (kernel > kernel')
+      (kernel < kernel') /== (kernel >= kernel')
+      (kernel <= kernel) === True
+      (kernel >= kernel) === True
+      min kernel kernel' === if kernel <= kernel' then kernel else kernel'
+      max kernel kernel' === if kernel >= kernel' then kernel else kernel'
+
+    specify "Read, Show" $ hedgehog $ do
+      kernel <- forAll Gen.kernel
+      read (show kernel) === kernel
+      read (showList [kernel] "") === [kernel]
+
+    specify "Hashable" $ hedgehog $ do
+      kernel <- forAll Gen.kernel
+      kernel' <- forAll Gen.kernel
+      (hashWithSalt 0 kernel == hashWithSalt 0 kernel') === (kernel == kernel')
+
   describe "Environment" $ do
     specify "Eq" $ hedgehog $ do
       env <- forAll Gen.environment

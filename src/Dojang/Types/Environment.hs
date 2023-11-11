@@ -6,6 +6,7 @@
 module Dojang.Types.Environment
   ( Architecture (..)
   , Environment (..)
+  , Kernel (..)
   , OperatingSystem (..)
   ) where
 
@@ -154,16 +155,33 @@ instance Hashable Architecture where
   hashWithSalt salt = hashWithSalt salt . show
 
 
+-- | A kernel information.  Equivalent to @uname -sr@.
+data Kernel = Kernel
+  { name :: CI Text
+  -- ^ The kernel name.  Equivalent to @uname -s@.
+  , release :: CI Text
+  -- ^ The kernel release.  Equivalent to @uname -r@.
+  }
+  deriving (Eq, Ord, Read, Show)
+
+
+instance Hashable Kernel where
+  hashWithSalt salt (Kernel name' release') =
+    salt `hashWithSalt` name' `hashWithSalt` release'
+
+
 -- | An environment.
 data Environment = Environment
   { operatingSystem :: OperatingSystem
   -- ^ The operating system (e.g. 'Linux', 'MacOS').
   , architecture :: Architecture
   -- ^ The architecture (e.g. 'X86_64', 'AArch64').
+  , kernel :: Kernel
+  -- ^ The kernel information.  Equivalent to @uname -sr@.
   }
   deriving (Eq, Ord, Read, Show)
 
 
 instance Hashable Environment where
-  hashWithSalt salt (Environment os' arch') =
-    salt `hashWithSalt` os' `hashWithSalt` arch'
+  hashWithSalt salt (Environment os' arch' kernel) =
+    salt `hashWithSalt` os' `hashWithSalt` arch' `hashWithSalt` kernel

@@ -14,6 +14,7 @@ module Dojang.Types.Gen
   , environmentVariable
   , filePathExpression
   , invalidMonikerNameText
+  , kernel
   , manifest
   , manifest'
   , monikerMap
@@ -49,6 +50,7 @@ import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
+  , Kernel (..)
   , OperatingSystem (..)
   )
 import Dojang.Types.EnvironmentPredicate
@@ -156,8 +158,15 @@ architecture =
     ]
 
 
+kernel :: (MonadGen m) => m Kernel
+kernel =
+  Kernel
+    <$> ciText (constant 1 50) Gen.unicodeAll
+    <*> ciText (constant 1 50) Gen.unicodeAll
+
+
 environment :: (MonadGen m) => m Environment
-environment = Environment <$> operatingSystem <*> architecture
+environment = Environment <$> operatingSystem <*> architecture <*> kernel
 
 
 environmentPredicate :: (MonadGen m) => m EnvironmentPredicate
