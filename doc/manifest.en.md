@@ -52,9 +52,9 @@ If you want a predicate that requires all of the listed monitors to be
 satisfied, you can use the `all` field.
 
 If you have more complex criteria for the environment, you can use
-the [**environment predicate**](environment-predicate.en.md) syntax. In fact,
-the above example can be rewritten with the environment predicate syntax as
-shown below and it will work the same:
+the [**environment predicate**](environment-predicate.en.md) syntax in the
+`when` field.  In fact, the above example can be rewritten with the environment
+predicate syntax as shown below and it will work the same:
 
 ~~~~ toml
 [monikers.mac]
