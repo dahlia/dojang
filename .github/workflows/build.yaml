@@ -103,6 +103,13 @@ jobs:
       shell: bash
       run: |
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
+        mkdir "$RUNNER_TEMP/dojang-bins/completions/"
+        "$RUNNER_TEMP"/dojang-bins/dojang --bash-completion-script dojang \
+          > "$RUNNER_TEMP/dojang-bins/completions/dojang.bash"
+        "$RUNNER_TEMP"/dojang-bins/dojang --zsh-completion-script dojang \
+          > "$RUNNER_TEMP/dojang-bins/completions/dojang.zsh"
+        "$RUNNER_TEMP"/dojang-bins/dojang --fish-completion-script dojang \
+          > "$RUNNER_TEMP/dojang-bins/completions/dojang.fish"
         version="$("$RUNNER_TEMP"/dojang-bins/dojang version \
                  | awk '{print $2}')"
         os="$("$RUNNER_TEMP"/dojang-bins/dojang env \

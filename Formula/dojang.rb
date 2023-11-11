@@ -14,6 +14,22 @@ class Dojang < Formula
     system "hpack"
     system "cabal", "v2-update"
     system "cabal", "v2-install", *std_cabal_v2_args
+
+    completions = buildpath/"completions"
+    completions.mkdir()
+    (completions/"dojang.bash").write(
+      Utils.safe_popen_read(bin/"dojang", "--bash-completion-script=dojang")
+    )
+    (completions/"dojang.zsh").write(
+      Utils.safe_popen_read(bin/"dojang", "--zsh-completion-script=dojang")
+    )
+    (completions/"dojang.fish").write(
+      Utils.safe_popen_read(bin/"dojang", "--fish-completion-script=dojang")
+    )
+
+    bash_completion.install "completions/dojang.bash"
+    zsh_completion.install "completions/dojang.zsh"
+    fish_completion.install "completions/dojang.fish"
   end
 
   test do

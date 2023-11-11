@@ -24,6 +24,7 @@ import Options.Applicative
   , ParserInfo
   , ParserPrefs
   , ParserResult
+  , action
   , argument
   , command
   , commandGroup
@@ -95,6 +96,7 @@ appP = do
           <> metavar "PATH"
           <> value period
           <> showDefault
+          <> action "directory"
           <> help "Repository (i.e., source tree) directory"
       )
   intermediateDirectory' <-
@@ -104,6 +106,7 @@ appP = do
           <> metavar "PATH"
           <> value intermediateDirname
           <> showDefault
+          <> action "directory"
           <> help
             ( "Intermediate directory which is managed by Dojang.  "
                 ++ "Relative to source tree directory (-s/--source-dir) "
@@ -117,6 +120,7 @@ appP = do
           <> metavar "PATH"
           <> value manifestFilename
           <> showDefault
+          <> action "file"
           <> help
             ( "Manifest file.  Relative to source tree directory "
                 ++ "(-s/--source-dir) if not absolute"
@@ -129,6 +133,7 @@ appP = do
           <> metavar "PATH"
           <> value envFilename
           <> showDefault
+          <> action "file"
           <> help
             ( "Environment file.  Relative to source tree directory "
                 ++ "(-s/--source-dir) if not absolute.  It will be silently "
@@ -211,6 +216,7 @@ cmdP =
                         <> metavar "PATH"
                         <> value hyphen
                         <> showDefault
+                        <> action "file"
                         <> help
                           ( "Output file path.  Use - for stdout, "
                               ++ "and ./- for a file named -"
@@ -249,7 +255,7 @@ cmdP =
                         <> help
                           "Enforce reflecting if there are ignorable errors"
                     )
-                  <*> some (pathArgument $ metavar "FILE")
+                  <*> some (pathArgument $ metavar "FILE" <> action "file")
               )
               (progDesc "Let the repository reflect the target file")
           )

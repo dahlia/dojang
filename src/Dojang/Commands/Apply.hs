@@ -201,9 +201,6 @@ syncIntermediateToDestination files =
           (Directory, _) -> [RemoveFile to.path, CreateDir to.path]
           (_, Directory) -> [RemoveDirs to.path, CopyFile from.path to.path]
           _ -> [CopyFile from.path to.path]
-      Added ->
-        if to.stat == Directory
-          then [RemoveDirs to.path]
-          else [RemoveFile to.path]
+      Added -> []
     | (from, to, delta) <- files
     ]
