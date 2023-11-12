@@ -93,7 +93,7 @@ Dojang은 현재 실행되는 기기의 커널 정보를 인식합니다.  커�
 Dojang은 알아서 현재 실행되는 기기가 어떤 환경인지 인식하지만, 인식된 환경이
 아닌 다른 환경인 것처럼 가장하고 싶을 수 있습니다.
 특히, 다른 기기에서 어떻게 동작할지 테스트하고 싶을 때가 그렇습니다.
-*dojang-env.toml* 파일을 *dojang.toml* 파일 옆에 두는 것으로 Dojang이 직접
+*dojang-env.toml* 파일[^1]을 *dojang.toml* 파일 옆에 두는 것으로 Dojang이 직접
 인식한 환경 대신 그 파일 안에 지정된 환경으로 인식하게 할 수 있습니다.
 파일 형식은 `dojang env`의 결과 형식과 같습니다.
 
@@ -108,3 +108,6 @@ release = "6.5.9-300.fc35.aarch64"
 
 참고로, `dojang env -o dojang-env.toml` 명령으로 *dojang-env.toml* 파일의
 샘플을 만든 뒤, 그 파일을 고치는 식으로 작업할 수도 있습니다.
+
+[^1]: `-e`/`--env-file` 옵션을 사용하면 *dojang-env.toml* 파일 대신 다른 파일을
+      사용할 수 있습니다.

@@ -95,10 +95,10 @@ Overriding environment
 Dojang recognizes the environment of the device it's running on for you,
 but you may want to pretend it's something other than the recognized one,
 especially when you want to test how it will behave on different devices.
-By placing a *dojang-env.toml* file next to the *dojang.toml* file, you can make
-Dojang see the environment specified in that file instead of the environment it
-recognizes by itself.  The file will be formatted as the same as the result
-of `dojang env`:
+By placing a *dojang-env.toml* file[^1] next to the *dojang.toml* file,
+you can make Dojang see the environment specified in that file instead of
+the environment it recognizes by itself.  The file will be formatted as
+the same as the result of `dojang env`:
 
 ~~~~ toml
 os = "linux"
@@ -111,3 +111,6 @@ release = "6.5.9-300.fc35.aarch64"
 
 For your information, you can also use command `dojang env -o dojang-env.toml`
 to create a sample of *dojang-env.toml* file, and then work from there.
+
+[^1]: You can use `-e`/`--env-file` option to use a file other than
+      *dojang-env.toml*.
