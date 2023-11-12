@@ -18,7 +18,7 @@ import Control.Monad.Logger (logDebugSH)
 import Data.Text (pack)
 import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
 
-import Dojang.App (App, AppEnv (debug), ensureContext, lookupEnv')
+import Dojang.App (App, AppEnv (debug, manifestFile), ensureContext, lookupEnv')
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -106,9 +106,14 @@ apply force = do
               <> pathStyle (pack path')
               <> " would be deleted."
       _ -> return ()
+    manifestFile' <- asks (.manifestFile) >>= decodePath
+    printStderr' Hint
+      $ "If these deletions are accidental, ignore them in your manifest ("
+      <> pathStyle (pack manifestFile')
+      <> ")."
   -- Exit if there are any problems (unless forced):
   when (not force && (not (null conflicts) || any isDeletion shimOps)) $ do
-    printStderr' Warning
+    printStderr' Hint
       $ "Use "
       <> codeStyle "-f"
       <> "/"
