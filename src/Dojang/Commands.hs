@@ -124,8 +124,9 @@ printTable headers rows = do
     liftIO $ hPutStr stderr " "
   putLnStderr
   forM_ rows $ \row -> do
-    forM_ (zip row columnWidths) $ \((color', value), width) -> do
-      putCol stdout color' value width
+    forM_ (zip3 row columnWidths [1 ..]) $ \((color', value), width, i) -> do
+      putCol stdout color' value
+        $ if i < Prelude.length row then width else Data.Text.length value
       liftIO $ putStr " "
     putLn
  where
