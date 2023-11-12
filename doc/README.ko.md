@@ -16,7 +16,7 @@ Dojang 문서: 목차
 
 그 밖에 세부 주제별 참조 문서들도 있습니다.
 
- -  [선언](manifest.ko.md)
+ -  [선언](manifest.ko.md) (*dojang.toml*)
  -  [라우팅](routing.ko.md)
  -  [환경](environment.ko.md)
  -  [환경 서술어](environment-predicate.ko.md)

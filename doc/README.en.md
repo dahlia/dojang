@@ -16,7 +16,7 @@ how to use it:
 
 There are also reference docs for various topics:
 
- -  [Manifest](manifest.en.md)
+ -  [Manifest](manifest.en.md) (*dojang.toml*)
  -  [Routing](routing.en.md)
  -  [Environment](environment.en.md)
  -  [Environment predicate](environment-predicate.en.md)
