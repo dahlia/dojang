@@ -98,7 +98,7 @@ expectLinuxKernel :: Kernel -> IO ()
 expectLinuxKernel kernel = do
   original kernel.name `shouldBe` "Linux"
   original kernel.release
-    `shouldSatisfy` (=~ ("^[0-9]+\\.[0-9]+\\.?[0-9]+\\.[0-9]+(-|$)" :: Text))
+    `shouldSatisfy` (=~ ("^[0-9]+\\.[0-9]+\\.?[0-9]+[.-][0-9]+(-|$)" :: Text))
 
 
 expectWindowsKernel :: Kernel -> IO ()
