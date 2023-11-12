@@ -347,7 +347,7 @@ data OverlaidFile
     Gone
   | -- | A file that was copied from the given path.
     Copied OsPath
-  deriving (Eq)
+  deriving (Eq, Show)
 
 
 -- | Internal state of 'DryRun'.
@@ -701,14 +701,14 @@ instance MonadFileSystem DryRunIO where
   listDirectory path = do
     let normalizedPath = normalise path
     oFiles <- gets overlaidFiles
-    path' <- decodePath path
+    pathFP <- decodePath path
     case oFiles !? normalizedPath of
       Just ((_, Gone) :| _) ->
-        throwError $ noDirError path'
+        throwError $ noDirError pathFP
       Just ((_, Contents _) :| _) ->
-        throwError $ nonDirError path'
+        throwError $ nonDirError pathFP
       Just ((_, Copied _) :| _) ->
-        throwError $ nonDirError path'
+        throwError $ nonDirError pathFP
       Just ((_, Directory') :| _) ->
         return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
@@ -720,13 +720,13 @@ instance MonadFileSystem DryRunIO where
                 then return False
                 else throwError $ e `ioePrependLocation` "listDirectory"
         isFile' <- liftIO $ doesFileExist path
-        when (isSymlink' || isFile') $ throwError (nonDirError path')
+        when (isSymlink' || isFile') $ throwError (nonDirError pathFP)
         files <-
           liftIO $ System.Directory.OsPath.listDirectory path `catchError` \e ->
             throwError $ e `ioePrependLocation` "listDirectory"
         let directOChildren' = directOChildren oFiles
         let result =
-              [f | f <- files, directOChildren' !? (path </> f) /= Just Gone]
+              [f | f <- files, directOChildren' !? (path' </> f) /= Just Gone]
                 ++ [ filename
                    | (filePath, f) <- toAscList directOChildren'
                    , f /= Gone
@@ -735,8 +735,10 @@ instance MonadFileSystem DryRunIO where
                    ]
         return $ sort result
    where
+    path' :: OsPath
+    path' = normalise path
     pathDirs :: [OsPath]
-    pathDirs = splitDirectories path
+    pathDirs = splitDirectories path'
     directOChildren
       :: Map OsPath (NonEmpty (SeqNo, OverlaidFile)) -> Map OsPath OverlaidFile
     directOChildren oFiles =
@@ -748,20 +750,20 @@ instance MonadFileSystem DryRunIO where
         , length pathDirs + 1 == length split
         ]
     noDirError :: FilePath -> IOError
-    noDirError path' =
+    noDirError pathFP =
       mkIOError
         doesNotExistErrorType
         "listDirectory"
         Nothing
-        (Just path')
+        (Just pathFP)
         `ioeSetErrorString` "no such directory"
     nonDirError :: FilePath -> IOError
-    nonDirError path' =
+    nonDirError pathFP =
       mkIOError
         InappropriateType
         "listDirectory"
         Nothing
-        (Just path')
+        (Just pathFP)
         `ioeSetErrorString` "not a directory"
 
 
