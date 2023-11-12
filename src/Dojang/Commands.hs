@@ -28,7 +28,7 @@ import Data.Text.IO (hPutStr, hPutStrLn, putStr)
 import System.Console.Pretty
   ( Color (..)
   , Pretty
-  , Style (Bold, Underline)
+  , Style (..)
   , bgColor
   , style
   )
@@ -72,7 +72,7 @@ pathStyleFor handle = do
   colorAvailable <- isColorAvailable handle
   return
     $ if colorAvailable
-      then style Underline
+      then style Italic
       else id
 
 
