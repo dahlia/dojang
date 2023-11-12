@@ -20,3 +20,5 @@ it returns the following exit codes, depending on the situation.
  -  31: The file in the repository cannot be the target file.
  -  32: The file is not routed, so the operation cannot be performed.
  -  33: The file is ignored, so the operation cannot be performed.
+ -  34: The operation is canceled because some of the target files may be
+    deleted.

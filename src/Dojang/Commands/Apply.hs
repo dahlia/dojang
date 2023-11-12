@@ -1,15 +1,16 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Dojang.Commands.Apply (apply) where
 
-import Control.Monad (filterM, forM_, void, when)
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad (filterM, forM_, unless, void, when)
+import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.Function ((&))
 import Data.List (nub, sort)
-import System.Exit (ExitCode (..))
+import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import Prelude hiding (readFile)
 
@@ -17,18 +18,19 @@ import Control.Monad.Logger (logDebugSH)
 import Data.Text (pack)
 import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
 
-import Dojang.App (App, AppEnv (debug), ensureContext)
+import Dojang.App (App, AppEnv (debug), ensureContext, lookupEnv')
 import Dojang.Commands
   ( Admonition (..)
+  , codeStyleFor
   , pathStyleFor
   , printStderr
   , printStderr'
   )
 import Dojang.Commands.Status (printWarnings, status)
-import Dojang.ExitCodes (conflictError)
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.ExitCodes (accidentalDeletionWarning, conflictError)
+import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
 import Dojang.Types.Context
-  ( Context
+  ( Context (..)
   , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
@@ -44,42 +46,100 @@ apply force = do
   ctx <- ensureContext
   (files, ws) <- makeCorrespond ctx
   $(logDebugSH) files
+  -- Check if there are any conflicts:
   conflicts <- filterConflicts files
   pathStyle <- pathStyleFor stderr
-  forM_ conflicts $ \c -> do
-    srcPath <- decodePath c.source.path
-    dstPath <- decodePath c.destination.path
-    printStderr' Error
-      $ "There is a conflict between "
-      <> pathStyle (pack srcPath)
-      <> " and "
-      <> pathStyle (pack dstPath)
-      <> "."
-  if not force && not (null conflicts)
-    then return conflictError
-    else do
-      debug' <- asks (.debug)
-      when debug' (void $ status False)
-      let ops =
-            syncSourceToIntermediate
-              [ (fc.source, fc.intermediate, fc.sourceDelta)
-              | fc <- files
-              ]
-              & nub
-              . sort
-      forM_ ops $ \path -> printSyncOp path >> doSyncOp path
-      when debug' (void $ status False)
-      (files', _) <- makeCorrespond ctx
-      $(logDebugSH) files'
-      ops' <-
-        syncIntermediateToDestination
-          ctx
-          [ (fc.intermediate, fc.destination, fc.destinationDelta)
-          | fc <- files'
+  codeStyle <- codeStyleFor stderr
+  unless (null conflicts) $ do
+    forM_ conflicts $ \c -> do
+      srcPath <- decodePath c.source.path
+      dstPath <- decodePath c.destination.path
+      printStderr' (if force then Warning else Error)
+        $ "There is a conflict between "
+        <> pathStyle (pack srcPath)
+        <> " and "
+        <> pathStyle (pack dstPath)
+        <> "."
+  -- Check if there are any accidental deletions:
+  let ops =
+        syncSourceToIntermediate
+          [ (fc.source, fc.intermediate, fc.sourceDelta)
+          | fc <- files
           ]
-      forM_ (nub $ sort ops') $ \path -> printSyncOp path >> doSyncOp path
-      printWarnings ws
-      return ExitSuccess
+          & nub
+          . sort
+  shimOps <- liftIO $ dryRunIO $ do
+    forM_ ops doSyncOp
+    let ctx' = Context ctx.repository ctx.environment lookupEnv'
+    (files', _) <- makeCorrespond ctx'
+    syncIntermediateToDestination
+      ctx'
+      [ (fc.intermediate, fc.destination, fc.destinationDelta)
+      | fc <- files'
+      ]
+  when (any isDeletion shimOps) $ do
+    forM_ shimOps $ \case
+      RemoveDirs path -> do
+        path' <- decodePath $ addTrailingPathSeparator path
+        if force
+          then
+            printStderr' Warning
+              $ "Would delete "
+              <> pathStyle (pack path')
+              <> " (and its children)."
+          else
+            printStderr' Error
+              $ "Cancelled applying because "
+              <> pathStyle (pack path')
+              <> " (and its children) would be deleted."
+      RemoveFile path -> do
+        path' <- decodePath path
+        if force
+          then
+            printStderr'
+              Warning
+              ("Would delete " <> pathStyle (pack path') <> ".")
+          else
+            printStderr'
+              Error
+              $ "Cancelled applying because "
+              <> pathStyle (pack path')
+              <> " would be deleted."
+      _ -> return ()
+  -- Exit if there are any problems (unless forced):
+  when (not force && (not (null conflicts) || any isDeletion shimOps)) $ do
+    printStderr' Warning
+      $ "Use "
+      <> codeStyle "-f"
+      <> "/"
+      <> codeStyle "--force"
+      <> " to ignore these warnings and go ahead."
+    liftIO
+      $ exitWith
+      $ if not (null conflicts)
+        then conflictError
+        else accidentalDeletionWarning
+  -- When everything is fine (or excused):
+  debug' <- asks (.debug)
+  when debug' (void $ status False)
+  forM_ ops $ \path -> printSyncOp path >> doSyncOp path
+  when debug' (void $ status False)
+  (files', _) <- makeCorrespond ctx
+  $(logDebugSH) files'
+  ops' <-
+    syncIntermediateToDestination
+      ctx
+      [ (fc.intermediate, fc.destination, fc.destinationDelta)
+      | fc <- files'
+      ]
+  forM_ (nub $ sort ops') $ \path -> printSyncOp path >> doSyncOp path
+  printWarnings ws
+  return ExitSuccess
+ where
+  isDeletion :: SyncOp -> Bool
+  isDeletion (RemoveDirs _) = True
+  isDeletion (RemoveFile _) = True
+  isDeletion _ = False
 
 
 -- TODO: This should be in another module:
@@ -155,7 +215,7 @@ printSyncOp (CreateDirs path) = do
   printStderr ("Create " <> pathStyle (pack path') <> " (and its ancestors)...")
 
 
-doSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
+doSyncOp :: (MonadFileSystem i) => SyncOp -> i ()
 doSyncOp (RemoveDirs path) = removeDirectoryRecursively path
 doSyncOp (RemoveFile path) = removeFile path
 doSyncOp (CopyFile src dst) = copyFile src dst

@@ -22,6 +22,7 @@ module Dojang.App
   , ensureRepository
   , loadManifest
   , loadRepository
+  , lookupEnv'
   , runAppWithLogging
   , runAppWithStderrLogging
   , runAppWithoutLogging

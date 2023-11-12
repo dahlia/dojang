@@ -59,3 +59,7 @@ fileNotRoutedError = ExitFailure 32
 
 ignoredFileError :: ExitCode
 ignoredFileError = ExitFailure 33
+
+
+accidentalDeletionWarning :: ExitCode
+accidentalDeletionWarning = ExitFailure 34
