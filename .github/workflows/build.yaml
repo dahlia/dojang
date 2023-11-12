@@ -12,6 +12,12 @@ permissions:
   id-token: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: python3 scripts/check-doc-contents.py doc
+
   test:
     strategy:
       matrix:

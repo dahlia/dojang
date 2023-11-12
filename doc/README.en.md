@@ -7,11 +7,15 @@
 Dojang docs: table of contents
 ==============================
 
-**Dojang** is a cross-platform dotfiles manager.  This documentation describes
-how to use it.
+**Dojang** is a cross-platform dotfiles manager.  These docs describe
+how to use it:
 
  -  [Getting started](start.en.md)
  -  [Installation](installation.en.md)
+ -  [The Cookbook](cookbook/README.en.md)
+
+There are also reference docs for various topics:
+
  -  [Manifest](manifest.en.md)
  -  [Routing](routing.en.md)
  -  [Environment](environment.en.md)
