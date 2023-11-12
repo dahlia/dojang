@@ -158,6 +158,10 @@ mapEnvironmentPredicate' (OperatingSystem os) =
   always{os = Just $ Flat $ unpack $ original os.identifier}
 mapEnvironmentPredicate' (Architecture arch) =
   always{arch = Just $ Flat $ unpack $ original arch.identifier}
+mapEnvironmentPredicate' (KernelName kernel) =
+  always{kernel = Just $ Flat $ unpack $ original kernel}
+mapEnvironmentPredicate' (KernelRelease kernelRelease) =
+  always{kernelRelease = Just $ Flat $ unpack $ original kernelRelease}
 mapEnvironmentPredicate' (And predicates') =
   fromMaybe
     always{when = Just $ writeEnvironmentPredicate $ And predicates'}
@@ -172,6 +176,8 @@ mapEnvironmentPredicate' (And predicates') =
         Just b -> do
           os' <- xorMaybe a.os b.os
           arch' <- xorMaybe a.arch b.arch
+          kernel' <- xorMaybe a.kernel b.kernel
+          kernelRelease' <- xorMaybe a.kernelRelease b.kernelRelease
           all' <- xorMaybe a.all b.all
           any' <- xorMaybe a.any b.any
           when' <- xorMaybe a.when b.when
@@ -179,6 +185,8 @@ mapEnvironmentPredicate' (And predicates') =
             EnvironmentPredicate'
               { os = os'
               , arch = arch'
+              , kernel = kernel'
+              , kernelRelease = kernelRelease'
               , all = all'
               , any = any'
               , when = when'
@@ -193,6 +201,10 @@ mapEnvironmentPredicate' (Or predicates')
       always{os = Just $ NonEmpty $ toNonEmpty oses}
   | Prelude.length arches == length' =
       always{arch = Just $ NonEmpty $ toNonEmpty arches}
+  | Prelude.length kernels == length' =
+      always{kernel = Just $ NonEmpty $ toNonEmpty kernels}
+  | Prelude.length kernelReleases == length' =
+      always{kernelRelease = Just $ NonEmpty $ toNonEmpty kernelReleases}
   | Prelude.length monikers' == length' =
       always{any = Just $ toNonEmpty monikers'}
   | otherwise =
@@ -209,6 +221,16 @@ mapEnvironmentPredicate' (Or predicates')
   arches =
     [ unpack $ original arch'.identifier
     | Architecture arch' <- Data.List.NonEmpty.toList predicates'
+    ]
+  kernels :: [String]
+  kernels =
+    [ unpack $ original kernel'
+    | KernelName kernel' <- Data.List.NonEmpty.toList predicates'
+    ]
+  kernelReleases :: [String]
+  kernelReleases =
+    [ unpack $ original kernelRelease'
+    | KernelRelease kernelRelease' <- Data.List.NonEmpty.toList predicates'
     ]
   monikers' :: [MonikerName]
   monikers' = [n | Moniker n <- Data.List.NonEmpty.toList predicates']

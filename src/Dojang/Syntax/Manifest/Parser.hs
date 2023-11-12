@@ -154,7 +154,7 @@ mapEnvironmentPredicate' envPred' =
     Right pred' ->
       Right
         $ normalizePredicate
-        $ And [os, arch, all', any', pred']
+        $ And [os, arch, kernel, kernelRelease, all', any', pred']
     Left err -> Left err
  where
   os :: EnvironmentPredicate
@@ -169,6 +169,18 @@ mapEnvironmentPredicate' envPred' =
       Always
       (Or . fmap Architecture . mapFlatOrNonEmptyStrings)
       envPred'.arch
+  kernel :: EnvironmentPredicate
+  kernel =
+    maybe
+      Always
+      (Or . fmap KernelName . mapFlatOrNonEmptyStrings)
+      envPred'.kernel
+  kernelRelease :: EnvironmentPredicate
+  kernelRelease =
+    maybe
+      Always
+      (Or . fmap KernelRelease . mapFlatOrNonEmptyStrings)
+      envPred'.kernelRelease
   all' :: EnvironmentPredicate
   all' = maybe Always (And . fmap Moniker) envPred'.all
   any' :: EnvironmentPredicate

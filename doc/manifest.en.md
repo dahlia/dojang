@@ -70,6 +70,42 @@ when = "moniker = mac && arch = x86_64"
 For a detailed description of the environment predicate syntax,
 see the [corresponding documentation](environment-predicate.en.md).
 
+### Fields that can be used when defining a moniker
+
+ -  `os` (string or array of strings): The operating system of the environment.
+    If it is an array, it is satisfied if any of the operating systems in the
+    array are satisfied.  The OS identifiers are listed in
+    the [List of recognized operating
+    systems](environment.en.md#list-of-recognized-operating-systems) section.
+
+ -  `arch` (string or array of strings): The processor architecture of the
+    environment.  If it is an array, it is satisfied if any of the architectures
+    in the array are satisfied.  The architecture identifiers are listed
+    in the [List of recognized processor
+    architectures](environment.en.md#list-of-recognized-processor-architectures)
+    section.
+
+ -  `kernel` (string or array of strings): The kernel name of the environment.
+    If it is an array, it is satisfied if any of the kernels in the array are
+    satisfied.
+    See also [Kernel recognition](environment.en.md#kernel-recognition) section.
+
+ -  `kernel-release` (string or array of strings): The kernel version of the
+    environment.  If it is an array, it is satisfied if any of the kernel
+    versions in the array are satisfied.
+    See also [Kernel recognition](environment.en.md#kernel-recognition) section.
+
+ -  `any` (array of strings): Other moniker names.  It is satisfied if any of
+    the monikers in the array are satisfied. There must be at least one element.
+
+ -  `all` (array of strings): Other moniker names.  It is satisfied if all of
+    the monikers in the array are satisfied. There must be at least one element.
+
+ -  `when` (string): Criteria written in the [environment
+    predicate](environment-predicate.en.md) syntax.  It is satisfied if
+    the criteria are satisfied.  If used with the fields above,
+    all criteria together must be satisfied.
+
 
 Routing of directories and files
 --------------------------------

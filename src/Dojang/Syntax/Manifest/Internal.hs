@@ -26,7 +26,12 @@ import Data.Text (Text, pack, unpack)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import System.FilePattern (FilePattern)
 import Toml (Value (..))
-import Toml.FromValue (FromKey (..), FromValue (..), parseTableFromValue)
+import Toml.FromValue
+  ( FromKey (..)
+  , FromValue (..)
+  , optKey
+  , parseTableFromValue
+  )
 import Toml.FromValue.Generic (genericParseTable)
 import Toml.FromValue.Matcher (Matcher)
 import Toml.ToValue
@@ -34,6 +39,7 @@ import Toml.ToValue
   , ToTable (toTable)
   , ToValue (toValue)
   , defaultTableToValue
+  , table
   )
 import Toml.ToValue.Generic (genericToTable)
 
@@ -96,11 +102,13 @@ instance ToValue MonikerName where
 data EnvironmentPredicate' = EnvironmentPredicate'
   { os :: Maybe FlatOrNonEmptyStrings
   , arch :: Maybe FlatOrNonEmptyStrings
+  , kernel :: Maybe FlatOrNonEmptyStrings
+  , kernelRelease :: Maybe FlatOrNonEmptyStrings
   , all :: Maybe (NonEmpty MonikerName)
   , any :: Maybe (NonEmpty MonikerName)
   , when :: Maybe Text
   }
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show)
 
 
 always :: EnvironmentPredicate'
@@ -108,6 +116,8 @@ always =
   EnvironmentPredicate'
     { os = Nothing
     , arch = Nothing
+    , kernel = Nothing
+    , kernelRelease = Nothing
     , all = Nothing
     , any = Nothing
     , when = Nothing
@@ -115,7 +125,16 @@ always =
 
 
 instance FromValue EnvironmentPredicate' where
-  fromValue = parseTableFromValue genericParseTable
+  fromValue =
+    parseTableFromValue
+      $ EnvironmentPredicate'
+      <$> optKey "os"
+      <*> optKey "arch"
+      <*> optKey "kernel"
+      <*> optKey "kernel-release"
+      <*> optKey "all"
+      <*> optKey "any"
+      <*> optKey "when"
 
 
 instance ToValue EnvironmentPredicate' where
@@ -123,7 +142,27 @@ instance ToValue EnvironmentPredicate' where
 
 
 instance ToTable EnvironmentPredicate' where
-  toTable = genericToTable
+  toTable pred' =
+    table
+      $ fieldsToValue fields
+      ++ fieldsToValue fields'
+      ++ fieldsToValue
+        [("when", pred'.when)]
+   where
+    fields :: [(String, Maybe FlatOrNonEmptyStrings)]
+    fields =
+      [ ("os", pred'.os)
+      , ("arch", pred'.arch)
+      , ("kernel", pred'.kernel)
+      , ("kernel-release", pred'.kernelRelease)
+      ]
+    fields' :: [(String, Maybe (NonEmpty MonikerName))]
+    fields' =
+      [ ("all", pred'.all)
+      , ("any", pred'.any)
+      ]
+    fieldsToValue :: (ToValue a) => [(String, Maybe a)] -> [(String, Value)]
+    fieldsToValue fs = [(key, toValue value) | (key, Just value) <- fs]
 
 
 type MonikerMap' = Map MonikerName EnvironmentPredicate'
