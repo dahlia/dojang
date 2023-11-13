@@ -4,6 +4,8 @@
 
 module Dojang.Types.RepositorySpec (spec) where
 
+import System.Info (os)
+
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, runIO, specify)
 import Test.Hspec.Expectations.Pretty
@@ -30,9 +32,13 @@ import Dojang.Types.Repository
   )
 
 
+win :: Bool
+win = os == "mingw32"
+
+
 spec :: Spec
 spec = do
-  root <- runIO $ encodeFS "/"
+  root <- runIO $ encodeFS $ if win then "C:\\" else "/"
   foo <- runIO $ encodeFS "foo"
   bar <- runIO $ encodeFS "bar"
   baz <- runIO $ encodeFS "baz"
@@ -49,10 +55,24 @@ spec = do
           Manifest
             { monikers = monikers
             , fileRoutes =
-                [ (foo, dirRoute $ "/dst/foo")
-                , (bar, dirRoute $ "/dst/foo/bar")
-                , (baz, dirRoute $ "/dst/foo/bar/baz")
-                , (qux, dirRoute $ "/dst/foo/qux")
+                [ (foo, dirRoute $ if win then "C:\\dst\\foo" else "/dst/foo")
+                ,
+                  ( bar
+                  , dirRoute
+                      $ if win then "C:\\dst\\foo\\bar" else "/dst/foo/bar"
+                  )
+                ,
+                  ( baz
+                  , dirRoute
+                      $ if win
+                        then "C:\\dst\\foo\\bar\\baz"
+                        else "/dst/foo/bar/baz"
+                  )
+                ,
+                  ( qux
+                  , dirRoute
+                      $ if win then "C:\\dst\\foo\\qux" else "/dst/foo/qux"
+                  )
                 ]
             , ignorePatterns =
                 [ (foo, ["bar"])
