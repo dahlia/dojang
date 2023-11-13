@@ -23,7 +23,7 @@ Dojang is a cross-platform dotfiles manager.  Here are some of the highlights:
 
 For further information, see the docs:
 
- -  [English](doc/README.en.md)
+ -  [English](doc/README.md)
  -  [한국어](doc/README.ko.md) (Korean)
 
 Distributed under the [GPL 3.0] or later.

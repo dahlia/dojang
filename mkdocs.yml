@@ -1,0 +1,78 @@
+site_name: Dojang
+docs_dir: doc
+
+markdown_extensions:
+- footnotes
+
+plugins:
+- search
+- i18n:
+    docs_structure: suffix
+    languages:
+    - locale: en
+      default: true
+      name: English
+      build: true
+    - locale: ko
+      name: 한국어
+      build: true
+      nav_translations:
+        Home: 홈
+        References: 참조
+        Cookbook: 레시피 책
+    reconfigure_material: true
+
+nav:
+- Home: README.md
+- start.md
+- installation.md
+- References:
+  - manifest.md
+  - routing.md
+  - environment.md
+  - environment-predicate.md
+  - file-path-expression.md
+  - exit-codes.md
+  - fun-facts.md
+- Cookbook:
+  - cookbook/cross-platform-gitconfig.md
+  - cookbook/simulate-other-environment.md
+  - cookbook/wsl.md
+- GitHub: https://github.com/dahlia/dojang
+
+extra:
+  social:
+  - icon: fontawesome/brands/github
+    name: GitHub
+    link: https://github.com/dahlia/dojang
+
+repo_url: https://github.com/dahlia/dojang
+repo_name: dahlia/dojang
+edit_uri: edit/main/doc/
+
+theme:
+  name: material
+  logo: cat-pow.svg
+  features:
+  - navigation.tabs
+  - search.suggest
+  - search.highlight
+  - content.action.edit
+  - optimize
+  palette:
+  - media: "(prefers-color-scheme: light)"
+    scheme: default
+    primary: blue grey
+    toggle:
+      icon: material/brightness-7
+      name: Switch to dark mode
+  - media: "(prefers-color-scheme: dark)"
+    scheme: slate
+    primary: black
+    toggle:
+      icon: material/brightness-4
+      name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+# cSpell:ignore fontawesome

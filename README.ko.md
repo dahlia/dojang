@@ -23,7 +23,7 @@ Dojang은 크로스플랫폼 닷파일 관리자입니다.  Dojang의 특징은 
 자세한 내용은 다음 문서를 참고하세요.
 
  -  [한국어](doc/README.ko.md)
- -  [English](doc/README.en.md) (영어)
+ -  [English](doc/README.md) (영어)
 
 [GPL 3.0] 이상의 라이선스로 배포됩니다.
 
