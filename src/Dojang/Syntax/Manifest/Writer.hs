@@ -53,10 +53,17 @@ import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 
 
+schema :: Text
+schema = "https://schema.dojang.dev/2023-11/manifest.schema.json"
+
+
 -- | Encodes a 'Manifest' into a TOML document.
 writeManifest :: Manifest -> Text
 writeManifest manifest =
-  showt $ FromStringShow $ prettyTomlOrdered order tbl
+  "#:schema "
+    <> schema
+    <> "\n\n"
+    <> (showt $ FromStringShow $ prettyTomlOrdered order tbl)
  where
   manifest' :: Manifest'
   manifest' = mapManifest' manifest
