@@ -10,18 +10,22 @@ module Dojang.Commands.Status
 
 import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import System.Exit (ExitCode (..))
+import System.IO (Handle, stderr)
 
 import Data.CaseInsensitive (original)
-import Data.Text (Text, pack)
+import Data.Text (Text, intercalate, pack)
 import System.Console.Pretty (Color (..))
 import System.Directory.OsPath (makeAbsolute)
-import System.OsPath (addTrailingPathSeparator, makeRelative)
+import System.OsPath (addTrailingPathSeparator, decodeFS, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, ensureContext)
 import Dojang.Commands
   ( Admonition (..)
+  , codeStyleFor
+  , pathStyleFor
   , printStderr'
   , printTable
   )
@@ -36,9 +40,8 @@ import Dojang.Types.Context
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
-import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.MonikerName ()
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteMapWarning (..))
 
 
 status :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
@@ -85,20 +88,60 @@ renderFileStat (Symlink _) = (Default, "L")
 
 
 -- TODO: This should be in a separate module:
-formatWarning :: RouteWarning -> Text
-formatWarning (EnvironmentPredicateWarning w) = case w of
-  (UndefinedMoniker moniker) ->
-    "Reference to an undefined moniker: " <> original moniker.name
-  (UnrecognizedOperatingSystem os) ->
-    "Unrecognized operating system: " <> showt (FromStringShow os)
-  (UnrecognizedArchitecture arch) ->
-    "Unrecognized architecture: " <> showt (FromStringShow arch)
-formatWarning
-  (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) =
-    "Reference to an undefined environment variable: " <> envVar
+formatWarning :: (MonadIO i) => Handle -> RouteMapWarning -> i Text
+formatWarning handle (EnvironmentPredicateWarning w) = do
+  codeStyle <- codeStyleFor handle
+  case w of
+    (UndefinedMoniker moniker) ->
+      return
+        $ "Reference to an undefined moniker: "
+        <> codeStyle (original moniker.name)
+        <> "."
+    (UnrecognizedOperatingSystem os) ->
+      return
+        $ "Unrecognized operating system: "
+        <> codeStyle (showt $ FromStringShow os)
+        <> "."
+    (UnrecognizedArchitecture arch) ->
+      return
+        $ "Unrecognized architecture: "
+        <> codeStyle (showt $ FromStringShow arch)
+        <> "."
+formatWarning handle (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
+  codeStyle <- codeStyleFor handle
+  return
+    $ "Reference to an undefined environment variable: "
+    <> codeStyle envVar
+    <> "."
+formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
+  pathStyle <- pathStyleFor handle
+  name' <- liftIO $ pack <$> decodeFS name
+  dst' <- liftIO $ pack <$> decodeFS dst
+  pairStrings <- forM paths $ \(from, to) -> do
+    from' <- liftIO $ pack <$> decodeFS from
+    to' <- liftIO $ pack <$> decodeFS to
+    return $ pathStyle from' <> " -> " <> pathStyle to'
+  case pairStrings of
+    pairString :| [] ->
+      return
+        $ pathStyle name'
+        <> " -> "
+        <> pathStyle dst'
+        <> " overlaps with: "
+        <> pairString
+        <> "."
+    _ ->
+      return
+        $ pathStyle name'
+        <> " -> "
+        <> pathStyle dst'
+        <> " overlaps with:\n  "
+        <> intercalate "\n  " (toList pairStrings)
 
 
 -- TODO: This should be in a separate module:
-printWarnings :: (MonadIO i) => [RouteWarning] -> App i ()
+printWarnings :: (MonadIO i) => [RouteMapWarning] -> App i ()
 printWarnings ws =
-  forM_ ws $ printStderr' Warning . formatWarning
+  forM_ ws $ \w -> do
+    formatted <- formatWarning stderr w
+    printStderr' Warning formatted

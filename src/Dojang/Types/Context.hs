@@ -54,9 +54,12 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.Repository
+  ( Repository (..)
+  , RouteMapWarning
+  , RouteResult (..)
+  )
 import Dojang.Types.Repository qualified (routePaths)
 
 
@@ -78,7 +81,7 @@ routePaths
   :: (MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform path routing.
-  -> m ([RouteResult], [RouteWarning])
+  -> m ([RouteResult], [RouteMapWarning])
   -- ^ The expanded paths, along with any warnings that were generated.
 routePaths ctx =
   Dojang.Types.Repository.routePaths
@@ -139,7 +142,7 @@ makeCorrespond
   :: (HasCallStack, MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform file correspondence.
-  -> m ([FileCorrespondence], [RouteWarning])
+  -> m ([FileCorrespondence], [RouteMapWarning])
   -- ^ The file correspondences, along with a list of warnings that occurred
   -- during path routing (if any).  The file paths in the returned
   -- 'FileCorrespondence' values are absolute, or relative to the current
@@ -446,7 +449,7 @@ getRouteState
   -- ^ The context in which to perform path routing.
   -> OsPath
   -- ^ The path (which is a potential destination) to get the route state of.
-  -> m (RouteState, [RouteWarning])
+  -> m (RouteState, [RouteMapWarning])
   -- ^ The route state of the path, along with any warnings that were generated.
 getRouteState ctx path = do
   absPath <- liftIO $ makeAbsolute path

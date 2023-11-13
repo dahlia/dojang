@@ -49,11 +49,14 @@ import Dojang.Types.Environment
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
-import Dojang.Types.FileRoute (RouteWarning (..))
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
-import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.Repository
+  ( Repository (..)
+  , RouteMapWarning (..)
+  , RouteResult (..)
+  )
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 
 
