@@ -143,4 +143,24 @@ jobs:
       with:
         path: ${{ runner.temp }}/dojang-*-*-*.*
 
-# cSpell:ignore allejo codecov dasel DDOJANG popd pushd mikepenz xlarge
+  doc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+    steps:
+    - uses: actions/checkout@v4
+    - run: |
+        set -e
+        pip install --user -r doc/requirements.txt
+        mkdocs build
+      env:
+        TOKEN: ${{ github.token }}
+    - uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ github.token }}
+        publish_dir: ./site
+        keep_files: true
+
+# cSpell:ignore allejo codecov dasel DDOJANG popd pushd mikepenz mkdocs noreply
+# cSpell:ignore xlarge

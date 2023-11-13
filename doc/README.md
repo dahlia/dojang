@@ -1,10 +1,5 @@
-*This document is also available in languages other than English:
-[한국어](README.ko.md) (Korean).*
-
-----
-
-Dojang docs: table of contents
-==============================
+Dojang docs
+===========
 
 **Dojang** is a cross-platform dotfiles manager.  These docs describe
 how to use it:
