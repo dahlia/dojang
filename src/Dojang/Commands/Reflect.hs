@@ -54,10 +54,9 @@ reflect force paths = do
   nonExistents <- filterM (fmap not . exists) paths
   pathStyle <- pathStyleFor stderr
   unless (null nonExistents) $ do
-    ps <- mapM decodePath nonExistents
     dieWithErrors
       fileNotFoundError
-      ["No such file: " <> pathStyle (pack p) <> "." | p <- ps]
+      ["No such file: " <> pathStyle p <> "." | p <- nonExistents]
   absPaths <- liftIO $ mapM makeAbsolute paths
   $(logDebugSH) (absPaths :: [OsPath])
   sourcePath' <- liftIO $ makeAbsolute ctx.repository.sourcePath
@@ -70,28 +69,26 @@ reflect force paths = do
         ]
   $(logDebugSH) overlappedPaths
   unless (null overlappedPaths) $ do
-    ps <- mapM decodePath overlappedPaths
     dieWithErrors
       sourceCannotBeTargetError
       [ "Cannot reflect "
-        <> pathStyle (pack p)
+        <> pathStyle p
         <> " because it is a file inside the repository."
-      | p <- ps
+      | p <- overlappedPaths
       ]
   codeStyle <- codeStyleFor stderr
   warningLists <- forM absPaths $ \absPath -> do
     (state, ws) <- getRouteState ctx absPath
-    absPath' <- decodePath absPath
     case state of
       NotRouted -> do
-        manifestFile' <- asks (.manifestFile) >>= decodePath
+        manifestFile' <- asks (.manifestFile)
         printWarnings ws
         printStderr'
           Error
-          ("File " <> pathStyle (pack absPath') <> " is not routed.")
+          ("File " <> pathStyle absPath <> " is not routed.")
         printStderr'
           Hint
-          ("Add a route for it in " <> pathStyle (pack manifestFile') <> ".")
+          ("Add a route for it in " <> pathStyle manifestFile' <> ".")
         liftIO $ exitWith fileNotRoutedError
       Routed _ -> do
         return ws
@@ -101,7 +98,7 @@ reflect force paths = do
           then do
             printStderr' Note
               $ "File "
-              <> pathStyle (pack absPath')
+              <> pathStyle absPath
               <> " is ignored due to pattern "
               <> codeStyle (pack $ show pattern)
               <> " (route name: "
@@ -116,7 +113,7 @@ reflect force paths = do
             printWarnings ws
             printStderr' Error
               $ "File "
-              <> pathStyle (pack absPath')
+              <> pathStyle absPath
               <> " is ignored due to pattern "
               <> codeStyle (pack $ show pattern)
               <> " (route name: "
@@ -135,39 +132,33 @@ reflect force paths = do
   let conflicts = filterConflicts files'
   $(logDebugSH) conflicts
   unless (force || null conflicts) $ do
-    ps <- forM conflicts $ \c -> do
-      src <- decodePath c.source.path
-      dst <- decodePath c.destination.path
-      return (src, dst)
     printWarnings $ nub $ concat warningLists ++ ws
     dieWithErrors
       sourceCannotBeTargetError
       [ "Cannot reflect "
-        <> pathStyle (pack dst)
+        <> pathStyle c.destination.path
         <> ", since "
-        <> pathStyle (pack src)
+        <> pathStyle c.source.path
         <> " is also changed."
-      | (src, dst) <- ps
+      | c <- conflicts
       ]
   forM_ files' $ \c -> do
-    src <- decodePath c.source.path
-    dst <- decodePath c.destination.path
     if c.sourceDelta == Unchanged && c.destinationDelta == Unchanged
       then
         printStderr'
           Note
           ( "File "
-              <> pathStyle (pack dst)
+              <> pathStyle c.destination.path
               <> " is skipped, since it is the same as file "
-              <> pathStyle (pack src)
+              <> pathStyle c.source.path
               <> "."
           )
       else do
         printStderr
           $ "Reflect "
-          <> pathStyle (pack dst)
+          <> pathStyle c.destination.path
           <> " to "
-          <> pathStyle (pack src)
+          <> pathStyle c.source.path
           <> "..."
         unless (c.destinationDelta == Unchanged) $ do
           cleanup c.intermediate

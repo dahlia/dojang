@@ -38,7 +38,7 @@ import Data.Map.Strict
   )
 import Data.Map.Strict qualified as Map (empty, singleton, union)
 import Data.Set (singleton, size, toAscList, union)
-import Data.Text (Text, lines, pack, unlines)
+import Data.Text (Text, lines, unlines)
 import FortyTwo.Prompts.Multiselect (multiselect)
 import System.OsPath ((</>))
 
@@ -257,11 +257,9 @@ init presets noInteractive = do
     when (route'.fileType == Directory) $ do
       let dirPath = repoDir </> path
       createDirectories dirPath
-      dirPath' <- decodePath dirPath
-      printStderr $ "Directory created: " <> pathStyle (pack dirPath') <> "."
+      printStderr $ "Directory created: " <> pathStyle dirPath <> "."
   filename <- saveManifest manifest
-  filename' <- decodePath filename
-  printStderr $ "Manifest created: " <> pathStyle (pack filename') <> "."
+  printStderr $ "Manifest created: " <> pathStyle filename <> "."
   debug' <- asks (.debug)
   dryRun' <- asks (.dryRun)
   when (debug' || dryRun') $ do

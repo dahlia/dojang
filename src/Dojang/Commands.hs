@@ -10,6 +10,7 @@ module Dojang.Commands
   , die'
   , dieWithErrors
   , pathStyleFor
+  , pathStyleFor'
   , printStderr
   , printStderr'
   , printTable
@@ -20,10 +21,11 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode, exitWith)
 import System.IO.Extra (Handle, hIsTerminalDevice, stderr, stdout)
+import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (putStr, replicate)
 
 import Data.List (transpose)
-import Data.Text (Text, length, replicate)
+import Data.Text (Text, length, pack, replicate)
 import Data.Text.IO (hPutStr, hPutStrLn, putStr)
 import System.Console.Pretty
   ( Color (..)
@@ -33,6 +35,7 @@ import System.Console.Pretty
   , style
   )
 import System.Console.Pretty qualified (color)
+import System.OsPath (OsPath, decodeFS)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 
@@ -67,8 +70,17 @@ codeStyleFor handle = do
       else id
 
 
-pathStyleFor :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
+pathStyleFor :: forall m. (MonadIO m) => Handle -> m (OsPath -> Text)
 pathStyleFor handle = do
+  pathStyle <- pathStyleFor' handle
+  return $ \path -> pathStyle $ decodeFS' path
+ where
+  decodeFS' :: OsPath -> Text
+  decodeFS' = pack . unsafePerformIO . decodeFS
+
+
+pathStyleFor' :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
+pathStyleFor' handle = do
   colorAvailable <- isColorAvailable handle
   return
     $ if colorAvailable

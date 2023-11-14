@@ -1,6 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 module Dojang.Commands.Status
   ( formatWarning
@@ -18,7 +17,7 @@ import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
 import System.Console.Pretty (Color (..))
 import System.Directory.OsPath (makeAbsolute)
-import System.OsPath (addTrailingPathSeparator, decodeFS, makeRelative)
+import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, ensureContext)
@@ -115,26 +114,22 @@ formatWarning handle (FilePathExpressionWarning (UndefinedEnvironmentVariable en
     <> "."
 formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
   pathStyle <- pathStyleFor handle
-  name' <- liftIO $ pack <$> decodeFS name
-  dst' <- liftIO $ pack <$> decodeFS dst
   pairStrings <- forM paths $ \(from, to) -> do
-    from' <- liftIO $ pack <$> decodeFS from
-    to' <- liftIO $ pack <$> decodeFS to
-    return $ pathStyle from' <> " -> " <> pathStyle to'
+    return $ pathStyle from <> " -> " <> pathStyle to
   case pairStrings of
     pairString :| [] ->
       return
-        $ pathStyle name'
+        $ pathStyle name
         <> " -> "
-        <> pathStyle dst'
+        <> pathStyle dst
         <> " overlaps with: "
         <> pairString
         <> "."
     _ ->
       return
-        $ pathStyle name'
+        $ pathStyle name
         <> " -> "
-        <> pathStyle dst'
+        <> pathStyle dst
         <> " overlaps with:\n  "
         <> intercalate "\n  " (toList pairStrings)
 

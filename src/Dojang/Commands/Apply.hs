@@ -15,7 +15,6 @@ import System.IO (stderr)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebugSH)
-import Data.Text (pack)
 import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
 
 import Dojang.App (App, AppEnv (debug, manifestFile), ensureContext, lookupEnv')
@@ -52,13 +51,11 @@ apply force = do
   codeStyle <- codeStyleFor stderr
   unless (null conflicts) $ do
     forM_ conflicts $ \c -> do
-      srcPath <- decodePath c.source.path
-      dstPath <- decodePath c.destination.path
       printStderr' (if force then Warning else Error)
         $ "There is a conflict between "
-        <> pathStyle (pack srcPath)
+        <> pathStyle c.source.path
         <> " and "
-        <> pathStyle (pack dstPath)
+        <> pathStyle c.destination.path
         <> "."
   -- Check if there are any accidental deletions:
   let ops =
@@ -80,36 +77,32 @@ apply force = do
   when (any isDeletion shimOps) $ do
     forM_ shimOps $ \case
       RemoveDirs path -> do
-        path' <- decodePath $ addTrailingPathSeparator path
+        let path' = addTrailingPathSeparator path
         if force
           then
             printStderr' Warning
               $ "Would delete "
-              <> pathStyle (pack path')
+              <> pathStyle path'
               <> " (and its children)."
           else
             printStderr' Error
               $ "Cancelled applying because "
-              <> pathStyle (pack path')
+              <> pathStyle path'
               <> " (and its children) would be deleted."
       RemoveFile path -> do
-        path' <- decodePath path
         if force
-          then
-            printStderr'
-              Warning
-              ("Would delete " <> pathStyle (pack path') <> ".")
+          then printStderr' Warning ("Would delete " <> pathStyle path <> ".")
           else
             printStderr'
               Error
               $ "Cancelled applying because "
-              <> pathStyle (pack path')
+              <> pathStyle path
               <> " would be deleted."
       _ -> return ()
-    manifestFile' <- asks (.manifestFile) >>= decodePath
+    manifestFile' <- asks (.manifestFile)
     printStderr' Hint
       $ "If these deletions are accidental, ignore them in your manifest ("
-      <> pathStyle (pack manifestFile')
+      <> pathStyle manifestFile'
       <> ")."
   -- Exit if there are any problems (unless forced):
   when (not force && (not (null conflicts) || any isDeletion shimOps)) $ do
@@ -190,34 +183,26 @@ instance Ord SyncOp where
   compare a b = compare (syncOpOrdKey a) (syncOpOrdKey b)
 
 
-printSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
+printSyncOp :: (MonadIO i) => SyncOp -> App i ()
 printSyncOp (RemoveDirs path) = do
   pathStyle <- pathStyleFor stderr
-  path' <- decodePath $ addTrailingPathSeparator path
-  printStderr ("Remove " <> pathStyle (pack path') <> " (and its children)...")
+  let path' = addTrailingPathSeparator path
+  printStderr ("Remove " <> pathStyle path' <> " (and its children)...")
 printSyncOp (RemoveFile path) = do
   pathStyle <- pathStyleFor stderr
-  path' <- decodePath path
-  printStderr ("Remove " <> pathStyle (pack path') <> "...")
+  printStderr ("Remove " <> pathStyle path <> "...")
 printSyncOp (CopyFile src dst) = do
   pathStyle <- pathStyleFor stderr
-  src' <- decodePath src
-  dst' <- decodePath dst
   printStderr
-    ( "Copy "
-        <> pathStyle (pack src')
-        <> " to "
-        <> pathStyle (pack dst')
-        <> "..."
-    )
+    ("Copy " <> pathStyle src <> " to " <> pathStyle dst <> "...")
 printSyncOp (CreateDir path) = do
   pathStyle <- pathStyleFor stderr
-  path' <- decodePath $ addTrailingPathSeparator path
-  printStderr ("Create " <> pathStyle (pack path') <> "...")
+  let path' = addTrailingPathSeparator path
+  printStderr ("Create " <> pathStyle path' <> "...")
 printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
-  path' <- decodePath $ addTrailingPathSeparator path
-  printStderr ("Create " <> pathStyle (pack path') <> " (and its ancestors)...")
+  let path' = addTrailingPathSeparator path
+  printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
 
 
 doSyncOp :: (MonadFileSystem i) => SyncOp -> i ()
