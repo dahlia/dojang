@@ -20,6 +20,7 @@ plugins:
         Home: 홈
         References: 참조
         Cookbook: 레시피 책
+        Changelog: 변경 내역 (英)
     reconfigure_material: true
 
 nav:
@@ -38,6 +39,7 @@ nav:
   - cookbook/cross-platform-gitconfig.md
   - cookbook/simulate-other-environment.md
   - cookbook/wsl.md
+- Changelog: CHANGES.md
 - GitHub: https://github.com/dahlia/dojang
 
 extra:
