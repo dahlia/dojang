@@ -1,8 +1,19 @@
-Dojang docs
-===========
+Dojang, a cross-platform dotfiles manager
+=========================================
 
-**Dojang** is a cross-platform dotfiles manager.  These docs describe
-how to use it:
+**Dojang** is a cross-platform dotfiles manager.  Here are some of
+the highlights:
+
+ -  Lightweight.  It's built as a native executable, so it's easy to install
+    and fast to run.
+ -  Cross-platform.  It works on both the POSIX family and Windows.
+ -  Flexible.  It keeps in mind that config files can be placed in different
+    places or have different contents depending on the environment.
+ -  Safe.  Every run can be previewed by simulating it in a sandbox environment
+    with the `--dry-run` option.
+ -  Friendly.  Error messages are friendly and print helpful hints or warnings.
+
+These docs describe how to use it:
 
  -  [Getting started](start.en.md)
  -  [Installation](installation.en.md)
