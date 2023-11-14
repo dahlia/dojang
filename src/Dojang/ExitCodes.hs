@@ -21,6 +21,10 @@ fileNotFoundError :: ExitCode
 fileNotFoundError = ExitFailure 3
 
 
+externalProgramNonZeroExit :: ExitCode
+externalProgramNonZeroExit = ExitFailure 4
+
+
 unsupportedOnEnvError :: ExitCode
 unsupportedOnEnvError = ExitFailure 9
 

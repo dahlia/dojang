@@ -32,6 +32,7 @@ import Options.Applicative
   , defaultPrefs
   , execParserPure
   , flag
+  , flag'
   , footer
   , fullDesc
   , handleParseResult
@@ -40,6 +41,7 @@ import Options.Applicative
   , helper
   , info
   , long
+  , many
   , metavar
   , progDesc
   , short
@@ -61,6 +63,8 @@ import Dojang.App
   )
 import Dojang.Commands (Admonition (Error, Note), codeStyleFor, printStderr')
 import Dojang.Commands.Apply qualified (apply)
+import Dojang.Commands.Diff (DiffMode (..))
+import Dojang.Commands.Diff qualified (diff)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
@@ -243,7 +247,77 @@ cmdP =
                     )
                   <**> helper
               )
-              (progDesc "Show status of repository and target tree")
+              ( progDesc
+                  "Show status of repository and target (destination) tree"
+              )
+          )
+        <> command
+          "diff"
+          ( info
+              ( Dojang.Commands.Diff.diff
+                  <$> ( flag'
+                          Source
+                          ( long "source"
+                              <> short 's'
+                              <> help
+                                ( "Two-way diff between source tree and base "
+                                    ++ "(intermediate) tree"
+                                )
+                          )
+                          <|> flag'
+                            Destination
+                            ( long "destination"
+                                <> long "target"
+                                <> short 'd'
+                                <> help
+                                  ( "Two-way diff between destination (target) "
+                                      ++ "tree and base (intermediate) tree"
+                                  )
+                            )
+                          <|> flag'
+                            TwoWay
+                            ( long "two-way"
+                                <> short '2'
+                                <> help
+                                  ( "Two-way diff between source tree and "
+                                      ++ "destination (target) tree"
+                                  )
+                            )
+                          <|> pure ThreeWay
+                      )
+                  <*> optional
+                    ( pathOption
+                        ( long "diff"
+                            <> metavar "PROGRAM"
+                            <> action "command"
+                            <> help
+                              ( "A program to use for two-way diff.  "
+                                  ++ "If not specified, fall back to a program "
+                                  ++ "specified by the environment variable "
+                                  ++ "DOJANG_DIFF"
+                              )
+                        )
+                    )
+                  <*> optional
+                    ( pathOption
+                        ( long "diff3"
+                            <> metavar "PROGRAM"
+                            <> action "command"
+                            <> help
+                              ( "A program to use for three-way diff.  "
+                                  ++ "If not specified, fall back to a program "
+                                  ++ "specified by the environment variable "
+                                  ++ "DOJANG_DIFF3"
+                              )
+                        )
+                    )
+                  <*> many (pathArgument $ metavar "FILE" <> action "file")
+                  <**> helper
+              )
+              ( progDesc
+                  $ "Show changes between source tree and target "
+                  ++ "(destination) tree"
+              )
           )
         <> command
           "reflect"
