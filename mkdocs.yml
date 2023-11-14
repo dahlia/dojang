@@ -55,6 +55,7 @@ edit_uri: edit/main/doc/
 theme:
   name: material
   logo: cat-pow.svg
+  favicon: img/favicon.ico
   features:
   - navigation.tabs
   - search.suggest
