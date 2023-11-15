@@ -14,6 +14,12 @@ extra-source-files:
 - CHANGES.md
 - LICENSE
 
+flags:
+  static:
+    description: Static link
+    manual: true
+    default: false
+
 dependencies:
   base: ">=4.7 && <5"
   bytestring: ">=0.11 && <0.13"
@@ -57,9 +63,6 @@ library:
     semver: ">=0.4 && <0.5"
   ghc-options:
   # cSpell:disable
-  - -threaded
-  - -rtsopts
-  - -with-rtsopts=-N
   - -Wmissing-export-lists
   # cSpell:enable
 
@@ -72,15 +75,50 @@ executables:
       *name : ">0"
       code-page: ">=0.2 && <0.3"
       # cSpell:enable
-    ghc-options: &executable-ghc-options
-    # cSpell:disable
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    - -Wno-incomplete-uni-patterns
-    # See also: https://github.com/commercialhaskell/stack/issues/3918
-    - -optP-Wno-nonportable-include-path
-    # cSpell:enable
+    when:
+    - condition: flag(static)
+      then:
+        when:
+        - condition: os(linux)
+          then:
+            ghc-options:
+            # cSpell:disable
+            - -threaded
+            - -rtsopts
+            - -with-rtsopts=-N
+            - -Wno-incomplete-uni-patterns
+            # See also: https://github.com/commercialhaskell/stack/issues/3918
+            - -optP-Wno-nonportable-include-path
+            # Static link (Linux)
+            - -static
+            - -optl-static
+            - -optl-pthread
+            - -optc-Os
+            - -fPIC
+            # cSpell:enable
+          else:
+            ghc-options:
+            # cSpell:disable
+            - -threaded
+            - -rtsopts
+            - -with-rtsopts=-N
+            - -Wno-incomplete-uni-patterns
+            # See also: https://github.com/commercialhaskell/stack/issues/3918
+            - -optP-Wno-nonportable-include-path
+            # Static link (non-Linux)
+            - -static
+            - -optc-Os
+            # cSpell:enable
+      else:
+        ghc-options: &executable-ghc-options
+        # cSpell:disable
+        - -threaded
+        - -rtsopts
+        - -with-rtsopts=-N
+        - -Wno-incomplete-uni-patterns
+        # See also: https://github.com/commercialhaskell/stack/issues/3918
+        - -optP-Wno-nonportable-include-path
+        # cSpell:enable
 
 tests:
   spec:

@@ -67,11 +67,11 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest, macos-latest-xlarge]
+        os: [windows-latest, macos-latest, macos-latest-xlarge]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
-    - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
+    - if: startsWith(runner.os, 'macOS')
       uses: actions/cache@v3
       with:
         path: ~/.stack
@@ -83,7 +83,7 @@ jobs:
           ~\AppData\Roaming\stack
           ~\AppData\Local\Programs\stack
         key: build-${{ runner.os }}-${{ hashFiles('stack.yaml.lock') }}
-    - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
+    - if: startsWith(runner.os, 'macOS')
       shell: bash
       run: |
         if command -v stack > /dev/null; then
@@ -102,43 +102,74 @@ jobs:
       run: >-
         stack build
         --ghc-options=-O2
+        --flag dojang:static
         --copy-bins
         --local-bin-path="${{ runner.temp }}/dojang-bins/"
     - uses: allejo/setup-dasel@v1
-    - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
+    - if: startsWith(runner.os, 'macOS')
       shell: bash
       run: |
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
-        mkdir "$RUNNER_TEMP/dojang-bins/completions/"
-        "$RUNNER_TEMP"/dojang-bins/dojang --bash-completion-script dojang \
-          > "$RUNNER_TEMP/dojang-bins/completions/dojang.bash"
-        "$RUNNER_TEMP"/dojang-bins/dojang --zsh-completion-script dojang \
-          > "$RUNNER_TEMP/dojang-bins/completions/dojang.zsh"
-        "$RUNNER_TEMP"/dojang-bins/dojang --fish-completion-script dojang \
-          > "$RUNNER_TEMP/dojang-bins/completions/dojang.fish"
-        version="$("$RUNNER_TEMP"/dojang-bins/dojang version \
-                 | awk '{print $2}')"
-        os="$("$RUNNER_TEMP"/dojang-bins/dojang env \
-            | dasel -r toml -w yaml ".os")"
-        arch="$("$RUNNER_TEMP"/dojang-bins/dojang env \
-              | dasel -r toml -w yaml ".arch")"
-        pushd "$RUNNER_TEMP/dojang-bins/"
-        tar cvfJ "$RUNNER_TEMP/dojang-$version-$os-$arch.tar.xz" ./*
-        popd
+        scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins/"
+        mv dojang-*.tar.xz "$RUNNER_TEMP/"
     - if: startsWith(runner.os, 'Windows')
       shell: powershell
       run: |
         Copy-Item .\LICENSE $env:RUNNER_TEMP\dojang-bins\
-        $version = (& $env:RUNNER_TEMP\dojang-bins\dojang.exe version `
-          ).Split()[1]
-        & $env:RUNNER_TEMP\dojang-bins\dojang.exe env `
-          | Out-File .env.toml -Encoding ascii
-        $os = dasel -f .env.toml -r toml -w yaml ".os"
-        $arch = dasel -f .env.toml -r toml -w yaml ".arch"
-        Compress-Archive `
-          -Path $env:RUNNER_TEMP\dojang-bins\* `
-          -DestinationPath $env:RUNNER_TEMP\dojang-$version-$os-$arch.zip `
-          -CompressionLevel Optimal
+        & scripts\make-dist.ps1 $env:RUNNER_TEMP\dojang-bins\
+        Move-Item dojang-*.zip $env:RUNNER_TEMP\
+    - uses: actions/upload-artifact@v3
+      with:
+        path: ${{ runner.temp }}/dojang-*-*-*.*
+
+  build-linux:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.repository_owner }}
+        password: ${{ github.token }}
+    - id: build-image
+      if: github.ref_type != 'tag'
+      uses: docker/build-push-action@v5
+      with:
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}:git-${{ github.sha }}
+        cache-from:
+          type=registry,ref=ghcr.io/${{ github.repository }}:build-cache
+        cache-to:
+          type=registry,ref=ghcr.io/${{ github.repository }}:build-cache,mode=max
+        build-args: DOJANG_DEV_BUILD=${{ github.run_number }}
+    - if: github.ref_type == 'tag'
+      uses: docker/build-push-action@v5
+      with:
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository }}:latest
+          ghcr.io/${{ github.repository }}:git-${{ github.sha }}
+          ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+        cache-from:
+          type=registry,ref=ghcr.io/${{ github.repository }}:build-cache
+        cache-to:
+          type=registry,ref=ghcr.io/${{ github.repository }}:build-cache,mode=max
+    - uses: allejo/setup-dasel@v1
+    - run: |
+        mkdir -p "$RUNNER_TEMP/dojang-bins/"
+        docker run "ghcr.io/$GITHUB_REPOSITORY:git-$GITHUB_SHA" \
+          cat /usr/local/bin/dojang \
+            > "$RUNNER_TEMP/dojang-bins/dojang"
+        cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
+        scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins"
+        mv dojang-*.tar.xz "$RUNNER_TEMP/"
+      env:
+        DIGEST: ${{ steps.build-image.outputs.digest }}
     - uses: actions/upload-artifact@v3
       with:
         path: ${{ runner.temp }}/dojang-*-*-*.*
@@ -162,5 +193,5 @@ jobs:
         publish_dir: ./site
         keep_files: true
 
-# cSpell:ignore allejo codecov dasel DDOJANG popd pushd mikepenz mkdocs noreply
-# cSpell:ignore xlarge
+# cSpell:ignore allejo buildx codecov dasel DDOJANG peaceiris popd pushd
+# cSpell:ignore mikepenz mkdocs noreply xlarge

@@ -1,0 +1,12 @@
+.hpc/
+.hspec-failures
+.idea/
+.stack-work/
+.venv/
+dist-newstyle/
+dojang.cabal
+dojang.iml
+dojang.tix
+dojang.exe.tix
+out/
+site/
