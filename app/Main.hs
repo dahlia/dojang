@@ -274,20 +274,11 @@ cmdP =
                                       ++ "tree and base (intermediate) tree"
                                   )
                             )
-                          <|> flag'
-                            TwoWay
-                            ( long "two-way"
-                                <> short '2'
-                                <> help
-                                  ( "Two-way diff between source tree and "
-                                      ++ "destination (target) tree"
-                                  )
-                            )
-                          <|> pure ThreeWay
+                          <|> pure Both
                       )
                   <*> optional
                     ( pathOption
-                        ( long "diff"
+                        ( long "diff-program"
                             <> metavar "PROGRAM"
                             <> action "command"
                             <> help
@@ -295,19 +286,6 @@ cmdP =
                                   ++ "If not specified, fall back to a program "
                                   ++ "specified by the environment variable "
                                   ++ "DOJANG_DIFF"
-                              )
-                        )
-                    )
-                  <*> optional
-                    ( pathOption
-                        ( long "diff3"
-                            <> metavar "PROGRAM"
-                            <> action "command"
-                            <> help
-                              ( "A program to use for three-way diff.  "
-                                  ++ "If not specified, fall back to a program "
-                                  ++ "specified by the environment variable "
-                                  ++ "DOJANG_DIFF3"
                               )
                         )
                     )
