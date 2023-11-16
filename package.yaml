@@ -1,7 +1,7 @@
 name: &name dojang
 version: 0.1.0
 synopsis: A cross-platform dotfiles manager
-description: See also the README.md file
+description: See also the README.md file.
 homepage: https://github.com/dahlia/dojang
 license: GPL-3.0-or-later
 author: &author Hong Minhee <hong@minhee.org>
@@ -9,7 +9,7 @@ maintainer: *author
 copyright: "\xa9 2023 Hong Minhee"
 category: Configuration
 
-extra-source-files:
+extra-doc-files:
 - README.md
 - CHANGES.md
 - LICENSE

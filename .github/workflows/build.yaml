@@ -21,7 +21,11 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest, macos-latest-xlarge]
+        os:
+        - windows-latest
+        - macos-latest
+        - ubuntu-latest
+        - macos-latest-xlarge
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
@@ -40,6 +44,7 @@ jobs:
     - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
       shell: bash
       run: |
+        set -e
         if command -v stack > /dev/null; then
           stack upgrade || true
         else
@@ -86,6 +91,7 @@ jobs:
     - if: startsWith(runner.os, 'macOS')
       shell: bash
       run: |
+        set -e
         if command -v stack > /dev/null; then
           stack upgrade || true
         else
@@ -109,6 +115,7 @@ jobs:
     - if: startsWith(runner.os, 'macOS')
       shell: bash
       run: |
+        set -e
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins/"
         mv dojang-*.tar.xz "$RUNNER_TEMP/"
@@ -120,6 +127,7 @@ jobs:
         Move-Item dojang-*.zip $env:RUNNER_TEMP\
     - uses: actions/upload-artifact@v3
       with:
+        name: dist
         path: ${{ runner.temp }}/dojang-*-*-*.*
 
   build-linux:
@@ -161,6 +169,7 @@ jobs:
           type=registry,ref=ghcr.io/${{ github.repository }}:build-cache,mode=max
     - uses: allejo/setup-dasel@v1
     - run: |
+        set -e
         mkdir -p "$RUNNER_TEMP/dojang-bins/"
         docker run "ghcr.io/$GITHUB_REPOSITORY:git-$GITHUB_SHA" \
           cat /usr/local/bin/dojang \
@@ -172,6 +181,7 @@ jobs:
         DIGEST: ${{ steps.build-image.outputs.digest }}
     - uses: actions/upload-artifact@v3
       with:
+        name: dist
         path: ${{ runner.temp }}/dojang-*-*-*.*
 
   doc:
@@ -193,5 +203,72 @@ jobs:
         publish_dir: ./site
         keep_files: true
 
-# cSpell:ignore allejo buildx codecov dasel DDOJANG peaceiris popd pushd
-# cSpell:ignore mikepenz mkdocs noreply xlarge
+  release:
+    needs: [check, test, build, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v3
+      with:
+        name: dist
+        path: ${{ runner.temp }}/dist
+    - run: |
+        set -e
+        if command -v stack > /dev/null; then
+          stack upgrade || true
+        else
+          curl -sSL https://get.haskellstack.org/ | sh
+        fi
+        stack sdist
+        mkdir -p "$RUNNER_TEMP/dist/"
+        cp "$(stack path --dist-dir)"/dojang-*.tar.gz \
+          "$RUNNER_TEMP/dist/"
+        mkdir -p "$RUNNER_TEMP/sdist/"
+        mv "$(stack path --dist-dir)"/dojang-*.tar.gz \
+          "$RUNNER_TEMP/sdist/"
+    - run: ls -al ${{ runner.temp }}/dist/
+    - run: ls -al ${{ runner.temp }}/sdist/
+    - id: lookup-version
+      uses: mikefarah/yq@v4.35.2
+      with:
+        cmd: yq .version package.yaml
+    - run: echo "$VERSION"
+      env:
+        VERSION: ${{ steps.lookup-version.outputs.result }}
+    - if: github.ref_type == 'tag'
+      run: '[[ "$VERSION" = "$GITHUB_REF_NAME" ]]'
+      env:
+        VERSION: ${{ steps.lookup-version.outputs.result }}
+    - id: extract-changelog
+      uses: dahlia/submark@5a5ff0a58382fb812616a5801402f5aef00f90ce
+      with:
+        input-file: CHANGES.md
+        heading-level: 2
+        heading-title-text: version ${{ steps.lookup-version.outputs.result }}
+        ignore-case: true
+        omit-heading: true
+    - run: 'cat "$CHANGES_FILE"'
+      env:
+        CHANGES_FILE: ${{ steps.extract-changelog.outputs.output-file }}
+    - if: github.ref_type == 'tag'
+      uses: softprops/action-gh-release@v1
+      with:
+        body_path: ${{ steps.extract-changelog.outputs.output-file }}
+        name: Dojang ${{ steps.lookup-version.outputs.result }}
+        generate_release_notes: false
+        discussion_category_name: Announcements
+        files: ${{ runner.temp }}/dist/dojang-*
+    - if: github.ref_type == 'tag'
+      env:
+        HACKAGE_API_KEY: ${{ secrets.HACKAGE_API_KEY }}
+      run: |
+        for file in "$RUNNER_TEMP/sdist"/*; do
+          curl \
+            -H "Authorization: X-ApiKey $HACKAGE_API_KEY" \
+            -F package=@"$file" \
+            https://hackage.haskell.org/packages/
+        done
+
+# cSpell:ignore allejo buildx codecov dasel DDOJANG hackage mikefarah
+# cSpell:ignore mikepenz mkdocs noreply peaceiris popd pushd
+# cSpell:ignore sdist softprops submark
