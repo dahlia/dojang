@@ -786,3 +786,7 @@ spec = do
     (state'', ws'') <- getRouteState ctx (tmpDir </> foo </> ignoreMe)
     ws'' `shouldBe` ws
     state'' `shouldBe` Ignored foo "ignore-*"
+    let ctx' = ctx{environment = ctx.environment{operatingSystem = FreeBSD}}
+    (stateOnNullRouting, ws''') <- getRouteState ctx' (tmpDir </> src)
+    ws''' `shouldBe` ws
+    stateOnNullRouting `shouldBe` NotRouted

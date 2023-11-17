@@ -470,7 +470,7 @@ getRouteState ctx path = do
           (pattern, _, _) : _ -> return $ Ignored route.routeName pattern
           _ -> return $ Routed route.routeName
       else return NotRouted
-  return (minimum states, ws)
+  return (if null states then NotRouted else minimum states, ws)
  where
   ignorePatterns :: Map OsPath [FilePattern]
   ignorePatterns = ctx.repository.manifest.ignorePatterns
