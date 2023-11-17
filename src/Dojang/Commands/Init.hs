@@ -9,38 +9,46 @@
 module Dojang.Commands.Init
   ( InitPreset (..)
   , init
-  , initPresetEnvironment
   , initPresetName
   ) where
 
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.Bifunctor (Bifunctor (second))
-import Data.Either (rights)
+import Data.Function ((&))
+import Data.List (maximumBy, sortOn)
+import Data.List.NonEmpty as NonEmpty (NonEmpty ((:|)), toList)
+import Data.Ord (comparing)
 import Data.String (IsString)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Info qualified (os)
 import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo)
 import Control.Monad.Reader (asks)
-import Data.CaseInsensitive (CI (original))
-import Data.HashMap.Strict qualified as HashMap (fromList)
+import Data.HashMap.Strict qualified as HashMap
+  ( filterWithKey
+  , lookup
+  , member
+  , toList
+  )
 import Data.Map.Strict
   ( Map
+  , findWithDefault
   , fromList
   , fromListWith
   , keys
-  , member
   , toAscList
   , (!)
   )
-import Data.Map.Strict qualified as Map (empty, singleton, union)
-import Data.Set (singleton, size, toAscList, union)
+import Data.Map.Strict qualified as Map (toList)
+import Data.Set (Set)
+import Data.Set qualified as Set (member, null, toAscList)
 import Data.Text (Text, lines, unlines)
 import FortyTwo.Prompts.Multiselect (multiselect)
-import System.OsPath ((</>))
+import System.FilePattern (FilePattern)
+import System.OsPath (OsPath, encodeFS, (</>))
 
 import Dojang.App
   ( App
@@ -59,12 +67,21 @@ import Dojang.Commands
 import Dojang.ExitCodes (manifestAlreadyExists, unsupportedOnEnvError)
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifest)
-import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
+import Dojang.Types.Environment
+  ( Architecture (..)
+  , Environment (..)
+  , Kernel (..)
+  , OperatingSystem (..)
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate.Evaluate (evaluate)
+import Dojang.Types.EnvironmentPredicate.Specificity (specificity)
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FileRoute (FileRoute (fileType), fileRoute)
+import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.MonikerName (parseMonikerName)
+import Dojang.Types.MonikerMap (MonikerMap)
+import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 
 
 data InitPreset
@@ -74,6 +91,7 @@ data InitPreset
   | IntelMac
   | Win64
   | WinArm64
+  | Wsl2
   deriving (Show, Eq, Ord, Enum, Bounded)
 
 
@@ -85,22 +103,220 @@ initPresetName = \case
   IntelMac -> "Intel Mac"
   Win64 -> "Windows (64-bit)"
   WinArm64 -> "Windows (ARM64)"
+  Wsl2 -> "Linux (WSL2)"
 
 
-initPresetEnvironment :: InitPreset -> (OperatingSystem, Architecture)
-initPresetEnvironment = \case
-  Amd64Linux -> (Linux, X86_64)
-  Arm64Linux -> (Linux, AArch64)
-  AppleSiliconMac -> (MacOS, AArch64)
-  IntelMac -> (MacOS, X86_64)
-  Win64 -> (Windows, X86_64)
-  WinArm64 -> (Windows, AArch64)
+toEnvironment :: InitPreset -> Environment
+toEnvironment = \case
+  Amd64Linux -> Environment Linux X86_64 (Kernel "Linux" "0.0.0.0")
+  Arm64Linux -> Environment Linux AArch64 (Kernel "Linux" "0.0.0.0")
+  AppleSiliconMac -> Environment MacOS AArch64 (Kernel "Darwin" "0.0.0")
+  IntelMac -> Environment MacOS X86_64 (Kernel "Darwin" "0.0.0")
+  Win64 -> Environment Windows X86_64 (Kernel "Windows" "0.0.0.0")
+  WinArm64 -> Environment Windows AArch64 (Kernel "Windows" "0.0.0.0")
+  Wsl2 ->
+    Environment
+      Linux
+      X86_64
+      (Kernel "Linux" "0.0.0.0-microsoft-standard-WSL2")
+
+
+monikers :: MonikerMap
+monikers =
+  [ (moniker "linux", OperatingSystem Linux)
+  , (moniker "macos", OperatingSystem MacOS)
+  , (moniker "windows", OperatingSystem Windows)
+  , (moniker "posix", Or [OperatingSystem Linux, OperatingSystem MacOS])
+  , (moniker "linux-amd64", And [OperatingSystem Linux, Architecture X86_64])
+  , (moniker "linux-arm64", And [OperatingSystem Linux, Architecture AArch64])
+  , (moniker "macos-intel", And [OperatingSystem MacOS, Architecture X86_64])
+  ,
+    ( moniker "macos-apple-silicon"
+    , And [OperatingSystem MacOS, Architecture AArch64]
+    )
+  ,
+    ( moniker "windows-amd64"
+    , And [OperatingSystem Windows, Architecture X86_64]
+    )
+  ,
+    ( moniker "windows-arm64"
+    , And [OperatingSystem Windows, Architecture AArch64]
+    )
+  ,
+    ( moniker "linux-wsl"
+    , And
+        [ OperatingSystem Linux
+        , KernelReleaseSuffix "-microsoft-standard-WSL2"
+        ]
+    )
+  ]
+
+
+moniker :: Text -> MonikerName
+moniker name = case parseMonikerName name of
+  Right n -> n
+  Left _ -> error $ "Invalid moniker name: " <> show name
+
+
+selectMonikers :: Environment -> [MonikerName]
+selectMonikers env =
+  [ (name, predicate)
+  | (name, predicate) <- HashMap.toList monikers
+  , fst $ evaluate env monikers predicate
+  ]
+    & sortOn (specificity (`HashMap.lookup` monikers) . snd)
+    & map fst
+
+
+listNeededMonikers :: [InitPreset] -> [(InitPreset, NonEmpty MonikerName)]
+listNeededMonikers presets =
+  [ (preset, head ms' :| tail ms')
+  | (preset, ms) <- selectedMonikers
+  , let (havingDups, notHavingDups) = span (hasDuplicateMonikers preset) ms
+  , let ms' = havingDups ++ take 1 notHavingDups
+  , not $ null ms'
+  ]
+ where
+  selectedMonikers :: [(InitPreset, [MonikerName])]
+  selectedMonikers =
+    [(preset, selectMonikers $ toEnvironment preset) | preset <- presets]
+  hasDuplicateMonikers :: InitPreset -> MonikerName -> Bool
+  hasDuplicateMonikers preset moniker' =
+    (not . null)
+      [ True
+      | (p, ms) <- selectedMonikers
+      , p /= preset
+      , m <- ms
+      , m == moniker'
+      ]
+
+
+path :: String -> OsPath
+path = unsafePerformIO . encodeFS
+
+
+routes
+  :: Map OsPath ([(Set MonikerName, FilePathExpression)], Set OperatingSystem)
+routes =
+  [
+    ( path "HOME"
+    ,
+      (
+        [ ([moniker "posix", moniker "linux", moniker "macos"], posixHome)
+        , ([moniker "windows"], windowsUserProfile)
+        ]
+      , [Linux, MacOS, Linux]
+      )
+    )
+  ,
+    ( path "XDG_CONFIG_HOME"
+    ,
+      (
+        [
+          ( [moniker "posix", moniker "linux", moniker "macos"]
+          , posixXdgConfigHome
+          )
+        , ([moniker "windows"], windowsXdgConfigHome)
+        ]
+      , [Linux, MacOS]
+      )
+    )
+  ,
+    ( path "Application Support"
+    ,
+      (
+        [ ([moniker "macos"], macosApplicationSupport)
+        , ([moniker "linux"], posixXdgConfigHome)
+        , ([moniker "windows"], windowsAppData)
+        ]
+      , [MacOS]
+      )
+    )
+  ,
+    ( path "AppData"
+    ,
+      (
+        [ ([moniker "windows"], windowsAppData)
+        ,
+          ( [moniker "posix", moniker "linux", moniker "macos"]
+          , posixXdgConfigHome
+          )
+        ]
+      , [Windows]
+      )
+    )
+  ]
+
+
+ignorePatterns' :: Map OsPath [FilePattern]
+ignorePatterns' =
+  [ (path "HOME", ["*"])
+  , (path "Application Support", ["*"])
+  , (path "AppData", ["*"])
+  ]
+
+
+makeRouteMap
+  :: [(InitPreset, NonEmpty MonikerName)] -> MonikerMap -> FileRouteMap
+makeRouteMap neededMonikers monikers' =
+  fromList
+    [ (path', fileRoute monikers' (makePairs route) Directory)
+    | (path', (route, requiredOses)) <- Map.toList routes
+    , any
+        ((`Set.member` requiredOses) . (.operatingSystem) . toEnvironment . fst)
+        neededMonikers
+    ]
+ where
+  monikerScoreTable :: Map MonikerName Int
+  monikerScoreTable =
+    fromListWith (+)
+      $ zip (concatMap (NonEmpty.toList . snd) neededMonikers) [1, 1 ..]
+  makePairs
+    :: [(Set MonikerName, FilePathExpression)]
+    -> [(MonikerName, Maybe FilePathExpression)]
+  makePairs route =
+    [ ( maximumBy
+          ( comparing $ \k ->
+              ( findWithDefault 0 k monikerScoreTable
+              , specificity (`HashMap.lookup` monikers') $ Moniker k
+              )
+          )
+          (Set.toAscList names)
+      , Just expr
+      )
+    | (names, expr) <- route
+    , not $ Set.null names
+    , any (`HashMap.member` monikers') $ Set.toAscList names
+    ]
+
+
+makeManifest :: [InitPreset] -> Manifest
+makeManifest presets =
+  Manifest monikers' routeMap
+    $ fromList
+      [ (p, ignores)
+      | p <- keys routeMap
+      , let ignores = findWithDefault [] p ignorePatterns'
+      , not $ null ignores
+      ]
+ where
+  neededMonikers :: [(InitPreset, NonEmpty MonikerName)]
+  neededMonikers = listNeededMonikers presets
+  monikers' :: MonikerMap
+  monikers' =
+    monikers
+      & HashMap.filterWithKey
+        ( \k _ ->
+            k `elem` [m | (_, ms) <- neededMonikers, m <- NonEmpty.toList ms]
+        )
+  routeMap :: FileRouteMap
+  routeMap = makeRouteMap neededMonikers monikers'
 
 
 init :: (MonadFileSystem i, MonadIO i) => [InitPreset] -> Bool -> App i ExitCode
 init presets noInteractive = do
   manifestExists <- doesManifestExist
-  when (manifestExists) $ do
+  when manifestExists $ do
     die' manifestAlreadyExists "Manifest already exists."
   $(logInfo) "No manifest found."
   when (System.Info.os == "mingw32" && not noInteractive) $ do
@@ -123,139 +339,12 @@ init presets noInteractive = do
       then askPresets
       else pure presets
   $(logDebugSH) presets'
-  -- FIXME: The below code is overly complicated.  It should be simplified,
-  -- through letting it be more imperative, I think?
-  let environments = second singleton . initPresetEnvironment <$> presets'
-  let oses = (`fromListWith` environments) union
-  let monikerNames =
-        fromList
-          [ ((os', arch'), name)
-          | (os', arch', Right name) <-
-              [ (os, Nothing, parseMonikerName $ original os.identifier)
-              | os <- keys oses
-              ]
-                ++ [ ( os
-                     , Just arch
-                     , parseMonikerName
-                        $ original
-                        $ os.identifier
-                        <> "-"
-                        <> arch.identifier
-                     )
-                   | (os, archSet) <- Data.Map.Strict.toAscList oses
-                   , arch <- Data.Set.toAscList archSet
-                   ]
-          ]
-  let posixName = head $ rights [parseMonikerName "posix"]
-  let needsPosix = Linux `member` oses && MacOS `member` oses
-  let monikers =
-        HashMap.fromList
-          $ [ (monikerNames ! (os, Nothing), OperatingSystem os)
-            | os <- keys oses
-            ]
-          ++ [ ( monikerNames ! (os, Just arch)
-               , And
-                  [ Moniker $ monikerNames ! (os, Nothing)
-                  , Architecture arch
-                  ]
-               )
-             | (os, archSet) <- Data.Map.Strict.toAscList oses
-             , Data.Set.size archSet > 1
-             , arch <- Data.Set.toAscList archSet
-             ]
-          ++ [ ( posixName
-               , Or
-                  [ Moniker $ monikerNames ! (Linux, Nothing)
-                  , Moniker $ monikerNames ! (MacOS, Nothing)
-                  ]
-               )
-             | needsPosix
-             ]
-  let route = fileRoute monikers
-  let dirRoute = (`route` Directory)
-  homePath <- encodePath "HOME"
-  let homeRoutes =
-        Map.singleton
-          homePath
-          ( dirRoute
-              $ [ ( monikerNames ! (Windows, Nothing)
-                  , Just windowsUserProfile
-                  )
-                | Windows `member` oses
-                ]
-              ++ [ (posixName, Just posixHome)
-                 | Linux `member` oses || MacOS `member` oses
-                 ]
-          )
-  xdgConfigHomePath <- encodePath "XDG_CONFIG_HOME"
-  let xdgConfigHomRoutes =
-        if Linux `member` oses || MacOS `member` oses
-          then
-            Map.singleton
-              xdgConfigHomePath
-              ( dirRoute
-                  $ [ ( monikerNames ! (Windows, Nothing)
-                      , Just windowsXdgConfigHome
-                      )
-                    | Windows `member` oses
-                    ]
-                  ++ [ (posixName, Just posixXdgConfigHome)
-                     | Linux `member` oses || MacOS `member` oses
-                     ]
-              )
-          else Map.empty
-  applicationSupportPath <- encodePath "ApplicationSupport"
-  let applicationSupportRoutes =
-        if MacOS `member` oses
-          then
-            Map.singleton
-              applicationSupportPath
-              ( dirRoute
-                  $ [ ( monikerNames ! (MacOS, Nothing)
-                      , Just macosApplicationSupport
-                      )
-                    | MacOS `member` oses
-                    ]
-                  ++ [ ( monikerNames ! (Linux, Nothing)
-                       , Just posixXdgConfigHome
-                       )
-                     | Linux `member` oses
-                     ]
-                  ++ [ ( monikerNames ! (Windows, Nothing)
-                       , Just windowsAppData
-                       )
-                     | Windows `member` oses
-                     ]
-              )
-          else Map.empty
-  appDataPath <- encodePath "AppData"
-  let appDataRoutes =
-        if Windows `member` oses
-          then
-            Map.singleton
-              appDataPath
-              ( dirRoute
-                  $ [ ( monikerNames ! (Windows, Nothing)
-                      , Just windowsAppData
-                      )
-                    | Windows `member` oses
-                    ]
-                  ++ [ (posixName, Just posixXdgConfigHome)
-                     | Linux `member` oses || MacOS `member` oses
-                     ]
-              )
-          else Map.empty
-  let fileRoutes =
-        homeRoutes
-          `Map.union` xdgConfigHomRoutes
-          `Map.union` applicationSupportRoutes
-          `Map.union` appDataRoutes
-  let manifest = Manifest monikers fileRoutes [(homePath, ["*"])]
+  let manifest = makeManifest presets'
   repoDir <- asks (.sourceDirectory)
   pathStyle <- pathStyleFor stderr
-  forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path, route') -> do
+  forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
     when (route'.fileType == Directory) $ do
-      let dirPath = repoDir </> path
+      let dirPath = repoDir </> path'
       createDirectories dirPath
       printStderr $ "Directory created: " <> pathStyle dirPath <> "."
   filename <- saveManifest manifest

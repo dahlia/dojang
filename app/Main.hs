@@ -168,13 +168,14 @@ appP = do
 
 initPresetP :: Parser [InitPreset]
 initPresetP =
-  (\a b c d e f' -> catMaybes [a, b, c, d, e, f'])
+  (\a b c d e f' g -> catMaybes [a, b, c, d, e, f', g])
     <$> f Amd64Linux ("linux-x86_64", "linux-arm64")
     <*> f Arm64Linux ("linux-aarch64", "linux-arm64")
     <*> f AppleSiliconMac ("macos-aarch64", "apple-silicon-mac")
     <*> f IntelMac ("macos-amd64", "intel-mac")
     <*> f Win64 ("windows-amd64", "win64")
     <*> f WinArm64 ("windows-aarch64", "win-arm64")
+    <*> f Wsl2 ("linux-wsl2", "wsl2")
  where
   f :: InitPreset -> (String, String) -> Parser (Maybe InitPreset)
   f preset (longOpt, alias) =
