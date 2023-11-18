@@ -21,6 +21,7 @@ import Dojang.App (App, AppEnv (manifestFile), ensureContext)
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
+  , die'
   , dieWithErrors
   , pathStyleFor
   , printStderr
@@ -42,7 +43,7 @@ import Dojang.Types.Context
   , FileStat (..)
   , RouteState (..)
   , getRouteState
-  , makeCorrespond
+  , makeCorrespondWithDestination
   )
 import Dojang.Types.Repository (Repository (..))
 
@@ -127,12 +128,17 @@ reflect force paths = do
               <> codeStyle "--force"
               <> " option."
             liftIO $ exitWith ignoredFileError
-  (files, ws) <- makeCorrespond ctx
-  files' <- filterTargets files absPaths
-  let conflicts = filterConflicts files'
+  files <- forM absPaths $ \p -> do
+    (f, ws) <- makeCorrespondWithDestination ctx p
+    printWarnings $ nub ws
+    case f of
+      Nothing ->
+        die' fileNotRoutedError ("File " <> pathStyle p <> " is not routed.")
+      Just c -> return c
+  let conflicts = filterConflicts files
   $(logDebugSH) conflicts
   unless (force || null conflicts) $ do
-    printWarnings $ nub $ concat warningLists ++ ws
+    printWarnings $ nub $ concat warningLists
     dieWithErrors
       sourceCannotBeTargetError
       [ "Cannot reflect "
@@ -142,7 +148,7 @@ reflect force paths = do
         <> " is also changed."
       | c <- conflicts
       ]
-  forM_ files' $ \c -> do
+  forM_ files $ \c -> do
     if c.sourceDelta == Unchanged && c.destinationDelta == Unchanged
       then
         printStderr'
@@ -166,7 +172,7 @@ reflect force paths = do
         unless (c.sourceDelta == Unchanged) $ do
           cleanup c.source
           copy c.intermediate c.source
-  printWarnings $ nub $ concat warningLists ++ ws
+  printWarnings $ nub $ concat warningLists
   return ExitSuccess
 
 
@@ -198,21 +204,6 @@ copy from to = do
       createDirectories parent
       $(logDebug) $ "Copy file: " <> pack from' <> " -> " <> pack to'
       copyFile from.path to.path
-
-
-filterTargets
-  :: forall m
-   . (MonadIO m)
-  => [FileCorrespondence]
-  -> [OsPath]
-  -> m [FileCorrespondence]
-filterTargets corresponds targetFiles =
-  filterM conflicts corresponds
- where
-  conflicts :: FileCorrespondence -> m Bool
-  conflicts correspond = do
-    dst <- liftIO $ makeAbsolute correspond.destination.path
-    return $ dst `elem` targetFiles
 
 
 filterConflicts

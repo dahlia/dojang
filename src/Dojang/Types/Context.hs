@@ -18,12 +18,14 @@ module Dojang.Types.Context
   , makeCorrespondBetweenThreeDirs
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
+  , makeCorrespondWithDestination
   , routePaths
   ) where
 
 import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (isPrefixOf)
+import Data.List (find, isPrefixOf, sortOn)
+import Data.Ord (Down (Down))
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
@@ -46,7 +48,14 @@ import Data.Map.Strict
   )
 import System.Directory.OsPath (makeAbsolute)
 import System.FilePattern (FilePattern, matchMany)
-import System.OsPath (OsPath, joinPath, normalise, splitDirectories, (</>))
+import System.OsPath
+  ( OsPath
+  , joinPath
+  , makeRelative
+  , normalise
+  , splitDirectories
+  , (</>)
+  )
 import System.OsString (OsString)
 
 import Data.Set (toList, union)
@@ -133,6 +142,39 @@ data FileCorrespondence = FileCorrespondence
   -- ^ The kind of change that was made to the destination file.
   }
   deriving (Eq, Ord, Show)
+
+
+-- | Creates a 'FileCorrespondence' from a single destination file.
+makeCorrespondWithDestination
+  :: forall m
+   . (MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform file correspondence.
+  -> OsPath
+  -- ^ The path to the destination file.
+  -> m (Maybe FileCorrespondence, [RouteMapWarning])
+  -- ^ The file correspondence, along with a list of warnings that occurred
+  -- during path routing (if any).  The file paths in the returned
+  -- 'FileCorrespondence' value are absolute, or relative to the current
+  -- working directory at least.
+makeCorrespondWithDestination ctx dstPath = do
+  (paths, warnings) <- routePaths ctx
+  let paths' = sortOn (Down . (.destinationPath)) paths
+  let dstPath' = splitDirectories $ normalise dstPath
+  case find (`startsWith` dstPath') paths' of
+    Nothing -> return (Nothing, warnings)
+    Just route -> do
+      let relPath = makeRelative (normalise route.destinationPath) dstPath
+      let interPath =
+            normalise
+              (ctx.repository.intermediatePath </> route.routeName </> relPath)
+      let srcPath = normalise $ route.sourcePath </> relPath
+      correspond <- makeCorrespondBetweenThreeFiles interPath srcPath dstPath
+      return (Just correspond, warnings)
+ where
+  startsWith :: RouteResult -> [OsPath] -> Bool
+  startsWith p prefix =
+    splitDirectories (normalise p.destinationPath) `isPrefixOf` prefix
 
 
 -- | Creates a list of file correspondences between the source files, the

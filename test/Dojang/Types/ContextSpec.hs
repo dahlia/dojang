@@ -39,6 +39,7 @@ import Dojang.Types.Context
   , makeCorrespondBetweenThreeDirs
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
+  , makeCorrespondWithDestination
   , routePaths
   )
 import Dojang.Types.Environment
@@ -172,6 +173,32 @@ spec = do
                     , fileType = Dojang.MonadFileSystem.Directory
                     }
                  ]
+  specify "makeCorrespondWithDestination"
+    $ withContextFixture
+    $ \ctx tmpDir -> do
+      (correspond, ws) <-
+        makeCorrespondWithDestination ctx (tmpDir </> bar </> foo)
+      ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+      correspond
+        `shouldBe` Just
+          ( FileCorrespondence
+              { source =
+                  FileEntry
+                    (tmpDir </> src </> bar </> foo)
+                    (File 6)
+              , sourceDelta = Added
+              , intermediate =
+                  FileEntry
+                    (tmpDir </> src </> intermediateDir </> bar </> foo)
+                    Missing
+              , destination = FileEntry (tmpDir </> bar </> foo) Missing
+              , destinationDelta = Unchanged
+              }
+          )
+      (correspond', ws') <-
+        makeCorrespondWithDestination ctx (tmpDir </> corge)
+      correspond' `shouldBe` Nothing
+      ws' `shouldBe` ws
 
   specify "makeCorrespond" $ withContextFixture $ \ctx tmpDir -> do
     (corresponds, ws) <- makeCorrespond ctx
