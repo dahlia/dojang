@@ -32,7 +32,7 @@ def check(dir: Path):
     errors = []
     for lang in languages:
         readme_file = dir / f"README.{lang}.md"
-        readme = readme_file.read_text()
+        readme = readme_file.read_text(encoding="utf-8")
         hrefs = get_hrefs(readme)
         docs = dir.glob(f"*.{lang}.md")
         for doc in docs:

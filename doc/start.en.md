@@ -120,7 +120,7 @@ For more information, see [Ignoring irrelevant files](routing.en.md#ignoring-irr
 
 
 Routing
-------
+-------
 
 [**Routing**](routing.en.md) means copying config files to different locations
 depending on your environment.  For example, the location of the home directory
@@ -194,7 +194,7 @@ In this case, you can force it to be reflected using the `-f` option.
 
 
 Adding a new config file
------------------
+------------------------
 
 If you want to add an entirely new config file, you can create the source config
 file directly in your repository.  If you do this, you'll need to use
@@ -232,7 +232,7 @@ or need to be changed.
 
 
 Applying to a new device
---------------
+------------------------
 
 The `dojang apply` command, which copies all files that need to be changed,
 can also be used to apply config files to a new device at once thanks to

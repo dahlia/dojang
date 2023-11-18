@@ -13,7 +13,7 @@ Enter the following command in the terminal:
 
 ~~~~ console
 $ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-brew install --HEAD dahlia/dojang/dojang
+$ brew install --HEAD dahlia/dojang/dojang
 ~~~~
 
 [Homebrew]: https://brew.sh/
@@ -33,7 +33,7 @@ Now you are ready to build Dojang.  Enter the following command in the terminal:
 $ git clone https://github.com/dahlia/dojang.git
 $ cd dojang/
 $ stack build
-stack install
+$ stack install
 ~~~~
 
 The `stack install` command installs the `dojang` executable in

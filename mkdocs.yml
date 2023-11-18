@@ -36,6 +36,8 @@ nav:
   - exit-codes.md
   - fun-facts.md
 - Cookbook:
+  - cookbook/README.md
+  - cookbook/conflicts.md
   - cookbook/cross-platform-gitconfig.md
   - cookbook/simulate-other-environment.md
   - cookbook/wsl.md

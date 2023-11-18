@@ -57,6 +57,10 @@ apply force = do
         <> " and "
         <> pathStyle c.destination.path
         <> "."
+    printStderr' Hint
+      $ "Use `"
+      <> codeStyle "dojang diff"
+      <> "' to see the actual changes on both sides."
   -- Check if there are any accidental deletions:
   let ops =
         syncSourceToIntermediate
