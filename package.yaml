@@ -2,7 +2,7 @@ name: &name dojang
 version: 0.1.0
 synopsis: A cross-platform dotfiles manager
 description: See also the README.md file.
-homepage: https://github.com/dahlia/dojang
+homepage: https://dojang.dev/
 license: GPL-3.0-or-later
 author: &author Hong Minhee <hong@minhee.org>
 maintainer: *author
