@@ -164,11 +164,25 @@ makeCorrespondWithDestination ctx dstPath = do
   case find (`startsWith` dstPath') paths' of
     Nothing -> return (Nothing, warnings)
     Just route -> do
-      let relPath = makeRelative (normalise route.destinationPath) dstPath
-      let interPath =
-            normalise
-              (ctx.repository.intermediatePath </> route.routeName </> relPath)
-      let srcPath = normalise $ route.sourcePath </> relPath
+      let normalized = normalise route.destinationPath
+      let relPath = makeRelative normalized dstPath
+      period <- encodePath "."
+      let (interPath, srcPath) =
+            if normalized == dstPath || relPath == period
+              then
+                let interPath' =
+                      normalise
+                        (ctx.repository.intermediatePath </> route.routeName)
+                    srcPath' = normalise route.sourcePath
+                in (interPath', srcPath')
+              else
+                let interPath' =
+                      normalise
+                        $ ctx.repository.intermediatePath
+                        </> route.routeName
+                        </> relPath
+                    srcPath' = normalise $ route.sourcePath </> relPath
+                in (interPath', srcPath')
       correspond <- makeCorrespondBetweenThreeFiles interPath srcPath dstPath
       return (Just correspond, warnings)
  where

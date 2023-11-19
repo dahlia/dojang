@@ -195,10 +195,25 @@ spec = do
               , destinationDelta = Unchanged
               }
           )
+      let ctx' = ctx{environment = ctx.environment{operatingSystem = Windows}}
       (correspond', ws') <-
+        makeCorrespondWithDestination ctx' (tmpDir </> baz)
+      ws' `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+      correspond'
+        `shouldBe` Just
+          ( FileCorrespondence
+              { source = FileEntry (tmpDir </> src </> baz) (File 11)
+              , sourceDelta = Added
+              , intermediate =
+                  FileEntry (tmpDir </> src </> intermediateDir </> baz) Missing
+              , destination = FileEntry (tmpDir </> baz) Missing
+              , destinationDelta = Unchanged
+              }
+          )
+      (correspond'', ws'') <-
         makeCorrespondWithDestination ctx (tmpDir </> corge)
-      correspond' `shouldBe` Nothing
-      ws' `shouldBe` ws
+      correspond'' `shouldBe` Nothing
+      ws'' `shouldBe` ws
 
   specify "makeCorrespond" $ withContextFixture $ \ctx tmpDir -> do
     (corresponds, ws) <- makeCorrespond ctx

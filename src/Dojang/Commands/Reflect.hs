@@ -166,12 +166,10 @@ reflect force paths = do
           <> " to "
           <> pathStyle c.source.path
           <> "..."
-        unless (c.destinationDelta == Unchanged) $ do
-          cleanup c.intermediate
-          copy c.destination c.intermediate
-        unless (c.sourceDelta == Unchanged) $ do
-          cleanup c.source
-          copy c.intermediate c.source
+        cleanup c.intermediate
+        copy c.destination c.intermediate
+        cleanup c.source
+        copy c.intermediate c.source
   printWarnings $ nub $ concat warningLists
   return ExitSuccess
 
