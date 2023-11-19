@@ -1,14 +1,14 @@
 Detecting WSL
 =============
 
-> **Tip**
+> [!TIP]
 >
 > WSL, which stands for Windows Subsystem for Linux, is a feature that allows
 > running Linux on Windows.
 > See the [official WSL docs](https://docs.microsoft.com/windows/wsl/)
 > for more information.
 
-> **Note**
+> [!NOTE]
 >
 > This document assumes WSL 2.  It may not work on WSL 1.
 > (Contributions welcome, though.)

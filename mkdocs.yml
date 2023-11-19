@@ -3,6 +3,7 @@ docs_dir: doc
 
 markdown_extensions:
 - footnotes
+- gfm_admonition
 
 plugins:
 - search

@@ -1,7 +1,7 @@
 Environment
 ===========
 
-> **Note**  
+> [!NOTE]
 >
 > An **environment** is not the same thing as an **environment variable**.
 

@@ -76,7 +76,7 @@ $ dojang init
 When asked about the types of devices you use,
 you can select everything you use.
 
-> **Note**
+> [!NOTE]
 >
 > On Windows, `dojang init` does not yet support interactive mode;
 > this will be fixed in the future (see issue [#4]).  Until then,
@@ -85,9 +85,7 @@ you can select everything you use.
 > For example, if you use both a Windows PC and an Intel Mac,
 > you might type something like:
 >
-> ~~~~ console
-> > dojang init --win64 --intel-mac
-> ~~~~
+>     > dojang init --win64 --intel-mac
 
 You can now open the manifest file and edit it as you want.
 For a detailed description of the manifest file,

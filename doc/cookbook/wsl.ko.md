@@ -1,13 +1,13 @@
 WSL 감지
 ========
 
-> **Tip**
+> [!TIP]
 >
 > WSL은 Windows Subsystem for Linux의 약자로, Windows에서 리눅스를 사용할 수
 > 있게 해주는 기능입니다.  자세한 내용은 [WSL 공식
 > 문서](https://docs.microsoft.com/windows/wsl/)를 참고하세요.
 
-> **Note**
+> [!NOTE]
 >
 > 이 문서는 WSL 2를 기준으로 작성되었습니다.  WSL 1에서는 동작하지 않을 수
 > 있습니다.  (문서 기여는 환영.)
@@ -31,6 +31,6 @@ when = "kernel-release $= '-microsoft-standard-WSL2'"
 때문에 `when` 필드 안에 [환경 서술자 문법](../environment-predicate.ko.md)을
 사용해야 한다는 점에 주의하세요.
 
-[^1]: [WSL에서 실행 중인지 감지하는 방법?][1]
+[^1]: [WSL에서 실행 중인지 감지하는 방법?][1] (英)
 
 [1]: https://github.com/microsoft/WSL/issues/4071

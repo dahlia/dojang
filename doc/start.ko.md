@@ -70,7 +70,7 @@ $ dojang init
 
 여러분이 쓰는 기기들의 종류를 물으면 쓰는 모든 종류를 선택하면 됩니다.
 
-> **Note**
+> [!NOTE]
 >
 > Windows에서는 아직 `dojang init`이 인터랙티브 모드를 지원하지 않습니다.
 > 이 문제는 추후 해결될 예정입니다 (이슈 [#4] 참고).  그 전까지는, 명령행 옵션을
@@ -78,9 +78,7 @@ $ dojang init
 > 옵션들이 있는지 먼저 확인하세요.  예를 들어, Windows PC와 Intel Mac을 모두
 > 쓴다면 다음과 같이 입력하면 됩니다.
 >
-> ~~~~ console
-> > dojang init --win64 --intel-mac
-> ~~~~
+>     > dojang init --win64 --intel-mac
 
 이제 선언 파일을 열어서 원하는 대로 수정할 수 있습니다.  선언 파일에 대한 자세한
 설명은 [선언](manifest.ko.md) 문서를 참고하세요.

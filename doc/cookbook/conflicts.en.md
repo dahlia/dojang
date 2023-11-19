@@ -48,12 +48,13 @@ $ dojang diff
 
 ~~~~
 
-> **Tip**
+> [!TIP]
 >
 > The output format of the `dojang diff` command is basically equivalent to one
 > of the `diff --unified` commands.  If you want a different output format,
 > use the `--diff-program` option.  For example, the `--diff-program delta`
-> option allows you to change to the output format of the [`delta`] program.
+> option allows you to change to the output format of the [`delta`][delta]
+> program.
 
 Once you've identified the changes to the config file that are causing
 the conflict, it's time to resolve the conflict.  There are three ways to
@@ -67,4 +68,4 @@ resolve conflicts.
     modify the source config file that causes the conflict,
     and run the `dojang apply -f` command.
 
-[`delta`]: https://github.com/dandavison/delta
+[delta]: https://github.com/dandavison/delta

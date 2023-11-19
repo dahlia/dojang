@@ -43,12 +43,12 @@ $ dojang diff
 
 ~~~~
 
-> **Tip**
+> [!TIP]
 >
 > `dojang diff` 명령의 출력 형식은 `diff --unified` 명령과 기본적으로 같습니다.
 > 만약 출력 형식을 다르게 하고 싶다면, `--diff-program` 옵션을 사용하세요.
-> 예를 들어, `--diff-program delta` 옵션을 사용하면 [`delta`] 프로그램의 출력
-> 형식으로 변경할 수 있습니다.
+> 예를 들어, `--diff-program delta` 옵션을 사용하면 [`delta`][delta] 프로그램의
+> 출력 형식으로 변경할 수 있습니다.
 
 충돌을 일으키는 설정 파일의 변경 내용을 확인했다면, 이제 충돌을 해결할
 차례입니다.  충돌을 해결하는 방법은 크게 세 가지가 있습니다.
@@ -60,4 +60,4 @@ $ dojang diff
  -  원본 파일과 대상 파일의 변경 모두 취하기: 충돌을 일으키는 원본 설정 파일을
     직접 수정하고, `dojang apply -f` 명령을 실행하면 됩니다.
 
-[`delta`]: https://github.com/dandavison/delta
+[delta]: https://github.com/dandavison/delta
