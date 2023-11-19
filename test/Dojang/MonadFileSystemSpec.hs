@@ -9,7 +9,6 @@ import GHC.IO.Exception (IOErrorType (InappropriateType))
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
-  , ioeGetErrorString
   , ioeGetErrorType
   , ioeGetFileName
   , ioeGetLocation
@@ -975,20 +974,27 @@ spec = do
 
       it "fails if path doesn't exist" $ withTempDir $ \tmpDir tmpDirFP -> do
         Left e <- tryDryRunIO $ getFileSize $ tmpDir </> nonExistentP
-        ioeGetFileName e `shouldBe` Just (tmpDirFP `combine` nonExistentFP)
         ioeGetErrorType e `shouldBe` doesNotExistErrorType
+        ioeGetFileName e `shouldBe` Just (tmpDirFP `combine` nonExistentFP)
+        ioeGetLocation e `shouldBe` "getFileSize"
         Left e' <- tryDryRunIO $ do
           () <- removeFile packageYamlP
           getFileSize packageYamlP
+        ioeGetErrorType e' `shouldBe` doesNotExistErrorType
         ioeGetFileName e' `shouldBe` Just packageYamlFP
-        ioeGetErrorString e' `shouldBe` "getFileSize: no such file"
+        ioeGetLocation e' `shouldBe` "getFileSize"
+        show e' `shouldContain` "does not exist"
 
       it "fails if path is a directory" $ withTempDir $ \tmpDir tmpDirFP -> do
         Left e <- tryDryRunIO $ getFileSize tmpDir
+        ioeGetErrorType e `shouldBe` InappropriateType
         ioeGetFileName e `shouldBe` Just tmpDirFP
-        ioeGetErrorString e `shouldBe` "getFileSize: it is a directory"
+        ioeGetLocation e `shouldBe` "getFileSize"
+        show e `shouldContain` "not a regular file, but a directory"
         Left e' <- tryDryRunIO $ do
           () <- createDirectory nonExistentP
           getFileSize nonExistentP
+        ioeGetErrorType e' `shouldBe` InappropriateType
         ioeGetFileName e' `shouldBe` Just nonExistentFP
-        ioeGetErrorString e' `shouldBe` "getFileSize: it is a directory"
+        ioeGetLocation e' `shouldBe` "getFileSize"
+        show e' `shouldContain` "not a regular file, but a directory"

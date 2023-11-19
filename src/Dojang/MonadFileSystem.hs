@@ -25,7 +25,6 @@ import System.IO.Error
   , doesNotExistErrorType
   , ioeGetLocation
   , ioeSetErrorString
-  , ioeSetFileName
   , ioeSetLocation
   , isDoesNotExistError
   , isPermissionError
@@ -68,7 +67,6 @@ import System.OsPath
   , decodeFS
   , encodeFS
   , joinPath
-  , makeRelative
   , normalise
   , splitDirectories
   , takeDirectory
@@ -699,10 +697,9 @@ instance MonadFileSystem DryRunIO where
 
 
   listDirectory path = do
-    let normalizedPath = normalise path
     oFiles <- gets overlaidFiles
     pathFP <- decodePath path
-    case oFiles !? normalizedPath of
+    case oFiles !? path' of
       Just ((_, Gone) :| _) ->
         throwError $ noDirError pathFP
       Just ((_, Contents _) :| _) ->
@@ -730,7 +727,10 @@ instance MonadFileSystem DryRunIO where
                 ++ [ filename
                    | (filePath, f) <- toAscList directOChildren'
                    , f /= Gone
-                   , let filename = makeRelative path filePath
+                   , let split = splitDirectories filePath
+                   , pathDirs `isPrefixOf` split
+                   , length pathDirs < length split
+                   , let filename = split !! length pathDirs
                    , filename `notElem` files
                    ]
         return $ sort result
@@ -772,13 +772,9 @@ instance MonadFileSystem DryRunIO where
     path' <- decodePath path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) ->
-        throwError
-          $ userError "getFileSize: no such file"
-          `ioeSetFileName` path'
+        throwError $ noFileError path'
       Just ((_, Directory') :| _) ->
-        throwError
-          $ userError "getFileSize: it is a directory"
-          `ioeSetFileName` path'
+        throwError $ nonFileError path'
       Just _ -> do
         contents <- readFile path
         return
@@ -787,12 +783,27 @@ instance MonadFileSystem DryRunIO where
       Nothing -> do
         isDir <- isDirectory path
         if isDir
-          then
-            throwError
-              $ userError "getFileSize: it is a directory"
-              `ioeSetFileName` path'
-          else do
-            liftIO $ System.Directory.OsPath.getFileSize path
+          then throwError $ nonFileError path'
+          else
+            liftIO (System.Directory.OsPath.getFileSize path)
+              `catchError` \e -> throwError (e `ioeSetLocation` "getFileSize")
+   where
+    noFileError :: FilePath -> IOError
+    noFileError pathFP =
+      mkIOError
+        doesNotExistErrorType
+        "getFileSize"
+        Nothing
+        (Just pathFP)
+        `ioeSetErrorString` "no such file"
+    nonFileError :: FilePath -> IOError
+    nonFileError pathFP =
+      mkIOError
+        InappropriateType
+        "getFileSize"
+        Nothing
+        (Just pathFP)
+        `ioeSetErrorString` "not a regular file, but a directory"
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns the result.
