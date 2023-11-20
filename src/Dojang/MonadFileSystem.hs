@@ -163,8 +163,7 @@ class (MonadError IOError m) => MonadFileSystem m where
                 throwError $ fileError ancestor'
               else createDirectory ancestor
     )
-      `catchError` \e ->
-        throwError $ e `ioePrependLocation` "createDirectories"
+      `mapError` (`ioePrependLocation` "createDirectories")
    where
     split :: [OsPath]
     split = splitDirectories path
@@ -196,8 +195,7 @@ class (MonadError IOError m) => MonadFileSystem m where
             Symlink -> removeFile $ path </> entry
         removeDirectory path
     )
-      `catchError` \e ->
-        throwError $ e `ioePrependLocation` "removeDirectoryRecursively"
+      `mapError` (`ioePrependLocation` "removeDirectoryRecursively")
 
 
   -- | Lists all files and directories in a directory except for @.@ and @..@,
@@ -222,8 +220,8 @@ class (MonadError IOError m) => MonadFileSystem m where
     -- ^ The list of pairs of file types and paths.  The paths are relative
     -- to the given directory.
   listDirectoryRecursively path ignorePatterns =
-    listDirectoryRecursively' path (step_ ignorePatterns) `catchError` \e ->
-      throwError $ e `ioePrependLocation` "listDirectoryRecursively"
+    listDirectoryRecursively' path (step_ ignorePatterns)
+      `mapError` (`ioePrependLocation` "listDirectoryRecursively")
 
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
@@ -525,8 +523,7 @@ instance MonadFileSystem DryRunIO where
       Nothing ->
         liftIO
           $ getSymbolicLinkTarget path
-          `catchError` \e ->
-            throwError $ e `ioePrependLocation` "readSymlinkTarget"
+          `mapError` (`ioePrependLocation` "readSymlinkTarget")
 
 
   copyFile src dst = do
@@ -719,8 +716,9 @@ instance MonadFileSystem DryRunIO where
         isFile' <- liftIO $ doesFileExist path
         when (isSymlink' || isFile') $ throwError (nonDirError pathFP)
         files <-
-          liftIO $ System.Directory.OsPath.listDirectory path `catchError` \e ->
-            throwError $ e `ioePrependLocation` "listDirectory"
+          liftIO
+            $ System.Directory.OsPath.listDirectory path
+            `mapError` (`ioePrependLocation` "listDirectory")
         let directOChildren' = directOChildren oFiles
         let result =
               [f | f <- files, directOChildren' !? (path' </> f) /= Just Gone]
@@ -786,7 +784,7 @@ instance MonadFileSystem DryRunIO where
           then throwError $ nonFileError path'
           else
             liftIO (System.Directory.OsPath.getFileSize path)
-              `catchError` \e -> throwError (e `ioeSetLocation` "getFileSize")
+              `mapError` (`ioeSetLocation` "getFileSize")
    where
     noFileError :: FilePath -> IOError
     noFileError pathFP =
@@ -835,3 +833,7 @@ ioePrependLocation e location =
  where
   loc :: String
   loc = ioeGetLocation e
+
+
+mapError :: (MonadError e m) => m a -> (e -> e) -> m a
+mapError action transform = catchError action (throwError . transform)
