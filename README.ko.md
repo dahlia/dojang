@@ -8,6 +8,7 @@ Dojang: 크로스플랫폼 닷파일 관리자
 
 [![GPL 3.0][License badge]](./LICENSE)
 [![GitHub Actions][GitHub Actions status badge]][GitHub Actions]
+[![Cirrus CI][Cirrus CI status badge]][Cirrus CI]
 [![Codecov][Codecov badge]][Codecov]
 
 Dojang은 크로스플랫폼 닷파일 관리자입니다.  Dojang의 특징은 다음과 같습니다.
@@ -30,6 +31,10 @@ Dojang은 크로스플랫폼 닷파일 관리자입니다.  Dojang의 특징은 
 [License badge]: https://img.shields.io/github/license/dahlia/dojang
 [GitHub Actions status badge]: https://github.com/dahlia/dojang/actions/workflows/build.yaml/badge.svg
 [GitHub Actions]: https://github.com/dahlia/dojang/actions/workflows/build.yaml
+[Cirrus CI status badge]: https://img.shields.io/cirrus/github/dahlia/dojang
+[Cirrus CI]: https://cirrus-ci.com/github/dahlia/dojang
 [Codecov badge]: https://codecov.io/gh/dahlia/dojang/graph/badge.svg?token=JrwY5Yt2pD
 [Codecov]: https://codecov.io/gh/dahlia/dojang
 [GPL 3.0]: https://www.gnu.org/licenses/gpl-3.0.html
+
+<!-- cSpell: ignore codecov -->

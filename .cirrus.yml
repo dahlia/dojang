@@ -1,0 +1,11 @@
+freebsd_instance:
+  image_family: freebsd-13-2
+
+task:
+  install_script:
+  - pkg install -y devel/stack
+  - mv stack-ghc-9.4.5.yaml stack.yaml
+  - stack setup
+  - stack build --only-dependencies --test --no-run-tests
+  test_script:
+  - stack test

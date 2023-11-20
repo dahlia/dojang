@@ -69,6 +69,7 @@ expectedOS = case os of
   "darwin" -> MacOS
   "linux" -> Linux
   "mingw32" -> Windows
+  "freebsd" -> FreeBSD
   os' -> OtherOS $ fromString os'
 
 
