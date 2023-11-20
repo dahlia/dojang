@@ -50,6 +50,9 @@ extra:
   - icon: fontawesome/brands/github
     name: GitHub
     link: https://github.com/dahlia/dojang
+  analytics:
+    provider: custom
+    domain: dojang.dev
 
 repo_url: https://github.com/dahlia/dojang
 repo_name: dahlia/dojang
@@ -57,6 +60,7 @@ edit_uri: edit/main/doc/
 
 theme:
   name: material
+  custom_dir: doc/overrides
   logo: cat-pow.svg
   favicon: img/favicon.ico
   features:
