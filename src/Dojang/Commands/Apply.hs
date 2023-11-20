@@ -123,9 +123,9 @@ apply force = do
         else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
-  when debug' (void $ status False)
+  when debug' (void $ status False False)
   forM_ ops $ \path -> printSyncOp path >> doSyncOp path
-  when debug' (void $ status False)
+  when debug' (void $ status False False)
   (files', _) <- makeCorrespond ctx
   $(logDebugSH) files'
   ops' <-

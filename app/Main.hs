@@ -246,6 +246,11 @@ cmdP =
                               ++ "on Windows) to directory paths"
                           )
                     )
+                  <*> switch
+                    ( long "only-changes"
+                        <> short 'c'
+                        <> help "Only show changed files"
+                    )
                   <**> helper
               )
               ( progDesc

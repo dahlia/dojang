@@ -43,12 +43,13 @@ import Dojang.Types.MonikerName ()
 import Dojang.Types.Repository (Repository (..), RouteMapWarning (..))
 
 
-status :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
-status noTrailingSlash = do
+status :: (MonadFileSystem i, MonadIO i) => Bool -> Bool -> App i ExitCode
+status noTrailingSlash onlyChanges = do
   ctx <- ensureContext
   (files, ws) <- makeCorrespond ctx
+  let files' = if onlyChanges then filter isChanged files else files
   sourcePath <- liftIO $ makeAbsolute ctx.repository.sourcePath
-  rows <- forM files $ \file -> do
+  rows <- forM files' $ \file -> do
     path <- liftIO $ makeAbsolute file.source.path
     let relPath = makeRelative sourcePath path
     let relPathS =
@@ -70,6 +71,11 @@ status noTrailingSlash = do
   printTable ["Source", "ST", "Destination", "DT", "File"] rows
   printWarnings ws
   return ExitSuccess
+
+
+isChanged :: FileCorrespondence -> Bool
+isChanged file =
+  file.sourceDelta /= Unchanged || file.destinationDelta /= Unchanged
 
 
 renderDeltaKind :: FileDeltaKind -> (Color, Text)
