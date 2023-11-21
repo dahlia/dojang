@@ -2,7 +2,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Commands.Status
-  ( formatWarning
+  ( StatusOptions (..)
+  , defaultStatusOptions
+  , formatWarning
   , printWarnings
   , status
   ) where
@@ -43,32 +45,60 @@ import Dojang.Types.MonikerName ()
 import Dojang.Types.Repository (Repository (..), RouteMapWarning (..))
 
 
-status :: (MonadFileSystem i, MonadIO i) => Bool -> Bool -> App i ExitCode
-status noTrailingSlash onlyChanges = do
+data StatusOptions = StatusOptions
+  { noTrailingSlash :: Bool
+  , onlyChanges :: Bool
+  , showDestinationPath :: Bool
+  }
+  deriving (Show)
+
+
+defaultStatusOptions :: StatusOptions
+defaultStatusOptions =
+  StatusOptions
+    { noTrailingSlash = False
+    , onlyChanges = False
+    , showDestinationPath = False
+    }
+
+
+status :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
+status options = do
   ctx <- ensureContext
   (files, ws) <- makeCorrespond ctx
-  let files' = if onlyChanges then filter isChanged files else files
+  let files' = if options.onlyChanges then filter isChanged files else files
   sourcePath <- liftIO $ makeAbsolute ctx.repository.sourcePath
   rows <- forM files' $ \file -> do
-    path <- liftIO $ makeAbsolute file.source.path
-    let relPath = makeRelative sourcePath path
-    let relPathS =
-          if not noTrailingSlash
+    displayPath <-
+      if options.showDestinationPath
+        then liftIO $ makeAbsolute file.destination.path
+        else do
+          path <- liftIO $ makeAbsolute file.source.path
+          return $ makeRelative sourcePath path
+    let displayPathS =
+          if not options.noTrailingSlash
             && ( (file.source.stat == Directory)
                   || (file.source.stat == Missing)
                   && (file.destination.stat == Directory)
                )
-            then addTrailingPathSeparator relPath
-            else relPath
-    relPath' <- decodePath relPathS
+            then addTrailingPathSeparator displayPath
+            else displayPath
+    displayPathFP <- decodePath displayPathS
     return
       [ renderDeltaKind file.sourceDelta
       , renderFileStat file.source.stat
       , renderDeltaKind file.destinationDelta
       , renderFileStat file.destination.stat
-      , (Default, pack relPath')
+      , (Default, pack displayPathFP)
       ]
-  printTable ["Source", "ST", "Destination", "DT", "File"] rows
+  printTable
+    [ "Source"
+    , "ST"
+    , "Destination"
+    , "DT"
+    , if options.showDestinationPath then "Destination File" else "Source File"
+    ]
+    rows
   printWarnings ws
   return ExitSuccess
 

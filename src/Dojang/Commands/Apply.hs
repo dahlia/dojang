@@ -25,7 +25,7 @@ import Dojang.Commands
   , printStderr
   , printStderr'
   )
-import Dojang.Commands.Status (printWarnings, status)
+import Dojang.Commands.Status (defaultStatusOptions, printWarnings, status)
 import Dojang.ExitCodes (accidentalDeletionWarning, conflictError)
 import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
 import Dojang.Types.Context
@@ -123,9 +123,9 @@ apply force = do
         else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
-  when debug' (void $ status False False)
+  when debug' (void $ status defaultStatusOptions)
   forM_ ops $ \path -> printSyncOp path >> doSyncOp path
-  when debug' (void $ status False False)
+  when debug' (void $ status defaultStatusOptions)
   (files', _) <- makeCorrespond ctx
   $(logDebugSH) files'
   ops' <-

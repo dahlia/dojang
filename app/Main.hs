@@ -69,6 +69,7 @@ import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
 import Dojang.Commands.Reflect qualified (reflect)
+import Dojang.Commands.Status (StatusOptions (..))
 import Dojang.Commands.Status qualified (status)
 import Dojang.ExitCodes (unhandledError)
 import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
@@ -238,19 +239,29 @@ cmdP =
           "status"
           ( info
               ( Dojang.Commands.Status.status
-                  <$> switch
-                    ( long "no-trailing-slash"
-                        <> short 'S'
-                        <> help
-                          ( "Do not append trailing slash (or backslash "
-                              ++ "on Windows) to directory paths"
-                          )
-                    )
-                  <*> switch
-                    ( long "only-changes"
-                        <> short 'c'
-                        <> help "Only show changed files"
-                    )
+                  <$> ( StatusOptions
+                          <$> switch
+                            ( long "no-trailing-slash"
+                                <> short 'S'
+                                <> help
+                                  ( "Do not append trailing slash (or backslash "
+                                      ++ "on Windows) to directory paths"
+                                  )
+                            )
+                          <*> switch
+                            ( long "only-changes"
+                                <> short 'c'
+                                <> help "Only show changed files"
+                            )
+                          <*> switch
+                            ( long "show-destination-path"
+                                <> short 'd'
+                                <> help
+                                  ( "Show destination (target) path "
+                                      ++ "instead of source path"
+                                  )
+                            )
+                      )
                   <**> helper
               )
               ( progDesc
