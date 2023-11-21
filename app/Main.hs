@@ -340,6 +340,7 @@ cmdP =
                               ++ "changes in the target tree too"
                           )
                     )
+                  <*> many (pathArgument $ metavar "FILE" <> action "file")
                   <**> helper
               )
               (progDesc "Apply changes to target tree")

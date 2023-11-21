@@ -5,7 +5,7 @@
 
 module Dojang.Commands.Apply (apply) where
 
-import Control.Monad (filterM, forM_, unless, void, when)
+import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.Function ((&))
@@ -15,18 +15,25 @@ import System.IO (stderr)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebugSH)
+import Data.Map.Strict (fromList, notMember, toList)
+import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
 
 import Dojang.App (App, AppEnv (debug, manifestFile), ensureContext, lookupEnv')
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
+  , die'
   , pathStyleFor
   , printStderr
   , printStderr'
   )
 import Dojang.Commands.Status (defaultStatusOptions, printWarnings, status)
-import Dojang.ExitCodes (accidentalDeletionWarning, conflictError)
+import Dojang.ExitCodes
+  ( accidentalDeletionWarning
+  , conflictError
+  , fileNotRoutedError
+  )
 import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
 import Dojang.Types.Context
   ( Context (..)
@@ -40,14 +47,33 @@ import Dojang.Types.Context
   )
 
 
-apply :: (MonadFileSystem i, MonadIO i) => Bool -> App i ExitCode
-apply force = do
+apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
+apply force filePaths = do
   ctx <- ensureContext
-  (files, ws) <- makeCorrespond ctx
+  (allFiles, ws) <- makeCorrespond ctx
+  fileMap <- fmap fromList $ forM allFiles $ \fc -> do
+    srcAbsPath <- liftIO $ makeAbsolute fc.source.path
+    return (srcAbsPath, fc)
+  pathStyle <- pathStyleFor stderr
+  filePaths' <- forM filePaths $ \fp -> do
+    fp' <- liftIO $ makeAbsolute fp
+    when (fp' `notMember` fileMap) $ do
+      die' fileNotRoutedError
+        $ "File "
+        <> pathStyle fp
+        <> " is not tracked by this repository."
+    return fp'
+  let files =
+        if null filePaths'
+          then allFiles
+          else
+            [ f
+            | (srcAbsPath, f) <- toList fileMap
+            , srcAbsPath `elem` filePaths'
+            ]
   $(logDebugSH) files
   -- Check if there are any conflicts:
   conflicts <- filterConflicts files
-  pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
   unless (null conflicts) $ do
     forM_ conflicts $ \c -> do
