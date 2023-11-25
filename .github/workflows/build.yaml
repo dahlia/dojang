@@ -171,7 +171,12 @@ jobs:
     - run: |
         set -e
         mkdir -p "$RUNNER_TEMP/dojang-bins/"
-        docker run "ghcr.io/$GITHUB_REPOSITORY:git-$GITHUB_SHA" \
+        if [[ "$GITHUB_REF_TYPE" = tag ]]; then
+          tag="$GITHUB_REF_NAME"
+        else
+          tag="git-$GITHUB_SHA"
+        fi
+        docker run "ghcr.io/$GITHUB_REPOSITORY:$tag" \
           cat /usr/local/bin/dojang \
             > "$RUNNER_TEMP/dojang-bins/dojang"
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
@@ -206,6 +211,9 @@ jobs:
   release:
     needs: [check, test, build, build-linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      discussions: write
     steps:
     - uses: actions/checkout@v4
     - uses: actions/download-artifact@v3

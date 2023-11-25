@@ -4,4 +4,4 @@ Dojang changelog
 Version 0.1.0
 -------------
 
-To be released sometime in the future.
+Initial release.  Released on November 26, 2023.
