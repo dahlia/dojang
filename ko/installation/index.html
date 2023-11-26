@@ -986,11 +986,16 @@
 <h1 id="_1">설치</h1>
 <p>이 문서에서는 Dojang을 설치하는 방법들을 설명합니다.</p>
 <h2 id="homebrew-macos-linux">Homebrew (macOS 및 Linux)</h2>
-<p>Dojang은 <a href="https://brew.sh/">Homebrew</a>를 통해 자동으로 빌드하여 설치할 수 있습니다.
-다음 명령어를 터미널에서 입력해 주세요.</p>
+<p>Dojang은 <a href="https://brew.sh/">Homebrew</a>를 통해 자동으로 실행 파일을 다운로드 받아 설치할 수
+있습니다.  다음 명령어를 터미널에서 입력해 주세요.</p>
 <pre><code class="language-console">$ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-$ brew install --HEAD dahlia/dojang/dojang
+$ brew install --cask dahlia/dojang/dojang
 </code></pre>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>만약 실행 파일을 받지 않고 직접 빌드하고 싶다면 <code>--cask</code> 옵션 대신 <code>--formula</code>
+옵션을 사용해 주세요.</p>
+</div>
 <h2 id="scoop-windows">Scoop (Windows)</h2>
 <p>Dojang은 <a href="https://scoop.sh/">Scoop</a>을 통해 자동으로 실행 파일을 다운로드 받아 설치할 수 있습니다.
 다음 명령어를 터미널에서 입력해 주세요.</p>
