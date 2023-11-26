@@ -13,6 +13,12 @@ cask "dojang" do
   conflicts_with formula: "dojang"
 
   binary "dojang"
+  binary "completions/dojang.bash",
+         target: "#{HOMEBREW_PREFIX}/etc/bash_completion.d/dojang"
+  binary "completions/dojang.zsh",
+         target: "#{HOMEBREW_PREFIX}/share/zsh/site-functions/_dojang"
+  binary "completions/dojang.fish",
+         target: "#{HOMEBREW_PREFIX}/share/fish/vendor_completions.d/dojang.fish"
 
   postflight do
     if OS.send(:mac?) && Hardware::CPU.send(:arm?)
@@ -28,23 +34,5 @@ cask "dojang" do
              "#{staged_path}/dojang"
     end
     set_permissions (staged_path/"dojang"), "0755"
-
-    completions = staged_path/"completions"
-    completions.mkdir() unless completions.exist?
-    (HOMEBREW_PREFIX/"etc"/"bash_completion.d"/"dojang.bash").write(
-      system_command(staged_path/"dojang", args: ["--bash-completion-script=dojang"]).stdout
-    )
-    (HOMEBREW_PREFIX/"share"/"zsh"/"site-functions"/"dojang.zsh").write(
-      system_command(staged_path/"dojang", args: ["--zsh-completion-script=dojang"]).stdout
-    )
-    (HOMEBREW_PREFIX/"share"/"fish"/"vendor_completions.d"/"dojang.fish").write(
-      system_command(staged_path/"dojang", args: ["--fish-completion-script=dojang"]).stdout
-    )
-  end
-
-  uninstall_postflight do
-    (HOMEBREW_PREFIX/"etc"/"bash_completion.d"/"dojang.bash").unlink
-    (HOMEBREW_PREFIX/"share"/"zsh"/"site-functions"/"dojang.zsh").unlink
-    (HOMEBREW_PREFIX/"share"/"fish"/"vendor_completions.d"/"dojang.fish").unlink
   end
 end
