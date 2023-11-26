@@ -512,6 +512,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#scoop-windows" class="md-nav__link">
+    <span class="md-ellipsis">
+      Scoop (Windows)
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#build-it-manually" class="md-nav__link">
     <span class="md-ellipsis">
       Build it manually
@@ -934,6 +943,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#scoop-windows" class="md-nav__link">
+    <span class="md-ellipsis">
+      Scoop (Windows)
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#build-it-manually" class="md-nav__link">
     <span class="md-ellipsis">
       Build it manually
@@ -966,13 +984,18 @@
 
 
 <h1 id="installation">Installation</h1>
-<p>Dojang has never been officially released yet, so you'll need to build it to
-install it. This article explains how to install Dojang.</p>
+<p>This article explains how to install Dojang.</p>
 <h2 id="homebrew-macos-linux">Homebrew (macOS &amp; Linux)</h2>
 <p>Dojang can be automatically built and installed via <a href="https://brew.sh/">Homebrew</a>.
 Enter the following command in the terminal:</p>
 <pre><code class="language-console">$ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
 $ brew install --HEAD dahlia/dojang/dojang
+</code></pre>
+<h2 id="scoop-windows">Scoop (Windows)</h2>
+<p>Dojang can be automatically installed via <a href="https://scoop.sh/">Scoop</a> by downloading its executable.
+Enter the following command in the terminal:</p>
+<pre><code class="language-console">$ scoop bucket add dojang https://github.com/dahlia/dojang.git
+$ scoop install dojang
 </code></pre>
 <h2 id="build-it-manually">Build it manually</h2>
 <p>Dojang is a program made in Haskell, so you need to install the <a href="https://haskellstack.org/">Haskell Tool
