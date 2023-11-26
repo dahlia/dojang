@@ -12,7 +12,7 @@ Enter the following command in the terminal:
 
 ~~~~ console
 $ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-$ brew install --HEAD dahlia/dojang/dojang
+$ brew install dahlia/dojang/dojang
 ~~~~
 
 [Homebrew]: https://brew.sh/

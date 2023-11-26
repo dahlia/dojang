@@ -12,7 +12,7 @@ Dojang은 [Homebrew]를 통해 자동으로 빌드하여 설치할 수 있습니
 
 ~~~~ console
 $ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-$ brew install --HEAD dahlia/dojang/dojang
+$ brew install dahlia/dojang/dojang
 ~~~~
 
 [Homebrew]: https://brew.sh/
