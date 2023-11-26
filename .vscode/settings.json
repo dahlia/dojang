@@ -29,9 +29,11 @@
   "cSpell.words": [
     "aarch64",
     "amigaos",
+    "autoupdate",
     "bifunctor",
     "bimap",
     "bytestring",
+    "checkver",
     "combinators",
     "concat",
     "deepseq",

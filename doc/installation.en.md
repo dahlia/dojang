@@ -1,8 +1,7 @@
 Installation
 ============
 
-Dojang has never been officially released yet, so you'll need to build it to
-install it. This article explains how to install Dojang.
+This article explains how to install Dojang.
 
 
 Homebrew (macOS & Linux)
@@ -17,6 +16,20 @@ $ brew install --HEAD dahlia/dojang/dojang
 ~~~~
 
 [Homebrew]: https://brew.sh/
+
+
+Scoop (Windows)
+---------------
+
+Dojang can be automatically installed via [Scoop] by downloading its executable.
+Enter the following command in the terminal:
+
+~~~~ console
+$ scoop bucket add dojang https://github.com/dahlia/dojang.git
+$ scoop install dojang
+~~~~
+
+[Scoop]: https://scoop.sh/
 
 
 Build it manually

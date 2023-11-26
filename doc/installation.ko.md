@@ -1,8 +1,7 @@
 설치
 ====
 
-Dojang은 현재 정식으로 릴리스된 적 없습니다.  따라서 Dojang을 설치하려면 빌드
-과정을 거쳐야 합니다.  이 문서에서는 Dojang을 설치하는 방법들을 설명합니다.
+이 문서에서는 Dojang을 설치하는 방법들을 설명합니다.
 
 
 Homebrew (macOS 및 Linux)
@@ -17,6 +16,20 @@ $ brew install --HEAD dahlia/dojang/dojang
 ~~~~
 
 [Homebrew]: https://brew.sh/
+
+
+Scoop (Windows)
+---------------
+
+Dojang은 [Scoop]을 통해 자동으로 실행 파일을 다운로드 받아 설치할 수 있습니다.
+다음 명령어를 터미널에서 입력해 주세요.
+
+~~~~ console
+$ scoop bucket add dojang https://github.com/dahlia/dojang.git
+$ scoop install dojang
+~~~~
+
+[Scoop]: https://scoop.sh/
 
 
 직접 빌드하기
