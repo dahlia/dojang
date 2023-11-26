@@ -191,6 +191,29 @@ In this case, you can force it to be reflected using the `-f` option.
 [inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
 
 
+*.dojang* directory
+-------------------
+
+Dojang keeps internal records in the *.dojang* directory in order to do
+three-way diffs between the config files applied to your device and the source
+config files.  This directory is placed at the root of the repository.
+The contents of this directory should not be modified or deleted by you,
+and it should not be put on a SCM because its contents are device-specific.
+
+Therefore, when using a SCM like Git or Mercurial, you should tell it to ignore
+this directory.  If you're using Git, you can do this by adding it to your
+*~/.gitignore* file like below:
+
+~~~~ gitignore
+.dojang/
+~~~~
+
+> [!TIP]
+>
+> If you ran the `git init` command before running the `dojang init` command,
+> `dojang init` will automatically generate a *.gitignore* file.
+
+
 Adding a new config file
 ------------------------
 

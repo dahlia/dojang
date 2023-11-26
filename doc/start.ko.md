@@ -176,6 +176,28 @@ Hint: You can reflect it anyway by enforcing it using -f/--force option.
 [inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
 
 
+*.dojang* 디렉터리
+------------------
+
+Dojang은 기기에 적용된 설정 파일들과 원본 설정 파일들을 삼각측량하기 위해,
+*.dojang* 디렉터리에 내부적인 기록을 남깁니다.  이 디렉터리는 저장소의 최상위에
+있습니다.  이 디렉터리의 내용은 사용자가 직접 수정하거나 삭제해서는 안 되며,
+내용물은 기기에 따라 달라지므로 형상 관리 시스템에 올려두지 않아야 합니다.
+
+따라서 Git이나 Mercurial 같은 형상 관리 시스템을 사용할 때는,
+이 디렉터리를 무시하도록 설정해야 합니다.  Git을 사용한다면,
+아래처럼 *~/.gitignore* 파일에 추가하면 됩니다.
+
+~~~~ gitignore
+.dojang/
+~~~~
+
+> [!TIP]
+>
+> `dojang init` 명령을 실행하기 전에 `git init` 명령을 실행했다면,
+> `dojang init`은 자동으로 *.gitignore* 파일을 생성합니다.
+
+
 새 설정 파일 추가
 -----------------
 
