@@ -7,13 +7,18 @@ This article explains how to install Dojang.
 Homebrew (macOS & Linux)
 ------------------------
 
-Dojang can be automatically built and installed via [Homebrew].
-Enter the following command in the terminal:
+Dojang can be automatically installed via [Homebrew] by downloading its
+executable.  Enter the following command in the terminal:
 
 ~~~~ console
 $ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-$ brew install dahlia/dojang/dojang
+$ brew install --cask dahlia/dojang/dojang
 ~~~~
+
+> [!TIP]
+>
+> If you want to build it manually instead of downloading the executable,
+> use the `--formula` option instead of the `--cask` option.
 
 [Homebrew]: https://brew.sh/
 

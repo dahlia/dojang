@@ -7,13 +7,18 @@
 Homebrew (macOS 및 Linux)
 -------------------------
 
-Dojang은 [Homebrew]를 통해 자동으로 빌드하여 설치할 수 있습니다.
-다음 명령어를 터미널에서 입력해 주세요.
+Dojang은 [Homebrew]를 통해 자동으로 실행 파일을 다운로드 받아 설치할 수
+있습니다.  다음 명령어를 터미널에서 입력해 주세요.
 
 ~~~~ console
 $ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-$ brew install dahlia/dojang/dojang
+$ brew install --cask dahlia/dojang/dojang
 ~~~~
+
+> [!TIP]
+>
+> 만약 실행 파일을 받지 않고 직접 빌드하고 싶다면 `--cask` 옵션 대신 `--formula`
+> 옵션을 사용해 주세요.
 
 [Homebrew]: https://brew.sh/
 
