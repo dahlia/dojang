@@ -547,6 +547,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dojang" class="md-nav__link">
+    <span class="md-ellipsis">
+      .dojang 디렉터리
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#_9" class="md-nav__link">
     <span class="md-ellipsis">
       새 설정 파일 추가
@@ -1051,6 +1060,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dojang" class="md-nav__link">
+    <span class="md-ellipsis">
+      .dojang 디렉터리
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#_9" class="md-nav__link">
     <span class="md-ellipsis">
       새 설정 파일 추가
@@ -1202,6 +1220,21 @@ Error: File /home/USER/.bash_history is ignored due to pattern &quot;*&quot; (ro
 Hint: You can reflect it anyway by enforcing it using -f/--force option.
 </code></pre>
 <p>이럴 때는 <code>-f</code> 옵션을 사용하여 강제로 반영할 수 있습니다.</p>
+<h2 id="dojang"><em>.dojang</em> 디렉터리</h2>
+<p>Dojang은 기기에 적용된 설정 파일들과 원본 설정 파일들을 삼각측량하기 위해,
+<em>.dojang</em> 디렉터리에 내부적인 기록을 남깁니다.  이 디렉터리는 저장소의 최상위에
+있습니다.  이 디렉터리의 내용은 사용자가 직접 수정하거나 삭제해서는 안 되며,
+내용물은 기기에 따라 달라지므로 형상 관리 시스템에 올려두지 않아야 합니다.</p>
+<p>따라서 Git이나 Mercurial 같은 형상 관리 시스템을 사용할 때는,
+이 디렉터리를 무시하도록 설정해야 합니다.  Git을 사용한다면,
+아래처럼 <em>~/.gitignore</em> 파일에 추가하면 됩니다.</p>
+<pre><code class="language-gitignore">.dojang/
+</code></pre>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p><code>dojang init</code> 명령을 실행하기 전에 <code>git init</code> 명령을 실행했다면,
+<code>dojang init</code>은 자동으로 <em>.gitignore</em> 파일을 생성합니다.</p>
+</div>
 <h2 id="_9">새 설정 파일 추가</h2>
 <p>아예 새로운 설정 파일을 추가할 때는, 저장소에 직접 원본 설정 파일을 만들어 넣을
 수 있습니다.  이렇게 할 경우, 저장소에서 대상 디렉터리로 복사해야 하므로

@@ -547,6 +547,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dojang-directory" class="md-nav__link">
+    <span class="md-ellipsis">
+      .dojang directory
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#adding-a-new-config-file" class="md-nav__link">
     <span class="md-ellipsis">
       Adding a new config file
@@ -1051,6 +1060,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#dojang-directory" class="md-nav__link">
+    <span class="md-ellipsis">
+      .dojang directory
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#adding-a-new-config-file" class="md-nav__link">
     <span class="md-ellipsis">
       Adding a new config file
@@ -1217,6 +1235,22 @@ Error: File /home/USER/.bash_history is ignored due to pattern &quot;*&quot; (ro
 Hint: You can reflect it anyway by enforcing it using -f/--force option.
 </code></pre>
 <p>In this case, you can force it to be reflected using the <code>-f</code> option.</p>
+<h2 id="dojang-directory"><em>.dojang</em> directory</h2>
+<p>Dojang keeps internal records in the <em>.dojang</em> directory in order to do
+three-way diffs between the config files applied to your device and the source
+config files.  This directory is placed at the root of the repository.
+The contents of this directory should not be modified or deleted by you,
+and it should not be put on a SCM because its contents are device-specific.</p>
+<p>Therefore, when using a SCM like Git or Mercurial, you should tell it to ignore
+this directory.  If you're using Git, you can do this by adding it to your
+<em>~/.gitignore</em> file like below:</p>
+<pre><code class="language-gitignore">.dojang/
+</code></pre>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>If you ran the <code>git init</code> command before running the <code>dojang init</code> command,
+<code>dojang init</code> will automatically generate a <em>.gitignore</em> file.</p>
+</div>
 <h2 id="adding-a-new-config-file">Adding a new config file</h2>
 <p>If you want to add an entirely new config file, you can create the source config
 file directly in your repository.  If you do this, you'll need to use
