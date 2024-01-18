@@ -66,7 +66,7 @@ instance FromValue Kernel where
     parseTableFromValue
       $ Kernel
       <$> (fromString <$> reqKey "name")
-      <*> (fromString <$> reqKey "version")
+      <*> (fromString <$> reqKey "release")
 
 
 instance ToValue Kernel where

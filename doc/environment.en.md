@@ -16,7 +16,7 @@ os = "windows"
 arch = "x86_64" # a 64-bit CPU from the Intel or AMD family
 
 [kernel]
-
+name = "Microsoft Windows"
 release = "10.0.23585.1001"  # Windows 11 22H2
 ~~~~
 
