@@ -170,7 +170,7 @@ appP = do
 initPresetP :: Parser [InitPreset]
 initPresetP =
   (\a b c d e f' g -> catMaybes [a, b, c, d, e, f', g])
-    <$> f Amd64Linux ("linux-x86_64", "linux-arm64")
+    <$> f Amd64Linux ("linux-x86_64", "linux-amd64")
     <*> f Arm64Linux ("linux-aarch64", "linux-arm64")
     <*> f AppleSiliconMac ("macos-aarch64", "apple-silicon-mac")
     <*> f IntelMac ("macos-amd64", "intel-mac")
