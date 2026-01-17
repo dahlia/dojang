@@ -8,7 +8,7 @@ RUN apk add --no-cache build-base=0.5-r3 \
         ghc=9.4.4-r1 \
         zlib-dev=1.2.13-r1 \
         zlib-static=1.2.13-r1
-RUN cabal v2-update && cabal v2-install --constraint="text -simdutf" hpack
+RUN cabal v2-update && cabal v2-install --constraint="text -simdutf" --constraint="hpack <0.37" hpack
 
 # Add just the package.yaml file to capture dependencies
 COPY package.yaml /src/dojang/package.yaml

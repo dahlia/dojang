@@ -29,8 +29,8 @@ mkdir -p "$bin_dir/completions/"
   > "$bin_dir/completions/dojang.fish"
 
 version="$("$bin_dir/dojang" version | awk '{print $2}')"
-os="$("$bin_dir/dojang" env | dasel -r toml -w yaml ".os")"
-arch="$("$bin_dir/dojang" env | dasel -r toml -w yaml ".arch")"
+os="$("$bin_dir/dojang" env | dasel -p toml -w yaml ".os")"
+arch="$("$bin_dir/dojang" env | dasel -p toml -w yaml ".arch")"
 
 workdir="$(pwd)"
 

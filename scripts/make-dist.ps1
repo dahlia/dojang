@@ -13,8 +13,8 @@ if (-not (Get-Command "$binDir/dojang" -ErrorAction Ignore)) {
 
 $version = (& "$binDir/dojang" version).Split()[1]
 & "$binDir\dojang" env | Out-File .env.toml -Encoding ascii
-$os = dasel -f .env.toml -r toml -w yaml ".os"
-$arch = dasel -f .env.toml -r toml -w yaml ".arch"
+$os = dasel -f .env.toml -p toml -w yaml ".os"
+$arch = dasel -f .env.toml -p toml -w yaml ".arch"
 Remove-Item .env.toml
 
 $workDir = Get-Location
