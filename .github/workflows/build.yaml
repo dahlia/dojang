@@ -122,7 +122,7 @@ jobs:
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins/"
         mv dojang-*.tar.xz "$RUNNER_TEMP/"
     - if: startsWith(runner.os, 'Windows')
-      shell: powershell
+      shell: pwsh
       run: |
         Copy-Item .\LICENSE $env:RUNNER_TEMP\dojang-bins\
         & scripts\make-dist.ps1 $env:RUNNER_TEMP\dojang-bins\
