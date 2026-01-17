@@ -112,6 +112,8 @@ jobs:
         --copy-bins
         --local-bin-path="${{ runner.temp }}/dojang-bins/"
     - uses: allejo/setup-dasel@v1
+      with:
+        version: v3.2.1
     - if: startsWith(runner.os, 'macOS')
       shell: bash
       run: |
@@ -168,6 +170,8 @@ jobs:
         cache-to:
           type=registry,ref=ghcr.io/${{ github.repository }}:build-cache,mode=max
     - uses: allejo/setup-dasel@v1
+      with:
+        version: v3.2.1
     - run: |
         set -e
         mkdir -p "$RUNNER_TEMP/dojang-bins/"
