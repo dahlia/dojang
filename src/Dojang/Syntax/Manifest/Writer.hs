@@ -242,6 +242,7 @@ mapEnvironmentPredicate' (Or predicates')
   monikers' :: [MonikerName]
   monikers' = [n | Moniker n <- Data.List.NonEmpty.toList predicates']
   toNonEmpty :: [a] -> NonEmpty a
-  toNonEmpty l = head l :| tail l
+  toNonEmpty (x : xs) = x :| xs
+  toNonEmpty [] = error "toNonEmpty: empty list"
 mapEnvironmentPredicate' pred' =
   always{when = Just $ writeEnvironmentPredicate pred'}

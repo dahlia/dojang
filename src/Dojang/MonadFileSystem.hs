@@ -168,7 +168,7 @@ class (MonadError IOError m) => MonadFileSystem m where
     split :: [OsPath]
     split = splitDirectories path
     ancestors :: [OsPath]
-    ancestors = map joinPath $ tail (inits split)
+    ancestors = map joinPath $ drop 1 (inits split)
     fileError :: FilePath -> IOError
     fileError path' =
       mkIOError InappropriateType "createDirectories" Nothing (Just path')

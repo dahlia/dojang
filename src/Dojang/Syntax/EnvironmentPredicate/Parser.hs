@@ -74,8 +74,9 @@ expression = label "expression" $ do
   subExprs <- andExpression `sepBy1` (space >> string "||" >> space)
   space
   return $ case subExprs of
-    x : xs | not (null xs) -> Or $ x :| xs
-    _ -> head subExprs
+    [x] -> x
+    x : xs -> Or $ x :| xs
+    [] -> error "sepBy1 should never return an empty list"
 
 
 andExpression :: Parser EnvironmentPredicate
@@ -84,8 +85,9 @@ andExpression = do
   subExprs <- simpleExpression `sepBy1` (space >> string "&&" >> space)
   space
   return $ case subExprs of
-    x : xs | not (null xs) -> And $ x :| xs
-    _ -> head subExprs
+    [x] -> x
+    x : xs -> And $ x :| xs
+    [] -> error "sepBy1 should never return an empty list"
 
 
 simpleExpression :: Parser EnvironmentPredicate
