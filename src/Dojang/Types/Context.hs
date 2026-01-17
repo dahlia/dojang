@@ -50,13 +50,13 @@ import System.Directory.OsPath (makeAbsolute)
 import System.FilePattern (FilePattern, matchMany)
 import System.OsPath
   ( OsPath
+  , OsString
   , joinPath
   , makeRelative
   , normalise
   , splitDirectories
   , (</>)
   )
-import System.OsString (OsString)
 
 import Data.Set (toList, union)
 import Dojang.MonadFileSystem (MonadFileSystem (..))

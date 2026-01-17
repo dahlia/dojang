@@ -58,9 +58,7 @@ import Control.Monad.Logger
 import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
 import Control.Monad.Trans (MonadTrans (lift))
 import Data.Text (concat, pack, unlines, unpack)
-import System.OsPath (normalise, (</>))
-import System.OsPath.Types (OsPath)
-import System.OsString (OsString)
+import System.OsPath (OsPath, OsString, normalise, (</>))
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.Commands

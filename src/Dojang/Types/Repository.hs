@@ -27,8 +27,7 @@ import Data.List.NonEmpty
 
 import Data.Map.Strict (Map, findWithDefault, fromListWith, toList)
 import System.FilePattern (FilePattern, matchMany)
-import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
-import System.OsString (OsString)
+import System.OsPath (OsPath, OsString, makeRelative, normalise, splitDirectories, (</>))
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
 import Dojang.Types.Environment (Environment)
