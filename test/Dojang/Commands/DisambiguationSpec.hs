@@ -9,7 +9,7 @@ import Prelude hiding (readFile, writeFile)
 import Control.Exception (bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.OsPath (encodeFS)
-import Test.Hspec (Spec, describe, it, runIO)
+import Test.Hspec (Spec, describe, it, runIO, sequential)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
 import Dojang.Commands.Disambiguation
@@ -40,7 +40,8 @@ spec = do
   foo <- runIO $ encodeFS "foo"
   dst <- runIO $ encodeFS "dst"
 
-  describe "getAutoSelectMode" $ do
+  -- These tests must run sequentially because they modify global env vars.
+  sequential $ describe "getAutoSelectMode" $ do
     it "returns Interactive when DOJANG_AUTO_SELECT is unset" $ do
       withEnvVar "DOJANG_AUTO_SELECT" Nothing $ do
         mode <- getAutoSelectMode
@@ -70,7 +71,8 @@ spec = do
               , destinationPath = dst
               , fileType = Dojang.MonadFileSystem.Directory
               }
-      let candidate = CandidateRoute route 1 True
+      let candidate = CandidateRoute route 1 foo True
       candidate.specificity `shouldBe` 1
+      candidate.sourceFilePath `shouldBe` foo
       candidate.sourceExists `shouldBe` True
       candidate.route.routeName `shouldBe` foo

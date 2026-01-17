@@ -11,10 +11,11 @@ module Dojang.Commands.Disambiguation
   , getAutoSelectMode
   ) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Map.Strict (Map, fromList, lookup)
 import System.Environment (lookupEnv)
+import System.IO (stderr)
 import Prelude hiding (lookup)
 
 import Data.List.NonEmpty (NonEmpty)
@@ -23,6 +24,7 @@ import FortyTwo.Prompts.Select (select)
 import System.OsPath (OsPath)
 
 import Dojang.App (App)
+import Dojang.Commands (Admonition (..), pathStyleFor, printStderr')
 import Dojang.MonadFileSystem (MonadFileSystem (decodePath))
 import Dojang.Types.Context (CandidateRoute (..))
 import Dojang.Types.Repository (RouteResult (..))
@@ -91,7 +93,13 @@ disambiguateRoutes mode explicitSource candidates =
       let existingCandidates =
             [c | c <- NE.toList candidates, c.sourceExists]
       case existingCandidates of
-        [c] -> return $ Just c.route
+        [c] -> do
+          -- Auto-select the single existing file.
+          pathStyle <- pathStyleFor stderr
+          printStderr' Note $
+            "Auto-selected existing file: "
+              <> pathStyle c.sourceFilePath
+          return $ Just c.route
         _ -> case mode of
           AutoSelectFirst -> return $ Just (NE.head candidates).route
           ErrorOnAmbiguity -> return Nothing
@@ -104,13 +112,22 @@ promptForRoute
   => NonEmpty CandidateRoute
   -> App i (Maybe RouteResult)
 promptForRoute candidates = do
-  -- Decode route names to strings for display.
-  routeNamePairs <- forM (NE.toList candidates) $ \c -> do
-    name <- decodePath c.route.routeName
-    return (name, c.route)
-  let routeNames = map fst routeNamePairs
-  let nameToRoute :: Map String RouteResult
-      nameToRoute = fromList routeNamePairs
+  -- Build display strings with full source file paths and existence labels.
+  displayPairs <- forM (NE.toList candidates) $ \c -> do
+    pathStr <- decodePath c.sourceFilePath
+    let existsLabel = if c.sourceExists then " (exists)" else ""
+    let displayStr = pathStr ++ existsLabel
+    return (displayStr, c.route)
+  let displayStrings = map fst displayPairs
+  let displayToRoute :: Map String RouteResult
+      displayToRoute = fromList displayPairs
+  -- Warn if multiple files exist (potential configuration issue).
+  let existingCount = length [c | c <- NE.toList candidates, c.sourceExists]
+  when (existingCount > 1) $
+    printStderr'
+      Warning
+      "Multiple files exist. This may indicate a configuration issue."
   -- Prompt user to select.
-  selected <- liftIO $ select "Multiple routes match. Select one:" routeNames
-  return $ lookup selected nameToRoute
+  selected <-
+    liftIO $ select "Multiple source paths found. Select one:" displayStrings
+  return $ lookup selected displayToRoute

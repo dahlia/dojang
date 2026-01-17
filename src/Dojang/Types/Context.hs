@@ -519,6 +519,9 @@ data CandidateRoute = CandidateRoute
   , specificity :: Int
   -- ^ The specificity of the route, i.e., the number of path components
   -- from the route's destination to the target path.  Lower is more specific.
+  , sourceFilePath :: OsPath
+  -- ^ The computed source file path (combining route source path with relative
+  -- path from destination to target).
   , sourceExists :: Bool
   -- ^ Whether the source file for this route already exists.
   }
@@ -618,7 +621,7 @@ findMatchingRoutes ctx targetPath = do
             then normalise route.sourcePath
             else normalise $ route.sourcePath </> relPath
     srcExists <- exists srcPath
-    return $ CandidateRoute route spec srcExists
+    return $ CandidateRoute route spec srcPath srcExists
 
 
 -- | Gets the route state of the given path (which is a potential destination).
