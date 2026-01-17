@@ -16,6 +16,7 @@ import System.IO.Error
 import Prelude hiding (readFile, writeFile)
 
 import Data.ByteString qualified (length)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map, fromList)
 import System.FilePath (combine)
 import System.OsPath (OsPath, encodeFS, (</>))
@@ -27,12 +28,17 @@ import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (Entry (..), makeFixtureTree, withTempDir)
 import Dojang.Types.Context
-  ( Context (..)
+  ( CandidateRoute (..)
+  , Context (..)
   , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , RouteMatch (..)
   , RouteState (..)
+  , calculateSpecificity
+  , filterBySpecificity
+  , findMatchingRoutes
   , getRouteState
   , listFiles
   , makeCorrespond
@@ -161,132 +167,132 @@ spec = do
     ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
     sortOn (.sourcePath) results
       `shouldBe` [ RouteResult
-                    { sourcePath = tmpDir </> src </> bar
-                    , routeName = bar
-                    , destinationPath = tmpDir </> bar
-                    , fileType = Dojang.MonadFileSystem.Directory
-                    }
+                     { sourcePath = tmpDir </> src </> bar
+                     , routeName = bar
+                     , destinationPath = tmpDir </> bar
+                     , fileType = Dojang.MonadFileSystem.Directory
+                     }
                  , RouteResult
-                    { sourcePath = tmpDir </> src </> foo
-                    , routeName = foo
-                    , destinationPath = tmpDir </> foo
-                    , fileType = Dojang.MonadFileSystem.Directory
-                    }
+                     { sourcePath = tmpDir </> src </> foo
+                     , routeName = foo
+                     , destinationPath = tmpDir </> foo
+                     , fileType = Dojang.MonadFileSystem.Directory
+                     }
                  ]
-  specify "makeCorrespondWithDestination"
-    $ withContextFixture
-    $ \ctx tmpDir -> do
-      (correspond, ws) <-
-        makeCorrespondWithDestination ctx (tmpDir </> bar </> foo)
-      ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
-      correspond
-        `shouldBe` Just
-          ( FileCorrespondence
-              { source =
-                  FileEntry
-                    (tmpDir </> src </> bar </> foo)
-                    (File 6)
-              , sourceDelta = Added
-              , intermediate =
-                  FileEntry
-                    (tmpDir </> src </> intermediateDir </> bar </> foo)
-                    Missing
-              , destination = FileEntry (tmpDir </> bar </> foo) Missing
-              , destinationDelta = Unchanged
-              }
-          )
-      let ctx' = ctx{environment = ctx.environment{operatingSystem = Windows}}
-      (correspond', ws') <-
-        makeCorrespondWithDestination ctx' (tmpDir </> baz)
-      ws' `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
-      correspond'
-        `shouldBe` Just
-          ( FileCorrespondence
-              { source = FileEntry (tmpDir </> src </> baz) (File 11)
-              , sourceDelta = Added
-              , intermediate =
-                  FileEntry (tmpDir </> src </> intermediateDir </> baz) Missing
-              , destination = FileEntry (tmpDir </> baz) Missing
-              , destinationDelta = Unchanged
-              }
-          )
-      (correspond'', ws'') <-
-        makeCorrespondWithDestination ctx (tmpDir </> corge)
-      correspond'' `shouldBe` Nothing
-      ws'' `shouldBe` ws
+  specify "makeCorrespondWithDestination" $
+    withContextFixture $
+      \ctx tmpDir -> do
+        (correspond, ws) <-
+          makeCorrespondWithDestination ctx (tmpDir </> bar </> foo)
+        ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+        correspond
+          `shouldBe` Just
+            ( FileCorrespondence
+                { source =
+                    FileEntry
+                      (tmpDir </> src </> bar </> foo)
+                      (File 6)
+                , sourceDelta = Added
+                , intermediate =
+                    FileEntry
+                      (tmpDir </> src </> intermediateDir </> bar </> foo)
+                      Missing
+                , destination = FileEntry (tmpDir </> bar </> foo) Missing
+                , destinationDelta = Unchanged
+                }
+            )
+        let ctx' = ctx{environment = ctx.environment{operatingSystem = Windows}}
+        (correspond', ws') <-
+          makeCorrespondWithDestination ctx' (tmpDir </> baz)
+        ws' `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
+        correspond'
+          `shouldBe` Just
+            ( FileCorrespondence
+                { source = FileEntry (tmpDir </> src </> baz) (File 11)
+                , sourceDelta = Added
+                , intermediate =
+                    FileEntry (tmpDir </> src </> intermediateDir </> baz) Missing
+                , destination = FileEntry (tmpDir </> baz) Missing
+                , destinationDelta = Unchanged
+                }
+            )
+        (correspond'', ws'') <-
+          makeCorrespondWithDestination ctx (tmpDir </> corge)
+        correspond'' `shouldBe` Nothing
+        ws'' `shouldBe` ws
 
   specify "makeCorrespond" $ withContextFixture $ \ctx tmpDir -> do
     (corresponds, ws) <- makeCorrespond ctx
     ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
     sortOn (.source.path) corresponds
       `shouldBe` [ FileCorrespondence
-                    { source =
-                        FileEntry
-                          (tmpDir </> src </> bar </> foo)
-                          (File 6)
-                    , sourceDelta = Added
-                    , intermediate =
-                        FileEntry
-                          (tmpDir </> src </> intermediateDir </> bar </> foo)
-                          Missing
-                    , destination = FileEntry (tmpDir </> bar </> foo) Missing
-                    , destinationDelta = Unchanged
-                    }
+                     { source =
+                         FileEntry
+                           (tmpDir </> src </> bar </> foo)
+                           (File 6)
+                     , sourceDelta = Added
+                     , intermediate =
+                         FileEntry
+                           (tmpDir </> src </> intermediateDir </> bar </> foo)
+                           Missing
+                     , destination = FileEntry (tmpDir </> bar </> foo) Missing
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source =
-                        FileEntry
-                          (tmpDir </> src </> foo </> bar)
-                          Directory
-                    , sourceDelta = Added
-                    , intermediate =
-                        FileEntry
-                          (tmpDir </> src </> intermediateDir </> foo </> bar)
-                          Missing
-                    , destination = FileEntry (tmpDir </> foo </> bar) Missing
-                    , destinationDelta = Unchanged
-                    }
+                     { source =
+                         FileEntry
+                           (tmpDir </> src </> foo </> bar)
+                           Directory
+                     , sourceDelta = Added
+                     , intermediate =
+                         FileEntry
+                           (tmpDir </> src </> intermediateDir </> foo </> bar)
+                           Missing
+                     , destination = FileEntry (tmpDir </> foo </> bar) Missing
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source =
-                        FileEntry
-                          (tmpDir </> src </> foo </> bar </> foo)
-                          (File 9)
-                    , sourceDelta = Added
-                    , intermediate =
-                        FileEntry
-                          ( tmpDir
-                              </> src
-                              </> intermediateDir
-                              </> foo
-                              </> bar
-                              </> foo
-                          )
-                          Missing
-                    , destination =
-                        FileEntry (tmpDir </> foo </> bar </> foo) Missing
-                    , destinationDelta = Unchanged
-                    }
+                     { source =
+                         FileEntry
+                           (tmpDir </> src </> foo </> bar </> foo)
+                           (File 9)
+                     , sourceDelta = Added
+                     , intermediate =
+                         FileEntry
+                           ( tmpDir
+                               </> src
+                               </> intermediateDir
+                               </> foo
+                               </> bar
+                               </> foo
+                           )
+                           Missing
+                     , destination =
+                         FileEntry (tmpDir </> foo </> bar </> foo) Missing
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source =
-                        FileEntry (tmpDir </> src </> foo </> baz) Directory
-                    , sourceDelta = Added
-                    , intermediate =
-                        FileEntry
-                          (tmpDir </> src </> intermediateDir </> foo </> baz)
-                          Missing
-                    , destination = FileEntry (tmpDir </> foo </> baz) Missing
-                    , destinationDelta = Unchanged
-                    }
+                     { source =
+                         FileEntry (tmpDir </> src </> foo </> baz) Directory
+                     , sourceDelta = Added
+                     , intermediate =
+                         FileEntry
+                           (tmpDir </> src </> intermediateDir </> foo </> baz)
+                           Missing
+                     , destination = FileEntry (tmpDir </> foo </> baz) Missing
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source =
-                        FileEntry (tmpDir </> src </> foo </> foo) (File 4)
-                    , sourceDelta = Added
-                    , intermediate =
-                        FileEntry
-                          (tmpDir </> src </> intermediateDir </> foo </> foo)
-                          Missing
-                    , destination = FileEntry (tmpDir </> foo </> foo) Missing
-                    , destinationDelta = Unchanged
-                    }
+                     { source =
+                         FileEntry (tmpDir </> src </> foo </> foo) (File 4)
+                     , sourceDelta = Added
+                     , intermediate =
+                         FileEntry
+                           (tmpDir </> src </> intermediateDir </> foo </> foo)
+                           Missing
+                     , destination = FileEntry (tmpDir </> foo </> foo) Missing
+                     , destinationDelta = Unchanged
+                     }
                  ]
 
   describe "listFiles" $ do
@@ -389,7 +395,7 @@ spec = do
     makeCorrespond_ `shouldThrow` \e ->
       ( ioeGetErrorString e
           == "makeCorrespondBetweenThreeFiles: "
-          ++ "expected a file, but got a directory"
+            ++ "expected a file, but got a directory"
       )
         && (ioeGetFileName e == Just filename)
 
@@ -527,166 +533,166 @@ spec = do
         ["ignored"]
     sortOn (.source.path) corresponds
       `shouldBe` [ FileCorrespondence
-                    { source = FileEntry added Directory
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry added Directory
-                    , destination = FileEntry added Directory
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry added Directory
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry added Directory
+                     , destination = FileEntry added Directory
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (added </> bar) Missing
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry (added </> bar) Missing
-                    , destination = FileEntry (added </> bar) (File 13)
-                    , destinationDelta = Added
-                    }
+                     { source = FileEntry (added </> bar) Missing
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry (added </> bar) Missing
+                     , destination = FileEntry (added </> bar) (File 13)
+                     , destinationDelta = Added
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (added </> baz) (File 14)
-                    , sourceDelta = Added
-                    , intermediate = FileEntry (added </> baz) Missing
-                    , destination = FileEntry (added </> baz) (File 14)
-                    , destinationDelta = Added
-                    }
+                     { source = FileEntry (added </> baz) (File 14)
+                     , sourceDelta = Added
+                     , intermediate = FileEntry (added </> baz) Missing
+                     , destination = FileEntry (added </> baz) (File 14)
+                     , destinationDelta = Added
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (added </> foo) (File 13)
-                    , sourceDelta = Added
-                    , intermediate = FileEntry (added </> foo) Missing
-                    , destination = FileEntry (added </> foo) Missing
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (added </> foo) (File 13)
+                     , sourceDelta = Added
+                     , intermediate = FileEntry (added </> foo) Missing
+                     , destination = FileEntry (added </> foo) Missing
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (added </> qux) Directory
-                    , sourceDelta = Added
-                    , intermediate = FileEntry (added </> qux) Missing
-                    , destination = FileEntry (added </> qux) Directory
-                    , destinationDelta = Added
-                    }
+                     { source = FileEntry (added </> qux) Directory
+                     , sourceDelta = Added
+                     , intermediate = FileEntry (added </> qux) Missing
+                     , destination = FileEntry (added </> qux) Directory
+                     , destinationDelta = Added
+                     }
                  , FileCorrespondence
-                    { source = FileEntry ignored Directory
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry ignored Directory
-                    , destination = FileEntry ignored Directory
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry ignored Directory
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry ignored Directory
+                     , destination = FileEntry ignored Directory
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (ignored </> bar) (File 21)
-                    , sourceDelta = Added
-                    , intermediate = FileEntry (ignored </> bar) Missing
-                    , destination = FileEntry (ignored </> bar) (File 21)
-                    , destinationDelta = Added
-                    }
+                     { source = FileEntry (ignored </> bar) (File 21)
+                     , sourceDelta = Added
+                     , intermediate = FileEntry (ignored </> bar) Missing
+                     , destination = FileEntry (ignored </> bar) (File 21)
+                     , destinationDelta = Added
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (ignored </> baz) Missing
-                    , sourceDelta = Removed
-                    , intermediate = FileEntry (ignored </> baz) (File 23)
-                    , destination = FileEntry (ignored </> baz) (File 23)
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (ignored </> baz) Missing
+                     , sourceDelta = Removed
+                     , intermediate = FileEntry (ignored </> baz) (File 23)
+                     , destination = FileEntry (ignored </> baz) (File 23)
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (ignored </> foo) (File 23)
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry (ignored </> foo) (File 23)
-                    , destination = FileEntry (ignored </> foo) (File 23)
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (ignored </> foo) (File 23)
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry (ignored </> foo) (File 23)
+                     , destination = FileEntry (ignored </> foo) (File 23)
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry modified Directory
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry modified Directory
-                    , destination = FileEntry modified Directory
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry modified Directory
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry modified Directory
+                     , destination = FileEntry modified Directory
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (modified </> bar) (File 3)
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry (modified </> bar) (File 3)
-                    , destination = FileEntry (modified </> bar) (File 16)
-                    , destinationDelta = Modified
-                    }
+                     { source = FileEntry (modified </> bar) (File 3)
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry (modified </> bar) (File 3)
+                     , destination = FileEntry (modified </> bar) (File 16)
+                     , destinationDelta = Modified
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (modified </> baz) (File 16)
-                    , sourceDelta = Modified
-                    , intermediate = FileEntry (modified </> baz) (File 3)
-                    , destination = FileEntry (modified </> baz) (File 16)
-                    , destinationDelta = Modified
-                    }
+                     { source = FileEntry (modified </> baz) (File 16)
+                     , sourceDelta = Modified
+                     , intermediate = FileEntry (modified </> baz) (File 3)
+                     , destination = FileEntry (modified </> baz) (File 16)
+                     , destinationDelta = Modified
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (modified </> corge) (File 31)
-                    , sourceDelta = Modified
-                    , intermediate = FileEntry (modified </> corge) (File 31)
-                    , destination = FileEntry (modified </> corge) (File 31)
-                    , destinationDelta = Modified
-                    }
+                     { source = FileEntry (modified </> corge) (File 31)
+                     , sourceDelta = Modified
+                     , intermediate = FileEntry (modified </> corge) (File 31)
+                     , destination = FileEntry (modified </> corge) (File 31)
+                     , destinationDelta = Modified
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (modified </> foo) (File 16)
-                    , sourceDelta = Modified
-                    , intermediate = FileEntry (modified </> foo) (File 3)
-                    , destination = FileEntry (modified </> foo) (File 3)
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (modified </> foo) (File 16)
+                     , sourceDelta = Modified
+                     , intermediate = FileEntry (modified </> foo) (File 3)
+                     , destination = FileEntry (modified </> foo) (File 3)
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (modified </> quux) (File 15)
-                    , sourceDelta = Modified
-                    , intermediate = FileEntry (modified </> quux) Directory
-                    , destination = FileEntry (modified </> quux) Directory
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (modified </> quux) (File 15)
+                     , sourceDelta = Modified
+                     , intermediate = FileEntry (modified </> quux) Directory
+                     , destination = FileEntry (modified </> quux) Directory
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (modified </> qux) Directory
-                    , sourceDelta = Modified
-                    , intermediate = FileEntry (modified </> qux) (File 15)
-                    , destination = FileEntry (modified </> qux) (File 15)
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (modified </> qux) Directory
+                     , sourceDelta = Modified
+                     , intermediate = FileEntry (modified </> qux) (File 15)
+                     , destination = FileEntry (modified </> qux) (File 15)
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry removed Directory
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry removed Directory
-                    , destination = FileEntry removed Directory
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry removed Directory
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry removed Directory
+                     , destination = FileEntry removed Directory
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (removed </> bar) (File 15)
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry (removed </> bar) (File 15)
-                    , destination = FileEntry (removed </> bar) Missing
-                    , destinationDelta = Removed
-                    }
+                     { source = FileEntry (removed </> bar) (File 15)
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry (removed </> bar) (File 15)
+                     , destination = FileEntry (removed </> bar) Missing
+                     , destinationDelta = Removed
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (removed </> baz) Missing
-                    , sourceDelta = Removed
-                    , intermediate = FileEntry (removed </> baz) (File 16)
-                    , destination = FileEntry (removed </> baz) Missing
-                    , destinationDelta = Removed
-                    }
+                     { source = FileEntry (removed </> baz) Missing
+                     , sourceDelta = Removed
+                     , intermediate = FileEntry (removed </> baz) (File 16)
+                     , destination = FileEntry (removed </> baz) Missing
+                     , destinationDelta = Removed
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (removed </> foo) Missing
-                    , sourceDelta = Removed
-                    , intermediate = FileEntry (removed </> foo) (File 15)
-                    , destination = FileEntry (removed </> foo) (File 15)
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (removed </> foo) Missing
+                     , sourceDelta = Removed
+                     , intermediate = FileEntry (removed </> foo) (File 15)
+                     , destination = FileEntry (removed </> foo) (File 15)
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (removed </> qux) Missing
-                    , sourceDelta = Removed
-                    , intermediate = FileEntry (removed </> qux) Directory
-                    , destination = FileEntry (removed </> qux) Missing
-                    , destinationDelta = Removed
-                    }
+                     { source = FileEntry (removed </> qux) Missing
+                     , sourceDelta = Removed
+                     , intermediate = FileEntry (removed </> qux) Directory
+                     , destination = FileEntry (removed </> qux) Missing
+                     , destinationDelta = Removed
+                     }
                  , FileCorrespondence
-                    { source = FileEntry unchanged Directory
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry unchanged Directory
-                    , destination = FileEntry unchanged Directory
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry unchanged Directory
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry unchanged Directory
+                     , destination = FileEntry unchanged Directory
+                     , destinationDelta = Unchanged
+                     }
                  , FileCorrespondence
-                    { source = FileEntry (unchanged </> foo) (File 13)
-                    , sourceDelta = Unchanged
-                    , intermediate = FileEntry (unchanged </> foo) (File 13)
-                    , destination = FileEntry (unchanged </> foo) (File 13)
-                    , destinationDelta = Unchanged
-                    }
+                     { source = FileEntry (unchanged </> foo) (File 13)
+                     , sourceDelta = Unchanged
+                     , intermediate = FileEntry (unchanged </> foo) (File 13)
+                     , destination = FileEntry (unchanged </> foo) (File 13)
+                     , destinationDelta = Unchanged
+                     }
                  ]
 
   specify "makeCorrespondBetweenTwoDirs" $ withTempDir $ \tmpDir _ -> do
@@ -832,3 +838,167 @@ spec = do
     (stateOnNullRouting, ws''') <- getRouteState ctx' (tmpDir </> src)
     ws''' `shouldBe` ws
     stateOnNullRouting `shouldBe` NotRouted
+
+  describe "calculateSpecificity" $ do
+    it "returns 0 for exact match" $ withTempDir $ \tmpDir _ -> do
+      let route =
+            RouteResult
+              { sourcePath = tmpDir </> foo
+              , routeName = foo
+              , destinationPath = tmpDir </> bar
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      calculateSpecificity (tmpDir </> bar) route `shouldBe` 0
+
+    it "returns 1 for direct child" $ withTempDir $ \tmpDir _ -> do
+      let route =
+            RouteResult
+              { sourcePath = tmpDir </> foo
+              , routeName = foo
+              , destinationPath = tmpDir </> bar
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      calculateSpecificity (tmpDir </> bar </> baz) route `shouldBe` 1
+
+    it "returns 2 for grandchild" $ withTempDir $ \tmpDir _ -> do
+      let route =
+            RouteResult
+              { sourcePath = tmpDir </> foo
+              , routeName = foo
+              , destinationPath = tmpDir </> bar
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      calculateSpecificity (tmpDir </> bar </> baz </> qux) route `shouldBe` 2
+
+  describe "filterBySpecificity" $ do
+    it "returns empty list for empty input" $ withTempDir $ \tmpDir _ -> do
+      filterBySpecificity (tmpDir </> foo) [] `shouldBe` []
+
+    it "keeps only most specific routes" $ withTempDir $ \tmpDir _ -> do
+      let route1 =
+            RouteResult
+              { sourcePath = tmpDir </> src </> foo
+              , routeName = foo
+              , destinationPath = tmpDir </> bar
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      let route2 =
+            RouteResult
+              { sourcePath = tmpDir </> src </> baz
+              , routeName = baz
+              , destinationPath = tmpDir </> bar </> qux
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      -- route1: specificity = 2 (bar/qux/foo)
+      -- route2: specificity = 1 (qux/foo)
+      let target = tmpDir </> bar </> qux </> foo
+      filterBySpecificity target [route1, route2] `shouldBe` [route2]
+
+    it "keeps all routes when equally specific" $ withTempDir $ \tmpDir _ -> do
+      let route1 =
+            RouteResult
+              { sourcePath = tmpDir </> src </> foo
+              , routeName = foo
+              , destinationPath = tmpDir </> dst
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      let route2 =
+            RouteResult
+              { sourcePath = tmpDir </> src </> bar
+              , routeName = bar
+              , destinationPath = tmpDir </> dst
+              , fileType = Dojang.MonadFileSystem.Directory
+              }
+      -- Both routes have the same destinationPath, so same specificity
+      let target = tmpDir </> dst </> baz
+      filterBySpecificity target [route1, route2] `shouldBe` [route1, route2]
+
+  describe "findMatchingRoutes" $ do
+    it "returns NoMatch when no routes match" $ withContextFixture $ \ctx tmpDir -> do
+      (result, _) <- findMatchingRoutes ctx (tmpDir </> corge)
+      result `shouldBe` NoMatch
+
+    it "returns SingleMatch for unambiguous route" $ withContextFixture $ \ctx tmpDir -> do
+      (result, _) <- findMatchingRoutes ctx (tmpDir </> foo </> foo)
+      case result of
+        SingleMatch route -> route.routeName `shouldBe` foo
+        _ -> fail "Expected SingleMatch"
+
+    it "returns SingleMatch when filtered by specificity" $ withTempDir $ \tmpDir _ -> do
+      -- Create a context with overlapping routes at different depths
+      createDirectory $ tmpDir </> src
+      createDirectory $ tmpDir </> dst
+      createDirectory $ tmpDir </> dst </> foo
+      writeFile (tmpDir </> src </> manifestFilename') ""
+
+      -- route1 points to DST (via env var), route2 points to DST_FOO (via env var)
+      -- For target dst/foo/bar, route2 is more specific (specificity=1 vs 2)
+      let overlappingFileRoutes =
+            [ (foo, [(posix, Just $ Substitution "DST")])
+            , (bar, [(posix, Just $ Substitution "DST_FOO")])
+            ]
+              :: Map OsPath [(MonikerName, Maybe FilePathExpression)]
+      let overlappingManifest =
+            Dojang.Types.Manifest.manifest
+              monikerMap
+              []
+              overlappingFileRoutes
+              []
+      let repo =
+            Repository
+              (tmpDir </> src)
+              (tmpDir </> src </> intermediateDir)
+              overlappingManifest
+      let ctx =
+            Context
+              repo
+              (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ \e -> return $ case e of
+                "DST" -> Just $ tmpDir </> dst
+                "DST_FOO" -> Just $ tmpDir </> dst </> foo
+                _ -> Nothing
+      (result, _) <- findMatchingRoutes ctx (tmpDir </> dst </> foo </> baz)
+      case result of
+        SingleMatch route -> route.routeName `shouldBe` bar
+        _ -> fail $ "Expected SingleMatch, got " ++ show result
+
+    it "returns AmbiguousMatch for equally specific routes" $ withTempDir $ \tmpDir _ -> do
+      -- Create a context with two routes pointing to the same destination
+      createDirectory $ tmpDir </> src
+      createDirectory $ tmpDir </> src </> foo
+      createDirectory $ tmpDir </> src </> bar
+      createDirectory $ tmpDir </> dst
+      writeFile (tmpDir </> src </> manifestFilename') ""
+
+      -- Both foo and bar routes point to DST (via env var)
+      let ambiguousFileRoutes =
+            [ (foo, [(posix, Just $ Substitution "DST")])
+            , (bar, [(posix, Just $ Substitution "DST")])
+            ]
+              :: Map OsPath [(MonikerName, Maybe FilePathExpression)]
+      let ambiguousManifest =
+            Dojang.Types.Manifest.manifest
+              monikerMap
+              []
+              ambiguousFileRoutes
+              []
+      let repo =
+            Repository
+              (tmpDir </> src)
+              (tmpDir </> src </> intermediateDir)
+              ambiguousManifest
+      let ctx =
+            Context
+              repo
+              (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ \e -> return $ case e of
+                "DST" -> Just $ tmpDir </> dst
+                _ -> Nothing
+      (result, _) <- findMatchingRoutes ctx (tmpDir </> dst </> baz)
+      case result of
+        AmbiguousMatch candidates -> do
+          length candidates `shouldBe` 2
+          -- All candidates should have same specificity
+          let firstSpec = (NE.head candidates).specificity
+          all (\c -> c.specificity == firstSpec) (NE.toList candidates) `shouldBe` True
+        _ -> fail $ "Expected AmbiguousMatch, got " ++ show result

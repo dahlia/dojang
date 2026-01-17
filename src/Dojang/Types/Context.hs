@@ -6,12 +6,17 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Types.Context
-  ( Context (..)
+  ( CandidateRoute (..)
+  , Context (..)
   , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , RouteMatch (..)
   , RouteState (..)
+  , calculateSpecificity
+  , filterBySpecificity
+  , findMatchingRoutes
   , getRouteState
   , listFiles
   , makeCorrespond
@@ -24,8 +29,7 @@ module Dojang.Types.Context
 
 import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (find, isPrefixOf, sortOn)
-import Data.Ord (Down (Down))
+import Data.List (isPrefixOf)
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
@@ -58,6 +62,8 @@ import System.OsPath
   , (</>)
   )
 
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Set (toList, union)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
@@ -158,37 +164,45 @@ makeCorrespondWithDestination
   -- 'FileCorrespondence' value are absolute, or relative to the current
   -- working directory at least.
 makeCorrespondWithDestination ctx dstPath = do
-  (paths, warnings) <- routePaths ctx
-  let paths' = sortOn (Down . (.destinationPath)) paths
-  let dstPath' = splitDirectories $ normalise dstPath
-  case find (`startsWith` dstPath') paths' of
-    Nothing -> return (Nothing, warnings)
-    Just route -> do
-      let normalized = normalise route.destinationPath
-      let relPath = makeRelative normalized dstPath
-      period <- encodePath "."
-      let (interPath, srcPath) =
-            if normalized == dstPath || relPath == period
-              then
-                let interPath' =
-                      normalise
-                        (ctx.repository.intermediatePath </> route.routeName)
-                    srcPath' = normalise route.sourcePath
-                in (interPath', srcPath')
-              else
-                let interPath' =
-                      normalise
-                        $ ctx.repository.intermediatePath
-                        </> route.routeName
-                        </> relPath
-                    srcPath' = normalise $ route.sourcePath </> relPath
-                in (interPath', srcPath')
-      correspond <- makeCorrespondBetweenThreeFiles interPath srcPath dstPath
+  (routeMatch, warnings) <- findMatchingRoutes ctx dstPath
+  case routeMatch of
+    NoMatch -> return (Nothing, warnings)
+    SingleMatch route -> do
+      correspond <- makeCorrespondForRoute route
+      return (Just correspond, warnings)
+    AmbiguousMatch candidates -> do
+      -- For backward compatibility: auto-select by existence if possible,
+      -- or return the first route.
+      let existingCandidates =
+            [c | c <- NE.toList candidates, c.sourceExists]
+      route <- case existingCandidates of
+        [c] -> return c.route
+        _ -> return (NE.head candidates).route
+      correspond <- makeCorrespondForRoute route
       return (Just correspond, warnings)
  where
-  startsWith :: RouteResult -> [OsPath] -> Bool
-  startsWith p prefix =
-    splitDirectories (normalise p.destinationPath) `isPrefixOf` prefix
+  makeCorrespondForRoute :: RouteResult -> m FileCorrespondence
+  makeCorrespondForRoute route = do
+    let normalized = normalise route.destinationPath
+    let relPath = makeRelative normalized dstPath
+    period <- encodePath "."
+    let (interPath, srcPath) =
+          if normalized == dstPath || relPath == period
+            then
+              let interPath' =
+                    normalise
+                      (ctx.repository.intermediatePath </> route.routeName)
+                  srcPath' = normalise route.sourcePath
+              in (interPath', srcPath')
+            else
+              let interPath' =
+                    normalise $
+                      ctx.repository.intermediatePath
+                        </> route.routeName
+                        </> relPath
+                  srcPath' = normalise $ route.sourcePath </> relPath
+              in (interPath', srcPath')
+    makeCorrespondBetweenThreeFiles interPath srcPath dstPath
 
 
 -- | Creates a list of file correspondences between the source files, the
@@ -217,18 +231,18 @@ makeCorrespond ctx = do
             (findWithDefault [] (normalise expanded.routeName) ignorePatterns)
         return
           [ correspond
-            { source =
-                correspond.source{path = expanded.sourcePath </> correspond.source.path}
-            , intermediate =
-                correspond.intermediate
-                  { path = interAbsPath </> correspond.intermediate.path
-                  }
-            , destination =
-                correspond.destination
-                  { path =
-                      expanded.destinationPath </> correspond.destination.path
-                  }
-            }
+              { source =
+                  correspond.source{path = expanded.sourcePath </> correspond.source.path}
+              , intermediate =
+                  correspond.intermediate
+                    { path = interAbsPath </> correspond.intermediate.path
+                    }
+              , destination =
+                  correspond.destination
+                    { path =
+                        expanded.destinationPath </> correspond.destination.path
+                    }
+              }
           | correspond <- fs
           ]
       _ -> do
@@ -276,12 +290,12 @@ makeCorrespondBetweenThreeFiles intermediatePath srcPath dstPath = do
     isDir <- isDirectory path
     when isDir $ do
       path' <- decodePath path
-      throwError
-        $ userError
+      throwError $
+        userError
           ( "makeCorrespondBetweenThreeFiles: "
               ++ "expected a file, but got a directory"
           )
-        `ioeSetFileName` path'
+          `ioeSetFileName` path'
     exists' <- exists path
     if exists'
       then do
@@ -339,8 +353,8 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
           actualDstStat <- getFileStat (dstPath </> path)
           actualDelta <- getDelta path dstPath interEntry2.stat actualDstStat
           return (dstEntry{stat = actualDstStat}, actualDelta)
-    return
-      $ FileCorrespondence
+    return $
+      FileCorrespondence
         { source = srcEntry
         , sourceDelta = srcDelta
         , intermediate =
@@ -460,9 +474,9 @@ listFiles path ignorePatterns = do
   isFile' <- isFile path
   when (isSymlink' || isFile') $ do
     path' <- decodePath path
-    throwError
-      $ mkIOError InappropriateType "listFiles" Nothing (Just path')
-      `ioeSetErrorString` "not a directory"
+    throwError $
+      mkIOError InappropriateType "listFiles" Nothing (Just path')
+        `ioeSetErrorString` "not a directory"
   exists' <- exists path
   if exists'
     then do
@@ -496,6 +510,115 @@ data RouteState
   | -- | The file is not routed at all.
     NotRouted
   deriving (Eq, Ord, Show)
+
+
+-- | A candidate route with computed metadata for disambiguation.
+data CandidateRoute = CandidateRoute
+  { route :: RouteResult
+  -- ^ The route result.
+  , specificity :: Int
+  -- ^ The specificity of the route, i.e., the number of path components
+  -- from the route's destination to the target path.  Lower is more specific.
+  , sourceExists :: Bool
+  -- ^ Whether the source file for this route already exists.
+  }
+  deriving (Eq, Show)
+
+
+-- | Result of finding routes for a destination path.
+data RouteMatch
+  = -- | No matching routes found.
+    NoMatch
+  | -- | A single unambiguous route was found.
+    SingleMatch RouteResult
+  | -- | Multiple routes match with the same specificity.
+    AmbiguousMatch (NonEmpty CandidateRoute)
+  deriving (Eq, Show)
+
+
+-- | Calculate the specificity of a route relative to a target path.
+-- Returns the number of path components between the route's destination
+-- and the target path.  Lower values indicate more specific routes.
+--
+-- ==== Examples
+--
+-- >>> calculateSpecificity "/foo/bar/baz" route  -- route.destinationPath = "/foo"
+-- 2  -- bar/baz
+--
+-- >>> calculateSpecificity "/foo" route  -- route.destinationPath = "/foo"
+-- 0  -- exact match
+calculateSpecificity
+  :: OsPath
+  -- ^ The target path.
+  -> RouteResult
+  -- ^ The route result.
+  -> Int
+  -- ^ The specificity (number of path components from route destination to
+  -- target).
+calculateSpecificity targetPath route =
+  let dstDirs = splitDirectories $ normalise route.destinationPath
+      targetDirs = splitDirectories $ normalise targetPath
+  in length targetDirs - length dstDirs
+
+
+-- | Filter routes by specificity, keeping only those with the lowest
+-- (most specific) specificity value.
+filterBySpecificity
+  :: OsPath
+  -- ^ The target path.
+  -> [RouteResult]
+  -- ^ The list of routes to filter.
+  -> [RouteResult]
+  -- ^ The routes with the lowest specificity.
+filterBySpecificity _ [] = []
+filterBySpecificity targetPath routes =
+  let specificityCounts = [(r, calculateSpecificity targetPath r) | r <- routes]
+      minSpec = minimum $ map snd specificityCounts
+  in [r | (r, s) <- specificityCounts, s == minSpec]
+
+
+-- | Find matching routes for a destination path.
+-- Returns a 'RouteMatch' indicating whether no routes, a single route,
+-- or multiple ambiguous routes match.
+findMatchingRoutes
+  :: (MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform route matching.
+  -> OsPath
+  -- ^ The target path.
+  -> m (RouteMatch, [RouteMapWarning])
+  -- ^ The route match result, along with any warnings that were generated.
+findMatchingRoutes ctx targetPath = do
+  (routes, warnings) <- routePaths ctx
+  let targetDirs = splitDirectories $ normalise targetPath
+  let matching = [r | r <- routes, startsWithRoute r targetDirs]
+  case matching of
+    [] -> return (NoMatch, warnings)
+    [r] -> return (SingleMatch r, warnings)
+    rs -> do
+      let filtered = filterBySpecificity targetPath rs
+      case filtered of
+        [] -> return (NoMatch, warnings)
+        [r] -> return (SingleMatch r, warnings)
+        (r : rs') -> do
+          candidates <- mapM (makeCandidateRoute targetPath) (r :| rs')
+          return (AmbiguousMatch candidates, warnings)
+ where
+  startsWithRoute :: RouteResult -> [OsPath] -> Bool
+  startsWithRoute route targetDirs' =
+    splitDirectories (normalise route.destinationPath) `isPrefixOf` targetDirs'
+  makeCandidateRoute
+    :: (MonadFileSystem m) => OsPath -> RouteResult -> m CandidateRoute
+  makeCandidateRoute target route = do
+    let spec = calculateSpecificity target route
+    let relPath = makeRelative (normalise route.destinationPath) (normalise target)
+    period <- encodePath "."
+    let srcPath =
+          if relPath == period
+            then normalise route.sourcePath
+            else normalise $ route.sourcePath </> relPath
+    srcExists <- exists srcPath
+    return $ CandidateRoute route spec srcExists
 
 
 -- | Gets the route state of the given path (which is a potential destination).

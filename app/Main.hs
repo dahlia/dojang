@@ -230,9 +230,9 @@ cmdP =
                     )
                   <**> helper
               )
-              ( progDesc
-                  $ "Show environment in TOML format, "
-                  ++ "which can be used with -e/--env-file"
+              ( progDesc $
+                  "Show environment in TOML format, "
+                    ++ "which can be used with -e/--env-file"
               )
           )
         <> command
@@ -309,9 +309,9 @@ cmdP =
                   <*> many (pathArgument $ metavar "FILE" <> action "file")
                   <**> helper
               )
-              ( progDesc
-                  $ "Show changes between source tree and target "
-                  ++ "(destination) tree"
+              ( progDesc $
+                  "Show changes between source tree and target "
+                    ++ "(destination) tree"
               )
           )
         <> command
@@ -324,7 +324,18 @@ cmdP =
                         <> help
                           "Enforce reflecting if there are ignorable errors"
                     )
+                  <*> optional
+                    ( pathOption
+                        ( long "source"
+                            <> short 's'
+                            <> metavar "PATH"
+                            <> action "file"
+                            <> help
+                              "Explicitly specify source path (skip disambiguation)"
+                        )
+                    )
                   <*> some (pathArgument $ metavar "FILE" <> action "file")
+                  <**> helper
               )
               (progDesc "Let the repository reflect the target file")
           )
@@ -411,12 +422,12 @@ main = withCP65001 $ do
         return (exitCode', -1)
   codeColor <- codeStyleFor stderr
   when (appEnv.dryRun && ops > 0) $ do
-    printStderr' Note
-      $ "Since "
-      <> codeColor "--dry-run"
-      <> " was specified, those "
-      <> showt ops
-      <> " changes were not actually committed to the filesystem."
+    printStderr' Note $
+      "Since "
+        <> codeColor "--dry-run"
+        <> " was specified, those "
+        <> showt ops
+        <> " changes were not actually committed to the filesystem."
   exitWith exitCode
  where
   run :: (MonadFileSystem i, MonadIO i) => AppEnv -> i ExitCode
@@ -425,8 +436,8 @@ main = withCP65001 $ do
     (if appEnv.debug then runAppWithStderrLogging else runAppWithoutLogging)
       appEnv
       $ cmd
-      `catchError` \e -> do
-        printStderr' Error
-          $ "An unexpected error occurred; you may report this as a bug: "
-          <> showt e
-        return unhandledError
+        `catchError` \e -> do
+          printStderr' Error $
+            "An unexpected error occurred; you may report this as a bug: "
+              <> showt e
+          return unhandledError

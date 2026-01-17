@@ -67,3 +67,7 @@ ignoredFileError = ExitFailure 33
 
 accidentalDeletionWarning :: ExitCode
 accidentalDeletionWarning = ExitFailure 34
+
+
+ambiguousRouteError :: ExitCode
+ambiguousRouteError = ExitFailure 35
