@@ -9,9 +9,9 @@ Project overview
 ----------------
 
 Dojang is a cross-platform dotfiles manager written in Haskell. It manages
-configuration files across different operating systems (Windows, macOS, Linux,
-FreeBSD) by maintaining a repository of source config files and applying them
-to target locations based on environment predicates.
+configuration files across different operating systems (Windows, macOS, Linux)
+by maintaining a repository of source config files and applying them to target
+locations based on environment predicates.
 
 Key concepts:
 
@@ -360,7 +360,7 @@ Important conventions
 
 ### Cross-platform support
 
- -  Test on Windows, macOS, Linux (Ubuntu), and FreeBSD (Cirrus CI)
+ -  Test on Windows, macOS, and Linux (Ubuntu)
  -  Handle platform-specific path separators
  -  Support both POSIX and Windows environment conventions
 
@@ -372,7 +372,6 @@ This project uses Stack (not Cabal directly):
 
  -  *package.yaml*: Hpack configuration (generates .cabal file)
  -  *stack.yaml*: Main Stack configuration (LTS 24.28, GHC 9.10.3)
- -  *stack-ghc-9.4.5.yaml*: Alternative Stack config for FreeBSD
 
 Dependencies are declared in *package.yaml* with version bounds.
 
