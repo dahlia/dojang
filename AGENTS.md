@@ -191,6 +191,133 @@ Tests use Hspec with:
 Test organization mirrors src/ structure.
 
 
+Development practices
+---------------------
+
+### Test-driven development
+
+This project strictly follows test-driven development (TDD) practices.
+All new code must be developed using the TDD cycle:
+
+1.  *Red*: Write a failing test that describes the expected behavior.
+    Run the test to confirm it fails.
+2.  *Green*: Write the minimum code necessary to make the test pass.
+    Run the test to confirm it passes.
+3.  *Refactor*: Improve the code while keeping all tests passing.
+    Run tests after each refactoring step.
+
+Additional TDD guidelines:
+
+ -  *Write tests first*: Before implementing new functionality, write tests
+    that describe the expected behavior.  Confirm that the tests fail before
+    proceeding with the implementation.
+ -  *Regression tests for bugs*: When fixing bugs, first write a regression
+    test that reproduces the bug.  Confirm that the test fails, then fix the
+    bug and verify the test passes.
+ -  *Small increments*: Implement features in small, testable increments.
+    Each increment should have its own test.
+ -  *Run tests frequently*: Run `stack test` after every change to ensure
+    existing functionality is not broken.
+
+### Before committing
+
+ -  *Run all tests*: Before committing any changes, run `stack test` to
+    ensure all tests pass.
+ -  *Check formatting*: Run `fourmolu --mode check src/ app/ test/` to
+    verify code formatting.
+ -  *Build successfully*: Ensure `stack build` completes without errors
+    or warnings.
+
+### Commit messages
+
+ -  Do not use Conventional Commits (no `fix:`, `feat:`, etc. prefixes).
+    Keep the first line under 50 characters when possible.
+
+ -  Focus on *why* the change was made, not just *what* changed.
+
+ -  When referencing issues or PRs, use permalink URLs instead of just
+    numbers (e.g., `#123`).  This preserves context if the repository
+    is moved later.
+
+ -  When listing items after a colon, add a blank line after the colon:
+
+    ~~~~
+    This commit includes the following changes:
+
+    - Added foo
+    - Fixed bar
+    ~~~~
+
+ -  When using LLMs or coding agents, include credit via `Co-Authored-By:`.
+    Include a permalink to the agent session if available.
+
+### Changelog (*CHANGES.md*)
+
+This repository uses *CHANGES.md* as a human-readable changelog.  Follow these
+conventions:
+
+ -  *Structure*: Keep entries in reverse chronological order (newest version at
+    the top).
+
+ -  *Version sections*: Each release is a top-level section:
+
+    ~~~~
+    Version 0.1.0
+    -------------
+    ~~~~
+
+ -  *Unreleased version*: The next version should start with:
+
+    ~~~~
+    To be released.
+    ~~~~
+
+ -  *Released versions*: Use a release-date line right after the version header:
+
+    ~~~~
+    Released on December 30, 2025.
+    ~~~~
+
+    If you need to add brief context (e.g., initial release), keep it on the
+    same sentence:
+
+    ~~~~
+    Released on August 21, 2025.  Initial release.
+    ~~~~
+
+ -  *Bullets and wrapping*: Use ` -  ` list items, wrap around ~80 columns, and
+    indent continuation lines by 4 spaces so they align with the bullet text.
+
+ -  *Write useful change notes*: Prefer concrete, user-facing descriptions.
+    Include what changed, why it changed, and what users should do differently
+    (especially for breaking changes, deprecations, and security fixes).
+
+ -  *Multi-paragraph items*: For longer explanations, keep paragraphs inside the
+    same bullet item by indenting them by 4 spaces and separating paragraphs
+    with a blank line (also indented).
+
+ -  *Code blocks in bullets*: If a bullet includes code, indent the entire code
+    fence by 4 spaces so it remains part of that list item.  Use `~~~~` fences
+    and specify a language (e.g., `~~~~ haskell`).
+
+ -  *Nested lists*: If you need sub-items (e.g., a list of added features), use
+    a nested list inside the parent bullet, indented by 4 spaces.
+
+ -  *Issue and PR references*: Use `[[#123]]` markers in the text and add
+    reference links at the end of the version section.
+
+    When listing multiple issues/PRs, list them like `[[#123], [#124]]`.
+
+    When the reference is for a PR authored by an external contributor, append
+    `by <NAME>` after the last reference marker (e.g., `[[#123] by Hong Minhee]`
+    or `[[#123], [#124] by Hong Minhee]`).
+
+    ~~~~
+    [#123]: https://github.com/dahlia/dojang/issues/123
+    [#124]: https://github.com/dahlia/dojang/pull/124
+    ~~~~
+
+
 Important conventions
 ---------------------
 
@@ -199,6 +326,7 @@ Important conventions
  -  Use `ExitCode` constants from `Dojang.ExitCodes` (never hardcode exit codes)
  -  Provide friendly error messages via `Dojang.Commands` utilities
  -  Include hints and warnings using `Admonition` types
+ -  End error messages with a period
 
 ### File system operations
 
@@ -211,6 +339,8 @@ Important conventions
  -  Use Template Haskell logging: `$(logDebug)`, `$(logInfo)`, `$(logWarn)`,
     `$(logError)`
  -  Include `FromStringShow` wrappers for showing complex types in logs
+ -  End log messages with a period, or with an ellipsis (`...`) for ongoing
+    operations
 
 ### Code style
 
@@ -218,6 +348,15 @@ Important conventions
  -  Use record dot syntax for field access (`OverloadedRecordDot`)
  -  Disable field selectors (`NoFieldSelectors`) and use HasField/record updates
  -  Include comprehensive Haddock documentation for exported functions
+ -  All exported APIs must have Haddock comments describing their purpose,
+    parameters, and return values
+
+### Type safety
+
+ -  All code must be type-safe.  Avoid using unsafe operations unless
+    absolutely necessary.
+ -  Prefer immutable data structures unless there is a specific reason to
+    use mutable ones.
 
 ### Cross-platform support
 
@@ -236,3 +375,101 @@ This project uses Stack (not Cabal directly):
  -  *stack-ghc-9.4.5.yaml*: Alternative Stack config for FreeBSD
 
 Dependencies are declared in *package.yaml* with version bounds.
+
+
+Markdown style guide
+--------------------
+
+When creating or editing Markdown documentation files in this project,
+follow these style conventions to maintain consistency with existing
+documentation:
+
+### Headings
+
+ -  *Setext-style headings*: Use underline-style for the document title
+    (with `=`) and sections (with `-`):
+
+    ~~~~
+    Document Title
+    ==============
+
+    Section Name
+    ------------
+    ~~~~
+
+ -  *ATX-style headings*: Use only for subsections within a section:
+
+    ~~~~
+    ### Subsection Name
+    ~~~~
+
+ -  *Heading case*: Use sentence case (capitalize only the first word and
+    proper nouns) rather than Title Case:
+
+    ~~~~
+    Development practices    ← Correct
+    Development Practices    ← Incorrect
+    ~~~~
+
+### Text formatting
+
+ -  *Italics* (`*text*`): Use for package names (*dojang*, *stack*),
+    emphasis, and to distinguish concepts
+ -  *Bold* (`**text**`): Use sparingly for strong emphasis
+ -  *Inline code* (`` `code` ``): Use for code spans, function names,
+    module names, filenames, and command-line options
+
+### Lists
+
+ -  Use ` -  ` (space-hyphen-two spaces) for unordered list items
+
+ -  Indent nested items with 4 spaces
+
+ -  Align continuation text with the item content:
+
+    ~~~~
+     -  *First item*: Description text that continues
+        on the next line with proper alignment
+     -  *Second item*: Another item
+    ~~~~
+
+### Code blocks
+
+ -  Use four tildes (`~~~~`) for code fences instead of backticks
+
+ -  Always specify the language identifier:
+
+    ~~~~~
+    ~~~~ haskell
+    exampleFunction :: Int -> String
+    exampleFunction n = show n
+    ~~~~
+    ~~~~~
+
+ -  For shell commands, use `bash`:
+
+    ~~~~~
+    ~~~~ bash
+    stack test
+    ~~~~
+    ~~~~~
+
+### Links
+
+ -  Use reference-style links placed at the *end of each section*
+    (not at document end)
+
+ -  Format reference links with consistent spacing:
+
+    ~~~~
+    See the [Haskell Wiki] for more information.
+
+    [Haskell Wiki]: https://wiki.haskell.org/
+    ~~~~
+
+### Spacing and line length
+
+ -  Wrap lines at approximately 80 characters for readability
+ -  Use one blank line between sections and major elements
+ -  Use two blank lines before Setext-style section headings
+ -  Place one blank line before and after code blocks
