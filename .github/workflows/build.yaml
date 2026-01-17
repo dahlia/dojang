@@ -30,12 +30,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - if: startsWith(runner.os, 'Linux') || startsWith(runner.os, 'macOS')
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.stack
         key: test-${{ runner.os }}-${{ hashFiles('stack.yaml.lock') }}
     - if: startsWith(runner.os, 'Windows')
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~\AppData\Roaming\stack
@@ -77,12 +77,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - if: startsWith(runner.os, 'macOS')
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.stack
         key: build-${{ runner.os }}-${{ hashFiles('stack.yaml.lock') }}
     - if: startsWith(runner.os, 'Windows')
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~\AppData\Roaming\stack
@@ -125,9 +125,9 @@ jobs:
         Copy-Item .\LICENSE $env:RUNNER_TEMP\dojang-bins\
         & scripts\make-dist.ps1 $env:RUNNER_TEMP\dojang-bins\
         Move-Item dojang-*.zip $env:RUNNER_TEMP\
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
-        name: dist
+        name: dist-${{ matrix.os }}
         path: ${{ runner.temp }}/dojang-*-*-*.*
 
   build-linux:
@@ -184,9 +184,9 @@ jobs:
         mv dojang-*.tar.xz "$RUNNER_TEMP/"
       env:
         DIGEST: ${{ steps.build-image.outputs.digest }}
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
-        name: dist
+        name: dist-linux
         path: ${{ runner.temp }}/dojang-*-*-*.*
 
   doc:
@@ -216,10 +216,11 @@ jobs:
       discussions: write
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@v4
       with:
-        name: dist
+        pattern: dist-*
         path: ${{ runner.temp }}/dist
+        merge-multiple: true
     - run: |
         set -e
         if command -v stack > /dev/null; then
