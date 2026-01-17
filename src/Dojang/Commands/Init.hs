@@ -172,11 +172,11 @@ selectMonikers env =
 
 listNeededMonikers :: [InitPreset] -> [(InitPreset, NonEmpty MonikerName)]
 listNeededMonikers presets =
-  [ (preset, head ms' :| tail ms')
+  [ (preset, m :| ms'')
   | (preset, ms) <- selectedMonikers
   , let (havingDups, notHavingDups) = span (hasDuplicateMonikers preset) ms
   , let ms' = havingDups ++ take 1 notHavingDups
-  , not $ null ms'
+  , (m : ms'') <- [ms']
   ]
  where
   selectedMonikers :: [(InitPreset, [MonikerName])]

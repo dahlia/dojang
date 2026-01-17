@@ -371,7 +371,7 @@ Package management
 This project uses Stack (not Cabal directly):
 
  -  *package.yaml*: Hpack configuration (generates .cabal file)
- -  *stack.yaml*: Main Stack configuration (LTS 21.21, GHC 9.4.8)
+ -  *stack.yaml*: Main Stack configuration (LTS 24.28, GHC 9.10.3)
  -  *stack-ghc-9.4.5.yaml*: Alternative Stack config for FreeBSD
 
 Dependencies are declared in *package.yaml* with version bounds.

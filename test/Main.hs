@@ -2,12 +2,12 @@ module Main where
 
 import qualified Spec
 
-import Test.Hspec.Formatters (specdoc)
-import Test.Hspec.JUnit (hspecJUnitWith)
-import Test.Hspec.Runner (configFormatter, defaultConfig)
+import Test.Hspec.Api.Formatters.V1 (specdoc, useFormatter)
+import Test.Hspec.JUnit.Formatter ()
+import Test.Hspec.Runner (defaultConfig, hspecWith)
 
 
 main :: IO ()
-main = hspecJUnitWith defaultConfig{configFormatter = Just specdoc} Spec.spec
+main = hspecWith (useFormatter ("specdoc", specdoc) defaultConfig) Spec.spec
 
 -- cSpell:ignore specdoc

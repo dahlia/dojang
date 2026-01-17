@@ -42,8 +42,8 @@ import Data.Map.Strict (empty)
 import Data.Text (Text, cons, length, pack)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (Range, constant, constantFrom, singleton)
-import System.OsPath (OsPath, joinPath)
-import System.OsString (OsString, encodeFS)
+import System.OsPath (OsPath, encodeFS, joinPath)
+import System.OsString (OsString)
 import Test.Hspec.Hedgehog (MonadGen)
 
 import Dojang.MonadFileSystem (FileType (..))
