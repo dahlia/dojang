@@ -15,12 +15,12 @@
 
 네 가지 종류의 훅이 있으며, 다음 순서로 실행됩니다:
 
-| 훅 종류            | 실행 시점                                       |
-|--------------------|-------------------------------------------------|
-| `pre-apply`        | 매 apply, 파일 동기화 직전                      |
-| `pre-first-apply`  | 첫 apply만, 파일 동기화 직전                    |
-| `post-first-apply` | 첫 apply만, 파일 동기화 완료 후                 |
-| `post-apply`       | 매 apply, 파일 동기화 완료 후                   |
+| 훅 종류            | 실행 시점                       |
+| ------------------ | ------------------------------- |
+| `pre-apply`        | 매 apply, 파일 동기화 직전      |
+| `pre-first-apply`  | 첫 apply만, 파일 동기화 직전    |
+| `post-first-apply` | 첫 apply만, 파일 동기화 완료 후 |
+| `post-apply`       | 매 apply, 파일 동기화 완료 후   |
 
 **첫 apply**는 레지스트리 파일(*~/.dojang*)의 존재 여부로 판단합니다.
 `dojang apply`를 처음 실행하면 네 가지 훅이 모두 다음 순서로 실행됩니다:
@@ -56,7 +56,6 @@ args = ["--user", "restart", "my-service"]
 
 같은 종류의 훅을 여러 개 정의할 수 있습니다.  정의된 순서대로 실행됩니다.
 
-
 ### 훅 필드
 
  -  `command` (문자열, 필수): 실행할 실행 파일 경로.  절대 경로이거나 `$PATH`에서
@@ -72,7 +71,6 @@ args = ["--user", "restart", "my-service"]
 
  -  `ignore-failure` (불리언, 선택): `true`이면 훅이 0이 아닌 종료 코드로
     끝나도 Dojang이 계속 진행합니다.  기본값은 `false`.
-
 
 ### 조건부 훅
 
@@ -96,13 +94,13 @@ when = "os = macos"
 
 훅에서 사용할 수 있는 환경 변수:
 
-| 변수               | 설명                                             |
-|--------------------|--------------------------------------------------|
-| `DOJANG_REPOSITORY`| 저장소 디렉터리의 절대 경로                      |
-| `DOJANG_MANIFEST`  | 선언 파일(*dojang.toml*) 경로                    |
-| `DOJANG_DRY_RUN`   | dry-run 모드면 `1`, 아니면 `0`                   |
-| `DOJANG_OS`        | 현재 운영체제 식별자                             |
-| `DOJANG_ARCH`      | 현재 프로세서 아키텍처 식별자                    |
+| 변수                | 설명                           |
+| ------------------- | ------------------------------ |
+| `DOJANG_REPOSITORY` | 저장소 디렉터리의 절대 경로    |
+| `DOJANG_MANIFEST`   | 선언 파일(*dojang.toml*) 경로  |
+| `DOJANG_DRY_RUN`    | dry-run 모드면 `1`, 아니면 `0` |
+| `DOJANG_OS`         | 현재 운영체제 식별자           |
+| `DOJANG_ARCH`       | 현재 프로세서 아키텍처 식별자  |
 
 
 Dry-run 모드
@@ -144,7 +142,6 @@ command = "/bin/bash"
 args = ["-c", "echo '최초 설정!' && ./setup.sh"]
 ~~~~
 
-
 ### 플랫폼별 훅
 
 운영체제에 따라 다른 명령 실행:
@@ -161,7 +158,6 @@ args = ["install", "-y", "packages..."]
 when = "os = linux"
 ~~~~
 
-
 ### 서비스 재시작
 
 설정 변경 후 서비스 재시작:
@@ -172,6 +168,5 @@ command = "/usr/bin/systemctl"
 args = ["--user", "reload", "my-app"]
 when = "os = linux"
 ~~~~
-
 
 <!-- cSpell:ignore dunst killall Brewfile -->

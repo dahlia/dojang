@@ -5,10 +5,10 @@
 예를 들어 PostgreSQL의 클라이언트인 `psql`의 설정 파일은 [문서][1]에 따르면
 환경에 따라 다음과 같이 경로가 달라집니다.
 
-  - POSIX: `PSQLRC` 환경 변수가 있다면 해당 값을 경로로 사용하되,
+ -  POSIX: `PSQLRC` 환경 변수가 있다면 해당 값을 경로로 사용하되,
     없다면 *~/.psqlrc* 사용.
-  - Windows: `PSQLRC` 환경 변수가 있다면 해당 값을 경로로 사용하되,
-    없다면 *%APPDATA%\postgresql\psqlrc.conf* 사용.
+ -  Windows: `PSQLRC` 환경 변수가 있다면 해당 값을 경로로 사용하되,
+    없다면 *%APPDATA%\\postgresql\\psqlrc.conf* 사용.
 
 Dojang은 이러한 복잡한 경우에 대응하기 위해 **라우팅**(routing)이라는 개념을
 이용합니다.
@@ -44,23 +44,23 @@ os = "windows"
 여기서 라우팅 이름인 `app_config`는 저장소 내의 디렉터리 이름이기도 합니다.
 저장소 안에 파일들이 아래와 같이 있다고 할 때 …
 
-- *dojang.toml*
-- *app_config/*
-    - *alacritty/*
-        - *alacritty.toml*
-    - *ghc/*
-        - *ghci.conf*
-    - *nvim/*
+ -  *dojang.toml*
+ -  *app\_config/*
+     -  *alacritty/*
+         -  *alacritty.toml*
+     -  *ghc/*
+         -  *ghci.conf*
+     -  *nvim/*
         *init.vim*
 
 Linux에서는 아래 경로에 파일들이 생길 것입니다.
 
-- */home/$USER/.config/alacritty/*
-- */home/$USER/.config/alacritty/alacritty.toml*
-- */home/$USER/.config/ghc/*
-- */home/$USER/.config/ghc/ghci.conf*
-- */home/$USER/.config/nvim/*
-- */home/$USER/.config/nvim/init.vim*
+ -  */home/$USER/.config/alacritty/*
+ -  */home/$USER/.config/alacritty/alacritty.toml*
+ -  */home/$USER/.config/ghc/*
+ -  */home/$USER/.config/ghc/ghci.conf*
+ -  */home/$USER/.config/nvim/*
+ -  */home/$USER/.config/nvim/init.vim*
 
 하지만 만약 `XDG_CONFIG_HOME` 환경 변수가 정의되어 있지 않다면 어떻게 될까요?
 Linux에서의 `app_config` 라우팅은 빈 경로, 즉 Dojang을 실행시키는 시점의 현재
@@ -184,19 +184,19 @@ Dojang은 **구체성**(specificity)을 기준으로 어떤 라우팅을 사용�
 
  -  **단일 조건**(예: `os = linux`, `arch = "x86_64"`)의 구체성은 1입니다.
 
- -  **And(`&&`)**는 각 부분의 구체성을 합산합니다.  예를 들어,
+ -  **논리곱(`&&`)** 연산자는 각 부분의 구체성을 합산합니다.  예를 들어,
     `os = linux && arch = "x86_64"`의 구체성은 2입니다.
     두 조건 모두 충족되어야 하기 때문입니다.
 
- -  **Or(`||`)**는 각 부분 중 최댓값을 취합니다.  예를 들어,
+ -  **논리합(`||`)** 연산자는 각 부분 중 최댓값을 취합니다.  예를 들어,
     `os = linux || os = macos`의 구체성은 1입니다.
     하나의 조건만 충족되면 되기 때문입니다.
 
- -  **모니커**는 해석되는 서술어의 구체성을 물려받습니다.
+ -  **모니커** 참조는 해석되는 서술어의 구체성을 물려받습니다.
     `os = linux && arch = "x86_64"`로 정의된 모니커는 해당 표현식을 직접 쓴 것과
     동일한 구체성을 갖습니다.
 
- -  **`always`**의 구체성은 0으로, 모든 환경과 일치하지만 가장 낮은 우선순위를
+ -  \*\*`always`\*\*의 구체성은 0으로, 모든 환경과 일치하지만 가장 낮은 우선순위를
     갖습니다.
 
 ### 예시
@@ -229,7 +229,7 @@ Apple Silicon Mac(aarch64 아키텍처의 macOS)에서는 `apple-silicon`과 `po
 모두 일치합니다.  하지만 `apple-silicon`이 더 높은 구체성(2 > 1)을 가지므로
 선택됩니다.
 
-Intel Mac(x86_64 아키텍처의 macOS)에서는 `posix`만 일치합니다.
+Intel Mac(x86\_64 아키텍처의 macOS)에서는 `posix`만 일치합니다.
 
 Linux에서는 `posix`와 `linux` 모두 동일한 구체성으로 일치합니다.
 이 경우 선언 파일에서의 순서가 동점 해결 기준이 됩니다.

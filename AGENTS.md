@@ -444,8 +444,6 @@ This project uses [mise] for managing development tools:
 Run `mise install` to install all required tools, or simply run any mise task
 (e.g., `mise run check`) and mise will automatically install missing tools.
 
-[mise]: https://mise.jdx.dev/
-
 
 Markdown style guide
 --------------------

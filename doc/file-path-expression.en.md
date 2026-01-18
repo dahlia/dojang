@@ -36,10 +36,10 @@ A file path may contain environment variables, or a file path expression
 may consist of only one environment variable.
 There are two syntaxes for environment variable substitution:
 
- -   `$ENV_VAR`: If the boundaries of the environment variable are obvious,
-     you can use this syntax in most cases.
- -   `${ENV_VAR}`: Sometimes the boundaries of an environment variable are
-     unclear, in which case you use this syntax.
+ -  `$ENV_VAR`: If the boundaries of the environment variable are obvious,
+    you can use this syntax in most cases.
+ -  `${ENV_VAR}`: Sometimes the boundaries of an environment variable are
+    unclear, in which case you use this syntax.
 
 Note that even on Windows, we don't use the `%ENV_VAR%` or `$env:ENV_VAR`
 syntax, instead we use the POSIX shell-style syntax above.

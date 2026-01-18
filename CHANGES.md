@@ -1,5 +1,5 @@
 Dojang changelog
-=================
+================
 
 Version 0.2.0
 -------------
@@ -27,8 +27,8 @@ To be released.
  -  Added the `dojang edit` command which opens the source file of a target
     file in the user's editor and applies changes after editing.  [[#21]]
 
-     -  Editor detection priority: `--editor` option > `$VISUAL` > `$EDITOR`
-        > platform default (`notepad` on Windows, `vi` on POSIX)
+     -  Editor detection priority: `--editor` option → `$VISUAL` → `$EDITOR`
+        → platform default (`notepad` on Windows, `vi` on POSIX)
      -  Use `--no-apply` flag to skip automatic apply after editing
      -  Use `--force` flag to skip conflict warnings
      -  Use `--sequential` flag to edit files one at a time
@@ -70,16 +70,15 @@ To be released.
      -  Hooks support conditional execution via `when` field using
         environment predicates
      -  Use `ignore-failure = true` to continue even if a hook fails
-     -  In dry-run mode, hooks print "Would run hook: ..." instead of
+     -  In dry-run mode, hooks print “Would run hook: …” instead of
         executing
      -  Environment variables available to hooks: `DOJANG_REPOSITORY`,
         `DOJANG_MANIFEST`, `DOJANG_DRY_RUN`, `DOJANG_OS`, `DOJANG_ARCH`
 
-[#10]: https://github.com/dahlia/dojang/issues/10
 [#16]: https://github.com/dahlia/dojang/issues/16
-[#19]: https://github.com/dahlia/dojang/issues/19
-[#18]: https://github.com/dahlia/dojang/issues/18
 [#17]: https://github.com/dahlia/dojang/issues/17
+[#18]: https://github.com/dahlia/dojang/issues/18
+[#19]: https://github.com/dahlia/dojang/issues/19
 [#21]: https://github.com/dahlia/dojang/issues/21
 [#22]: https://github.com/dahlia/dojang/issues/22
 

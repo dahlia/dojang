@@ -32,4 +32,5 @@ $ dojang apply --force --dry-run
 $ dojang --dry-run apply --force
 ~~~~
 
-[^1]: `-e`/`--env-file` 옵션을 사용하면 *dojang-env.toml* 파일 대신 다른 파일을 사용할 수 있습니다.
+[^1]: `-e`/`--env-file` 옵션을 사용하면 *dojang-env.toml* 파일 대신 다른 파일을
+      사용할 수 있습니다.

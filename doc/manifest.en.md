@@ -152,23 +152,23 @@ os = ["windows"]
 A route can be named like `home_directory` in the example above,
 which actually refers to the path where the source of config files are located
 within the repository.  If it says `home_directory`, it refers to
-*home_directory/* in the repository, which is the directory where the manifest
+*home\_directory/* in the repository, which is the directory where the manifest
 file is located.  So if your repository has files like the following:
 
-- *dojang.manifest*
-- *home_directory/*
-    - *.bash_profile*
-    - *.inputrc*
+ -  *dojang.manifest*
+ -  *home\_directory/*
+     -  *.bash\_profile*
+     -  *.inputrc*
 
 When applied to Linux, the files are copied to the following paths:
 
-- */home/$USER/.bash_profile*
-- */home/$USER/.inputrc*
+ -  */home/$USER/.bash\_profile*
+ -  */home/$USER/.inputrc*
 
 Similarly, on Windows, they would look like below:
 
-- *C:\Users\\%USERNAME%\\.bash_profile*
-- *C:\USers\\%USERNAME%\\.inputrc*
+ -  *C:\\Users\\%USERNAME%\\.bash\_profile*
+ -  *C:\\USers\\%USERNAME%\\.inputrc*
 
 In practice, more complex routing is possible, see the [relevant
 documentation](routing.en.md) for a detailed explanation of routing.
@@ -229,6 +229,5 @@ when = "os = linux"
 ~~~~
 
 For a detailed description of hooks, see the [hooks documentation](hooks.en.md).
-
 
 <!-- cSpell:ignore inputrc -->

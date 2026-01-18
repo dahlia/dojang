@@ -7,7 +7,7 @@
 Dojang은 크로스플랫폼 닷파일 관리자입니다.  닷파일이란 POSIX 계열 플랫폼에서
 프로그램들이 마침표로 시작하는 설정 파일을 홈 디렉터리에 두기에 생긴 말이지만,
 여기서는 닷파일을 다양한 형태의 설정 파일들을 일컫는 말로 사용합니다.
-예를 들어, *~/.vimrc*나 *~\AppData\Roaming\alacritty\alacritty.toml* 모두
+예를 들어, *~/.vimrc*나 *~\\AppData\\Roaming\\alacritty\\alacritty.toml* 모두
 Dojang이 다루는 대상입니다.
 
 Dojang은 설정 파일의 기기 간 동기화를 제공하지 않으며, 앞으로도 제공할 계획이
@@ -78,7 +78,9 @@ $ dojang init
 > 옵션들이 있는지 먼저 확인하세요.  예를 들어, Windows PC와 Intel Mac을 모두
 > 쓴다면 다음과 같이 입력하면 됩니다.
 >
->     > dojang init --win64 --intel-mac
+> ~~~~
+> > dojang init --win64 --intel-mac
+> ~~~~
 
 이제 선언 파일을 열어서 원하는 대로 수정할 수 있습니다.  선언 파일에 대한 자세한
 설명은 [선언](manifest.ko.md) 문서를 참고하세요.
@@ -116,9 +118,11 @@ HOME = ["Documents"]
 것을 말합니다.  예를 들어, 홈 디렉터리의 위치는 모든 운영체제에서 다르기 때문에,
 홈 디렉터리에 있는 설정 파일들을 각 운영체제에 맞게 다른 위치로 복사해야 합니다.
 
-선언 파일의 내용 중 가장 중요한 것이 바로 이 라우팅이라고 해도 과언이 아닙니다.  라우팅은 선언 파일 내 `dirs` 및 `files` 구획에 기술합니다.  `dojang init` 명령을
-통해 저장소를 초기화하면, 이미 선언 파일 내에 기본적인 라우팅이 기술되어 있을
-것입니다. 예를 들어 다음은 홈 디렉터리에 위치한 설정 파일들을 위한 라우팅입니다.
+선언 파일의 내용 중 가장 중요한 것이 바로 이 라우팅이라고 해도 과언이
+아닙니다.  라우팅은 선언 파일 내 `dirs` 및 `files` 구획에 기술합니다.
+`dojang init` 명령을 통해 저장소를 초기화하면, 이미 선언 파일 내에 기본적인
+라우팅이 기술되어 있을 것입니다. 예를 들어 다음은 홈 디렉터리에 위치한 설정
+파일들을 위한 라우팅입니다.
 
 ~~~~ toml
 [dirs.HOME]
@@ -126,7 +130,7 @@ posix = "$HOME"
 windows = "$UserProfile"
 ~~~~
 
-`HOME`은 라우팅 이름으로, 저장소 내 *HOME/*이라는 디렉터리에 들어있는 설정
+`HOME`은 라우팅 이름으로, 저장소 내 \*HOME/\*이라는 디렉터리에 들어있는 설정
 파일들이 원본이 됩니다.  라우팅 이름은 얼마든지 다른 이름이 될 수 있습니다.
 
 `posix`와 `windows`는 모니커로, 마찬가지로 선언 파일 내의 `monikers` 구획에서
@@ -173,6 +177,8 @@ Hint: You can reflect it anyway by enforcing it using -f/--force option.
 
 이럴 때는 `-f` 옵션을 사용하여 강제로 반영할 수 있습니다.
 
+[inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
+
 ### 변경된 모든 파일 반영하기
 
 `dojang reflect` 명령을 인자 없이 실행하면 변경된 모든 파일을 한 번에 반영할 수
@@ -210,8 +216,6 @@ $ dojang reflect --include-unregistered
 등록되지 않은 파일에 여러 라우팅이 매칭될 수 있는 경우, Dojang은 어떤 라우팅을
 사용할지 선택하도록 프롬프트를 표시합니다.
 
-[inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
-
 
 설정 파일 편집
 --------------
@@ -229,10 +233,10 @@ $ dojang edit ~/.inputrc
 
 기본적으로 편집기는 다음 순서에 따라 결정됩니다.
 
- 1. `--editor` (`-E`) 옵션
- 2. `$VISUAL` 환경 변수
- 3. `$EDITOR` 환경 변수
- 4. 플랫폼 기본값 (Windows에서는 `notepad`, POSIX에서는 `vi`)
+1.  `--editor` (`-E`) 옵션
+2.  `$VISUAL` 환경 변수
+3.  `$EDITOR` 환경 변수
+4.  플랫폼 기본값 (Windows에서는 `notepad`, POSIX에서는 `vi`)
 
 자동으로 적용하지 않으려면 `--no-apply` (`-n`) 옵션을 사용할 수 있습니다.
 
@@ -302,9 +306,9 @@ Dojang은 기기에 적용된 설정 파일들과 원본 설정 파일들을 삼
 
 아예 새로운 설정 파일을 추가할 때는 두 가지 방법이 있습니다.
 
- 1. `dojang edit`을 대상 경로와 함께 사용
+1.  `dojang edit`을 대상 경로와 함께 사용
     ([edit으로 새 설정 파일 만들기](#edit으로-새-설정-파일-만들기) 참고)
- 2. 저장소에 직접 원본 설정 파일을 만들어 넣기
+2.  저장소에 직접 원본 설정 파일을 만들어 넣기
 
 저장소에 직접 파일을 만든 경우, 저장소에서 대상 디렉터리로 복사해야 하므로
 `dojang reflect` 대신 `dojang apply` 명령을 사용해야 합니다.

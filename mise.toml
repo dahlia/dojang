@@ -2,12 +2,19 @@
 python = "3.14"
 stack = "latest"
 
+[tools."github:dahlia/hongdown"]
+version = "0.3.0"
+
+[tools."github:dahlia/hongdown".platforms]
+linux-x64 = "hongdown-*-x86_64-unknown-linux-musl.tar.bz2"
+linux-arm64 = "hongdown-*-aarch64-unknown-linux-musl.tar.bz2"
+
 [settings.python]
 default_packages_file = "doc/requirements.txt"
 
 [tasks.check]
 description = "Check code quality and documentation"
-depends = ["build:fast", "doc:check"]
+depends = ["build:fast", "md:check", "doc:check"]
 
 [tasks.build]
 description = "Build the project"
@@ -28,6 +35,14 @@ run = "stack test --fast"
 [tasks.run]
 description = "Run the Dojang"
 run = "stack run"
+
+[tasks."md:check"]
+description = "Check Markdown files for formatting issues"
+run = "hongdown --check"
+
+[tasks."md:fmt"]
+description = "Format Markdown files"
+run = "hongdown --write"
 
 [tasks."doc:check"]
 description = "Check the documentation for issues"

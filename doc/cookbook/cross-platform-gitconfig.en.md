@@ -85,7 +85,7 @@ will be copied to *~/.gitconfig* on Windows.
 
 
 Create a common configuration file
----------------------
+----------------------------------
 
 Putting common settings in one place is a simple matter of using the `[include]`
 function supported by Git config itself.  Create *gitconfig/.gitconfig.mac* like

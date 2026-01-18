@@ -141,22 +141,23 @@ os = ["windows"]
 라우팅에는 위 예시의 `home_directory`와 같이 이름을 정할 수 있는데,
 이 이름은 실제로 설정 파일의 소스가 저장소 안에서 위치한 경로를 나타냅니다.
 `home_directory`라고 적혀 있다면 선언 파일이 있는 디렉터리 안의
-*home_directory/*를 가리키게 됩니다. 저장소에 아래와 같이 파일이 있다고 한다면…
+\*home\_directory/\*를 가리키게 됩니다. 저장소에 아래와 같이 파일이 있다고
+한다면…
 
-- *dojang.manifest*
-- *home_directory/*
-    - *.bash_profile*
-    - *.inputrc*
+ -  *dojang.manifest*
+ -  *home\_directory/*
+     -  *.bash\_profile*
+     -  *.inputrc*
 
 Linux에 적용할 경우 아래 경로에 파일들이 복사됩니다.
 
-- */home/$USER/.bash_profile*
-- */home/$USER/.inputrc*
+ -  */home/$USER/.bash\_profile*
+ -  */home/$USER/.inputrc*
 
 마찬가지로, Windows에서는 아래와 같습니다.
 
-- *C:\Users\\%USERNAME%\\.bash_profile*
-- *C:\USers\\%USERNAME%\\.inputrc*
+ -  *C:\\Users\\%USERNAME%\\.bash\_profile*
+ -  *C:\\USers\\%USERNAME%\\.inputrc*
 
 실제로는 더 복잡한 라우팅이 가능한데, 라우팅에 관한 자세한 설명은 [해당
 문서](routing.ko.md)를 참고하세요.
@@ -195,8 +196,8 @@ HOME = [
 훅
 --
 
-**[훅](hooks.ko.md)**을 사용하면 `dojang apply` 명령 전후에 사용자 정의 스크립트를
-실행할 수 있습니다.  네 가지 종류의 훅이 있습니다:
+\*\*[훅](hooks.ko.md)\*\*을 사용하면 `dojang apply` 명령 전후에 사용자 정의
+스크립트를 실행할 수 있습니다.  네 가지 종류의 훅이 있습니다:
 
  -  `pre-apply`: 매 apply 전에 실행
  -  `pre-first-apply`: 첫 apply에서만 실행
@@ -215,6 +216,5 @@ when = "os = linux"
 ~~~~
 
 훅에 대한 자세한 설명은 [훅 문서](hooks.ko.md)를 참고하세요.
-
 
 <!-- cSpell:ignore inputrc -->

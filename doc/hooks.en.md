@@ -15,12 +15,12 @@ Hook types
 
 There are four types of hooks, executed in the following order:
 
-| Hook type          | When it runs                                    |
-|--------------------|-------------------------------------------------|
-| `pre-apply`        | Before every apply, before file sync            |
-| `pre-first-apply`  | Only on first apply, before file sync           |
-| `post-first-apply` | Only on first apply, after file sync            |
-| `post-apply`       | After every apply, after file sync              |
+| Hook type          | When it runs                          |
+| ------------------ | ------------------------------------- |
+| `pre-apply`        | Before every apply, before file sync  |
+| `pre-first-apply`  | Only on first apply, before file sync |
+| `post-first-apply` | Only on first apply, after file sync  |
+| `post-apply`       | After every apply, after file sync    |
 
 **First apply** is determined by the absence of the registry file (*~/.dojang*).
 When you run `dojang apply` for the first time, all four hooks run in this
@@ -58,7 +58,6 @@ args = ["--user", "restart", "my-service"]
 You can define multiple hooks of the same type.  They will be executed in the
 order they are defined.
 
-
 ### Hook fields
 
  -  `command` (string, required): The path to the executable to run.
@@ -67,16 +66,15 @@ order they are defined.
  -  `args` (array of strings, optional): Arguments to pass to the command.
     Defaults to an empty array.
 
- -  `when` (string, optional): An [environment predicate](environment-predicate.en.md)
-    expression.  The hook only runs if the condition is satisfied.
-    Defaults to always run.
+ -  `when` (string, optional): An
+    [environment predicate](environment-predicate.en.md) expression.  The hook
+    only runs if the condition is satisfied. Defaults to always run.
 
  -  `working-directory` (string, optional): The working directory for
     the hook.  Defaults to the repository directory.
 
  -  `ignore-failure` (boolean, optional): If `true`, Dojang continues
     even if the hook exits with a non-zero status.  Defaults to `false`.
-
 
 ### Conditional hooks
 
@@ -100,13 +98,13 @@ Environment variables
 
 The following environment variables are available to hooks:
 
-| Variable           | Description                                      |
-|--------------------|--------------------------------------------------|
-| `DOJANG_REPOSITORY`| Absolute path to the repository directory        |
-| `DOJANG_MANIFEST`  | Path to the manifest file (*dojang.toml*)        |
-| `DOJANG_DRY_RUN`   | `1` if running in dry-run mode, `0` otherwise    |
-| `DOJANG_OS`        | Current operating system identifier              |
-| `DOJANG_ARCH`      | Current processor architecture identifier        |
+| Variable            | Description                                   |
+| ------------------- | --------------------------------------------- |
+| `DOJANG_REPOSITORY` | Absolute path to the repository directory     |
+| `DOJANG_MANIFEST`   | Path to the manifest file (*dojang.toml*)     |
+| `DOJANG_DRY_RUN`    | `1` if running in dry-run mode, `0` otherwise |
+| `DOJANG_OS`         | Current operating system identifier           |
+| `DOJANG_ARCH`       | Current processor architecture identifier     |
 
 
 Dry-run mode
@@ -148,7 +146,6 @@ command = "/bin/bash"
 args = ["-c", "echo 'First time setup!' && ./setup.sh"]
 ~~~~
 
-
 ### Platform-specific hooks
 
 Run different commands based on the operating system:
@@ -165,7 +162,6 @@ args = ["install", "-y", "packages..."]
 when = "os = linux"
 ~~~~
 
-
 ### Service reload
 
 Reload a service after config changes:
@@ -176,6 +172,5 @@ command = "/usr/bin/systemctl"
 args = ["--user", "reload", "my-app"]
 when = "os = linux"
 ~~~~
-
 
 <!-- cSpell:ignore dunst killall Brewfile -->

@@ -8,7 +8,8 @@ Dojang is a cross-platform dotfile manager.  The word dotfile comes from
 the fact that on POSIX-like platforms, programs place their config files,
 which start with a period, in the home directory, but here we say dotfile to
 refer to various forms of config files.  For example, *~/.vimrc* and
-*~\AppData\Roaming\alacritty\alacritty.toml* could both be covered by Dojang.
+*~\\AppData\\Roaming\\alacritty\\alacritty.toml* could both be covered by
+Dojang.
 
 Dojang does not offer device-to-device sync of config files,
 and has no plan to do so in the future. Instead, you can achieve
@@ -85,7 +86,9 @@ you can select everything you use.
 > For example, if you use both a Windows PC and an Intel Mac,
 > you might type something like:
 >
->     > dojang init --win64 --intel-mac
+> ~~~~
+> > dojang init --win64 --intel-mac
+> ~~~~
 
 You can now open the manifest file and edit it as you want.
 For a detailed description of the manifest file,
@@ -114,7 +117,8 @@ it to ignore the *Documents* directory inside the home directory:
 HOME = ["Documents"]
 ~~~~
 
-For more information, see [Ignoring irrelevant files](routing.en.md#ignoring-irrelevant-files).
+For more information, see
+[Ignoring irrelevant files](routing.en.md#ignoring-irrelevant-files).
 
 
 Routing
@@ -188,6 +192,8 @@ Hint: You can reflect it anyway by enforcing it using -f/--force option.
 
 In this case, you can force it to be reflected using the `-f` option.
 
+[inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
+
 ### Reflecting all changed files
 
 You can also run `dojang reflect` without any arguments to reflect all changed
@@ -227,8 +233,6 @@ $ dojang reflect --include-unregistered
 When multiple routes could match an unregistered file, Dojang will prompt you
 to select which route to use.
 
-[inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
-
 
 Editing config files
 --------------------
@@ -247,10 +251,10 @@ file (*~/.inputrc* in this case), opens it in your editor, and then runs
 
 By default, the editor is determined in the following order:
 
- 1. The `--editor` (`-E`) option
- 2. The `$VISUAL` environment variable
- 3. The `$EDITOR` environment variable
- 4. Platform default (`notepad` on Windows, `vi` on POSIX)
+1.  The `--editor` (`-E`) option
+2.  The `$VISUAL` environment variable
+3.  The `$EDITOR` environment variable
+4.  Platform default (`notepad` on Windows, `vi` on POSIX)
 
 If you don't want to apply changes automatically, you can use the `--no-apply`
 (`-n`) option.
@@ -323,9 +327,9 @@ Adding a new config file
 
 If you want to add an entirely new config file, you have two options:
 
- 1. Use `dojang edit` with the target path (see
+1.  Use `dojang edit` with the target path (see
     [Creating new config files with edit](#creating-new-config-files-with-edit))
- 2. Create the source config file directly in your repository
+2.  Create the source config file directly in your repository
 
 If you create the file directly in your repository, you'll need to use
 the `dojang apply` command instead of `dojang reflect` because you'll need to

@@ -6,11 +6,11 @@ depending on the environment.  For example, the config file for `psql`,
 a client of PostgreSQL, has the following different paths depending
 on the environment, according to [documentation][1]:
 
-  - POSIX: If the `PSQLRC` environment variable is present,
+ -  POSIX: If the `PSQLRC` environment variable is present,
     use its value as the path; if not, use *~/.psqlrc*.
-  - Windows: If the `PSQLRC` environment variable is present,
+ -  Windows: If the `PSQLRC` environment variable is present,
     use its value as the path;
-    otherwise, use *%APPDATA%\postgresql\psqlrc.conf*.
+    otherwise, use *%APPDATA%\\postgresql\\psqlrc.conf*.
 
 Dojang utilizes a concept called **routing** to deal with such complex cases.
 
@@ -45,23 +45,23 @@ os = "windows"
 Here, the routing name, `app_config`, is also the name of a directory within
 the repository. If we say that the files in the repository are as follows:
 
-- *dojang.toml*
-- *app_config/*
-    - *alacritty/*
-        - *alacritty.toml*
-    - *ghc/*
-        - *ghci.conf*
-    - *nvim/*
+ -  *dojang.toml*
+ -  *app\_config/*
+     -  *alacritty/*
+         -  *alacritty.toml*
+     -  *ghc/*
+         -  *ghci.conf*
+     -  *nvim/*
         *init.vim*
 
 On Linux, you will have files in the following paths:
 
-- */home/$USER/.config/alacritty/*
-- */home/$USER/.config/alacritty/alacritty.toml*
-- */home/$USER/.config/ghc/*
-- */home/$USER/.config/ghc/ghci.conf*
-- */home/$USER/.config/nvim/*
-- */home/$USER/.config/nvim/init.vim*
+ -  */home/$USER/.config/alacritty/*
+ -  */home/$USER/.config/alacritty/alacritty.toml*
+ -  */home/$USER/.config/ghc/*
+ -  */home/$USER/.config/ghc/ghci.conf*
+ -  */home/$USER/.config/nvim/*
+ -  */home/$USER/.config/nvim/init.vim*
 
 However, what if the `XDG_CONFIG_HOME` environment variable is not defined?
 The `app_config` routing on Linux would be an empty path, i.e. the current
@@ -77,9 +77,9 @@ exists, take its value, but otherwise take the path *~/.config*.
 For more advanced features like this, see the [file path
 expressions](file-path-expression.en.md) documentation.
 
-[^1]: For example, in the cross-platform app framework Electron,
-      the `app.getPath("appData")` API returns different paths depending on
-      the environment.  In the same manner, GLib's `get_user_config_dir()` API
+[^1]: For example, in the cross-platform app framework Electron, the
+      `app.getPath("appData")` API returns different paths depending on the
+      environment. In the same manner, GLib's `get_user_config_dir()` API
       behaves similarly.
 
 ### Ignoring irrelevant files
@@ -235,7 +235,7 @@ On an Apple Silicon Mac (macOS with aarch64 architecture), both
 `apple-silicon` and `posix` would match.  However, `apple-silicon` wins
 because it has higher specificity (2 > 1).
 
-On an Intel Mac (macOS with x86_64 architecture), only `posix` matches.
+On an Intel Mac (macOS with x86\_64 architecture), only `posix` matches.
 
 On Linux, both `posix` and `linux` match with equal specificity.
 In this case, the route order in the manifest becomes the tiebreaker—whichever
@@ -256,7 +256,8 @@ appears first in the predicate comparison takes priority.
     consider restructuring with `&&` conditions instead.
 
 
-## Null routing
+Null routing
+------------
 
 Some config files may not exist or be needed in some environments.
 In these cases, you can choose not to route them at all,

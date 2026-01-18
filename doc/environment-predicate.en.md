@@ -16,6 +16,7 @@ kernel-release ^= "4.1"
 !(os in (linux, freebsd, macos) && arch = "x86_64" || os = openbsd)
 ~~~~
 
+
 Left-hand side
 --------------
 
@@ -34,12 +35,12 @@ Comparison operators
 There are four operators that can be used to compare against a target of
 a predicate:
 
-- `=`: is …
-- `!=`: is not …
-- `^=`: starts with … (only available for `kernel-release` field)
-- `$=`: ends with … (only available for `kernel-release` field)
-- `in`: is one of …
-- not in`: not any of …
+ -  `=`: is …
+ -  `!=`: is not …
+ -  `^=`: starts with … (only available for `kernel-release` field)
+ -  `$=`: ends with … (only available for `kernel-release` field)
+ -  `in`: is one of …
+ -  `not in`: not any of …
 
 Comparison operators are always preceded by fields, followed by string literals
 after `=`/`!=`/`^=`/`$=`, and lists after `in` and `not in`.
@@ -64,7 +65,7 @@ String literals are representations of string values, such as `linux` and
  -  Double-quoted string literal: A string enclosed in double quotes, supporting
     C/Python-style escape-column syntax (e.g., `\0`, `\n`, `\"`, `\xff`,
     `\uffff`).  Double-quotes can be written literally without escape sequences.
--   Single-quote string literals: strings enclosed in single-quotes, supporting
+ -  Single-quote string literals: strings enclosed in single-quotes, supporting
     C/Python-style escape-column syntax (e.g. `\0`, `\n`, `\'`, `\xff`,
     `\uffff`).  Single-quotes can be written literally without escape sequences.
 

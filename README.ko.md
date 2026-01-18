@@ -1,6 +1,8 @@
 *다른 언어로 보기: [English](README.en.md).*
 
-----
+   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+<!-- hongdown-disable-next-line -->
 
 ![](cat-pow.svg)
 Dojang: 크로스플랫폼 닷파일 관리자
@@ -23,8 +25,8 @@ Dojang은 크로스플랫폼 닷파일 관리자입니다.  Dojang의 특징은 
 
 자세한 내용은 다음 문서를 참고하세요.
 
- -  [한국어](https://dojang.dev/ko/)
- -  [English](https://dojang.dev/) (영어)
+ -  [한국어]
+ -  [English] (영어)
 
 [GPL 3.0] 이상의 라이선스로 배포됩니다.
 
@@ -35,6 +37,8 @@ Dojang은 크로스플랫폼 닷파일 관리자입니다.  Dojang의 특징은 
 [Cirrus CI]: https://cirrus-ci.com/github/dahlia/dojang
 [Codecov badge]: https://codecov.io/gh/dahlia/dojang/graph/badge.svg?token=JrwY5Yt2pD
 [Codecov]: https://codecov.io/gh/dahlia/dojang
+[한국어]: https://dojang.dev/ko/
+[English]: https://dojang.dev/
 [GPL 3.0]: https://www.gnu.org/licenses/gpl-3.0.html
 
 <!-- cSpell: ignore codecov -->

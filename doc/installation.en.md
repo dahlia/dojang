@@ -40,9 +40,9 @@ $ scoop install dojang
 Build it manually
 -----------------
 
-Dojang is a program made in Haskell, so you need to install the [Haskell Tool
-Stack].  Please refer to the [installation guide][1] on the Stack official
-website to install the Stack.  If you can use the `stack` command in
+Dojang is a program made in Haskell, so you need to install the
+[Haskell Tool Stack].  Please refer to the [installation guide][1] on the Stack
+official website to install the Stack.  If you can use the `stack` command in
 the terminal, the installation is complete.
 
 Now you are ready to build Dojang.  Enter the following command in the terminal:
