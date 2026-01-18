@@ -6,16 +6,17 @@
 
 module Dojang.Commands.Reflect (reflect) where
 
-import Control.Monad (filterM, forM, forM_, unless)
+import Control.Monad (filterM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, nub)
 import System.Exit (ExitCode (..), exitWith)
-import System.IO (stderr)
+import System.IO (hIsTerminalDevice, stderr, stdin)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (pack)
+import FortyTwo.Prompts.Confirm (confirm)
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath
   ( OsPath
@@ -47,6 +48,7 @@ import Dojang.ExitCodes
   , fileNotRoutedError
   , ignoredFileError
   , sourceCannotBeTargetError
+  , userCancelledError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
@@ -60,6 +62,7 @@ import Dojang.Types.Context
   , RouteState (..)
   , findMatchingRoutes
   , getRouteState
+  , makeCorrespond
   , makeCorrespondBetweenThreeFiles
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
@@ -69,12 +72,51 @@ reflect
   :: (MonadFileSystem i, MonadIO i)
   => Bool
   -- ^ Force flag.
+  -> Bool
+  -- ^ All flag (skip confirmation).
+  -> Bool
+  -- ^ Include unregistered files flag.
   -> Maybe OsPath
   -- ^ Explicit source path.
   -> [OsPath]
-  -- ^ Target paths.
+  -- ^ Target paths (may be empty for all changed files).
   -> App i ExitCode
-reflect force explicitSource paths = do
+reflect force allFlag _includeUnregistered _explicitSource [] = do
+  -- No arguments: reflect all changed files
+  ctx <- ensureContext
+  pathStyle <- pathStyleFor stderr
+  (allFiles, ws) <- makeCorrespond ctx
+  let changedFiles = filter isChanged allFiles
+  printWarnings ws
+  if null changedFiles
+    then do
+      printStderr "No changed files to reflect."
+      return ExitSuccess
+    else do
+      -- Display changed files
+      printStderr $
+        "Found "
+          <> pack (show $ length changedFiles)
+          <> " changed file(s):"
+      forM_ changedFiles $ \fc -> do
+        printStderr $ "  " <> pathStyle fc.destination.path
+      -- Confirm unless --all is specified
+      proceed <-
+        if allFlag
+          then return True
+          else do
+            isTerminal <- liftIO $ hIsTerminalDevice stdin
+            if isTerminal
+              then liftIO $ confirm "Reflect all changed files?"
+              else return True -- Non-interactive: proceed
+      if proceed
+        then do
+          reflectCorrespondences force changedFiles
+          return ExitSuccess
+        else do
+          printStderr "Cancelled."
+          liftIO $ exitWith userCancelledError
+reflect force allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   nonExistents <- filterM (fmap not . exists) paths
   pathStyle <- pathStyleFor stderr
@@ -101,8 +143,21 @@ reflect force explicitSource paths = do
           <> " because it is a file inside the repository."
       | p <- overlappedPaths
       ]
+  -- Separate directories and files
+  (dirPaths, filePaths) <- partitionByType absPaths
+  -- For directories: get changed files within
+  dirFiles <-
+    if null dirPaths
+      then return []
+      else do
+        (allFiles, ws) <- makeCorrespond ctx
+        printWarnings ws
+        let changedFiles = filter isChanged allFiles
+        -- Filter files within the directories
+        filterFilesInDirs dirPaths changedFiles
+  -- For files: process as before
   codeStyle <- codeStyleFor stderr
-  warningLists <- forM absPaths $ \absPath -> do
+  warningLists <- forM filePaths $ \absPath -> do
     (state, ws) <- getRouteState ctx absPath
     case state of
       NotRouted -> do
@@ -153,7 +208,7 @@ reflect force explicitSource paths = do
                 <> " option."
             liftIO $ exitWith ignoredFileError
   autoSelectMode <- getAutoSelectMode
-  files <- forM absPaths $ \p -> do
+  fileCorrespondences <- forM filePaths $ \p -> do
     (routeMatch, ws) <- findMatchingRoutes ctx p
     printWarnings $ nub ws
     case routeMatch of
@@ -187,10 +242,88 @@ reflect force explicitSource paths = do
           Just route -> do
             correspond <- makeCorrespondForRoute ctx p route
             return correspond
-  let conflicts = filterConflicts files
+  -- Combine directory files and individual file correspondences
+  let allCorrespondences = dirFiles ++ fileCorrespondences
+  -- For directory mode with confirmation
+  when (not (null dirPaths) && not allFlag && not (null allCorrespondences)) $ do
+    printStderr $
+      "Found "
+        <> pack (show $ length allCorrespondences)
+        <> " changed file(s) in specified directories:"
+    forM_ allCorrespondences $ \fc -> do
+      printStderr $ "  " <> pathStyle fc.destination.path
+    isTerminal <- liftIO $ hIsTerminalDevice stdin
+    proceed <-
+      if isTerminal
+        then liftIO $ confirm "Reflect these files?"
+        else return True
+    unless proceed $ do
+      printStderr "Cancelled."
+      liftIO $ exitWith userCancelledError
+  let conflicts = filterConflicts allCorrespondences
   $(logDebugSH) conflicts
   unless (force || null conflicts) $ do
     printWarnings $ nub $ concat warningLists
+    dieWithErrors
+      sourceCannotBeTargetError
+      [ "Cannot reflect "
+          <> pathStyle c.destination.path
+          <> ", since "
+          <> pathStyle c.source.path
+          <> " is also changed."
+      | c <- conflicts
+      ]
+  reflectCorrespondences force allCorrespondences
+  printWarnings $ nub $ concat warningLists
+  return ExitSuccess
+
+
+-- | Check if a file correspondence has changes.
+isChanged :: FileCorrespondence -> Bool
+isChanged fc = fc.sourceDelta /= Unchanged || fc.destinationDelta /= Unchanged
+
+
+-- | Partition paths into directories and files.
+partitionByType
+  :: (MonadFileSystem m)
+  => [OsPath]
+  -> m ([OsPath], [OsPath])
+partitionByType paths = do
+  results <- forM paths $ \p -> do
+    isDir <- isDirectory p
+    return (p, isDir)
+  let dirs = [p | (p, True) <- results]
+  let files = [p | (p, False) <- results]
+  return (dirs, files)
+
+
+-- | Filter file correspondences to those within the given directories.
+filterFilesInDirs
+  :: (Monad m)
+  => [OsPath]
+  -> [FileCorrespondence]
+  -> m [FileCorrespondence]
+filterFilesInDirs dirPaths correspondences = do
+  let dirPrefixes = map splitDirectories dirPaths
+  return
+    [ fc
+    | fc <- correspondences
+    , let dstDirs = splitDirectories fc.destination.path
+    , any (`isPrefixOf` dstDirs) dirPrefixes
+    ]
+
+
+-- | Perform the actual reflect operation on file correspondences.
+reflectCorrespondences
+  :: (MonadFileSystem i, MonadIO i)
+  => Bool
+  -- ^ Force flag.
+  -> [FileCorrespondence]
+  -> App i ()
+reflectCorrespondences force files = do
+  pathStyle <- pathStyleFor stderr
+  let conflicts = filterConflicts files
+  unless (force || null conflicts) $ do
     dieWithErrors
       sourceCannotBeTargetError
       [ "Cannot reflect "
@@ -222,8 +355,6 @@ reflect force explicitSource paths = do
         copy c.destination c.intermediate
         cleanup c.source
         copy c.intermediate c.source
-  printWarnings $ nub $ concat warningLists
-  return ExitSuccess
 
 
 -- | Create a 'FileCorrespondence' from a route result and destination path.

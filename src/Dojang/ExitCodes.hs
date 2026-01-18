@@ -71,3 +71,7 @@ accidentalDeletionWarning = ExitFailure 34
 
 ambiguousRouteError :: ExitCode
 ambiguousRouteError = ExitFailure 35
+
+
+userCancelledError :: ExitCode
+userCancelledError = ExitFailure 36

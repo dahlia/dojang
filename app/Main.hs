@@ -46,7 +46,6 @@ import Options.Applicative
   , progDesc
   , short
   , showDefault
-  , some
   , str
   , strOption
   , subparser
@@ -337,6 +336,18 @@ cmdP defaultRepoPath =
                         <> help
                           "Enforce reflecting if there are ignorable errors"
                     )
+                  <*> switch
+                    ( long "all"
+                        <> short 'a'
+                        <> help
+                          "Reflect all changed files without prompting"
+                    )
+                  <*> switch
+                    ( long "include-unregistered"
+                        <> short 'u'
+                        <> help
+                          "Include unregistered files (prompts for route)"
+                    )
                   <*> optional
                     ( pathOption
                         ( long "source"
@@ -347,7 +358,7 @@ cmdP defaultRepoPath =
                               "Explicitly specify source path (skip disambiguation)"
                         )
                     )
-                  <*> some (pathArgument $ metavar "FILE" <> action "file")
+                  <*> many (pathArgument $ metavar "PATH" <> action "file")
                   <**> helper
               )
               (progDesc "Let the repository reflect the target file")
@@ -400,6 +411,18 @@ cmdP defaultRepoPath =
                         <> short 'S'
                         <> help "Edit files one at a time instead of all at once"
                     )
+                  <*> switch
+                    ( long "all"
+                        <> short 'a'
+                        <> help
+                          "Edit all changed source files without prompting"
+                    )
+                  <*> switch
+                    ( long "include-unregistered"
+                        <> short 'u'
+                        <> help
+                          "Include unregistered files (prompts for route)"
+                    )
                   <*> optional
                     ( pathOption
                         ( long "source"
@@ -409,7 +432,7 @@ cmdP defaultRepoPath =
                             <> help "Explicit source path (skip disambiguation)"
                         )
                     )
-                  <*> some (pathArgument $ metavar "FILE" <> action "file")
+                  <*> many (pathArgument $ metavar "PATH" <> action "file")
                   <**> helper
               )
               (progDesc "Edit source file of a target file and apply changes")

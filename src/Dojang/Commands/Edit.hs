@@ -18,12 +18,13 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, nub)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
-import System.IO (stderr)
+import System.IO (hIsTerminalDevice, stderr, stdin)
 import System.Process (spawnProcess, waitForProcess)
 
 import Control.Monad.Logger (logDebugSH)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (pack)
+import FortyTwo.Prompts.Confirm (confirm)
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
 import TextShow (showt)
@@ -50,13 +51,18 @@ import Dojang.ExitCodes
   , fileNotFoundError
   , fileNotRoutedError
   , sourceCannotBeTargetError
+  , userCancelledError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
+  , FileCorrespondence (..)
+  , FileDeltaKind (..)
+  , FileEntry (..)
   , RouteMatch (..)
   , findMatchingRoutes
+  , makeCorrespond
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 
@@ -105,12 +111,51 @@ edit
   -- ^ The @--force@ flag.
   -> Bool
   -- ^ The @--sequential@ flag.
+  -> Bool
+  -- ^ The @--all@ flag (skip confirmation).
+  -> Bool
+  -- ^ The @--include-unregistered@ flag.
   -> Maybe OsPath
   -- ^ The @--source@ option for disambiguation.
   -> [OsPath]
-  -- ^ The target file paths to edit.
+  -- ^ The target file paths to edit (may be empty for all changed files).
   -> App i ExitCode
-edit editorOpt noApply force sequential explicitSource paths = do
+edit editorOpt noApply force sequential allFlag _includeUnregistered _explicitSource [] = do
+  -- No arguments: edit source files of all changed files
+  ctx <- ensureContext
+  pathStyle <- pathStyleFor stderr
+  (allFiles, ws) <- makeCorrespond ctx
+  let changedFiles = filter isChanged allFiles
+  printWarnings ws
+  if null changedFiles
+    then do
+      printStderr "No changed files to edit."
+      return ExitSuccess
+    else do
+      -- Display changed files
+      printStderr $
+        "Found "
+          <> pack (show $ length changedFiles)
+          <> " changed file(s):"
+      forM_ changedFiles $ \fc -> do
+        printStderr $ "  " <> pathStyle fc.source.path
+      -- Confirm unless --all is specified
+      proceed <-
+        if allFlag
+          then return True
+          else do
+            isTerminal <- liftIO $ hIsTerminalDevice stdin
+            if isTerminal
+              then liftIO $ confirm "Edit all changed source files?"
+              else return True -- Non-interactive: proceed
+      if proceed
+        then do
+          let sourceFiles = map (.source.path) changedFiles
+          runEditorOnFiles editorOpt noApply force sequential sourceFiles
+        else do
+          printStderr "Cancelled."
+          liftIO $ exitWith userCancelledError
+edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
@@ -153,7 +198,7 @@ edit editorOpt noApply force sequential explicitSource paths = do
       NoMatch -> do
         printStderr' Error ("File " <> pathStyle targetPath <> " is not routed.")
         printStderr' Hint "Add a route for it in your manifest (dojang.toml)."
-        liftIO $ exitWithCode fileNotRoutedError
+        liftIO $ exitWith fileNotRoutedError
       SingleMatch route -> do
         srcPath <- computeSourcePath ctx targetPath route
         return srcPath
@@ -176,10 +221,35 @@ edit editorOpt noApply force sequential explicitSource paths = do
                 <> " to specify which source path to use, or set "
                 <> codeStyle "DOJANG_AUTO_SELECT=first"
                 <> " to auto-select."
-            liftIO $ exitWithCode ambiguousRouteError
+            liftIO $ exitWith ambiguousRouteError
           Just route -> do
             srcPath <- computeSourcePath ctx targetPath route
             return srcPath
+
+  runEditorOnFiles editorOpt noApply force sequential sourceFiles
+
+
+-- | Check if a file correspondence has changes.
+isChanged :: FileCorrespondence -> Bool
+isChanged fc = fc.sourceDelta /= Unchanged || fc.destinationDelta /= Unchanged
+
+
+-- | Run the editor on the given source files.
+runEditorOnFiles
+  :: (MonadFileSystem i, MonadIO i)
+  => Maybe String
+  -- ^ The @--editor@ option.
+  -> Bool
+  -- ^ The @--no-apply@ flag.
+  -> Bool
+  -- ^ The @--force@ flag.
+  -> Bool
+  -- ^ The @--sequential@ flag.
+  -> [OsPath]
+  -- ^ The source file paths to edit.
+  -> App i ExitCode
+runEditorOnFiles editorOpt noApply force sequential sourceFiles = do
+  pathStyle <- pathStyleFor stderr
 
   -- Get the editor to use.
   maybeEditor <- getEditor editorOpt
@@ -222,9 +292,6 @@ edit editorOpt noApply force sequential explicitSource paths = do
             _ <- Dojang.Commands.Apply.apply force []
             return ()
       return ExitSuccess
- where
-  exitWithCode :: ExitCode -> IO a
-  exitWithCode code = exitWith code
 
 
 -- | Compute the source path for a target path given a route.

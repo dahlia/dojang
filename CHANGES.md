@@ -43,7 +43,19 @@ To be released.
         to overwrite (in interactive mode) or overwrites silently
         (in non-interactive mode)
 
+ -  Enhanced `dojang reflect` and `dojang edit` commands to support
+    batch operations.  [[#18]]
+
+     -  Without arguments, shows all changed files and prompts for
+        confirmation before processing
+     -  Use `--all`/`-a` flag to process all changed files without
+        prompting
+     -  Directory arguments process all changed files within the directory
+     -  The `--include-unregistered`/`-u` flag is reserved for future use
+        (not yet implemented)
+
 [#16]: https://github.com/dahlia/dojang/issues/16
+[#18]: https://github.com/dahlia/dojang/issues/18
 [#17]: https://github.com/dahlia/dojang/issues/17
 [#21]: https://github.com/dahlia/dojang/issues/21
 [#22]: https://github.com/dahlia/dojang/issues/22
