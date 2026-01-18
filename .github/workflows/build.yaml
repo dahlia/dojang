@@ -24,9 +24,9 @@ jobs:
       matrix:
         os:
         - windows-latest
+        - macos-15-intel
         - macos-latest
         - ubuntu-latest
-        - macos-latest-xlarge
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
@@ -65,7 +65,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest, macos-latest-xlarge]
+        os: [windows-latest, macos-15-intel, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
