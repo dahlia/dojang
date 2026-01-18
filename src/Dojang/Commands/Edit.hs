@@ -60,9 +60,12 @@ import Dojang.Types.Context
   , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
+  , IgnoredFile (..)
   , RouteMatch (..)
   , findMatchingRoutes
+  , getIgnoredFiles
   , makeCorrespond
+  , makeCorrespondBetweenThreeFiles
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 
@@ -124,10 +127,69 @@ edit editorOpt noApply force sequential allFlag _includeUnregistered _explicitSo
   -- No arguments: edit source files of all changed files
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
+  codeStyle <- codeStyleFor stderr
   (allFiles, ws) <- makeCorrespond ctx
   let changedFiles = filter isChanged allFiles
   printWarnings ws
-  if null changedFiles
+
+  -- Get ignored files and warn about them
+  ignoredFiles <- getIgnoredFiles ctx
+  -- Filter to only ignored files that exist in destination
+  existingIgnored <- filterM (exists . (.destinationPath)) ignoredFiles
+  -- Create correspondences for ignored files if --force is used
+  ignoredCorrespondences <-
+    if force && not (null existingIgnored)
+      then do
+        forM existingIgnored $ \ignored -> do
+          let interPath =
+                ctx.repository.intermediatePath
+                  </> ignored.routeName
+                  </> makeRelative
+                    (normalise ignored.routeName)
+                    (normalise ignored.sourcePath)
+          makeCorrespondBetweenThreeFiles
+            interPath
+            ignored.sourcePath
+            ignored.destinationPath
+      else return []
+  let changedIgnored = filter isChanged ignoredCorrespondences
+
+  -- Print warnings for ignored files
+  unless (null existingIgnored) $ do
+    if force
+      then do
+        printStderr' Note $
+          "Including "
+            <> pack (show $ length existingIgnored)
+            <> " ignored file(s) due to "
+            <> codeStyle "--force"
+            <> ":"
+        forM_ existingIgnored $ \ignored -> do
+          printStderr $
+            "  "
+              <> pathStyle ignored.destinationPath
+              <> " (pattern: "
+              <> codeStyle (pack $ show ignored.pattern)
+              <> ")"
+      else do
+        printStderr' Warning $
+          "Skipping "
+            <> pack (show $ length existingIgnored)
+            <> " ignored file(s):"
+        forM_ existingIgnored $ \ignored -> do
+          printStderr $
+            "  "
+              <> pathStyle ignored.destinationPath
+              <> " (pattern: "
+              <> codeStyle (pack $ show ignored.pattern)
+              <> ")"
+        printStderr' Hint $
+          "Use "
+            <> codeStyle "--force"
+            <> " to include ignored files."
+
+  let allChangedFiles = changedFiles ++ changedIgnored
+  if null allChangedFiles
     then do
       printStderr "No changed files to edit."
       return ExitSuccess
@@ -135,9 +197,9 @@ edit editorOpt noApply force sequential allFlag _includeUnregistered _explicitSo
       -- Display changed files
       printStderr $
         "Found "
-          <> pack (show $ length changedFiles)
+          <> pack (show $ length allChangedFiles)
           <> " changed file(s):"
-      forM_ changedFiles $ \fc -> do
+      forM_ allChangedFiles $ \fc -> do
         printStderr $ "  " <> pathStyle fc.source.path
       -- Confirm unless --all is specified
       proceed <-
@@ -150,7 +212,7 @@ edit editorOpt noApply force sequential allFlag _includeUnregistered _explicitSo
               else return True -- Non-interactive: proceed
       if proceed
         then do
-          let sourceFiles = map (.source.path) changedFiles
+          let sourceFiles = map (.source.path) allChangedFiles
           runEditorOnFiles editorOpt noApply force sequential sourceFiles
         else do
           printStderr "Cancelled."

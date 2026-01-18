@@ -51,6 +51,8 @@ To be released.
      -  Use `--all`/`-a` flag to process all changed files without
         prompting
      -  Directory arguments process all changed files within the directory
+     -  Ignored files are skipped by default with a warning; use `--force`
+        to include them
      -  The `--include-unregistered`/`-u` flag is reserved for future use
         (not yet implemented)
 

@@ -12,11 +12,13 @@ module Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , IgnoredFile (..)
   , RouteMatch (..)
   , RouteState (..)
   , calculateSpecificity
   , filterBySpecificity
   , findMatchingRoutes
+  , getIgnoredFiles
   , getRouteState
   , listFiles
   , makeCorrespond
@@ -512,6 +514,20 @@ data RouteState
   deriving (Eq, Ord, Show)
 
 
+-- | Represents a file that is ignored by a route's ignore patterns.
+data IgnoredFile = IgnoredFile
+  { routeName :: OsPath
+  -- ^ The name of the route that contains the ignore pattern.
+  , sourcePath :: OsPath
+  -- ^ The path to the source file (in the repository).
+  , destinationPath :: OsPath
+  -- ^ The path to the destination file.
+  , pattern :: FilePattern
+  -- ^ The ignore pattern that matched the file.
+  }
+  deriving (Eq, Show)
+
+
 -- | A candidate route with computed metadata for disambiguation.
 data CandidateRoute = CandidateRoute
   { route :: RouteResult
@@ -656,3 +672,66 @@ getRouteState ctx path = do
  where
   ignorePatterns :: Map OsPath [FilePattern]
   ignorePatterns = ctx.repository.manifest.ignorePatterns
+
+
+-- | Gets a list of files that are ignored by the repository's ignore patterns.
+-- This function scans all directory routes for files that would be excluded
+-- by their ignore patterns.
+getIgnoredFiles
+  :: forall m
+   . (HasCallStack, MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform the operation.
+  -> m [IgnoredFile]
+  -- ^ The list of ignored files.
+getIgnoredFiles ctx = do
+  (routes, _) <- routePaths ctx
+  ignoredLists <- forM routes $ \route ->
+    case route.fileType of
+      Dojang.MonadFileSystem.Directory -> do
+        let ignores = findWithDefault [] (normalise route.routeName) ignorePatterns
+        if null ignores
+          then return []
+          else do
+            -- List all files (including those that would be ignored)
+            allFiles <- listFilesWithoutIgnore route.destinationPath
+            -- Find which files match ignore patterns
+            forM allFiles $ \entry -> do
+              relPath <- decodePath entry.path
+              case matchMany [(i, i) | i <- ignores] [((), relPath)] of
+                (ptn, _, _) : _ ->
+                  return $
+                    Just $
+                      IgnoredFile
+                        { routeName = route.routeName
+                        , sourcePath = route.sourcePath </> entry.path
+                        , destinationPath = route.destinationPath </> entry.path
+                        , pattern = ptn
+                        }
+                _ -> return Nothing
+      _ -> return []
+  return $ concat [[f | Just f <- fs] | fs <- ignoredLists]
+ where
+  ignorePatterns :: Map OsPath [FilePattern]
+  ignorePatterns = ctx.repository.manifest.ignorePatterns
+
+  listFilesWithoutIgnore :: OsPath -> m [FileEntry]
+  listFilesWithoutIgnore path = do
+    exists' <- exists path
+    if exists'
+      then do
+        entries <-
+          listDirectoryRecursively path [] `catchError` \e ->
+            if isPermissionError e
+              then return []
+              else throwError e
+        forM entries $ \case
+          (Dojang.MonadFileSystem.Directory, d) ->
+            return $ FileEntry d Directory
+          (Dojang.MonadFileSystem.File, f) -> do
+            size <- getFileSize $ path </> f
+            return $ FileEntry f $ File size
+          (Dojang.MonadFileSystem.Symlink, s) -> do
+            target <- readSymlinkTarget $ path </> s
+            return $ FileEntry s $ Symlink target
+      else return []
