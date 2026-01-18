@@ -1,3 +1,6 @@
+# TODO: Replace with regular version constraint after the PR is merged and released:
+# https://github.com/Python-Markdown/markdown/pull/1585
+git+https://github.com/dahlia/python-markdown.git@fix/fenced-code-in-blockquote#egg=Markdown
 mkdocs >=1.5.3, <1.6
 mkdocs-material >=9.4.8, <9.5
 mkdocs-static-i18n[material] >=1.2, <1.3
