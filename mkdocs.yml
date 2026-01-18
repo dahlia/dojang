@@ -30,6 +30,7 @@ nav:
 - installation.md
 - References:
   - manifest.md
+  - hooks.md
   - routing.md
   - environment.md
   - environment-predicate.md

@@ -6,7 +6,7 @@
 그 설정 파일들이 실제 컴퓨터에 어떻게 적용되어야 할지를 설정합니다.
 
 확장자에서 미루어 짐작할 수 있듯 [TOML] 형식으로 되어 있으며,
-크게 `dirs`, `files`, `monikers`, `ignores` 네 구획으로 나뉩니다.
+크게 `dirs`, `files`, `monikers`, `ignores`, `hooks` 다섯 구획으로 나뉩니다.
 본 문서에서는 독자가 TOML의 기본적인 문법을 안다는 전제로 설명합니다.
 
 [TOML]: https://toml.io/
@@ -190,6 +190,31 @@ HOME = [
 아무리 대상 경로에서 무시된 파일이라 하더라도, 저장소에 포함된 파일이면
 그 파일은 무시되지 않습니다.  이를 이용해서 모든 파일(`*`)을 무시하되 저장소에
 추가된 파일에 한해서만 관리하는 것도 가능합니다.
+
+
+훅
+--
+
+**[훅](hooks.ko.md)**을 사용하면 `dojang apply` 명령 전후에 사용자 정의 스크립트를
+실행할 수 있습니다.  네 가지 종류의 훅이 있습니다:
+
+ -  `pre-apply`: 매 apply 전에 실행
+ -  `pre-first-apply`: 첫 apply에서만 실행
+ -  `post-first-apply`: 첫 apply에서만, 파일 동기화 후 실행
+ -  `post-apply`: 매 apply 후에 실행
+
+~~~~ toml
+[[hooks.pre-apply]]
+command = "/bin/echo"
+args = ["설정 파일 적용 중..."]
+
+[[hooks.post-apply]]
+command = "/usr/bin/systemctl"
+args = ["--user", "restart", "my-service"]
+when = "os = linux"
+~~~~
+
+훅에 대한 자세한 설명은 [훅 문서](hooks.ko.md)를 참고하세요.
 
 
 <!-- cSpell:ignore inputrc -->

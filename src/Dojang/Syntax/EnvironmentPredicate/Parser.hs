@@ -271,10 +271,10 @@ singleQuoteStringLiteral = label "single quote string literal" $ do
 charactersInStringLiteral :: Char -> Parser Text
 charactersInStringLiteral terminal = do
   chunks <-
-    many
-      $ takeWhile1P (Just "string character") (\c -> c /= '\\' && c /= terminal)
-      <|> singleton
-      <$> charEscape
+    many $
+      takeWhile1P (Just "string character") (\c -> c /= '\\' && c /= terminal)
+        <|> singleton
+          <$> charEscape
   return $ concat chunks
  where
   charEscape :: Parser Char
@@ -313,29 +313,29 @@ charactersInStringLiteral terminal = do
           d6 <- hex
           d7 <- hex
           d8 <- hex
-          return
-            $ toEnum
-            $ d1
-            * 0x10000000
-            + d2
-            * 0x1000000
-            + d3
-            * 0x100000
-            + d4
-            * 0x10000
-            + d5
-            * 0x1000
-            + d6
-            * 0x100
-            + d7
-            * 0x10
-            + d8
+          return $
+            toEnum $
+              d1
+                * 0x10000000
+                + d2
+                  * 0x1000000
+                + d3
+                  * 0x100000
+                + d4
+                  * 0x10000
+                + d5
+                  * 0x1000
+                + d6
+                  * 0x100
+                + d7
+                  * 0x10
+                + d8
       ]
   hex :: Parser Int
   hex = do
     c <- hexDigitChar
-    return
-      $ if isDigit c
+    return $
+      if isDigit c
         then fromEnum c - 0x30
         else
           if 'A' <= c && c <= 'F'

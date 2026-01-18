@@ -1,7 +1,11 @@
 {-# LANGUAGE OverloadedRecordUpdate #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
-module Dojang.Types.Manifest (IgnoreMap, Manifest (..), manifest) where
+module Dojang.Types.Manifest
+  ( IgnoreMap
+  , Manifest (..)
+  , manifest
+  ) where
 
 import Data.Map.Strict (Map, fromList, toAscList, toList)
 import System.FilePattern (FilePattern)
@@ -11,6 +15,7 @@ import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.Hook (HookMap)
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 
@@ -28,6 +33,8 @@ data Manifest = Manifest
   -- ^ The directory routes that are resolved by the monikers.
   , ignorePatterns :: IgnoreMap
   -- ^ The file patterns that should be ignored for each directory route.
+  , hooks :: HookMap
+  -- ^ The hooks to run before and after applying.
   }
   deriving (Eq, Show)
 
@@ -52,13 +59,16 @@ manifest
   -- (the previous parameter), then the directory route will take precedence.
   -> IgnoreMap
   -- ^ The file patterns that should be ignored for each directory route.
+  -> HookMap
+  -- ^ The hooks to run before and after applying.
   -> Manifest
   -- ^ The made 'Manifest'.
-manifest monikers' fileRoutes' dirRoutes' ignorePatterns' =
+manifest monikers' fileRoutes' dirRoutes' ignorePatterns' hooks' =
   Manifest
     { monikers = monikers'
     , fileRoutes = fromList $ files ++ dirs
     , ignorePatterns = ignores
+    , hooks = hooks'
     }
  where
   files :: [(OsPath, FileRoute)]

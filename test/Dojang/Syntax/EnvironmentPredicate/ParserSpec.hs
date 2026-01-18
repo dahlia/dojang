@@ -354,8 +354,8 @@ spec = do
     let Left e = parseEnvironmentPredicate "<input>" "invalid"
     errorBundlePretty e
       `shouldBe` "<input>:1:1:\n"
-      <> "  |\n"
-      <> "1 | invalid\n"
-      <> "  | ^^^^^^^\n"
-      <> "unexpected \"invalid\"\n"
-      <> "expecting expression\n"
+        <> "  |\n"
+        <> "1 | invalid\n"
+        <> "  | ^^^^^^^\n"
+        <> "unexpected \"invalid\"\n"
+        <> "expecting expression\n"

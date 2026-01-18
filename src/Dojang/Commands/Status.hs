@@ -78,8 +78,8 @@ status options = do
     let displayPathS =
           if not options.noTrailingSlash
             && ( (file.source.stat == Directory)
-                  || (file.source.stat == Missing)
-                  && (file.destination.stat == Directory)
+                   || (file.source.stat == Missing)
+                     && (file.destination.stat == Directory)
                )
             then addTrailingPathSeparator displayPath
             else displayPath
@@ -128,46 +128,46 @@ formatWarning handle (EnvironmentPredicateWarning w) = do
   codeStyle <- codeStyleFor handle
   case w of
     (UndefinedMoniker moniker) ->
-      return
-        $ "Reference to an undefined moniker: "
-        <> codeStyle (original moniker.name)
-        <> "."
+      return $
+        "Reference to an undefined moniker: "
+          <> codeStyle (original moniker.name)
+          <> "."
     (UnrecognizedOperatingSystem os) ->
-      return
-        $ "Unrecognized operating system: "
-        <> codeStyle (showt $ FromStringShow os)
-        <> "."
+      return $
+        "Unrecognized operating system: "
+          <> codeStyle (showt $ FromStringShow os)
+          <> "."
     (UnrecognizedArchitecture arch) ->
-      return
-        $ "Unrecognized architecture: "
-        <> codeStyle (showt $ FromStringShow arch)
-        <> "."
+      return $
+        "Unrecognized architecture: "
+          <> codeStyle (showt $ FromStringShow arch)
+          <> "."
 formatWarning handle (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
   codeStyle <- codeStyleFor handle
-  return
-    $ "Reference to an undefined environment variable: "
-    <> codeStyle envVar
-    <> "."
+  return $
+    "Reference to an undefined environment variable: "
+      <> codeStyle envVar
+      <> "."
 formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
   pathStyle <- pathStyleFor handle
   pairStrings <- forM paths $ \(from, to) -> do
     return $ pathStyle from <> " -> " <> pathStyle to
   case pairStrings of
     pairString :| [] ->
-      return
-        $ pathStyle name
-        <> " -> "
-        <> pathStyle dst
-        <> " overlaps with: "
-        <> pairString
-        <> "."
+      return $
+        pathStyle name
+          <> " -> "
+          <> pathStyle dst
+          <> " overlaps with: "
+          <> pairString
+          <> "."
     _ ->
-      return
-        $ pathStyle name
-        <> " -> "
-        <> pathStyle dst
-        <> " overlaps with:\n  "
-        <> intercalate "\n  " (toList pairStrings)
+      return $
+        pathStyle name
+          <> " -> "
+          <> pathStyle dst
+          <> " overlaps with:\n  "
+          <> intercalate "\n  " (toList pairStrings)
 
 
 -- TODO: This should be in a separate module:

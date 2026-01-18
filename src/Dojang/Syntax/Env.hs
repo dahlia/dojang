@@ -63,10 +63,10 @@ instance ToValue Architecture where
 
 instance FromValue Kernel where
   fromValue =
-    parseTableFromValue
-      $ Kernel
-      <$> (fromString <$> reqKey "name")
-      <*> (fromString <$> reqKey "release")
+    parseTableFromValue $
+      Kernel
+        <$> (fromString <$> reqKey "name")
+        <*> (fromString <$> reqKey "release")
 
 
 instance ToValue Kernel where
@@ -83,11 +83,11 @@ instance ToTable Kernel where
 
 instance FromValue Environment where
   fromValue =
-    parseTableFromValue
-      $ Environment
-      <$> reqKey "os"
-      <*> reqKey "arch"
-      <*> reqKey "kernel"
+    parseTableFromValue $
+      Environment
+        <$> reqKey "os"
+        <*> reqKey "arch"
+        <*> reqKey "kernel"
 
 
 instance ToValue Environment where

@@ -6,7 +6,7 @@ it resides is a repository for config files managed by Dojang, and sets up how
 those config files should be applied on the actual machine.
 
 It is in [TOML] format, as you might guess from the extension, and is divided
-into four main sections: `dirs`, `files`, `monikers`, and `ignores`.
+into five main sections: `dirs`, `files`, `monikers`, `ignores`, and `hooks`.
 This document assumes that the reader knows the basic syntax of TOML.
 
 [TOML]: https://toml.io/
@@ -204,6 +204,31 @@ Note that even if a file is on your ignore list, it will not be ignored
 if it has already been included in the repository.  You can also use this
 behavior to manage only files that have been added to the repository,
 while ignoring everything else (`*`).
+
+
+Hooks
+-----
+
+**[Hooks](hooks.en.md)** allow you to run custom scripts before and after
+the `dojang apply` command.  There are four types of hooks:
+
+ -  `pre-apply`: Runs before every apply
+ -  `pre-first-apply`: Runs only on first apply
+ -  `post-first-apply`: Runs only on first apply, after file sync
+ -  `post-apply`: Runs after every apply
+
+~~~~ toml
+[[hooks.pre-apply]]
+command = "/bin/echo"
+args = ["Applying config files..."]
+
+[[hooks.post-apply]]
+command = "/usr/bin/systemctl"
+args = ["--user", "restart", "my-service"]
+when = "os = linux"
+~~~~
+
+For a detailed description of hooks, see the [hooks documentation](hooks.en.md).
 
 
 <!-- cSpell:ignore inputrc -->

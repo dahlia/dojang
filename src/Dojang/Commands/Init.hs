@@ -35,6 +35,7 @@ import Data.HashMap.Strict qualified as HashMap
   )
 import Data.Map.Strict
   ( Map
+  , empty
   , findWithDefault
   , fromList
   , fromListWith
@@ -271,8 +272,8 @@ makeRouteMap neededMonikers monikers' =
  where
   monikerScoreTable :: Map MonikerName Int
   monikerScoreTable =
-    fromListWith (+)
-      $ zip (concatMap (NonEmpty.toList . snd) neededMonikers) [1, 1 ..]
+    fromListWith (+) $
+      zip (concatMap (NonEmpty.toList . snd) neededMonikers) [1, 1 ..]
   makePairs
     :: [(Set MonikerName, FilePathExpression)]
     -> [(MonikerName, Maybe FilePathExpression)]
@@ -294,13 +295,7 @@ makeRouteMap neededMonikers monikers' =
 
 makeManifest :: [InitPreset] -> Manifest
 makeManifest presets =
-  Manifest monikers' routeMap
-    $ fromList
-      [ (p, ignores)
-      | p <- keys routeMap
-      , let ignores = findWithDefault [] p ignorePatterns'
-      , not $ null ignores
-      ]
+  Manifest monikers' routeMap ignorePatterns'' empty
  where
   neededMonikers :: [(InitPreset, NonEmpty MonikerName)]
   neededMonikers = listNeededMonikers presets
@@ -313,6 +308,13 @@ makeManifest presets =
         )
   routeMap :: FileRouteMap
   routeMap = makeRouteMap neededMonikers monikers'
+  ignorePatterns'' =
+    fromList
+      [ (p, ignores)
+      | p <- keys routeMap
+      , let ignores = findWithDefault [] p ignorePatterns'
+      , not $ null ignores
+      ]
 
 
 init :: (MonadFileSystem i, MonadIO i) => [InitPreset] -> Bool -> App i ExitCode
@@ -323,18 +325,18 @@ init presets noInteractive = do
   $(logInfo) "No manifest found."
   when (System.Info.os == "mingw32" && not noInteractive) $ do
     codeStyle <- codeStyleFor stderr
-    printStderr' Error
-      $ "We are sorry, but interactive mode is currently not supported on "
-      <> "Windows.  See the relevant issue:\n"
-      <> "\n  https://github.com/dahlia/dojang/issues/4\n"
-    printStderr' Hint
-      $ ("Please use the " <> codeStyle "--linux-*" <> "/")
-      <> (codeStyle "--macos-*" <> "/" <> codeStyle "--windows-*")
-      <> " options with the "
-      <> (codeStyle "-I" <> "/" <> codeStyle "--no-interactive")
-      <> " flag.  See also "
-      <> (codeStyle "-h" <> "/" <> codeStyle "--help")
-      <> " for command-line options."
+    printStderr' Error $
+      "We are sorry, but interactive mode is currently not supported on "
+        <> "Windows.  See the relevant issue:\n"
+        <> "\n  https://github.com/dahlia/dojang/issues/4\n"
+    printStderr' Hint $
+      ("Please use the " <> codeStyle "--linux-*" <> "/")
+        <> (codeStyle "--macos-*" <> "/" <> codeStyle "--windows-*")
+        <> " options with the "
+        <> (codeStyle "-I" <> "/" <> codeStyle "--no-interactive")
+        <> " flag.  See also "
+        <> (codeStyle "-h" <> "/" <> codeStyle "--help")
+        <> " for command-line options."
     liftIO $ exitWith unsupportedOnEnvError
   presets' <-
     if null presets && not noInteractive
@@ -356,10 +358,10 @@ init presets noInteractive = do
   dryRun' <- asks (.dryRun)
   when (debug' || dryRun') $ do
     let manifestText = indent $ writeManifest manifest
-    printStderr' Note
-      $ "The manifest file looks like below:\n\n"
-      <> manifestText
-      <> "\n"
+    printStderr' Note $
+      "The manifest file looks like below:\n\n"
+        <> manifestText
+        <> "\n"
   return ExitSuccess
 
 

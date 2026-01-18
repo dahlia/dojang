@@ -68,8 +68,8 @@ spec = do
       `shouldBe` ([], [])
     evaluateRoutes
       routes
-      ( Environment Windows X86_64
-          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      ( Environment Windows X86_64 $
+          Kernel "Microsoft Windows" "10.0.23585.1001"
       )
       `shouldBe` (
                    [ (bar, Root $ Just 'B')
@@ -93,8 +93,8 @@ spec = do
       `shouldBe` ([], [])
     eval
       routes
-      ( Environment Windows X86_64
-          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      ( Environment Windows X86_64 $
+          Kernel "Microsoft Windows" "10.0.23585.1001"
       )
       `shouldBe` (
                    [ (bar, (Root $ Just 'B', Directory))

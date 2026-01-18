@@ -116,7 +116,7 @@ spec = do
                        )
                      , (Moniker $ moniker "posix", Just $ Substitution "HOME")
                      ]
-                      :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+                       :: [(EnvironmentPredicate, Maybe FilePathExpression)]
                    )
 
     specify "Show" $ do
@@ -131,14 +131,14 @@ spec = do
     dispatch (Environment "macos" "aarch64" $ Kernel "Darwin" "23.1.0") route
       `shouldBe` ([Just $ Substitution "HOME"], [])
     dispatch
-      ( Environment "windows" "x86_64"
-          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      ( Environment "windows" "x86_64" $
+          Kernel "Microsoft Windows" "10.0.23585.1001"
       )
       route
       `shouldBe` ([Just $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
     dispatch
-      ( Environment "windows" "x86_64"
-          $ Kernel "Microsoft Windows" "10.0.23585.1001"
+      ( Environment "windows" "x86_64" $
+          Kernel "Microsoft Windows" "10.0.23585.1001"
       )
       route
       `shouldBe` ([Just $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
@@ -167,7 +167,7 @@ spec = do
       `shouldReturn` ( Just mempty
                      ,
                        [ FilePathExpressionWarning
-                          (UndefinedEnvironmentVariable "HOME")
+                           (UndefinedEnvironmentVariable "HOME")
                        ]
                      )
     home <- encodeFS "/home/hong"

@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -10,10 +11,13 @@ module Dojang.Syntax.Manifest.Internal
   , FileRouteMap'
   , EnvironmentPredicate' (..)
   , FlatOrNonEmptyStrings (..)
+  , Hook' (..)
+  , Hooks' (..)
   , IgnoreMap'
   , Manifest' (..)
   , MonikerMap'
   , always
+  , emptyHooks
   ) where
 
 import Data.List.NonEmpty (NonEmpty)
@@ -52,17 +56,18 @@ data FlatOrNonEmptyStrings
 
 typeError :: Value -> String -> Matcher a
 typeError actual wanted =
-  fail $ "type error. wanted: " ++ wanted ++ " got: " ++ case actual of
-    Integer{} -> "integer"
-    Float{} -> "float"
-    String{} -> "string"
-    Table{} -> "table"
-    Array{} -> "array"
-    Bool{} -> "boolean"
-    TimeOfDay{} -> "local time"
-    LocalTime{} -> "local date-time"
-    Day{} -> "locate date"
-    ZonedTime{} -> "offset date-time"
+  fail $
+    "type error. wanted: " ++ wanted ++ " got: " ++ case actual of
+      Integer{} -> "integer"
+      Float{} -> "float"
+      String{} -> "string"
+      Table{} -> "table"
+      Array{} -> "array"
+      Bool{} -> "boolean"
+      TimeOfDay{} -> "local time"
+      LocalTime{} -> "local date-time"
+      Day{} -> "locate date"
+      ZonedTime{} -> "offset date-time"
 
 
 instance FromValue FlatOrNonEmptyStrings where
@@ -126,15 +131,15 @@ always =
 
 instance FromValue EnvironmentPredicate' where
   fromValue =
-    parseTableFromValue
-      $ EnvironmentPredicate'
-      <$> optKey "os"
-      <*> optKey "arch"
-      <*> optKey "kernel"
-      <*> optKey "kernel-release"
-      <*> optKey "all"
-      <*> optKey "any"
-      <*> optKey "when"
+    parseTableFromValue $
+      EnvironmentPredicate'
+        <$> optKey "os"
+        <*> optKey "arch"
+        <*> optKey "kernel"
+        <*> optKey "kernel-release"
+        <*> optKey "all"
+        <*> optKey "any"
+        <*> optKey "when"
 
 
 instance ToValue EnvironmentPredicate' where
@@ -143,11 +148,11 @@ instance ToValue EnvironmentPredicate' where
 
 instance ToTable EnvironmentPredicate' where
   toTable pred' =
-    table
-      $ fieldsToValue fields
-      ++ fieldsToValue fields'
-      ++ fieldsToValue
-        [("when", pred'.when)]
+    table $
+      fieldsToValue fields
+        ++ fieldsToValue fields'
+        ++ fieldsToValue
+          [("when", pred'.when)]
    where
     fields :: [(String, Maybe FlatOrNonEmptyStrings)]
     fields =
@@ -177,11 +182,114 @@ type FileRouteMap' = Map FilePath FileRoute'
 type IgnoreMap' = Map FilePath [FilePattern]
 
 
+-- | A single hook configuration in detailed form.
+data Hook' = Hook'
+  { command :: Text
+  -- ^ The executable path (required).
+  , args :: Maybe [Text]
+  -- ^ Command arguments (default: []).
+  , moniker :: Maybe MonikerName
+  -- ^ Run only when this moniker matches.
+  , condition :: Maybe Text
+  -- ^ Run only when this predicate matches (parsed from "when" in TOML).
+  , workingDirectory :: Maybe FilePath
+  -- ^ Working directory (default: repository root).
+  , ignoreFailure :: Maybe Bool
+  -- ^ Continue on failure (default: False).
+  }
+  deriving (Eq, Show)
+
+
+instance FromValue Hook' where
+  fromValue =
+    parseTableFromValue $
+      Hook'
+        <$> reqKey "command"
+        <*> optKey "args"
+        <*> optKey "moniker"
+        <*> optKey "when"
+        <*> optKey "working-directory"
+        <*> optKey "ignore-failure"
+   where
+    reqKey key =
+      optKey key >>= \case
+        Just v -> return v
+        Nothing -> fail $ "missing required key: " ++ key
+
+
+instance ToValue Hook' where
+  toValue = defaultTableToValue
+
+
+instance ToTable Hook' where
+  toTable hook =
+    table $
+      [("command", toValue hook.command)]
+        ++ maybeField "args" hook.args
+        ++ maybeField "moniker" hook.moniker
+        ++ maybeField "when" hook.condition
+        ++ maybeField "working-directory" hook.workingDirectory
+        ++ maybeField "ignore-failure" hook.ignoreFailure
+   where
+    maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
+    maybeField key (Just v) = [(key, toValue v)]
+    maybeField _ Nothing = []
+
+
+-- | Hooks section of the manifest.
+data Hooks' = Hooks'
+  { preApply :: Maybe [Hook']
+  , preFirstApply :: Maybe [Hook']
+  , postFirstApply :: Maybe [Hook']
+  , postApply :: Maybe [Hook']
+  }
+  deriving (Eq, Show)
+
+
+-- | Empty hooks (no hooks defined).
+emptyHooks :: Hooks'
+emptyHooks =
+  Hooks'
+    { preApply = Nothing
+    , preFirstApply = Nothing
+    , postFirstApply = Nothing
+    , postApply = Nothing
+    }
+
+
+instance FromValue Hooks' where
+  fromValue =
+    parseTableFromValue $
+      Hooks'
+        <$> optKey "pre-apply"
+        <*> optKey "pre-first-apply"
+        <*> optKey "post-first-apply"
+        <*> optKey "post-apply"
+
+
+instance ToValue Hooks' where
+  toValue = defaultTableToValue
+
+
+instance ToTable Hooks' where
+  toTable hooks =
+    table $
+      maybeField "pre-apply" hooks.preApply
+        ++ maybeField "pre-first-apply" hooks.preFirstApply
+        ++ maybeField "post-first-apply" hooks.postFirstApply
+        ++ maybeField "post-apply" hooks.postApply
+   where
+    maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
+    maybeField key (Just v) = [(key, toValue v)]
+    maybeField _ Nothing = []
+
+
 data Manifest' = Manifest'
   { monikers :: MonikerMap'
   , dirs :: FileRouteMap'
   , files :: FileRouteMap'
   , ignores :: IgnoreMap'
+  , hooks :: Maybe Hooks'
   }
   deriving (Eq, Show, Generic)
 

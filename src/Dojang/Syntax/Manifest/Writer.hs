@@ -18,7 +18,7 @@ import Prelude hiding (all, any, writeFile)
 import Data.CaseInsensitive (CI (original))
 import Data.HashMap.Strict (toList)
 import Data.Map.Strict (toList)
-import Data.Text (Text, unpack)
+import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import System.OsPath (OsPath, decodeFS)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
@@ -26,6 +26,7 @@ import Toml.Pretty (prettyTomlOrdered)
 import Toml.ToValue (ToTable (toTable))
 import Toml.Value (Table)
 
+import qualified Data.Map.Strict
 import Dojang.MonadFileSystem
   ( FileType (Directory)
   , MonadFileSystem (writeFile)
@@ -36,11 +37,13 @@ import Dojang.Syntax.Manifest.Internal
   , FileRoute'
   , FileRouteMap'
   , FlatOrNonEmptyStrings (..)
+  , Hooks' (..)
   , IgnoreMap'
   , Manifest' (Manifest')
   , MonikerMap'
   , always
   )
+import qualified Dojang.Syntax.Manifest.Internal as Internal
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -48,6 +51,7 @@ import Dojang.Types.EnvironmentPredicate
 import Dojang.Types.FilePathExpression (toPathText)
 import Dojang.Types.FileRoute (FileRoute (..))
 import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
@@ -94,7 +98,7 @@ writeManifestFile manifest filePath =
 
 mapManifest' :: Manifest -> Manifest'
 mapManifest' manifest =
-  Manifest' monikers' dirs files ignores
+  Manifest' monikers' dirs files ignores hooks'
  where
   dirs :: FileRouteMap'
   files :: FileRouteMap'
@@ -107,6 +111,11 @@ mapManifest' manifest =
       [ (decodePath path, pattern)
       | (path, pattern) <- Data.Map.Strict.toList manifest.ignorePatterns
       ]
+  hooks' :: Maybe Hooks'
+  hooks' =
+    if Data.Map.Strict.null manifest.hooks
+      then Nothing
+      else Just $ mapHooks' manifest.hooks
 
 
 mapFiles :: FileRouteMap -> MonikerMap -> (FileRouteMap', FileRouteMap')
@@ -131,10 +140,10 @@ mapFileRoute' :: FileRoute -> MonikerMap -> FileRoute'
 mapFileRoute' fileRoute monikers =
   (fromList . catMaybes)
     [ case (normalizePredicate pred', maybe "" toPathText filePath) of
-      (Moniker n, path) -> Just (n, path)
-      (pred'', path) -> case lookBack monikers pred'' of
-        Just n -> Just (n, path)
-        Nothing -> Nothing
+        (Moniker n, path) -> Just (n, path)
+        (pred'', path) -> case lookBack monikers pred'' of
+          Just n -> Just (n, path)
+          Nothing -> Nothing
     | (pred', filePath) <- fileRoute.predicates
     ]
 
@@ -153,9 +162,9 @@ lookBack monikers predicate =
 
 mapMonikers' :: MonikerMap -> MonikerMap'
 mapMonikers' monikers =
-  fromList
-    $ second (mapEnvironmentPredicate' . normalizePredicate)
-    <$> Data.HashMap.Strict.toList monikers
+  fromList $
+    second (mapEnvironmentPredicate' . normalizePredicate)
+      <$> Data.HashMap.Strict.toList monikers
 
 
 mapEnvironmentPredicate' :: EnvironmentPredicate -> EnvironmentPredicate'
@@ -179,25 +188,25 @@ mapEnvironmentPredicate' (And predicates') =
   xor' (a :| predicates'') =
     let r : est = predicates''
     in case xor' (r :| est) of
-        Nothing -> Nothing
-        Just b -> do
-          os' <- xorMaybe a.os b.os
-          arch' <- xorMaybe a.arch b.arch
-          kernel' <- xorMaybe a.kernel b.kernel
-          kernelRelease' <- xorMaybe a.kernelRelease b.kernelRelease
-          all' <- xorMaybe a.all b.all
-          any' <- xorMaybe a.any b.any
-          when' <- xorMaybe a.when b.when
-          return
-            EnvironmentPredicate'
-              { os = os'
-              , arch = arch'
-              , kernel = kernel'
-              , kernelRelease = kernelRelease'
-              , all = all'
-              , any = any'
-              , when = when'
-              }
+         Nothing -> Nothing
+         Just b -> do
+           os' <- xorMaybe a.os b.os
+           arch' <- xorMaybe a.arch b.arch
+           kernel' <- xorMaybe a.kernel b.kernel
+           kernelRelease' <- xorMaybe a.kernelRelease b.kernelRelease
+           all' <- xorMaybe a.all b.all
+           any' <- xorMaybe a.any b.any
+           when' <- xorMaybe a.when b.when
+           return
+             EnvironmentPredicate'
+               { os = os'
+               , arch = arch'
+               , kernel = kernel'
+               , kernelRelease = kernelRelease'
+               , all = all'
+               , any = any'
+               , when = when'
+               }
   xorMaybe :: Maybe a -> Maybe a -> Maybe (Maybe a)
   xorMaybe (Just _) (Just _) = Nothing
   xorMaybe (Just a) Nothing = Just $ Just a
@@ -246,3 +255,35 @@ mapEnvironmentPredicate' (Or predicates')
   toNonEmpty [] = error "toNonEmpty: empty list"
 mapEnvironmentPredicate' pred' =
   always{when = Just $ writeEnvironmentPredicate pred'}
+
+
+mapHooks' :: HookMap -> Hooks'
+mapHooks' hookMap =
+  Hooks'
+    { preApply = mapHookList PreApply
+    , preFirstApply = mapHookList PreFirstApply
+    , postFirstApply = mapHookList PostFirstApply
+    , postApply = mapHookList PostApply
+    }
+ where
+  mapHookList :: HookType -> Maybe [Internal.Hook']
+  mapHookList hookType =
+    case Data.Map.Strict.lookup hookType hookMap of
+      Nothing -> Nothing
+      Just [] -> Nothing
+      Just hooks' -> Just $ mapHook <$> hooks'
+  mapHook :: Hook -> Internal.Hook'
+  mapHook hook =
+    Internal.Hook'
+      { Internal.command = decodePath' hook.command
+      , Internal.args = if null hook.args then Nothing else Just hook.args
+      , Internal.moniker = Nothing -- moniker is already resolved into condition
+      , Internal.condition =
+          if hook.condition == Always
+            then Nothing
+            else Just $ writeEnvironmentPredicate hook.condition
+      , Internal.workingDirectory = decodePath <$> hook.workingDirectory
+      , Internal.ignoreFailure = if hook.ignoreFailure then Just True else Nothing
+      }
+  decodePath' :: OsPath -> Text
+  decodePath' = unsafePerformIO . fmap pack . decodeFS

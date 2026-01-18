@@ -25,3 +25,5 @@ it returns the following exit codes, depending on the situation.
     deleted.
  -  35: The route is ambiguous because multiple routes match the same
     destination.
+ -  36: The operation is canceled by the user.
+ -  40: A hook failed with a non-zero exit code.

@@ -27,7 +27,14 @@ import Data.List.NonEmpty
 
 import Data.Map.Strict (Map, findWithDefault, fromListWith, toList)
 import System.FilePattern (FilePattern, matchMany)
-import System.OsPath (OsPath, OsString, makeRelative, normalise, splitDirectories, (</>))
+import System.OsPath
+  ( OsPath
+  , OsString
+  , makeRelative
+  , normalise
+  , splitDirectories
+  , (</>)
+  )
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
 import Dojang.Types.Environment (Environment)
@@ -107,8 +114,8 @@ routePaths repo env lookupEnvVar = do
         | (src, Just dst', ft, _) <- paths
         ]
   overlappingRoutes <-
-    forM (Data.Map.Strict.toList $ findOverlappingRouteResults paths')
-      $ \((name, dst), overlaps') -> do
+    forM (Data.Map.Strict.toList $ findOverlappingRouteResults paths') $
+      \((name, dst), overlaps') -> do
         let ignorePatterns =
               findWithDefault [] name repo.manifest.ignorePatterns
         filtered <- filterIgnoredPathsFromOverlaps dst ignorePatterns overlaps'

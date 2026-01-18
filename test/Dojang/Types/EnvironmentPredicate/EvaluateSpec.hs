@@ -55,9 +55,9 @@ spec = do
     let environment = Environment Linux X86_64 kernel
     let eval = evaluate environment monikerMap
 
-    specify "Always"
-      $ eval Always
-      `shouldBe` (True, [])
+    specify "Always" $
+      eval Always
+        `shouldBe` (True, [])
 
     specify "OperatingSystem" $ do
       eval (OperatingSystem Linux) `shouldBe` (True, [])
@@ -119,8 +119,8 @@ spec = do
         (And [OperatingSystem MacOS, Architecture AArch64])
         `shouldBe` (False, [])
 
-    specify "Or"
-      $ do
+    specify "Or" $
+      do
         eval (Or [OperatingSystem Linux]) `shouldBe` (True, [])
         eval (Or [Architecture X86_64]) `shouldBe` (True, [])
         eval

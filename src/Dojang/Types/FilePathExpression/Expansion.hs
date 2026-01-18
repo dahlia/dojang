@@ -9,7 +9,14 @@ import Dojang.Types.FilePathExpression
   )
 
 import Data.Text (Text)
-import System.OsPath (OsPath, OsString, pack, pathSeparator, unsafeFromChar, (</>))
+import System.OsPath
+  ( OsPath
+  , OsString
+  , pack
+  , pathSeparator
+  , unsafeFromChar
+  , (</>)
+  )
 
 
 -- | A set of warnings that can occur during expansion.

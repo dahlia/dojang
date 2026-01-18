@@ -13,6 +13,8 @@ module Dojang.Types.Gen
   , environmentPredicate
   , environmentVariable
   , filePathExpression
+  , hook
+  , hookMap
   , invalidMonikerNameText
   , kernel
   , manifest
@@ -46,6 +48,7 @@ import System.OsPath (OsPath, encodeFS, joinPath)
 import System.OsString (OsString)
 import Test.Hspec.Hedgehog (MonadGen)
 
+import Data.Map.Strict qualified as Map
 import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
@@ -64,6 +67,7 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FileRoute qualified as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName
@@ -119,8 +123,8 @@ monikerNameTextHavingInvalidCharacterWithIndex :: (MonadGen m) => m (Text, Int)
 monikerNameTextHavingInvalidCharacterWithIndex = do
   a <- Gen.text (constantFrom 1 1 256) Gen.alpha
   b <-
-    Gen.text (constant 1 1)
-      $ Gen.filterT (\c -> c /= '-' && c /= '_' && not (isAlphaNum c)) Gen.unicodeAll
+    Gen.text (constant 1 1) $
+      Gen.filterT (\c -> c /= '-' && c /= '_' && not (isAlphaNum c)) Gen.unicodeAll
   c <- Gen.text (constantFrom 0 0 256) Gen.alphaNum
   return (a <> b <> c, Data.Text.length a)
 
@@ -180,29 +184,29 @@ environmentPredicate = environmentPredicate' 5
 
 environmentPredicate' :: (MonadGen m) => Int -> m EnvironmentPredicate
 environmentPredicate' maxDepth =
-  Gen.choice
-    $ [ return Always
-      , Moniker <$> monikerName
-      , OperatingSystem <$> operatingSystem
-      , Architecture <$> architecture
-      , KernelName <$> kernelName
-      , KernelRelease <$> kernelRelease
-      , KernelReleasePrefix <$> (ciText (constant 0 50) Gen.unicodeAll)
-      , KernelReleaseSuffix <$> (ciText (constant 0 50) Gen.unicodeAll)
-      ]
-    ++ if maxDepth < 1
-      then []
-      else
-        [ Not <$> environmentPredicate' nextMaxDepth
-        , And
-            <$> Gen.nonEmpty
-              (constant 0 nextMaxDepth)
-              (environmentPredicate' nextMaxDepth)
-        , Or
-            <$> Gen.nonEmpty
-              (constant 0 nextMaxDepth)
-              (environmentPredicate' nextMaxDepth)
-        ]
+  Gen.choice $
+    [ return Always
+    , Moniker <$> monikerName
+    , OperatingSystem <$> operatingSystem
+    , Architecture <$> architecture
+    , KernelName <$> kernelName
+    , KernelRelease <$> kernelRelease
+    , KernelReleasePrefix <$> (ciText (constant 0 50) Gen.unicodeAll)
+    , KernelReleaseSuffix <$> (ciText (constant 0 50) Gen.unicodeAll)
+    ]
+      ++ if maxDepth < 1
+        then []
+        else
+          [ Not <$> environmentPredicate' nextMaxDepth
+          , And
+              <$> Gen.nonEmpty
+                (constant 0 nextMaxDepth)
+                (environmentPredicate' nextMaxDepth)
+          , Or
+              <$> Gen.nonEmpty
+                (constant 0 nextMaxDepth)
+                (environmentPredicate' nextMaxDepth)
+          ]
  where
   nextMaxDepth :: Int
   nextMaxDepth = maxDepth - 1
@@ -217,8 +221,8 @@ specificity =
 
 osChar :: (MonadGen m) => m Char
 osChar =
-  Gen.filterT (not . isControl)
-    $ Gen.frequency [(5, Gen.alphaNum), (3, Gen.latin1), (2, Gen.unicode)]
+  Gen.filterT (not . isControl) $
+    Gen.frequency [(5, Gen.alphaNum), (3, Gen.latin1), (2, Gen.unicode)]
 
 
 environmentVariable :: (MonadGen m) => m EnvironmentVariable
@@ -244,19 +248,19 @@ filePathExpression = filePathExpression' 5
 
 filePathExpression' :: (MonadGen m) => Int -> m FilePathExpression
 filePathExpression' maxDepth =
-  Gen.choice
-    $ [ bareComponent
-      , root
-      , substitution
-      ]
-    ++ if maxDepth > 0
-      then
-        [ concatenation
-        , pathSeparator
-        , substitutionWithDefault
-        , conditionalSubstitution
-        ]
-      else []
+  Gen.choice $
+    [ bareComponent
+    , root
+    , substitution
+    ]
+      ++ if maxDepth > 0
+        then
+          [ concatenation
+          , pathSeparator
+          , substitutionWithDefault
+          , conditionalSubstitution
+          ]
+        else []
  where
   filePathExpr :: (MonadGen m) => m FilePathExpression
   filePathExpr = filePathExpression' (maxDepth - 1)
@@ -284,8 +288,8 @@ filePathExpression' maxDepth =
           c -> not $ containsRoot c
       )
       $ Concatenation
-      <$> filePathExpr
-      <*> filePathExpr
+        <$> filePathExpr
+        <*> filePathExpr
   pathSeparator :: (MonadGen m) => m FilePathExpression
   pathSeparator =
     PathSeparator
@@ -297,8 +301,8 @@ filePathExpression' maxDepth =
   envVar = do
     first <- Gen.filterT (\c -> isAscii c && isAlpha c || c == '_') osChar
     rest <-
-      Gen.text (constantFrom 0 0 256)
-        $ Gen.filterT (\c -> isAscii c && isAlphaNum c || c == '_') osChar
+      Gen.text (constantFrom 0 0 256) $
+        Gen.filterT (\c -> isAscii c && isAlphaNum c || c == '_') osChar
     return $ first `cons` rest
   substitution :: (MonadGen m) => m FilePathExpression
   substitution = Substitution <$> envVar
@@ -336,9 +340,9 @@ monikerMap' sizeRange = do
   keys' <- Gen.list sizeRange monikerName
   let cardinality = Prelude.length keys'
   values <-
-    Gen.list (constant cardinality cardinality)
-      $ normalizePredicate
-      <$> environmentPredicate
+    Gen.list (constant cardinality cardinality) $
+      normalizePredicate
+        <$> environmentPredicate
   return $ fromList $ zip keys' values
 
 
@@ -387,15 +391,15 @@ fileRouteMap range monikers =
   Gen.map range $ do
     key <- osPath (singleton 1)
     value <-
-      fileRoute' (constant 0 5) monikers
-        $ Gen.choice
-        $ map return
-        $ fmap Moniker
-        $ case keys monikers of
-          [] ->
-            let Right undefined' = parseMonikerName $ pack "undefined"
-            in [undefined']
-          names -> names
+      fileRoute' (constant 0 5) monikers $
+        Gen.choice $
+          map return $
+            fmap Moniker $
+              case keys monikers of
+                [] ->
+                  let Right undefined' = parseMonikerName $ pack "undefined"
+                  in [undefined']
+                names -> names
     return (key, value)
 
 
@@ -403,8 +407,36 @@ manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
 manifest' monikerMapRange fileRouteMapRange = do
   monikers <- monikerMap' monikerMapRange
   fileRoutes <- fileRouteMap fileRouteMapRange monikers
-  return $ Manifest monikers fileRoutes Data.Map.Strict.empty
+  hooks <- hookMap (constant 0 3)
+  return $ Manifest monikers fileRoutes Data.Map.Strict.empty hooks
 
 
 manifest :: (MonadGen m) => m Manifest
 manifest = manifest' (constantFrom 0 0 5) (constantFrom 0 0 5)
+
+
+hook :: (MonadGen m) => m Hook
+hook = do
+  cmd <- osPath (constant 1 3)
+  argsCount <- Gen.integral (constant 0 5)
+  args' <- Gen.list (singleton argsCount) $ Gen.text (constant 1 20) Gen.alphaNum
+  cond <- normalizePredicate <$> environmentPredicate' 2
+  workDir <- Gen.maybe $ osPath (constant 1 3)
+  ignoreFail <- Gen.bool
+  return
+    Hook
+      { command = cmd
+      , args = args'
+      , condition = cond
+      , workingDirectory = workDir
+      , ignoreFailure = ignoreFail
+      }
+
+
+hookMap :: (MonadGen m) => Range Int -> m HookMap
+hookMap range = do
+  -- Generate a list of hook types to include (0 to 4 types)
+  hookTypes <-
+    Gen.subsequence [PreApply, PreFirstApply, PostFirstApply, PostApply]
+  pairs <- mapM (\ht -> (,) ht <$> Gen.list range hook) hookTypes
+  return $ Map.fromList [(ht, hs) | (ht, hs) <- pairs, not (null hs)]

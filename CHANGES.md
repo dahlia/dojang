@@ -59,7 +59,24 @@ To be released.
         found in destination directories (prompts for route selection in
         interactive mode; `dojang reflect` only, not yet for `dojang edit`)
 
+ -  Added pre/post apply hooks that run custom scripts before and after
+    the `dojang apply` command.  [[#19]]
+
+     -  `pre-apply`: Runs before every apply
+     -  `pre-first-apply`: Runs only on first apply (when *~/.dojang*
+        doesn't exist)
+     -  `post-first-apply`: Runs only on first apply, after file sync
+     -  `post-apply`: Runs after every apply
+     -  Hooks support conditional execution via `when` field using
+        environment predicates
+     -  Use `ignore-failure = true` to continue even if a hook fails
+     -  In dry-run mode, hooks print "Would run hook: ..." instead of
+        executing
+     -  Environment variables available to hooks: `DOJANG_REPOSITORY`,
+        `DOJANG_MANIFEST`, `DOJANG_DRY_RUN`, `DOJANG_OS`, `DOJANG_ARCH`
+
 [#16]: https://github.com/dahlia/dojang/issues/16
+[#19]: https://github.com/dahlia/dojang/issues/19
 [#18]: https://github.com/dahlia/dojang/issues/18
 [#17]: https://github.com/dahlia/dojang/issues/17
 [#21]: https://github.com/dahlia/dojang/issues/21

@@ -21,13 +21,14 @@ import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (readFile)
 
 import Data.HashMap.Strict as HashMap (fromList)
-import Data.Map.Strict as Map (Map, fromList, toList)
+import Data.Map.Strict as Map (Map, empty, fromList, toList)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient)
 import System.FilePattern (FilePattern)
 import System.OsPath (OsPath, encodeFS)
 import Toml (Result (..), decode)
 
+import qualified Data.HashMap.Strict as HashMap
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (readFile))
 import Dojang.Syntax.EnvironmentPredicate.Parser
   ( ParseErrorBundle
@@ -46,6 +47,7 @@ import Dojang.Syntax.Manifest.Internal
   , Manifest' (..)
   , MonikerMap'
   )
+import qualified Dojang.Syntax.Manifest.Internal as Internal
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -53,6 +55,7 @@ import Dojang.Types.EnvironmentPredicate
 import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
@@ -116,7 +119,11 @@ mapManifest manifest' =
     Right monikers' ->
       case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
         Left e -> Left e
-        Right fileRoutes' -> Right $ Manifest monikers' fileRoutes' ignores'
+        Right fileRoutes' ->
+          case mapHooks monikers' manifest'.hooks of
+            Left e -> Left e
+            Right hooks' ->
+              Right $ Manifest monikers' fileRoutes' ignores' hooks'
  where
   monikersResult :: Either Error MonikerMap
   monikersResult = mapMonikerMap manifest'.monikers
@@ -133,8 +140,8 @@ mapMonikerMap m =
   case errors of
     e : _ -> Left e
     _ ->
-      Right
-        $ HashMap.fromList
+      Right $
+        HashMap.fromList
           [(name, pred') | (name, Right pred') <- results]
  where
   results :: [(MonikerName, Either Error EnvironmentPredicate)]
@@ -152,9 +159,9 @@ mapEnvironmentPredicate'
 mapEnvironmentPredicate' envPred' =
   case when of
     Right pred' ->
-      Right
-        $ normalizePredicate
-        $ And [os, arch, kernel, kernelRelease, all', any', pred']
+      Right $
+        normalizePredicate $
+          And [os, arch, kernel, kernelRelease, all', any', pred']
     Left err -> Left err
  where
   os :: EnvironmentPredicate
@@ -230,8 +237,8 @@ mapFileRoute monikerMap fileRoute' fileType =
   case errors of
     e : _ -> Left $ FilePathExpressionError e
     _ ->
-      Right
-        $ fileRoute
+      Right $
+        fileRoute
           monikerMap
           ( [(name, Just expr') | (name, Just (Right expr')) <- results]
               ++ [(name, Nothing) | (name, Nothing) <- results]
@@ -251,3 +258,70 @@ mapFileRoute monikerMap fileRoute' fileType =
     ]
   errors :: [ParseErrorBundle Text Void]
   errors = lefts [r | (_, Just r) <- results]
+
+
+mapHooks :: MonikerMap -> Maybe Internal.Hooks' -> Either Error HookMap
+mapHooks _ Nothing = Right Map.empty
+mapHooks monikers (Just hooks') =
+  case errors of
+    e : _ -> Left e
+    _ ->
+      Right $
+        Map.fromList
+          [ (hookType, hookList)
+          | (hookType, Right hookList) <- results
+          , not (null hookList)
+          ]
+ where
+  results :: [(HookType, Either Error [Hook])]
+  results =
+    [ (PreApply, mapHookList monikers hooks'.preApply)
+    , (PreFirstApply, mapHookList monikers hooks'.preFirstApply)
+    , (PostFirstApply, mapHookList monikers hooks'.postFirstApply)
+    , (PostApply, mapHookList monikers hooks'.postApply)
+    ]
+  errors :: [Error]
+  errors = lefts [r | (_, r) <- results]
+
+
+mapHookList :: MonikerMap -> Maybe [Internal.Hook'] -> Either Error [Hook]
+mapHookList _ Nothing = Right []
+mapHookList monikers (Just hooks') =
+  case errors of
+    e : _ -> Left e
+    _ -> Right [hook | Right hook <- results]
+ where
+  results :: [Either Error Hook]
+  results = mapHook monikers <$> hooks'
+  errors :: [Error]
+  errors = lefts results
+
+
+mapHook :: MonikerMap -> Internal.Hook' -> Either Error Hook
+mapHook monikers hook' =
+  case conditionResult of
+    Left e -> Left e
+    Right cond ->
+      Right
+        Hook
+          { command = encodePath $ unpack hook'.command
+          , args = maybe [] id hook'.args
+          , condition = cond
+          , workingDirectory = encodePath <$> hook'.workingDirectory
+          , ignoreFailure = maybe False id hook'.ignoreFailure
+          }
+ where
+  conditionResult :: Either Error EnvironmentPredicate
+  conditionResult = case hook'.moniker of
+    Just monikerName ->
+      -- If moniker is specified, it takes precedence
+      case HashMap.lookup monikerName monikers of
+        Just pred' -> Right pred'
+        Nothing -> Right $ Moniker monikerName
+    Nothing ->
+      -- Otherwise, parse the condition (when) field
+      case hook'.condition of
+        Nothing -> Right Always
+        Just condText ->
+          first EnvironmentPredicateError $
+            parseEnvironmentPredicate "" condText

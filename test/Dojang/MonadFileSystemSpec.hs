@@ -210,22 +210,22 @@ spec = do
         result <- listDirectoryRecursively tmpDir ["bar/q*", "baz"]
         sortOn snd result `shouldBe` [(Directory, bar), (File, foo)]
 
-      symIt "distinguishes symlinks from regular files and directories"
-        $ withFixture
-        $ \tmpDir tmpDir' -> do
-          () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
-          () <- createFileLink quux (tmpDir </> baz </> corge)
-          () <- createDirectoryLink baz (tmpDir </> corge)
-          result <- listDirectoryRecursively tmpDir []
-          sortOn snd result
-            `shouldBe` [ (Directory, bar)
-                       , (File, bar </> quux)
-                       , (Directory, baz)
-                       , (Symlink, baz </> corge)
-                       , (Directory, baz </> qux)
-                       , (Symlink, corge)
-                       , (File, foo)
-                       ]
+      symIt "distinguishes symlinks from regular files and directories" $
+        withFixture $
+          \tmpDir tmpDir' -> do
+            () <- Prelude.writeFile (tmpDir' `combine` "bar" `combine` "quux") ""
+            () <- createFileLink quux (tmpDir </> baz </> corge)
+            () <- createDirectoryLink baz (tmpDir </> corge)
+            result <- listDirectoryRecursively tmpDir []
+            sortOn snd result
+              `shouldBe` [ (Directory, bar)
+                         , (File, bar </> quux)
+                         , (Directory, baz)
+                         , (Symlink, baz </> corge)
+                         , (Directory, baz </> qux)
+                         , (Symlink, corge)
+                         , (File, foo)
+                         ]
 
     specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
       Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"
@@ -320,12 +320,12 @@ spec = do
         packageYamlIsFile `shouldBe` False
 
     describe "isSymlink" $ do
-      symIt "checks an actual symlink that exists on the real file system"
-        $ withTempDir
-        $ \tmpDir tmpDir' -> do
-          () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
-          createFileLink foo (tmpDir </> bar)
-          dryRunIO (isSymlink $ tmpDir </> bar) `shouldReturn` True
+      symIt "checks an actual symlink that exists on the real file system" $
+        withTempDir $
+          \tmpDir tmpDir' -> do
+            () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
+            createFileLink foo (tmpDir </> bar)
+            dryRunIO (isSymlink $ tmpDir </> bar) `shouldReturn` True
 
       it "return False if a path does not exist" $ do
         dryRunIO (isSymlink nonExistentP) `shouldReturn` False
@@ -374,12 +374,12 @@ spec = do
         packageYamlIsFile `shouldBe` False
 
     describe "readFile" $ do
-      it "can read an actual file that exists on the real file system"
-        $ withTempDir
-        $ \tmpDir tmpDir' -> do
-          () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
-          packageYamlData <- dryRunIO $ readFile $ tmpDir </> foo
-          packageYamlData `shouldBe` "Foo contents"
+      it "can read an actual file that exists on the real file system" $
+        withTempDir $
+          \tmpDir tmpDir' -> do
+            () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+            packageYamlData <- dryRunIO $ readFile $ tmpDir </> foo
+            packageYamlData `shouldBe` "Foo contents"
 
       it "can't read a directory that exists on the real file system" $ do
         Left failToReadTest <- tryDryRunIO $ readFile testP
@@ -398,17 +398,17 @@ spec = do
           readFile nonExistentP
         nonExistentData `shouldBe` "foo"
 
-      it "can read a virtual file (Copied) that exists in memory"
-        $ withTempDir
-        $ \tmpDir tmpDir' -> do
-          Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
-          nonExistentData <- dryRunIO $ do
-            () <- copyFile (tmpDir </> foo) nonExistentP
-            () <- writeFile packageYamlP "foo" -- must not affect the result
-            () <- copyFile nonExistentP nonExistentP'
-            () <- writeFile nonExistentP "bar" -- must not affect the result
-            readFile nonExistentP'
-          nonExistentData `shouldBe` "Foo contents"
+      it "can read a virtual file (Copied) that exists in memory" $
+        withTempDir $
+          \tmpDir tmpDir' -> do
+            Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+            nonExistentData <- dryRunIO $ do
+              () <- copyFile (tmpDir </> foo) nonExistentP
+              () <- writeFile packageYamlP "foo" -- must not affect the result
+              () <- copyFile nonExistentP nonExistentP'
+              () <- writeFile nonExistentP "bar" -- must not affect the result
+              readFile nonExistentP'
+            nonExistentData `shouldBe` "Foo contents"
 
       it "can't read a virtual directory that exists in memory" $ do
         Left failToReadNonExistent <- tryDryRunIO $ do
@@ -445,22 +445,22 @@ spec = do
           Prelude.readFile (tmpDir' `combine` "foo")
             `shouldReturn` "Foo contents"
 
-      it "can write data to an existing file"
-        $ withTempDir
-        $ \tmpDir tmpDir' -> do
-          () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
-          data' <- dryRunIO $ do
-            () <- writeFile (tmpDir </> foo) "modified"
-            readFile (tmpDir </> foo)
-          data' `shouldBe` "modified"
-          Prelude.readFile (tmpDir' `combine` "foo")
-            `shouldReturn` "Foo contents"
-          data'' <- dryRunIO $ do
-            () <- writeFile nonExistentP "bar"
-            () <- writeFile nonExistentP "baz"
-            readFile nonExistentP
-          data'' `shouldBe` "baz"
-          doesFileExist nonExistentP `shouldReturn` False
+      it "can write data to an existing file" $
+        withTempDir $
+          \tmpDir tmpDir' -> do
+            () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
+            data' <- dryRunIO $ do
+              () <- writeFile (tmpDir </> foo) "modified"
+              readFile (tmpDir </> foo)
+            data' `shouldBe` "modified"
+            Prelude.readFile (tmpDir' `combine` "foo")
+              `shouldReturn` "Foo contents"
+            data'' <- dryRunIO $ do
+              () <- writeFile nonExistentP "bar"
+              () <- writeFile nonExistentP "baz"
+              readFile nonExistentP
+            data'' `shouldBe` "baz"
+            doesFileExist nonExistentP `shouldReturn` False
 
       it "can't write data to a directory" $ do
         Left failToWriteToTest <- tryDryRunIO $ writeFile testP "foo"
@@ -519,12 +519,12 @@ spec = do
         show failToWrite'' `shouldContain` "not inside a directory"
 
     describe "readSymlinkTarget" $ do
-      symIt "returns the target path of a symbolic link"
-        $ withTempDir
-        $ \tmpDir tmpDir' -> do
-          () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
-          createFileLink foo (tmpDir </> bar)
-          dryRunIO (readSymlinkTarget $ tmpDir </> bar) `shouldReturn` foo
+      symIt "returns the target path of a symbolic link" $
+        withTempDir $
+          \tmpDir tmpDir' -> do
+            () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
+            createFileLink foo (tmpDir </> bar)
+            dryRunIO (readSymlinkTarget $ tmpDir </> bar) `shouldReturn` foo
 
       it "fails with non-existent file" $ do
         dryRunIO (readSymlinkTarget nonExistentP) `shouldThrow` \e ->

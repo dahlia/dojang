@@ -25,7 +25,8 @@ win = os == "mingw32"
 spec :: Spec
 spec = do
   dotDojang <- runIO $ encodeFS ".dojang"
-  repoPath <- runIO $ encodeFS $ if win then "C:\\dotfiles" else "/home/test/dotfiles"
+  repoPath <-
+    runIO $ encodeFS $ if win then "C:\\dotfiles" else "/home/test/dotfiles"
 
   describe "registryFilename" $ do
     it "is .dojang" $ do

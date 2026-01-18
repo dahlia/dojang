@@ -87,8 +87,8 @@ diff mode diffProgram files = do
         fs <- forM files $ \file -> do
           file' <- liftIO $ makeAbsolute file
           let found =
-                find (\((src, dst), _) -> file' == src || file' == dst)
-                  $ zip routedFiles corresponds
+                find (\((src, dst), _) -> file' == src || file' == dst) $
+                  zip routedFiles corresponds
           return $ maybeToList $ fmap snd found
         return $ concat fs
   case mode of
@@ -134,11 +134,11 @@ twoWay program' srcSelector dstSelector files = do
         exitCode <- liftIO $ waitForProcess handle
         when (exitCode /= ExitSuccess && exitCode /= ExitFailure 1) $ do
           cmdStyle <- pathStyleFor' stderr
-          die' externalProgramNonZeroExit
-            $ cmdStyle (pack prog)
-            <> " terminated with exit code "
-            <> showt exitCode
-            <> "."
+          die' externalProgramNonZeroExit $
+            cmdStyle (pack prog)
+              <> " terminated with exit code "
+              <> showt exitCode
+              <> "."
 
 
 hasChange :: FileCorrespondence -> Bool
@@ -153,21 +153,25 @@ builtinDiff a b = do
   color <- colorFor stdout
   color' <- colorFor stdout
   pathStyle <- pathStyleFor stdout
-  liftIO $ putStrLn $ color Default Red "--- " <> pathStyle a.path <> case a.stat of
-    Missing -> " (missing)"
-    Directory -> " (directory)"
-    _ -> ""
-  liftIO $ putStrLn $ color Default Green "+++ " <> pathStyle b.path <> case b.stat of
-    Missing -> " (missing)"
-    Directory -> " (directory)"
-    _ -> ""
+  liftIO $
+    putStrLn $
+      color Default Red "--- " <> pathStyle a.path <> case a.stat of
+        Missing -> " (missing)"
+        Directory -> " (directory)"
+        _ -> ""
+  liftIO $
+    putStrLn $
+      color Default Green "+++ " <> pathStyle b.path <> case b.stat of
+        Missing -> " (missing)"
+        Directory -> " (directory)"
+        _ -> ""
   textA <- readFileEntry a
   textB <- readFileEntry b
   let linesA = lines textA
   let linesB = lines textB
   let diffOps =
-        diffToLineRanges
-          $ getGroupedDiff (unpack <$> linesA) (unpack <$> linesB)
+        diffToLineRanges $
+          getGroupedDiff (unpack <$> linesA) (unpack <$> linesB)
   forM_ diffOps $ \op -> liftIO $ do
     case op of
       Deletion aRange bOffset -> do
@@ -245,17 +249,17 @@ builtinDiff a b = do
   printRange :: (Int, Int) -> (Int, Int) -> IO ()
   printRange (delOffset, delLines) (addOffset, addLines) = do
     color <- colorFor stdout
-    putStrLn
-      $ color Default Cyan
-      $ "@@ -"
-      <> showt delOffset
-      <> ","
-      <> showt delLines
-      <> " +"
-      <> showt addOffset
-      <> ","
-      <> showt addLines
-      <> " @@"
+    putStrLn $
+      color Default Cyan $
+        "@@ -"
+          <> showt delOffset
+          <> ","
+          <> showt delLines
+          <> " +"
+          <> showt addOffset
+          <> ","
+          <> showt addLines
+          <> " @@"
   readFileEntry :: FileEntry -> App i Text
   readFileEntry entry = case entry.stat of
     Missing -> return ""

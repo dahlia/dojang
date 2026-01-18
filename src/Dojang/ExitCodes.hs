@@ -75,3 +75,7 @@ ambiguousRouteError = ExitFailure 35
 
 userCancelledError :: ExitCode
 userCancelledError = ExitFailure 36
+
+
+hookFailedError :: ExitCode
+hookFailedError = ExitFailure 40

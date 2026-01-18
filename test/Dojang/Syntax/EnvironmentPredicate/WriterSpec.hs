@@ -49,8 +49,8 @@ spec = do
       write (OperatingSystem "te st") `shouldBe` "os = \"te st\""
       write (OperatingSystem "") `shouldBe` "os = \"\""
 
-    specify "string literal is around by single quotes if it has double quote"
-      $ do
+    specify "string literal is around by single quotes if it has double quote" $
+      do
         write (OperatingSystem "\"test\"") `shouldBe` "os = '\"test\"'"
         write (OperatingSystem "\"test'") `shouldBe` "os = \"\\\"test'\""
 

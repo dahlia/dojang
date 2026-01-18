@@ -58,25 +58,26 @@ spec = do
                 [ (foo, dirRoute $ if win then "C:\\dst\\foo" else "/dst/foo")
                 ,
                   ( bar
-                  , dirRoute
-                      $ if win then "C:\\dst\\foo\\bar" else "/dst/foo/bar"
+                  , dirRoute $
+                      if win then "C:\\dst\\foo\\bar" else "/dst/foo/bar"
                   )
                 ,
                   ( baz
-                  , dirRoute
-                      $ if win
+                  , dirRoute $
+                      if win
                         then "C:\\dst\\foo\\bar\\baz"
                         else "/dst/foo/bar/baz"
                   )
                 ,
                   ( qux
-                  , dirRoute
-                      $ if win then "C:\\dst\\foo\\qux" else "/dst/foo/qux"
+                  , dirRoute $
+                      if win then "C:\\dst\\foo\\qux" else "/dst/foo/qux"
                   )
                 ]
             , ignorePatterns =
                 [ (foo, ["bar"])
                 ]
+            , hooks = mempty
             }
     let repo =
           Repository
@@ -88,35 +89,35 @@ spec = do
     routePaths repo env (const $ return Nothing)
       `shouldReturn` (
                        [ RouteResult
-                          (root </> src </> bar)
-                          bar
-                          (root </> dst </> foo </> bar)
-                          Directory
+                           (root </> src </> bar)
+                           bar
+                           (root </> dst </> foo </> bar)
+                           Directory
                        , RouteResult
-                          (root </> src </> baz)
-                          baz
-                          (root </> dst </> foo </> bar </> baz)
-                          Directory
+                           (root </> src </> baz)
+                           baz
+                           (root </> dst </> foo </> bar </> baz)
+                           Directory
                        , RouteResult
-                          (root </> src </> foo)
-                          foo
-                          (root </> dst </> foo)
-                          Directory
+                           (root </> src </> foo)
+                           foo
+                           (root </> dst </> foo)
+                           Directory
                        , RouteResult
-                          (root </> src </> qux)
-                          qux
-                          (root </> dst </> foo </> qux)
-                          Directory
+                           (root </> src </> qux)
+                           qux
+                           (root </> dst </> foo </> qux)
+                           Directory
                        ]
                      ,
                        [ OverlapDestinationPathsWarning
-                          bar
-                          (root </> dst </> foo </> bar)
-                          [(baz, root </> dst </> foo </> bar </> baz)]
+                           bar
+                           (root </> dst </> foo </> bar)
+                           [(baz, root </> dst </> foo </> bar </> baz)]
                        , OverlapDestinationPathsWarning
-                          foo
-                          (root </> dst </> foo)
-                          [(qux, root </> dst </> foo </> qux)]
+                           foo
+                           (root </> dst </> foo)
+                           [(qux, root </> dst </> foo </> qux)]
                        ]
                      )
 

@@ -151,20 +151,20 @@ normalizePredicate' (And ps) =
     else
       let filtered = filter (/= Always) ps'
       in if (`any` filtered) $ \case Not p' -> p' `elem` filtered; _ -> False
-          then Not Always
-          else
-            let reduced =
-                  maybe Always And
-                    $ nonEmpty
-                      [ p'
-                      | p <- filtered
-                      , p' <- case p of
-                          And ps'' -> normalizePredicate' <$> toList ps''
-                          p'' -> [p'']
-                      ]
-            in case reduced of
-                And [p'] -> p'
-                _ -> reduced
+           then Not Always
+           else
+             let reduced =
+                   maybe Always And $
+                     nonEmpty
+                       [ p'
+                       | p <- filtered
+                       , p' <- case p of
+                           And ps'' -> normalizePredicate' <$> toList ps''
+                           p'' -> [p'']
+                       ]
+             in case reduced of
+                  And [p'] -> p'
+                  _ -> reduced
  where
   ps' :: NonEmpty EnvironmentPredicate
   ps' = normalizePredicate' <$> ps
@@ -175,20 +175,20 @@ normalizePredicate' (Or ps) =
     else
       let filtered = filter (/= Not Always) ps'
       in if (`any` filtered) $ \case Not p' -> p' `elem` filtered; _ -> False
-          then Always
-          else
-            let reduced =
-                  maybe (Not Always) Or
-                    $ nonEmpty
-                      [ p'
-                      | p <- filtered
-                      , p' <- case p of
-                          Or ps'' -> normalizePredicate' <$> toList ps''
-                          p'' -> [p'']
-                      ]
-            in case reduced of
-                Or [p'] -> p'
-                _ -> reduced
+           then Always
+           else
+             let reduced =
+                   maybe (Not Always) Or $
+                     nonEmpty
+                       [ p'
+                       | p <- filtered
+                       , p' <- case p of
+                           Or ps'' -> normalizePredicate' <$> toList ps''
+                           p'' -> [p'']
+                       ]
+             in case reduced of
+                  Or [p'] -> p'
+                  _ -> reduced
  where
   ps' :: NonEmpty EnvironmentPredicate
   ps' = normalizePredicate' <$> ps

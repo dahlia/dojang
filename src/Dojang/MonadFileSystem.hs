@@ -321,9 +321,9 @@ instance MonadFileSystem IO where
     isDir <- isDirectory path
     when isDir $ do
       path' <- decodePath path
-      throwError
-        $ mkIOError InappropriateType "getFileSize" Nothing (Just path')
-        `ioeSetErrorString` "it is a directory"
+      throwError $
+        mkIOError InappropriateType "getFileSize" Nothing (Just path')
+          `ioeSetErrorString` "it is a directory"
     System.Directory.OsPath.getFileSize path
 
 
@@ -398,18 +398,18 @@ readFileFromDryRunIO seqOffset src = do
     Just changes ->
       let filteredChanges = filter (\(no, _) -> no <= seqOffset) changes
       in case filteredChanges of
-          [] -> fallback
-          (_, Contents contents) : _ -> return contents
-          (seqNo, Copied src') : _ ->
-            readFileFromDryRunIO seqNo src'
-          (_, Gone) : _ -> do
-            src' <- decodePath src
-            throwError
-              $ mkIOError doesNotExistErrorType "readFile" Nothing (Just src')
-              `ioeSetErrorString` "no such file"
-          (_, Directory') : _ -> do
-            src' <- decodePath src
-            throwError $ nonDirError src'
+           [] -> fallback
+           (_, Contents contents) : _ -> return contents
+           (seqNo, Copied src') : _ ->
+             readFileFromDryRunIO seqNo src'
+           (_, Gone) : _ -> do
+             src' <- decodePath src
+             throwError $
+               mkIOError doesNotExistErrorType "readFile" Nothing (Just src')
+                 `ioeSetErrorString` "no such file"
+           (_, Directory') : _ -> do
+             src' <- decodePath src
+             throwError $ nonDirError src'
  where
   fallback :: DryRunIO ByteString
   fallback = liftIO $ do
@@ -508,22 +508,22 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> do
         path' <- decodePath path
-        throwError
-          $ mkIOError
+        throwError $
+          mkIOError
             doesNotExistErrorType
             "readSymlinkTarget"
             Nothing
             (Just path')
-          `ioeSetErrorString` "no such file"
+            `ioeSetErrorString` "no such file"
       Just _ -> do
         path' <- decodePath path
-        throwError
-          $ mkIOError InappropriateType "readSymlinkTarget" Nothing (Just path')
-          `ioeSetErrorString` "not a symbolic link"
+        throwError $
+          mkIOError InappropriateType "readSymlinkTarget" Nothing (Just path')
+            `ioeSetErrorString` "not a symbolic link"
       Nothing ->
-        liftIO
-          $ getSymbolicLinkTarget path
-          `mapError` (`ioePrependLocation` "readSymlinkTarget")
+        liftIO $
+          getSymbolicLinkTarget path
+            `mapError` (`ioePrependLocation` "readSymlinkTarget")
 
 
   copyFile src dst = do
@@ -581,10 +581,11 @@ instance MonadFileSystem DryRunIO where
     isFile' <- liftIO $ doesFileExist dst
     isDir <- liftIO $ doesDirectoryExist dst
     isSymlink' <-
-      liftIO $ pathIsSymbolicLink dst `catchError` \e ->
-        if isDoesNotExistError e
-          then return False
-          else throwError $ e `ioePrependLocation` "createDirectory"
+      liftIO $
+        pathIsSymbolicLink dst `catchError` \e ->
+          if isDoesNotExistError e
+            then return False
+            else throwError $ e `ioePrependLocation` "createDirectory"
     parentExists <- liftIO $ doesPathExist parent
     parentIsDir <- liftIO $ doesDirectoryExist parent
     case (oFiles !? parent, oFiles !? normalise dst) of
@@ -627,12 +628,12 @@ instance MonadFileSystem DryRunIO where
     path' <- decodePath path
     exists' <- liftIO $ doesPathExist path
     isSymlink' <-
-      liftIO
-        $ pathIsSymbolicLink path
-        `catchError` \e ->
-          if isDoesNotExistError e
-            then return False
-            else throwError $ e `ioePrependLocation` "removeFile"
+      liftIO $
+        pathIsSymbolicLink path
+          `catchError` \e ->
+            if isDoesNotExistError e
+              then return False
+              else throwError $ e `ioePrependLocation` "removeFile"
     isDir <- liftIO $ doesDirectoryExist path
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> throwError $ noFileError path'
@@ -707,18 +708,18 @@ instance MonadFileSystem DryRunIO where
         return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
         isSymlink' <-
-          liftIO
-            $ pathIsSymbolicLink path
-            `catchError` \e ->
-              if isDoesNotExistError e
-                then return False
-                else throwError $ e `ioePrependLocation` "listDirectory"
+          liftIO $
+            pathIsSymbolicLink path
+              `catchError` \e ->
+                if isDoesNotExistError e
+                  then return False
+                  else throwError $ e `ioePrependLocation` "listDirectory"
         isFile' <- liftIO $ doesFileExist path
         when (isSymlink' || isFile') $ throwError (nonDirError pathFP)
         files <-
-          liftIO
-            $ System.Directory.OsPath.listDirectory path
-            `mapError` (`ioePrependLocation` "listDirectory")
+          liftIO $
+            System.Directory.OsPath.listDirectory path
+              `mapError` (`ioePrependLocation` "listDirectory")
         let directOChildren' = directOChildren oFiles
         let result =
               [f | f <- files, directOChildren' !? (path' </> f) /= Just Gone]
@@ -775,9 +776,9 @@ instance MonadFileSystem DryRunIO where
         throwError $ nonFileError path'
       Just _ -> do
         contents <- readFile path
-        return
-          $ fromIntegral
-          $ Data.ByteString.length contents
+        return $
+          fromIntegral $
+            Data.ByteString.length contents
       Nothing -> do
         isDir <- isDirectory path
         if isDir

@@ -107,17 +107,17 @@ bareComponent disallowedChars = do
   isInvalidChar c =
     isControl c
       || c
-      == '/'
+        == '/'
       || c
-      == '\\'
+        == '\\'
       || c
-      == '$'
+        == '$'
       || c
-      == '\r'
+        == '\r'
       || c
-      == '\n'
+        == '\n'
       || c
-      `elem` disallowedChars
+        `elem` disallowedChars
 {-# INLINE bareComponent #-}
 
 

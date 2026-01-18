@@ -64,8 +64,8 @@ colorFor handle = do
 codeStyleFor :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
 codeStyleFor handle = do
   colorAvailable <- isColorAvailable handle
-  return
-    $ if colorAvailable
+  return $
+    if colorAvailable
       then style Bold
       else id
 
@@ -82,8 +82,8 @@ pathStyleFor handle = do
 pathStyleFor' :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
 pathStyleFor' handle = do
   colorAvailable <- isColorAvailable handle
-  return
-    $ if colorAvailable
+  return $
+    if colorAvailable
       then style Italic
       else id
 
@@ -137,8 +137,8 @@ printTable headers rows = do
   putLnStderr
   forM_ rows $ \row -> do
     forM_ (zip3 row columnWidths [1 ..]) $ \((color', value), width, i) -> do
-      putCol stdout color' value
-        $ if i < Prelude.length row then width else Data.Text.length value
+      putCol stdout color' value $
+        if i < Prelude.length row then width else Data.Text.length value
       liftIO $ putStr " "
     putLn
  where

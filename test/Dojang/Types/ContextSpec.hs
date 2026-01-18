@@ -117,6 +117,7 @@ spec = do
           fileRoutes
           dirRoutes
           [(foo, ["ignore-*"])]
+          mempty
 
   let repositoryFixture repoPath = do
         -- The tree of the repository fixture looks like this:
@@ -944,6 +945,7 @@ spec = do
               []
               overlappingFileRoutes
               []
+              mempty
       let repo =
             Repository
               (tmpDir </> src)
@@ -982,6 +984,7 @@ spec = do
               []
               ambiguousFileRoutes
               []
+              mempty
       let repo =
             Repository
               (tmpDir </> src)

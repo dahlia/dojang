@@ -21,6 +21,7 @@ Dojang, 크로스플랫폼 닷파일 관리자
 그 밖에 세부 주제별 참조 문서들도 있습니다.
 
  -  [선언](manifest.ko.md) (*dojang.toml*)
+ -  [훅](hooks.ko.md)
  -  [라우팅](routing.ko.md)
  -  [환경](environment.ko.md)
  -  [환경 서술어](environment-predicate.ko.md)

@@ -14,7 +14,8 @@ import System.Exit (ExitCode (..), exitWith)
 import System.IO (hIsTerminalDevice, stderr, stdin)
 import Prelude hiding (readFile)
 
-import Control.Monad.Logger (logDebugSH)
+import Control.Monad.Logger (logDebug, logDebugSH)
+import Data.CaseInsensitive (original)
 import Data.Map.Strict (fromList, notMember, toList)
 import FortyTwo.Prompts.Confirm (confirm)
 import System.Directory.OsPath (getHomeDirectory, makeAbsolute)
@@ -25,7 +26,12 @@ import System.OsPath
   , (</>)
   )
 
-import Dojang.App (App, AppEnv (debug, manifestFile), ensureContext, lookupEnv')
+import Dojang.App
+  ( App
+  , AppEnv (debug, dryRun, manifestFile, sourceDirectory)
+  , ensureContext
+  , lookupEnv'
+  )
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -34,6 +40,7 @@ import Dojang.Commands
   , printStderr
   , printStderr'
   )
+import Dojang.Commands.Hook (HookEnv (HookEnv), executeHooks)
 import Dojang.Commands.Status (defaultStatusOptions, printWarnings, status)
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
@@ -51,6 +58,8 @@ import Dojang.Types.Context
   , getRouteState
   , makeCorrespond
   )
+import Dojang.Types.Environment (Environment (..))
+import Dojang.Types.Hook (HookType (..))
 import Dojang.Types.Registry
   ( Registry (..)
   , readRegistry
@@ -63,6 +72,35 @@ import Dojang.Types.Repository (Repository (..))
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
 apply force filePaths = do
   ctx <- ensureContext
+
+  -- Determine if this is the first apply (registry doesn't exist)
+  homeDir <- liftIO getHomeDirectory
+  let registryPath = homeDir </> registryFilename
+  existingRegistry <- readRegistry registryPath
+  let isFirstApply = case existingRegistry of
+        Nothing -> True
+        Just _ -> False
+
+  -- Build hook environment
+  sourceDir <- asks (.sourceDirectory)
+  manifestFile' <- asks (.manifestFile)
+  dryRun' <- asks (.dryRun)
+  let environment = ctx.environment
+  let hookEnv =
+        HookEnv
+          sourceDir
+          manifestFile'
+          dryRun'
+          (original environment.operatingSystem.identifier)
+          (original environment.architecture.identifier)
+
+  -- Run pre-apply hooks
+  $(logDebug) "Running pre-apply hooks..."
+  executeHooks hookEnv ctx PreApply
+  when isFirstApply $ do
+    $(logDebug) "Running pre-first-apply hooks..."
+    executeHooks hookEnv ctx PreFirstApply
+
   (allFiles, ws) <- makeCorrespond ctx
   fileMap <- fmap fromList $ forM allFiles $ \fc -> do
     srcAbsPath <- liftIO $ makeAbsolute fc.source.path
@@ -71,10 +109,10 @@ apply force filePaths = do
   filePaths' <- forM filePaths $ \fp -> do
     fp' <- liftIO $ makeAbsolute fp
     when (fp' `notMember` fileMap) $ do
-      die' fileNotRoutedError
-        $ "File "
-        <> pathStyle fp
-        <> " is not tracked by this repository."
+      die' fileNotRoutedError $
+        "File "
+          <> pathStyle fp
+          <> " is not tracked by this repository."
     return fp'
   let files =
         if null filePaths'
@@ -90,16 +128,16 @@ apply force filePaths = do
   codeStyle <- codeStyleFor stderr
   unless (null conflicts) $ do
     forM_ conflicts $ \c -> do
-      printStderr' (if force then Warning else Error)
-        $ "There is a conflict between "
-        <> pathStyle c.source.path
-        <> " and "
-        <> pathStyle c.destination.path
-        <> "."
-    printStderr' Hint
-      $ "Use `"
-      <> codeStyle "dojang diff"
-      <> "' to see the actual changes on both sides."
+      printStderr' (if force then Warning else Error) $
+        "There is a conflict between "
+          <> pathStyle c.source.path
+          <> " and "
+          <> pathStyle c.destination.path
+          <> "."
+    printStderr' Hint $
+      "Use `"
+        <> codeStyle "dojang diff"
+        <> "' to see the actual changes on both sides."
   -- Check if there are any accidental deletions:
   let ops =
         syncSourceToIntermediate
@@ -107,7 +145,7 @@ apply force filePaths = do
           | fc <- files
           ]
           & nub
-          . sort
+            . sort
   shimOps <- liftIO $ dryRunIO $ do
     forM_ ops doSyncOp
     let ctx' = Context ctx.repository ctx.environment lookupEnv'
@@ -123,15 +161,15 @@ apply force filePaths = do
         let path' = addTrailingPathSeparator path
         if force
           then
-            printStderr' Warning
-              $ "Would delete "
-              <> pathStyle path'
-              <> " (and its children)."
+            printStderr' Warning $
+              "Would delete "
+                <> pathStyle path'
+                <> " (and its children)."
           else
-            printStderr' Error
-              $ "Cancelled applying because "
-              <> pathStyle path'
-              <> " (and its children) would be deleted."
+            printStderr' Error $
+              "Cancelled applying because "
+                <> pathStyle path'
+                <> " (and its children) would be deleted."
       RemoveFile path -> do
         if force
           then printStderr' Warning ("Would delete " <> pathStyle path <> ".")
@@ -139,27 +177,26 @@ apply force filePaths = do
             printStderr'
               Error
               $ "Cancelled applying because "
-              <> pathStyle path
-              <> " would be deleted."
+                <> pathStyle path
+                <> " would be deleted."
       _ -> return ()
-    manifestFile' <- asks (.manifestFile)
-    printStderr' Hint
-      $ "If these deletions are accidental, ignore them in your manifest ("
-      <> pathStyle manifestFile'
-      <> ")."
+    printStderr' Hint $
+      "If these deletions are accidental, ignore them in your manifest ("
+        <> pathStyle manifestFile'
+        <> ")."
   -- Exit if there are any problems (unless forced):
   when (not force && (not (null conflicts) || any isDeletion shimOps)) $ do
-    printStderr' Hint
-      $ "Use "
-      <> codeStyle "-f"
-      <> "/"
-      <> codeStyle "--force"
-      <> " to ignore these warnings and go ahead."
-    liftIO
-      $ exitWith
-      $ if not (null conflicts)
-        then conflictError
-        else accidentalDeletionWarning
+    printStderr' Hint $
+      "Use "
+        <> codeStyle "-f"
+        <> "/"
+        <> codeStyle "--force"
+        <> " to ignore these warnings and go ahead."
+    liftIO $
+      exitWith $
+        if not (null conflicts)
+          then conflictError
+          else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ status defaultStatusOptions)
@@ -175,11 +212,16 @@ apply force filePaths = do
       ]
   forM_ (nub $ sort ops') $ \path -> printSyncOp path >> doSyncOp path
   printWarnings ws
+
+  -- Run post-apply hooks
+  when isFirstApply $ do
+    $(logDebug) "Running post-first-apply hooks..."
+    executeHooks hookEnv ctx PostFirstApply
+  $(logDebug) "Running post-apply hooks..."
+  executeHooks hookEnv ctx PostApply
+
   -- Update registry with current repository path:
-  homeDir <- liftIO getHomeDirectory
-  let registryPath = homeDir </> registryFilename
   currentRepo <- liftIO $ makeAbsolute ctx.repository.sourcePath
-  existingRegistry <- readRegistry registryPath
   case existingRegistry of
     Nothing -> do
       -- No existing registry, create one
@@ -294,20 +336,20 @@ syncSourceToIntermediate
 syncSourceToIntermediate files =
   concat
     [ case delta of
-      Unchanged -> []
-      Removed ->
-        if to.stat == Directory
-          then [RemoveDirs to.path]
-          else [RemoveFile to.path]
-      Modified ->
-        case (from.stat, to.stat) of
-          (Directory, _) -> [RemoveFile to.path, CreateDir to.path]
-          (_, Directory) -> [RemoveDirs to.path, CopyFile from.path to.path]
-          _ -> [CopyFile from.path to.path]
-      Added ->
-        if from.stat == Directory
-          then [CreateDirs to.path]
-          else [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
+        Unchanged -> []
+        Removed ->
+          if to.stat == Directory
+            then [RemoveDirs to.path]
+            else [RemoveFile to.path]
+        Modified ->
+          case (from.stat, to.stat) of
+            (Directory, _) -> [RemoveFile to.path, CreateDir to.path]
+            (_, Directory) -> [RemoveDirs to.path, CopyFile from.path to.path]
+            _ -> [CopyFile from.path to.path]
+        Added ->
+          if from.stat == Directory
+            then [CreateDirs to.path]
+            else [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
     | (from, to, delta) <- files
     ]
 
@@ -320,23 +362,23 @@ syncIntermediateToDestination
 syncIntermediateToDestination ctx files =
   (fmap concat . sequence)
     [ case delta of
-      Unchanged -> return []
-      Removed ->
-        if from.stat == Directory
-          then return [CreateDirs to.path]
-          else return [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
-      Modified ->
-        case (from.stat, to.stat) of
-          (Directory, _) -> return [RemoveFile to.path, CreateDir to.path]
-          (_, Directory) -> return [RemoveDirs to.path, CopyFile from.path to.path]
-          _ -> return [CopyFile from.path to.path]
-      Added -> do
-        (state, _) <- getRouteState ctx to.path
-        case state of
-          Ignored _ _ -> return []
-          _ ->
-            if to.stat == Directory
-              then return [RemoveDirs to.path]
-              else return [RemoveFile to.path]
+        Unchanged -> return []
+        Removed ->
+          if from.stat == Directory
+            then return [CreateDirs to.path]
+            else return [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
+        Modified ->
+          case (from.stat, to.stat) of
+            (Directory, _) -> return [RemoveFile to.path, CreateDir to.path]
+            (_, Directory) -> return [RemoveDirs to.path, CopyFile from.path to.path]
+            _ -> return [CopyFile from.path to.path]
+        Added -> do
+          (state, _) <- getRouteState ctx to.path
+          case state of
+            Ignored _ _ -> return []
+            _ ->
+              if to.stat == Directory
+                then return [RemoveDirs to.path]
+                else return [RemoveFile to.path]
     | (from, to, delta) <- files
     ]

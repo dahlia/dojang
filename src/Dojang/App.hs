@@ -158,9 +158,9 @@ currentEnvironment' = do
     readEnvFile filePath `catchError` \e -> do
       if isDoesNotExistError e
         then do
-          $(logWarn)
-            $ "Environment file not found: "
-            <> showt (FromStringShow e)
+          $(logWarn) $
+            "Environment file not found: "
+              <> showt (FromStringShow e)
           env <- liftIO currentEnvironment
           return $ Right (env, [])
         else die' noEnvFile $ showt e
@@ -232,9 +232,9 @@ loadManifest = do
       $(logError) $ "Error reading manifest file: " <> showt (FromStringShow e)
       throwError e
     Right (Left err) -> do
-      $(logError)
-        $ "Error parsing manifest file: "
-        <> Data.Text.unlines (formatErrors err)
+      $(logError) $
+        "Error parsing manifest file: "
+          <> Data.Text.unlines (formatErrors err)
       return $ Left err
     Right (Right (manifest, warnings)) -> do
       forM_ warnings $ \w -> $(logWarn) w
@@ -246,11 +246,11 @@ doesManifestExist :: (MonadFileSystem i, MonadIO i) => App i Bool
 doesManifestExist = do
   filePath <- manifestPath
   exists' <- exists filePath
-  $(logInfo)
-    $ "Manifest file "
-    <> showt (FromStringShow filePath)
-    <> " "
-    <> if exists' then "exists" else "does not exist"
+  $(logInfo) $
+    "Manifest file "
+      <> showt (FromStringShow filePath)
+      <> " "
+      <> if exists' then "exists" else "does not exist"
   return exists'
 
 
@@ -261,10 +261,10 @@ saveManifest manifest = do
   writeManifestFile manifest filename `catchError` \e -> do
     $(logError) $ "Error writing manifest file: " <> showt (FromStringShow e)
     throwError e
-  $(logInfo)
-    $ "Manifest file "
-    <> showt (FromStringShow filename)
-    <> " written"
+  $(logInfo) $
+    "Manifest file "
+      <> showt (FromStringShow filename)
+      <> " written"
   return filename
 
 
@@ -278,10 +278,10 @@ loadRepository = do
     Left err -> return $ Left err
     Right Nothing -> return $ Right Nothing
     Right (Just manifest) -> do
-      return
-        $ Right
-        $ Just
-        $ Repository sourceDir (sourceDir </> intermediateDir) manifest
+      return $
+        Right $
+          Just $
+            Repository sourceDir (sourceDir </> intermediateDir) manifest
 
 
 ensureRepository :: (MonadFileSystem i, MonadIO i) => App i Repository
