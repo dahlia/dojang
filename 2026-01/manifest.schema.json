@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schema.dojang.dev/2026-01/manifest.schema.json",
+  "title": "Dojang manifest",
+  "description": "Dojang manifest (so-called dojang.toml) is a TOML file that describes a Dojang repository.",
+  "$defs": {
+    "routeMap": {
+      "title": "Route definitions",
+      "description": "A map of route names to their corresponding route definitions.",
+      "type": "object",
+      "additionalProperties": {
+        "title": "Route definition",
+        "description": "A route definition which describes how to copy files/directories from the source to the destination for certain environments.",
+        "type": "object",
+        "propertyNames": {
+          "$ref": "#/$defs/monikerName"
+        },
+        "additionalProperties": {
+          "title": "File path expression",
+          "description": "A file path expression which represents a destination path.  It can contain expandable variables.",
+          "type": "string"
+        }
+      }
+    },
+    "environmentPredicate": {
+      "title": "Environment predicate",
+      "description": "An environment predicate which describes criteria for environments.",
+      "type": "object",
+      "properties": {
+        "os": {
+          "title": "OS criteria",
+          "description": "OS criteria that are satisfied if one of the OS identifiers matches.",
+          "$ref": "#/$defs/osList"
+        },
+        "arch": {
+          "title": "Process architecture criteria",
+          "description": "Process architecture criteria that are satisfied if one of the architecture identifiers matches.",
+          "$ref": "#/$defs/archList"
+        },
+        "kernel": {
+          "title": "Kernel name criteria",
+          "description": "Kernel name criteria that are satisfied if one of the kernel name identifiers matches.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "kernel-release": {
+          "title": "Kernel version criteria",
+          "description": "Kernel version criteria that are satisfied if one of the kernel version identifiers matches.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "any": {
+          "title": "Monikers criteria (OR condition)",
+          "description": "Monikers criteria that are satisfied if any of the moniker is satisfied.",
+          "$ref": "#/$defs/monikerNameList"
+        },
+        "all": {
+          "title": "Monikers criteria (AND condition)",
+          "description": "Monikers criteria that are satisfied if all of the monikers are satisfied.",
+          "$ref": "#/$defs/monikerNameList"
+        },
+        "when": {
+          "title": "Advanced environment predicate syntax",
+          "description": "Advanced environment predicate syntax that allows to specify a more complex condition.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "osList": {
+      "title": "OS identifier(s)",
+      "description": "An OS identifier or an array of OS identifiers.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/os"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/os"
+          }
+        }
+      ]
+    },
+    "os": {
+      "title": "OS identifier",
+      "description": "An OS identifier which is recognized by Dojang.",
+      "type": "string",
+      "enum": [
+        "android",
+        "freebsd",
+        "linux",
+        "macos",
+        "netbsd",
+        "openbsd",
+        "windows"
+      ]
+    },
+    "archList": {
+      "title": "Process architecture identifier(s)",
+      "description": "A process architecture identifier or an array of process architecture identifiers.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/arch"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/arch"
+          }
+        }
+      ]
+    },
+    "arch": {
+      "title": "Process architecture identifier",
+      "description": "A process architecture identifier which is recognized by Dojang.",
+      "type": "string",
+      "enum": [
+        "aarch64",
+        "x86",
+        "x86_64"
+      ]
+    },
+    "monikerNameList": {
+      "title": "Moniker names",
+      "description": "An array of moniker names.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/monikerName"
+      }
+    },
+    "monikerName": {
+      "title": "Moniker name",
+      "description": "A moniker name which defined in the same manifest.",
+      "type": "string",
+      "pattern": "^\\p{L}[\\p{L}\\d_-]*$"
+    },
+    "hook": {
+      "title": "Hook definition",
+      "description": "A hook that runs a custom script before or after the apply command.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "title": "Command path",
+          "description": "The path to the executable to run.",
+          "type": "string"
+        },
+        "args": {
+          "title": "Command arguments",
+          "description": "Arguments to pass to the command.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "when": {
+          "title": "Condition",
+          "description": "An environment predicate expression that determines when this hook runs.",
+          "type": "string"
+        },
+        "working-directory": {
+          "title": "Working directory",
+          "description": "The working directory for the hook. Defaults to the repository directory.",
+          "type": "string"
+        },
+        "ignore-failure": {
+          "title": "Ignore failure",
+          "description": "If true, continues even if the hook exits with a non-zero status.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": ["command"],
+      "additionalProperties": false
+    },
+    "hookList": {
+      "title": "Hook list",
+      "description": "An array of hooks.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hook"
+      }
+    }
+  },
+  "type": "object",
+  "properties": {
+    "files": {
+      "$ref": "#/$defs/routeMap"
+    },
+    "dirs": {
+      "$ref": "#/$defs/routeMap"
+    },
+    "ignores": {
+      "title": "Ignore patterns",
+      "description": "A map of route names to their corresponding ignore patterns.",
+      "type": "object",
+      "additionalProperties": {
+        "title": "Ignore patterns",
+        "description": "An array of ignore patterns.",
+        "type": "array",
+        "items": {
+          "title": "Ignore pattern (glob)",
+          "description": "A glob pattern that is used to ignore destination files/directories.",
+          "type": "string"
+        }
+      }
+    },
+    "monikers": {
+      "title": "Moniker definitions",
+      "description": "A map of moniker names to their corresponding environment predicates.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/monikerName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/environmentPredicate"
+      }
+    },
+    "hooks": {
+      "title": "Hook definitions",
+      "description": "Hooks that run custom scripts before and after the apply command.",
+      "type": "object",
+      "properties": {
+        "pre-apply": {
+          "title": "Pre-apply hooks",
+          "description": "Hooks that run before every apply, before file sync.",
+          "$ref": "#/$defs/hookList"
+        },
+        "pre-first-apply": {
+          "title": "Pre-first-apply hooks",
+          "description": "Hooks that run only on first apply, before file sync.",
+          "$ref": "#/$defs/hookList"
+        },
+        "post-first-apply": {
+          "title": "Post-first-apply hooks",
+          "description": "Hooks that run only on first apply, after file sync.",
+          "$ref": "#/$defs/hookList"
+        },
+        "post-apply": {
+          "title": "Post-apply hooks",
+          "description": "Hooks that run after every apply, after file sync.",
+          "$ref": "#/$defs/hookList"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
