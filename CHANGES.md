@@ -53,8 +53,9 @@ To be released.
      -  Directory arguments process all changed files within the directory
      -  Ignored files are skipped by default with a warning; use `--force`
         to include them
-     -  The `--include-unregistered`/`-u` flag is reserved for future use
-        (not yet implemented)
+     -  Use `--include-unregistered`/`-u` flag to include unregistered files
+        found in destination directories (prompts for route selection in
+        interactive mode; `dojang reflect` only, not yet for `dojang edit`)
 
 [#16]: https://github.com/dahlia/dojang/issues/16
 [#18]: https://github.com/dahlia/dojang/issues/18

@@ -15,11 +15,14 @@ module Dojang.Types.Context
   , IgnoredFile (..)
   , RouteMatch (..)
   , RouteState (..)
+  , UnregisteredFile (..)
   , calculateSpecificity
   , filterBySpecificity
+  , findCandidateRoutesFor
   , findMatchingRoutes
   , getIgnoredFiles
   , getRouteState
+  , getUnregisteredFiles
   , listFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeDirs
@@ -735,3 +738,102 @@ getIgnoredFiles ctx = do
             target <- readSymlinkTarget $ path </> s
             return $ FileEntry s $ Symlink target
       else return []
+
+
+-- | Represents a file that is not registered in any route.
+data UnregisteredFile = UnregisteredFile
+  { filePath :: OsPath
+  -- ^ The path to the unregistered file in the destination.
+  , candidateRoutes :: [RouteResult]
+  -- ^ The candidate routes that could contain this file (based on path prefix).
+  }
+  deriving (Eq, Show)
+
+
+-- | Gets a list of files in destination directories that are not registered
+-- in any route.  These are files that exist in destination directories but
+-- are not part of the repository.
+getUnregisteredFiles
+  :: forall m
+   . (HasCallStack, MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform the operation.
+  -> m [UnregisteredFile]
+  -- ^ The list of unregistered files.
+getUnregisteredFiles ctx = do
+  (routes, _) <- routePaths ctx
+  -- Get all files from makeCorrespond (these are registered)
+  (registeredCorrespondences, _) <- makeCorrespond ctx
+  let registeredPaths =
+        [ normalise c.destination.path
+        | c <- registeredCorrespondences
+        , c.destination.stat /= Missing
+        ]
+
+  -- For each directory route, find files not in the registered set
+  unregisteredLists <- forM routes $ \route ->
+    case route.fileType of
+      Dojang.MonadFileSystem.Directory -> do
+        allFiles <- listFilesInDir route.destinationPath
+        let unregistered =
+              [ f
+              | f <- allFiles
+              , normalise (route.destinationPath </> f.path)
+                  `notElem` registeredPaths
+              ]
+        -- For each unregistered file, find candidate routes
+        forM unregistered $ \entry -> do
+          let fullPath = route.destinationPath </> entry.path
+          candidates <- findCandidateRoutesFor ctx fullPath
+          return $
+            UnregisteredFile
+              { filePath = fullPath
+              , candidateRoutes = candidates
+              }
+      _ -> return []
+
+  return $ concat unregisteredLists
+ where
+  listFilesInDir :: OsPath -> m [FileEntry]
+  listFilesInDir path = do
+    exists' <- exists path
+    if exists'
+      then do
+        entries <-
+          listDirectoryRecursively path [] `catchError` \e ->
+            if isPermissionError e
+              then return []
+              else throwError e
+        forM entries $ \case
+          (Dojang.MonadFileSystem.Directory, d) ->
+            return $ FileEntry d Directory
+          (Dojang.MonadFileSystem.File, f) -> do
+            size <- getFileSize $ path </> f
+            return $ FileEntry f $ File size
+          (Dojang.MonadFileSystem.Symlink, s) -> do
+            target <- readSymlinkTarget $ path </> s
+            return $ FileEntry s $ Symlink target
+      else return []
+
+
+-- | Finds candidate routes for an unregistered file.
+-- Returns routes whose destination path is a prefix of the file path.
+findCandidateRoutesFor
+  :: forall m
+   . (MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform the operation.
+  -> OsPath
+  -- ^ The path to the unregistered file.
+  -> m [RouteResult]
+  -- ^ The list of candidate routes.
+findCandidateRoutesFor ctx filePath = do
+  (routes, _) <- routePaths ctx
+  let fileDirs = splitDirectories $ normalise filePath
+  return
+    [ route
+    | route <- routes
+    , route.fileType == Dojang.MonadFileSystem.Directory
+    , let routeDirs = splitDirectories $ normalise route.destinationPath
+    , routeDirs `isPrefixOf` fileDirs
+    ]

@@ -17,6 +17,7 @@ import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (pack)
 import FortyTwo.Prompts.Confirm (confirm)
+import FortyTwo.Prompts.Select (select)
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath
   ( OsPath
@@ -61,9 +62,11 @@ import Dojang.Types.Context
   , IgnoredFile (..)
   , RouteMatch (..)
   , RouteState (..)
+  , UnregisteredFile (..)
   , findMatchingRoutes
   , getIgnoredFiles
   , getRouteState
+  , getUnregisteredFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeFiles
   )
@@ -83,7 +86,7 @@ reflect
   -> [OsPath]
   -- ^ Target paths (may be empty for all changed files).
   -> App i ExitCode
-reflect force allFlag _includeUnregistered _explicitSource [] = do
+reflect force allFlag includeUnregistered _explicitSource [] = do
   -- No arguments: reflect all changed files
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
@@ -148,7 +151,69 @@ reflect force allFlag _includeUnregistered _explicitSource [] = do
             <> codeStyle "--force"
             <> " to include ignored files."
 
-  let allChangedFiles = changedFiles ++ changedIgnored
+  -- Handle unregistered files if --include-unregistered is used
+  unregisteredCorrespondences <-
+    if includeUnregistered
+      then do
+        unregisteredFiles <- getUnregisteredFiles ctx
+        if null unregisteredFiles
+          then return []
+          else do
+            printStderr $
+              "Found "
+                <> pack (show $ length unregisteredFiles)
+                <> " unregistered file(s):"
+            forM_ unregisteredFiles $ \unreg -> do
+              printStderr $ "  " <> pathStyle unreg.filePath
+            isTerminal <- liftIO $ hIsTerminalDevice stdin
+            if not isTerminal
+              then do
+                printStderr' Warning $
+                  "Cannot prompt for route selection in non-interactive mode."
+                printStderr' Hint $
+                  "Run interactively to select routes for unregistered files."
+                return []
+              else do
+                -- Prompt for each unregistered file
+                correspondences <- forM unregisteredFiles $ \unreg -> do
+                  case unreg.candidateRoutes of
+                    [] -> do
+                      printStderr' Warning $
+                        "No candidate routes for "
+                          <> pathStyle unreg.filePath
+                          <> ". Skipping."
+                      return Nothing
+                    [route] -> do
+                      -- Auto-select single candidate
+                      routeName' <- decodePath route.routeName
+                      printStderr' Note $
+                        "Auto-selecting route "
+                          <> codeStyle (pack routeName')
+                          <> " for "
+                          <> pathStyle unreg.filePath
+                      correspond <- createUnregisteredCorrespondence ctx unreg route
+                      return $ Just correspond
+                    routes -> do
+                      -- Prompt user to select route
+                      routeNames <- mapM (decodePath . (.routeName)) routes
+                      printStderr $
+                        "Select route for " <> pathStyle unreg.filePath <> ":"
+                      selectedName <-
+                        liftIO $
+                          select "Route: " routeNames
+                      case [r | (r, name) <- zip routes routeNames, name == selectedName] of
+                        (selectedRoute : _) -> do
+                          correspond <-
+                            createUnregisteredCorrespondence ctx unreg selectedRoute
+                          return $ Just correspond
+                        [] -> do
+                          printStderr' Warning "No matching route found. Skipping."
+                          return Nothing
+                return [c | Just c <- correspondences]
+      else return []
+
+  let allChangedFiles =
+        changedFiles ++ changedIgnored ++ unregisteredCorrespondences
   if null allChangedFiles
     then do
       printStderr "No changed files to reflect."
@@ -484,3 +549,56 @@ filterConflicts
   :: [FileCorrespondence]
   -> [FileCorrespondence]
 filterConflicts corresponds = [c | c <- corresponds, c.sourceDelta /= Unchanged]
+
+
+-- | Create a FileCorrespondence for an unregistered file.
+-- The source file doesn't exist yet, so we create a correspondence that
+-- will copy from destination to source.
+createUnregisteredCorrespondence
+  :: forall m
+   . (MonadFileSystem m)
+  => Context m
+  -> UnregisteredFile
+  -> RouteResult
+  -> m FileCorrespondence
+createUnregisteredCorrespondence ctx unreg route = do
+  -- Calculate the relative path from the route's destination to the file
+  let relPath = makeRelative (normalise route.destinationPath) (normalise unreg.filePath)
+  period <- encodePath "."
+  let (interPath, srcPath) =
+        if relPath == period
+          then
+            ( normalise (ctx.repository.intermediatePath </> route.routeName)
+            , normalise route.sourcePath
+            )
+          else
+            ( normalise $
+                ctx.repository.intermediatePath </> route.routeName </> relPath
+            , normalise $ route.sourcePath </> relPath
+            )
+  -- Create correspondence: source doesn't exist, destination exists
+  dstStat <- getFileStat unreg.filePath
+  let srcEntry = FileEntry srcPath Missing
+  let interEntry = FileEntry interPath Missing
+  let dstEntry = FileEntry unreg.filePath dstStat
+  return
+    FileCorrespondence
+      { source = srcEntry
+      , sourceDelta = Removed -- Source is "missing" relative to intermediate
+      , intermediate = interEntry
+      , destination = dstEntry
+      , destinationDelta = Added -- Destination was "added" relative to intermediate
+      }
+ where
+  getFileStat :: OsPath -> m FileStat
+  getFileStat path = do
+    isDir <- isDirectory path
+    if isDir
+      then return Directory
+      else do
+        exists' <- exists path
+        if exists'
+          then do
+            size <- getFileSize path
+            return $ File size
+          else return Missing
