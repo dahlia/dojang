@@ -58,7 +58,8 @@ jobs:
       with:
         target: stack:spec
         excludes: Main,Paths_dojang
-    - uses: codecov/codecov-action@v3
+    - if: matrix.os != 'macos-15-intel'
+      uses: codecov/codecov-action@v3
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
 
