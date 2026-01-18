@@ -1,0 +1,57 @@
+[tools]
+python = "3.14"
+stack = "latest"
+
+[settings.python]
+default_packages_file = "doc/requirements.txt"
+
+[tasks.check]
+description = "Check code quality and documentation"
+depends = ["build:fast", "doc:check"]
+
+[tasks.build]
+description = "Build the project"
+run = "stack build"
+
+[tasks."build:fast"]
+description = "Build the project quickly without optimizations"
+run = "stack build --fast"
+
+[tasks.test]
+description = "Run the test suite"
+run = "stack test"
+
+[tasks."test:fast"]
+description = "Run the test suite quickly without optimizations"
+run = "stack test --fast"
+
+[tasks.run]
+description = "Run the Dojang"
+run = "stack run"
+
+[tasks."doc:check"]
+description = "Check the documentation for issues"
+run = "python3 scripts/check-doc-contents.py doc"
+
+[tasks."doc:build"]
+description = "Build the documentation"
+run = "mkdocs build"
+
+[tasks."doc:serve"]
+description = "Serve the documentation locally"
+run = "mkdocs serve"
+
+[tasks."hooks:pre-commit"]
+description = "Run pre-commit hooks"
+depends = ["check"]
+
+[tasks."hooks:pre-push"]
+description = "Run pre-push hooks"
+depends = ["test:fast", "doc:check", "doc:build"]
+
+[tasks."hooks:install"]
+description = "Install Git hooks"
+run = """
+mise generate git-pre-commit --write --task=hooks:pre-commit
+mise generate git-pre-commit --hook pre-push --write --task=hooks:pre-push
+"""

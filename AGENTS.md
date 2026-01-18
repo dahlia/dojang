@@ -30,10 +30,47 @@ Key concepts:
 Build & test commands
 ---------------------
 
+This project uses [mise] for managing tools and tasks. All common development
+tasks are defined in *mise.toml*.
+
+[mise]: https://mise.jdx.dev/
+
+### Quick reference
+
+~~~~ bash
+# Check code quality, build, and verify documentation
+mise run check
+
+# Format code with Fourmolu
+mise run fmt
+
+# Build the project
+mise run build
+
+# Run tests
+mise run test
+
+# Build and run tests quickly (without optimizations)
+mise run build:fast
+mise run test:fast
+
+# Build and serve documentation locally
+mise run doc:serve
+
+# Install Git hooks
+mise run hooks:install
+~~~~
+
 ### Building
 
 ~~~~ bash
-# Standard build
+# Standard build (via mise)
+mise run build
+
+# Fast build without optimizations
+mise run build:fast
+
+# Or use stack directly:
 stack build
 
 # Build with static linking (Linux)
@@ -49,7 +86,13 @@ stack build --copy-bins --local-bin-path=./bin/
 ### Testing
 
 ~~~~ bash
-# Run all tests
+# Run all tests (via mise)
+mise run test
+
+# Fast test without optimizations
+mise run test:fast
+
+# Or use stack directly:
 stack test
 
 # Run tests with coverage
@@ -65,29 +108,42 @@ JUNIT_ENABLED=1 JUNIT_OUTPUT_DIRECTORY=.test_report JUNIT_SUITE_NAME=dojang-spec
 ### Formatting & linting
 
 ~~~~ bash
-# Format Haskell code (uses fourmolu.yaml configuration)
-fourmolu -i src/ app/ test/
+# Format code (via mise)
+mise run fmt
 
-# Check if formatting is correct
+# Check formatting without modifying files
+mise run fmt:check
+
+# Or use fourmolu directly:
+fourmolu -i src/ app/ test/
 fourmolu --mode check src/ app/ test/
 ~~~~
 
 ### Documentation
 
 ~~~~ bash
-# Build documentation site (requires mkdocs and dependencies)
+# Build documentation (via mise)
+mise run doc:build
+
+# Serve documentation locally (with live reload)
+mise run doc:serve
+
+# Check documentation contents
+mise run doc:check
+
+# Or use mkdocs/python directly:
 pip install -r doc/requirements.txt
 mkdocs build
-
-# Serve documentation locally
 mkdocs serve
+python3 scripts/check-doc-contents.py doc
 ~~~~
 
-### Verification
+### Comprehensive checks
 
 ~~~~ bash
-# Check documentation contents
-python3 scripts/check-doc-contents.py doc
+# Run all checks (formatting, build, documentation)
+mise run check
+# Equivalent to: mise run fmt:check build:fast doc:check
 ~~~~
 
 
@@ -221,12 +277,14 @@ Additional TDD guidelines:
 
 ### Before committing
 
- -  *Run all tests*: Before committing any changes, run `stack test` to
-    ensure all tests pass.
- -  *Check formatting*: Run `fourmolu --mode check src/ app/ test/` to
-    verify code formatting.
- -  *Build successfully*: Ensure `stack build` completes without errors
-    or warnings.
+ -  *Run comprehensive checks*: Before committing any changes, run
+    `mise run check` to verify formatting, build successfully, and check
+    documentation.  This command runs `fmt:check`, `build:fast`, and
+    `doc:check` in sequence.
+
+ -  *Install Git hooks*: You can automate pre-commit checks by running
+    `mise run hooks:install`.  This installs Git hooks that run appropriate
+    checks before commits and pushes.
 
 ### Commit messages
 
@@ -374,6 +432,19 @@ This project uses Stack (not Cabal directly):
  -  *stack.yaml*: Main Stack configuration (LTS 24.28, GHC 9.10.3)
 
 Dependencies are declared in *package.yaml* with version bounds.
+
+### Tool management
+
+This project uses [mise] for managing development tools:
+
+ -  *mise.toml*: Defines tools (fourmolu, python, stack), tasks, and settings
+ -  Automatically installs required tool versions when you run mise commands
+ -  Provides consistent development environment across different machines
+
+Run `mise install` to install all required tools, or simply run any mise task
+(e.g., `mise run check`) and mise will automatically install missing tools.
+
+[mise]: https://mise.jdx.dev/
 
 
 Markdown style guide

@@ -18,16 +18,18 @@ import Data.SemVer qualified (version)
 import Paths_dojang qualified
 
 
+{- FOURMOLU_DISABLE -}
 version :: Version
 version =
   let (Data.Version.Version [major', minor', patch'] _) = Paths_dojang.version
   in Data.SemVer.version
-      major'
-      minor'
-      patch'
+       major'
+       minor'
+       patch'
 #if defined(DOJANG_DEV_BUILD)
-      [fromJust $ textual "dev", numeric (DOJANG_DEV_BUILD)]
+       [fromJust $ textual "dev", numeric (DOJANG_DEV_BUILD)]
 #else
-      []
+       []
 #endif
-      []
+       []
+{- FOURMOLU_ENABLE -}
