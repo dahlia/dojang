@@ -1,4 +1,4 @@
-FROM alpine@sha256:1882fa4569e0c591ea092d3766c4893e19b8901a8e649de7067188aba3cc0679 AS build
+FROM alpine:3.23 AS build
 
 LABEL "org.opencontainers.image.title"="Dojang"
 LABEL "org.opencontainers.image.licenses"="GPL-3.0-or-later"
@@ -56,6 +56,6 @@ RUN if [ "$DOJANG_DEV_BUILD" != "" ]; then \
         >> cabal.project; \
         fi && cabal v2-install
 
-FROM alpine@sha256:1882fa4569e0c591ea092d3766c4893e19b8901a8e649de7067188aba3cc0679
+FROM alpine:3.23
 
 COPY --from=build /root/.local/bin/dojang /usr/local/bin/
