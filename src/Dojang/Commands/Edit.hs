@@ -13,7 +13,7 @@ module Dojang.Commands.Edit
   , runEditor
   ) where
 
-import Control.Monad (filterM, forM, forM_, unless, when)
+import Control.Monad (filterM, foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, nub)
 import System.Environment (lookupEnv)
@@ -23,8 +23,9 @@ import System.Process (spawnProcess, waitForProcess)
 
 import Control.Monad.Logger (logDebugSH)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (pack)
+import Data.Text (Text, pack)
 import FortyTwo.Prompts.Confirm (confirm)
+import FortyTwo.Prompts.Select (select)
 import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
 import TextShow (showt)
@@ -48,12 +49,12 @@ import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
   , externalProgramNonZeroExit
-  , fileNotFoundError
   , fileNotRoutedError
   , sourceCannotBeTargetError
   , userCancelledError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem qualified as FS
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
@@ -62,6 +63,7 @@ import Dojang.Types.Context
   , FileEntry (..)
   , IgnoredFile (..)
   , RouteMatch (..)
+  , findCandidateRoutesFor
   , findMatchingRoutes
   , getIgnoredFiles
   , makeCorrespond
@@ -222,14 +224,7 @@ edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSo
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
 
-  -- Check for non-existent files.
-  nonExistents <- filterM (fmap not . exists) paths
-  unless (null nonExistents) $
-    dieWithErrors
-      fileNotFoundError
-      ["No such file: " <> pathStyle p <> "." | p <- nonExistents]
-
-  -- Make paths absolute.
+  -- Make paths absolute first.
   absPaths <- liftIO $ mapM makeAbsolute paths
   $(logDebugSH) (absPaths :: [OsPath])
 
@@ -251,9 +246,13 @@ edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSo
       | p <- overlappedPaths
       ]
 
-  -- Map each target path to its source file.
+  -- Separate existing and non-existing files.
+  (existingPaths, nonExistentPaths) <- partitionM exists absPaths
+  $(logDebugSH) (nonExistentPaths :: [OsPath])
+
+  -- Map each existing target path to its source file.
   autoSelectMode <- getAutoSelectMode
-  sourceFiles <- forM absPaths $ \targetPath -> do
+  existingSourceFiles <- forM existingPaths $ \targetPath -> do
     (routeMatch, ws) <- findMatchingRoutes ctx targetPath
     printWarnings $ nub ws
     case routeMatch of
@@ -288,6 +287,58 @@ edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSo
             srcPath <- computeSourcePath ctx targetPath route
             return srcPath
 
+  -- Handle non-existent files: find candidate routes and create source files.
+  newSourceFiles <- forM nonExistentPaths $ \targetPath -> do
+    candidates <- findCandidateRoutesFor ctx targetPath
+    case candidates of
+      [] -> do
+        printStderr' Error ("File " <> pathStyle targetPath <> " is not routed.")
+        printStderr' Hint "Add a route for it in your manifest (dojang.toml)."
+        liftIO $ exitWith fileNotRoutedError
+      [route] -> do
+        srcPath <- computeSourcePath ctx targetPath route
+        createEmptySourceFile pathStyle srcPath
+        return srcPath
+      (firstRoute : restRoutes) -> do
+        let routes = firstRoute : restRoutes
+        -- Multiple routes: prompt for selection.
+        isTerminal <- liftIO $ hIsTerminalDevice stdin
+        if isTerminal
+          then do
+            routeLabels <- forM routes $ \route -> do
+              routeName' <- decodePath route.routeName
+              return routeName'
+            printStderr' Note $
+              "Multiple routes can create " <> pathStyle targetPath <> ":"
+            selectedLabel <-
+              liftIO $ select "Select route to use:" routeLabels
+            -- Find the route that matches the selected label.
+            matchingRoutes <-
+              filterM
+                ( \r -> do
+                    name <- decodePath r.routeName
+                    return (name == selectedLabel)
+                )
+                routes
+            let selectedRoute = case matchingRoutes of
+                  (match : _) -> match
+                  [] -> firstRoute -- Fallback to first if no match.
+            srcPath <- computeSourcePath ctx targetPath selectedRoute
+            createEmptySourceFile pathStyle srcPath
+            return srcPath
+          else do
+            -- Non-interactive: use first route.
+            routeName' <- decodePath firstRoute.routeName
+            printStderr' Note $
+              "Auto-selecting route "
+                <> codeStyle (pack routeName')
+                <> " for "
+                <> pathStyle targetPath
+            srcPath <- computeSourcePath ctx targetPath firstRoute
+            createEmptySourceFile pathStyle srcPath
+            return srcPath
+
+  let sourceFiles = existingSourceFiles ++ newSourceFiles
   runEditorOnFiles editorOpt noApply force sequential sourceFiles
 
 
@@ -373,3 +424,27 @@ computeSourcePath _ctx targetPath route = do
   if normalized == targetPath || relPath == period
     then return $ normalise route.sourcePath
     else return $ normalise $ route.sourcePath </> relPath
+
+
+-- | Partition a list based on a monadic predicate.
+partitionM :: (Monad m) => (a -> m Bool) -> [a] -> m ([a], [a])
+partitionM p xs = foldM go ([], []) xs
+ where
+  go (ts, fs) x = do
+    b <- p x
+    return $ if b then (ts ++ [x], fs) else (ts, fs ++ [x])
+
+
+-- | Create an empty source file for a new file.
+createEmptySourceFile
+  :: (MonadFileSystem m, MonadIO m)
+  => (OsPath -> Text)
+  -- ^ Path style function for display.
+  -> OsPath
+  -- ^ The source file path to create.
+  -> m ()
+createEmptySourceFile pathStyle srcPath = do
+  srcExists <- exists srcPath
+  unless srcExists $ do
+    printStderr $ "Creating new source file: " <> pathStyle srcPath
+    FS.writeFile srcPath ""

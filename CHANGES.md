@@ -34,6 +34,8 @@ To be released.
      -  Use `--sequential` flag to edit files one at a time
      -  Use `--source` option or `DOJANG_AUTO_SELECT` to resolve
         ambiguous routes
+     -  Non-existent target paths create empty source files before editing
+        (prompts for route selection if multiple routes match)
 
  -  Added a registry file (*~/.dojang*) that stores the repository path.
     This allows the `dojang edit` command to work from any directory.  [[#21]]
