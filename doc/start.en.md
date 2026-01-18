@@ -188,6 +188,45 @@ Hint: You can reflect it anyway by enforcing it using -f/--force option.
 
 In this case, you can force it to be reflected using the `-f` option.
 
+### Reflecting all changed files
+
+You can also run `dojang reflect` without any arguments to reflect all changed
+files at once.  This is useful when you've made changes to multiple config
+files on your device and want to sync them all back to the repository.
+
+~~~~ console
+$ dojang reflect
+Found 3 changed file(s):
+  /home/user/.inputrc
+  /home/user/.vimrc
+  /home/user/.bashrc
+Reflect all changed files? [y/N]
+~~~~
+
+The command will show a list of changed files and ask for confirmation before
+proceeding.  If you want to skip the confirmation prompt, use the `--all`
+(`-a`) flag:
+
+~~~~ console
+$ dojang reflect --all
+~~~~
+
+By default, files matching ignore patterns are skipped with a warning.
+Use `--force` (`-f`) to include them.
+
+### Reflecting unregistered files
+
+If you have new files in your target directories that aren't yet tracked
+by the repository, you can use the `--include-unregistered` (`-u`) flag
+to include them:
+
+~~~~ console
+$ dojang reflect --include-unregistered
+~~~~
+
+When multiple routes could match an unregistered file, Dojang will prompt you
+to select which route to use.
+
 [inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
 
 
@@ -222,6 +261,39 @@ If you don't want to apply changes automatically, you can use the `--no-apply`
 > the repository path in the *~/.dojang* file.  This file is automatically
 > created when you run `dojang apply`.
 
+### Editing all changed files
+
+Similar to `dojang reflect`, you can run `dojang edit` without any arguments
+to edit all changed source files at once:
+
+~~~~ console
+$ dojang edit
+Found 2 changed file(s):
+  HOME/.inputrc
+  HOME/.vimrc
+Edit all changed source files? [y/N]
+~~~~
+
+Use the `--all` (`-a`) flag to skip the confirmation prompt.
+Use `--sequential` (`-s`) to edit files one at a time instead of opening
+them all at once.
+
+### Creating new config files with edit
+
+You can also use `dojang edit` to create new config files.  If you specify
+a target path that doesn't exist yet, Dojang will create an empty source file
+and open it in your editor:
+
+~~~~ console
+$ dojang edit ~/.my-new-config
+Creating new source file: HOME/.my-new-config
+Opening HOME/.my-new-config in vi...
+~~~~
+
+If multiple routes could match the target path, Dojang will prompt you to
+select which route to use.  After you save and close the editor,
+`dojang apply` will copy the new file to the target location.
+
 
 *.dojang* directory
 -------------------
@@ -249,8 +321,13 @@ this directory.  If you're using Git, you can do this by adding it to your
 Adding a new config file
 ------------------------
 
-If you want to add an entirely new config file, you can create the source config
-file directly in your repository.  If you do this, you'll need to use
+If you want to add an entirely new config file, you have two options:
+
+ 1. Use `dojang edit` with the target path (see
+    [Creating new config files with edit](#creating-new-config-files-with-edit))
+ 2. Create the source config file directly in your repository
+
+If you create the file directly in your repository, you'll need to use
 the `dojang apply` command instead of `dojang reflect` because you'll need to
 copy it from the repository to the target directory.
 

@@ -173,6 +173,43 @@ Hint: You can reflect it anyway by enforcing it using -f/--force option.
 
 이럴 때는 `-f` 옵션을 사용하여 강제로 반영할 수 있습니다.
 
+### 변경된 모든 파일 반영하기
+
+`dojang reflect` 명령을 인자 없이 실행하면 변경된 모든 파일을 한 번에 반영할 수
+있습니다.  이는 기기에서 여러 설정 파일을 수정한 후 모두 저장소에 동기화하고
+싶을 때 유용합니다.
+
+~~~~ console
+$ dojang reflect
+Found 3 changed file(s):
+  /home/user/.inputrc
+  /home/user/.vimrc
+  /home/user/.bashrc
+Reflect all changed files? [y/N]
+~~~~
+
+명령은 변경된 파일 목록을 보여주고 진행하기 전에 확인을 요청합니다.
+확인 프롬프트를 건너뛰려면 `--all` (`-a`) 플래그를 사용하세요.
+
+~~~~ console
+$ dojang reflect --all
+~~~~
+
+기본적으로 무시 패턴에 해당하는 파일은 경고와 함께 건너뜁니다.
+포함하려면 `--force` (`-f`)를 사용하세요.
+
+### 등록되지 않은 파일 반영하기
+
+대상 디렉터리에 저장소에서 아직 추적하지 않는 새 파일이 있다면,
+`--include-unregistered` (`-u`) 플래그를 사용하여 포함할 수 있습니다.
+
+~~~~ console
+$ dojang reflect --include-unregistered
+~~~~
+
+등록되지 않은 파일에 여러 라우팅이 매칭될 수 있는 경우, Dojang은 어떤 라우팅을
+사용할지 선택하도록 프롬프트를 표시합니다.
+
 [inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
 
 
@@ -205,6 +242,38 @@ $ dojang edit ~/.inputrc
 > 때문에 어느 디렉터리에서나 동작합니다.  이 파일은 `dojang apply`를 실행할 때
 > 자동으로 생성됩니다.
 
+### 변경된 모든 파일 편집하기
+
+`dojang reflect`와 마찬가지로, `dojang edit` 명령을 인자 없이 실행하면 변경된
+모든 원본 파일을 한 번에 편집할 수 있습니다.
+
+~~~~ console
+$ dojang edit
+Found 2 changed file(s):
+  HOME/.inputrc
+  HOME/.vimrc
+Edit all changed source files? [y/N]
+~~~~
+
+확인 프롬프트를 건너뛰려면 `--all` (`-a`) 플래그를 사용하세요.
+파일을 한 번에 모두 열지 않고 하나씩 편집하려면 `--sequential` (`-s`)
+플래그를 사용하세요.
+
+### edit으로 새 설정 파일 만들기
+
+`dojang edit`을 사용하여 새 설정 파일을 만들 수도 있습니다.  아직 존재하지
+않는 대상 경로를 지정하면, Dojang이 빈 원본 파일을 만들고 편집기에서 엽니다.
+
+~~~~ console
+$ dojang edit ~/.my-new-config
+Creating new source file: HOME/.my-new-config
+Opening HOME/.my-new-config in vi...
+~~~~
+
+대상 경로에 여러 라우팅이 매칭될 수 있는 경우, Dojang은 어떤 라우팅을
+사용할지 선택하도록 프롬프트를 표시합니다.  편집기를 저장하고 닫으면,
+`dojang apply`가 새 파일을 대상 위치로 복사합니다.
+
 
 *.dojang* 디렉터리
 ------------------
@@ -231,8 +300,13 @@ Dojang은 기기에 적용된 설정 파일들과 원본 설정 파일들을 삼
 새 설정 파일 추가
 -----------------
 
-아예 새로운 설정 파일을 추가할 때는, 저장소에 직접 원본 설정 파일을 만들어 넣을
-수 있습니다.  이렇게 할 경우, 저장소에서 대상 디렉터리로 복사해야 하므로
+아예 새로운 설정 파일을 추가할 때는 두 가지 방법이 있습니다.
+
+ 1. `dojang edit`을 대상 경로와 함께 사용
+    ([edit으로 새 설정 파일 만들기](#edit으로-새-설정-파일-만들기) 참고)
+ 2. 저장소에 직접 원본 설정 파일을 만들어 넣기
+
+저장소에 직접 파일을 만든 경우, 저장소에서 대상 디렉터리로 복사해야 하므로
 `dojang reflect` 대신 `dojang apply` 명령을 사용해야 합니다.
 
 *~/.my-new-config*에 위치하게 될 새 설정 파일을 추가한다고 가정합시다.
