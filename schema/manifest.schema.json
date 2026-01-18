@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schema.dojang.dev/2023-11/manifest.schema.json",
+  "$id": "https://schema.dojang.dev/2026-01/manifest.schema.json",
   "title": "Dojang manifest",
   "description": "Dojang manifest (so-called dojang.toml) is a TOML file that describes a Dojang repository.",
   "$defs": {
@@ -152,6 +152,53 @@
       "description": "A moniker name which defined in the same manifest.",
       "type": "string",
       "pattern": "^\\p{L}[\\p{L}\\d_-]*$"
+    },
+    "hook": {
+      "title": "Hook definition",
+      "description": "A hook that runs a custom script before or after the apply command.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "title": "Command path",
+          "description": "The path to the executable to run.",
+          "type": "string"
+        },
+        "args": {
+          "title": "Command arguments",
+          "description": "Arguments to pass to the command.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "when": {
+          "title": "Condition",
+          "description": "An environment predicate expression that determines when this hook runs.",
+          "type": "string"
+        },
+        "working-directory": {
+          "title": "Working directory",
+          "description": "The working directory for the hook. Defaults to the repository directory.",
+          "type": "string"
+        },
+        "ignore-failure": {
+          "title": "Ignore failure",
+          "description": "If true, continues even if the hook exits with a non-zero status.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": ["command"],
+      "additionalProperties": false
+    },
+    "hookList": {
+      "title": "Hook list",
+      "description": "An array of hooks.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/hook"
+      }
     }
   },
   "type": "object",
@@ -187,6 +234,34 @@
       "additionalProperties": {
         "$ref": "#/$defs/environmentPredicate"
       }
+    },
+    "hooks": {
+      "title": "Hook definitions",
+      "description": "Hooks that run custom scripts before and after the apply command.",
+      "type": "object",
+      "properties": {
+        "pre-apply": {
+          "title": "Pre-apply hooks",
+          "description": "Hooks that run before every apply, before file sync.",
+          "$ref": "#/$defs/hookList"
+        },
+        "pre-first-apply": {
+          "title": "Pre-first-apply hooks",
+          "description": "Hooks that run only on first apply, before file sync.",
+          "$ref": "#/$defs/hookList"
+        },
+        "post-first-apply": {
+          "title": "Post-first-apply hooks",
+          "description": "Hooks that run only on first apply, after file sync.",
+          "$ref": "#/$defs/hookList"
+        },
+        "post-apply": {
+          "title": "Post-apply hooks",
+          "description": "Hooks that run after every apply, after file sync.",
+          "$ref": "#/$defs/hookList"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
