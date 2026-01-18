@@ -172,6 +172,90 @@ os = ["linux", "macos"]
 os = "windows"
 ~~~~
 
+
+Route priority
+--------------
+
+When a single file or directory has multiple routes that could match
+the current environment, Dojang determines which route to use based on
+**specificity**.  The more specific a predicate is, the higher its priority.
+This ensures that specialized configurations take precedence over
+general ones.
+
+### How specificity is calculated
+
+Specificity is measured by how many conditions must be satisfied for a
+predicate to match.  Here are the key rules:
+
+ -  **Single conditions** (like `os = linux` or `arch = "x86_64"`) have
+    a specificity of 1.
+
+ -  **And (`&&`)** combines the specificities of its parts.  For example,
+    `os = linux && arch = "x86_64"` has a specificity of 2 because
+    both conditions must be satisfied.
+
+ -  **Or (`||`)** takes the maximum specificity among its parts.
+    For example, `os = linux || os = macos` has a specificity of 1
+    because only one condition needs to match.
+
+ -  **Monikers** inherit the specificity of the predicate they resolve to.
+    A moniker defined as `os = linux && arch = "x86_64"` has the same
+    specificity as writing that expression directly.
+
+ -  **`always`** has a specificity of 0, meaning it matches everything but
+    with the lowest priority.
+
+### Examples
+
+Consider a manifest with the following routes for a config file:
+
+~~~~ toml
+[files.".bashrc"]
+apple-silicon = "~/Library/bashrc"
+posix = "$HOME/.bashrc"
+linux = "$HOME/.bashrc.linux"
+
+[monikers.apple-silicon]
+when = "os = macos && arch = aarch64"
+
+[monikers.posix]
+when = "os in (linux, macos)"
+
+[monikers.linux]
+when = "os = linux"
+~~~~
+
+In this configuration:
+
+ -  `apple-silicon` has specificity 2 (two conditions with `&&`)
+ -  `posix` has specificity 1 (single `in` check)
+ -  `linux` has specificity 1 (single `=` check)
+
+On an Apple Silicon Mac (macOS with aarch64 architecture), both
+`apple-silicon` and `posix` would match.  However, `apple-silicon` wins
+because it has higher specificity (2 > 1).
+
+On an Intel Mac (macOS with x86_64 architecture), only `posix` matches.
+
+On Linux, both `posix` and `linux` match with equal specificity.
+In this case, the route order in the manifest becomes the tiebreaker—whichever
+appears first in the predicate comparison takes priority.
+
+### Practical tips
+
+ -  **Start general, add specific**: Define broad routes first (like `posix`
+    for Unix-like systems), then add more specific ones (like `linux` or
+    `apple-silicon`) that override for particular environments.
+
+ -  **Use `&&` for specialization**: When you need environment-specific
+    behavior, combine conditions with `&&` to create more specific predicates
+    that take priority.
+
+ -  **Avoid overlapping `||` routes**: Routes using `||` don't increase
+    specificity much.  If you find yourself with ambiguous matches,
+    consider restructuring with `&&` conditions instead.
+
+
 ## Null routing
 
 Some config files may not exist or be needed in some environments.

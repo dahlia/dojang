@@ -75,6 +75,7 @@ To be released.
      -  Environment variables available to hooks: `DOJANG_REPOSITORY`,
         `DOJANG_MANIFEST`, `DOJANG_DRY_RUN`, `DOJANG_OS`, `DOJANG_ARCH`
 
+[#10]: https://github.com/dahlia/dojang/issues/10
 [#16]: https://github.com/dahlia/dojang/issues/16
 [#19]: https://github.com/dahlia/dojang/issues/19
 [#18]: https://github.com/dahlia/dojang/issues/18
