@@ -7,11 +7,11 @@ Version 0.2.0
 To be released.
 
  -  The `dojang init` command now generates *.gitignore* if the source directory
-    is a Git repository and the file does not exist yet.  [#16]
+    is a Git repository and the file does not exist yet.  [[#16]]
 
  -  Fixed a bug that Dojang had not recognized `kernel.release` field in
     a *dojang-env.toml* file unlike how it was documented and how `dojang env`
-    command have behaved.  [#17]
+    command have behaved.  [[#17]]
 
  -  Added disambiguation for ambiguous source paths in the `dojang reflect`
     command.  When multiple routes map to the same destination, Dojang now:

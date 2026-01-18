@@ -196,8 +196,9 @@ jobs:
   doc:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       pages: write
+      id-token: write
     steps:
     - uses: actions/checkout@v4
     - run: |
@@ -206,11 +207,22 @@ jobs:
         mkdocs build
       env:
         TOKEN: ${{ github.token }}
-    - uses: peaceiris/actions-gh-pages@v3
+    - uses: actions/upload-pages-artifact@v3
       with:
-        github_token: ${{ github.token }}
-        publish_dir: ./site
-        keep_files: true
+        path: ./site
+
+  deploy-pages:
+    needs: doc
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - id: deployment
+      uses: actions/deploy-pages@v4
 
   release:
     needs: [check, test, build, build-linux]
@@ -283,5 +295,5 @@ jobs:
         done
 
 # cSpell:ignore allejo buildx codecov dasel DDOJANG hackage mikefarah
-# cSpell:ignore mikepenz mkdocs noreply peaceiris popd pushd
+# cSpell:ignore mikepenz mkdocs noreply popd pushd
 # cSpell:ignore sdist softprops submark
