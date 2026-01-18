@@ -48,6 +48,7 @@ import Options.Applicative
   , showDefault
   , some
   , str
+  , strOption
   , subparser
   , switch
   , value
@@ -65,6 +66,7 @@ import Dojang.Commands (Admonition (Error, Note), codeStyleFor, printStderr')
 import Dojang.Commands.Apply qualified (apply)
 import Dojang.Commands.Diff (DiffMode (..))
 import Dojang.Commands.Diff qualified (diff)
+import Dojang.Commands.Edit qualified (edit)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
@@ -73,8 +75,11 @@ import Dojang.Commands.Status (StatusOptions (..))
 import Dojang.Commands.Status qualified (status)
 import Dojang.ExitCodes (unhandledError)
 import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
+import Dojang.Types.Registry (Registry (..), readRegistry, registryFilename)
 import Dojang.Version (toString, version)
 import Options.Applicative.Path (hyphen, pathArgument, pathOption, period)
+import System.Directory (getHomeDirectory)
+import System.OsPath qualified as OsPath
 
 
 intermediateDirname :: OsPath
@@ -92,14 +97,18 @@ envFilename = unsafePerformIO $ encodeFS "dojang-env.toml"
 {-# NOINLINE envFilename #-}
 
 
-appP :: (MonadFileSystem i, MonadIO i) => Parser (AppEnv, App i ExitCode)
-appP = do
+appP
+  :: (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -- ^ The default repository path (from registry or current directory).
+  -> Parser (AppEnv, App i ExitCode)
+appP defaultRepoPath = do
   sourceDirectory' <-
     pathOption
       ( long "repository-dir"
           <> short 'r'
           <> metavar "PATH"
-          <> value period
+          <> value defaultRepoPath
           <> showDefault
           <> action "directory"
           <> help "Repository (i.e., source tree) directory"
@@ -154,7 +163,7 @@ appP = do
             )
       )
   debug' <- switch (long "debug" <> short 'd' <> help "Enable debug logging")
-  cmd <- cmdP
+  cmd <- cmdP defaultRepoPath
   return
     ( AppEnv
         sourceDirectory'
@@ -189,8 +198,12 @@ initPresetP =
       )
 
 
-cmdP :: (MonadFileSystem i, MonadIO i) => Parser (App i ExitCode)
-cmdP =
+cmdP
+  :: (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -- ^ The default repository path (from registry or current directory).
+  -> Parser (App i ExitCode)
+cmdP defaultRepoPath =
   subparser
     ( commandGroup "Managing commands:"
         <> command
@@ -356,6 +369,51 @@ cmdP =
               )
               (progDesc "Apply changes to target tree")
           )
+        <> command
+          "edit"
+          ( info
+              ( Dojang.Commands.Edit.edit
+                  <$> optional
+                    ( strOption
+                        ( long "editor"
+                            <> short 'E'
+                            <> metavar "PROGRAM"
+                            <> action "command"
+                            <> help
+                              ( "Editor program to use "
+                                  ++ "(overrides $VISUAL and $EDITOR)"
+                              )
+                        )
+                    )
+                  <*> switch
+                    ( long "no-apply"
+                        <> short 'n'
+                        <> help "Do not apply changes after editing"
+                    )
+                  <*> switch
+                    ( long "force"
+                        <> short 'f'
+                        <> help "Skip conflict warnings and proceed"
+                    )
+                  <*> switch
+                    ( long "sequential"
+                        <> short 'S'
+                        <> help "Edit files one at a time instead of all at once"
+                    )
+                  <*> optional
+                    ( pathOption
+                        ( long "source"
+                            <> short 's'
+                            <> metavar "PATH"
+                            <> action "file"
+                            <> help "Explicit source path (skip disambiguation)"
+                        )
+                    )
+                  <*> some (pathArgument $ metavar "FILE" <> action "file")
+                  <**> helper
+              )
+              (progDesc "Edit source file of a target file and apply changes")
+          )
     )
     <|> subparser
       ( commandGroup "Meta commands:"
@@ -365,21 +423,29 @@ cmdP =
                 (pure versionCmd <**> helper)
                 (progDesc "Show version")
             )
-          <> command "help" (info helpP (progDesc "Show help"))
+          <> command "help" (info (helpP defaultRepoPath) (progDesc "Show help"))
       )
 
 
-helpP :: (MonadFileSystem i, MonadIO i) => Parser (App i ExitCode)
-helpP =
-  helpCmd
+helpP
+  :: (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -- ^ The default repository path (from registry or current directory).
+  -> Parser (App i ExitCode)
+helpP defaultRepoPath =
+  helpCmd defaultRepoPath
     <$> optional (argument str (metavar "COMMAND"))
     <**> helper
 
 
-parser :: (MonadFileSystem i, MonadIO i) => ParserInfo (AppEnv, App i ExitCode)
-parser =
+parser
+  :: (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -- ^ The default repository path (from registry or current directory).
+  -> ParserInfo (AppEnv, App i ExitCode)
+parser defaultRepoPath =
   info
-    (appP <**> helper)
+    (appP defaultRepoPath <**> helper)
     ( fullDesc
         <> progDesc "Manage dotfiles"
         <> header "Dojang: A cross-platform dotfiles manager"
@@ -398,27 +464,40 @@ versionCmd = do
 
 
 helpCmd
-  :: forall i. (MonadFileSystem i, MonadIO i) => Maybe String -> App i ExitCode
-helpCmd cmdString = do
+  :: forall i
+   . (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -- ^ The default repository path (from registry or current directory).
+  -> Maybe String
+  -> App i ExitCode
+helpCmd defaultRepoPath cmdString = do
   void $ liftIO $ handleParseResult result
   return ExitSuccess
  where
   args = maybeToList cmdString ++ ["--help"]
   result :: ParserResult (AppEnv, App i ExitCode)
-  result = execParserPure parserPrefs parser args
+  result = execParserPure parserPrefs (parser defaultRepoPath) args
 
 
 main :: IO ()
 main = withCP65001 $ do
   when (System.Info.os == "mingw32") $ setLocaleEncoding utf8
+  -- Try to read the repository path from the registry file (~/.dojang).
+  -- If the registry exists, use it as the default repository path.
+  -- Otherwise, default to the current directory.
+  defaultRepoPath <- do
+    homeDir <- OsPath.encodeFS =<< getHomeDirectory
+    let registryPath = homeDir OsPath.</> registryFilename
+    maybeRegistry <- readRegistry registryPath
+    return $ maybe period (.repositoryPath) maybeRegistry
   (appEnv, _) <-
-    liftIO $ customExecParser parserPrefs parser
+    liftIO $ customExecParser parserPrefs (parser defaultRepoPath)
       :: IO (AppEnv, App DryRunIO ExitCode)
   (exitCode, ops) <-
     if appEnv.dryRun
-      then dryRunIO' $ run appEnv
+      then dryRunIO' $ run defaultRepoPath appEnv
       else do
-        exitCode' <- run appEnv
+        exitCode' <- run defaultRepoPath appEnv
         return (exitCode', -1)
   codeColor <- codeStyleFor stderr
   when (appEnv.dryRun && ops > 0) $ do
@@ -430,9 +509,9 @@ main = withCP65001 $ do
         <> " changes were not actually committed to the filesystem."
   exitWith exitCode
  where
-  run :: (MonadFileSystem i, MonadIO i) => AppEnv -> i ExitCode
-  run appEnv = do
-    (_, cmd) <- liftIO $ customExecParser parserPrefs parser
+  run :: (MonadFileSystem i, MonadIO i) => OsPath -> AppEnv -> i ExitCode
+  run defaultRepoPath appEnv = do
+    (_, cmd) <- liftIO $ customExecParser parserPrefs (parser defaultRepoPath)
     (if appEnv.debug then runAppWithStderrLogging else runAppWithoutLogging)
       appEnv
       $ cmd

@@ -191,6 +191,38 @@ In this case, you can force it to be reflected using the `-f` option.
 [inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
 
 
+Editing config files
+--------------------
+
+When you want to edit a config file that is already being managed by Dojang,
+you can use the `dojang edit` command.  This command opens the source file
+in your editor and automatically applies changes after you save and close it.
+
+~~~~ console
+$ dojang edit ~/.inputrc
+~~~~
+
+The `dojang edit` command looks up the source file corresponding to the target
+file (*~/.inputrc* in this case), opens it in your editor, and then runs
+`dojang apply` after you finish editing.
+
+By default, the editor is determined in the following order:
+
+ 1. The `--editor` (`-E`) option
+ 2. The `$VISUAL` environment variable
+ 3. The `$EDITOR` environment variable
+ 4. Platform default (`notepad` on Windows, `vi` on POSIX)
+
+If you don't want to apply changes automatically, you can use the `--no-apply`
+(`-n`) option.
+
+> [!NOTE]
+>
+> The `dojang edit` command works from any directory because Dojang remembers
+> the repository path in the *~/.dojang* file.  This file is automatically
+> created when you run `dojang apply`.
+
+
 *.dojang* directory
 -------------------
 

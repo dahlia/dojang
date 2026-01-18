@@ -11,13 +11,19 @@ import Control.Monad.Reader (asks)
 import Data.Function ((&))
 import Data.List (nub, sort)
 import System.Exit (ExitCode (..), exitWith)
-import System.IO (stderr)
+import System.IO (hIsTerminalDevice, stderr, stdin)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebugSH)
 import Data.Map.Strict (fromList, notMember, toList)
-import System.Directory.OsPath (makeAbsolute)
-import System.OsPath (OsPath, addTrailingPathSeparator, takeDirectory)
+import FortyTwo.Prompts.Confirm (confirm)
+import System.Directory.OsPath (getHomeDirectory, makeAbsolute)
+import System.OsPath
+  ( OsPath
+  , addTrailingPathSeparator
+  , takeDirectory
+  , (</>)
+  )
 
 import Dojang.App (App, AppEnv (debug, manifestFile), ensureContext, lookupEnv')
 import Dojang.Commands
@@ -45,6 +51,13 @@ import Dojang.Types.Context
   , getRouteState
   , makeCorrespond
   )
+import Dojang.Types.Registry
+  ( Registry (..)
+  , readRegistry
+  , registryFilename
+  , writeRegistry
+  )
+import Dojang.Types.Repository (Repository (..))
 
 
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
@@ -162,6 +175,38 @@ apply force filePaths = do
       ]
   forM_ (nub $ sort ops') $ \path -> printSyncOp path >> doSyncOp path
   printWarnings ws
+  -- Update registry with current repository path:
+  homeDir <- liftIO getHomeDirectory
+  let registryPath = homeDir </> registryFilename
+  currentRepo <- liftIO $ makeAbsolute ctx.repository.sourcePath
+  existingRegistry <- readRegistry registryPath
+  case existingRegistry of
+    Nothing -> do
+      -- No existing registry, create one
+      writeRegistry registryPath $ Registry currentRepo
+    Just reg
+      | reg.repositoryPath == currentRepo ->
+          -- Same repository, no need to update
+          return ()
+      | otherwise -> do
+          -- Different repository, ask user
+          isTerminal <- liftIO $ hIsTerminalDevice stdin
+          proceed <-
+            if isTerminal
+              then do
+                oldPath <- decodePath reg.repositoryPath
+                newPath <- decodePath currentRepo
+                let msg =
+                      "The registry already points to "
+                        <> oldPath
+                        <> ". Overwrite with "
+                        <> newPath
+                        <> "?"
+                liftIO $ confirm msg
+              else
+                -- Non-interactive mode, just overwrite
+                return True
+          when proceed $ writeRegistry registryPath $ Registry currentRepo
   return ExitSuccess
  where
   isDeletion :: SyncOp -> Bool

@@ -176,6 +176,36 @@ Hint: You can reflect it anyway by enforcing it using -f/--force option.
 [inputrc]: https://tiswww.case.edu/php/chet/readline/readline.html#Readline-Init-File
 
 
+설정 파일 편집
+--------------
+
+Dojang이 이미 관리하고 있는 설정 파일을 편집하고 싶을 때는 `dojang edit` 명령을
+사용할 수 있습니다.  이 명령은 원본 파일을 편집기에서 열고, 저장하고 닫은 후에
+자동으로 변경 사항을 적용합니다.
+
+~~~~ console
+$ dojang edit ~/.inputrc
+~~~~
+
+`dojang edit` 명령은 대상 파일(이 경우 *~/.inputrc*)에 해당하는 원본 파일을
+찾아 편집기에서 열고, 편집을 마친 후 `dojang apply`를 실행합니다.
+
+기본적으로 편집기는 다음 순서에 따라 결정됩니다.
+
+ 1. `--editor` (`-E`) 옵션
+ 2. `$VISUAL` 환경 변수
+ 3. `$EDITOR` 환경 변수
+ 4. 플랫폼 기본값 (Windows에서는 `notepad`, POSIX에서는 `vi`)
+
+자동으로 적용하지 않으려면 `--no-apply` (`-n`) 옵션을 사용할 수 있습니다.
+
+> [!NOTE]
+>
+> `dojang edit` 명령은 Dojang이 저장소 경로를 *~/.dojang* 파일에 기억하기
+> 때문에 어느 디렉터리에서나 동작합니다.  이 파일은 `dojang apply`를 실행할 때
+> 자동으로 생성됩니다.
+
+
 *.dojang* 디렉터리
 ------------------
 
