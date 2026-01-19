@@ -4,7 +4,7 @@ Dojang changelog
 Version 0.2.0
 -------------
 
-To be released.
+Released on January 19, 2026.
 
  -  The `dojang init` command now generates *.gitignore* if the source directory
     is a Git repository and the file does not exist yet.  [[#16]]
