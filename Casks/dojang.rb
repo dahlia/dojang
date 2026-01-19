@@ -1,16 +1,14 @@
 cask "dojang" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.1.0"
-  sha256 arm:   "c5e221b577c2e7734b9f65c09365fae92a8a8fcc1312a00f174d092843cbc4ee",
-         intel: "e923d1dadb96a39b37747992567feaf2716b6c3a43dbc0efabf2dc1b60323342"
+  version "0.2.0"
+  sha256 arm:   "20c6c330aa480d2d54949a3379c82bd0c64865039688f37e406abc5620e294d3",
+         intel: "779ce556294193a68198ab49282d05808256908dc1afcdf8e75b555f26c757b2"
 
   url "https://github.com/dahlia/dojang/releases/download/#{version}/dojang-#{version}-macos-#{arch}.tar.xz"
   name "Dojang (binary)"
   desc "Cross-platform dotfiles manager"
   homepage "https://dojang.dev/"
-
-  conflicts_with formula: "dojang"
 
   binary "dojang"
   binary "completions/dojang.bash",

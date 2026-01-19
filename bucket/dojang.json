@@ -1,10 +1,10 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A cross-platform dotfiles manager",
   "homepage": "https://dojang.dev/",
   "license": "GPL-3.0-or-later",
-  "url": "https://github.com/dahlia/dojang/releases/download/0.1.0/dojang-0.1.0-windows-x86_64.zip",
-  "hash": "5a3d24b195066a7fb711116dd5a13f1063439f85445a9237b7f4b83bbfac2487",
+  "url": "https://github.com/dahlia/dojang/releases/download/0.2.0/dojang-0.2.0-windows-x86_64.zip",
+  "hash": "0b9eeded66d7eb1ccd601fd55907466bed93d292cc9e5f8af2be5a4a6f2dd971",
   "architecture": "64bit",
   "bin": "dojang.exe",
   "checkver": {
