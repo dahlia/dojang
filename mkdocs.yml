@@ -4,6 +4,8 @@ docs_dir: doc
 markdown_extensions:
 - footnotes
 - gfm_admonition
+- pymdownx.highlight
+- pymdownx.superfences
 
 plugins:
 - search
