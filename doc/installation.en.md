@@ -37,6 +37,19 @@ $ scoop install dojang
 [Scoop]: https://scoop.sh/
 
 
+mise (cross-platform)
+---------------------
+
+If you use [mise] for managing development tools, Dojang can be installed via
+the GitHub backend.  Enter the following command in the terminal:
+
+~~~~ console
+$ mise use -g github:dahlia/dojang
+~~~~
+
+[mise]: https://mise.jdx.dev/
+
+
 Build it manually
 -----------------
 
