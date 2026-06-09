@@ -39,7 +39,8 @@ Key concepts:
     `apple_silicon_mac`)
  -  *Environment predicates*: Conditions for matching environments (OS, arch,
     kernel)
- -  *File routes*: Mappings from source files to target paths based on predicates
+ -  *File routes*: Mappings from source files to target paths based on
+    predicates
  -  *Application*: Syncing source files to target locations
  -  *Reflection*: Syncing modified target files back to source
 
@@ -208,10 +209,12 @@ App i v = ReaderT AppEnv (LoggingT i) v
 
 Where:
 
- -  `AppEnv` contains source directory, manifest file path, dry-run flag, debug flag
+ -  `AppEnv` contains source directory, manifest file path, dry-run flag, debug
+    flag
  -  `LoggingT` provides logging capabilities
  -  `i` is the inner monad (usually `IO` or a test monad)
- -  Implements `MonadFileSystem` for abstracting file operations (enables testing)
+ -  Implements `MonadFileSystem` for abstracting file operations (enables
+    testing)
 
 ### Command structure
 
