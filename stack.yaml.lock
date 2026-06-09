@@ -27,7 +27,7 @@ packages:
     hackage: toml-parser-1.3.2.0@sha256:50adac7c438c0217e5968646618d5316c3c74f9c14e036976999f9b90a612306,3625
 snapshots:
 - completed:
-    sha256: 72cdd5851794184138551f43f0897c28f1a5acdda303b266aa9e910461103b3c
-    size: 726784
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/24/28.yaml
-  original: lts-24.28
+    sha256: e9e41fa6ceba9911de922014632ed66aa6f87af0cf92fc54f0e1835176a5be06
+    size: 732456
+    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/24/45.yaml
+  original: lts-24.45

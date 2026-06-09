@@ -1,4 +1,4 @@
-resolver: lts-24.28
+resolver: lts-24.45
 require-stack-version: ">=2.11.1"
 packages:
 - .
