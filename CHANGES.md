@@ -6,6 +6,13 @@ Version 0.2.1
 
 To be released.
 
+ -  Fixed a bug where `dojang reflect` crashed after deleting the intermediate
+    copy when a managed file had been removed at its destination.
+    Destination-side deletions are now reflected to the source and can also be
+    selected by naming the deleted destination path explicitly.  [[#24]]
+
+[#24]: https://github.com/dahlia/dojang/issues/24
+
 
 Version 0.2.0
 -------------
