@@ -9,8 +9,31 @@ version = "0.4.3"
 linux-x64 = "hongdown-*-x86_64-unknown-linux-musl.tar.bz2"
 linux-arm64 = "hongdown-*-aarch64-unknown-linux-musl.tar.bz2"
 
-[settings.python]
-default_packages_file = "doc/requirements.txt"
+[settings]
+experimental = true
+
+[env]
+_.python.venv = { path = ".venv", create = true, uv_create_args = ["--seed"] }
+
+[hooks]
+postinstall = [
+  "mise deps",
+  { task = "hooks:install" },
+]
+
+[deps.stack]
+auto = true
+description = "Install Haskell dependencies"
+sources = ["package.yaml", "stack.yaml", "stack.yaml.lock"]
+outputs = [".stack-work/"]
+run = "stack build --only-dependencies"
+
+[deps.python]
+auto = true
+description = "Install Python dependencies"
+sources = ["doc/requirements.txt"]
+outputs = [".venv/"]
+run = "python -m pip install --requirement doc/requirements.txt"
 
 [tasks.check]
 description = "Check code quality and documentation"
