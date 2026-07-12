@@ -17,8 +17,16 @@ To be released.
     and programs invoked by hook scripts to be found through `PATH` as
     documented.  [[#25]]
 
+ -  Fixed `writeManifest` silently dropping file route predicates that could
+    not be represented by a moniker or that collided after moniker resolution.
+    It now returns a `WriteError`, and `writeManifestFile` raises an I/O error,
+    instead of writing an incomplete manifest.  When multiple monikers
+    represent the same predicate, the writer now selects the first name in a
+    deterministic order.  [[#26]]
+
 [#24]: https://github.com/dahlia/dojang/issues/24
 [#25]: https://github.com/dahlia/dojang/issues/25
+[#26]: https://github.com/dahlia/dojang/issues/26
 
 
 Version 0.2.0

@@ -3,7 +3,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Dojang.Types.Gen
-  ( architecture
+  ( arbitraryManifest
+  , architecture
   , ciText
   , fileRoute
   , fileRoute'
@@ -40,7 +41,6 @@ import Prelude hiding (lookup)
 
 import Data.CaseInsensitive (CI, mk)
 import Data.HashMap.Strict (HashMap, fromList, keys, lookup)
-import Data.Map.Strict (empty)
 import Data.Text (Text, cons, length, pack)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (Range, constant, constantFrom, singleton)
@@ -390,29 +390,57 @@ fileRouteMap :: (MonadGen m) => Range Int -> MonikerMap -> m FileRouteMap
 fileRouteMap range monikers =
   Gen.map range $ do
     key <- osPath (singleton 1)
-    value <-
-      fileRoute' (constant 0 5) monikers $
-        Gen.choice $
-          map return $
-            fmap Moniker $
-              case keys monikers of
-                [] ->
-                  let Right undefined' = parseMonikerName $ pack "undefined"
-                  in [undefined']
-                names -> names
+    value <- representableRoute
     return (key, value)
+ where
+  monikerPredicates :: [EnvironmentPredicate]
+  monikerPredicates =
+    fmap Moniker $ case keys monikers of
+      [] ->
+        let Right undefined' = parseMonikerName $ pack "undefined"
+        in [undefined']
+      names -> names
+  representableRoute :: (MonadGen m) => m FileRoute.FileRoute
+  representableRoute =
+    fileRoute' (constant 0 5) monikers $ Gen.element monikerPredicates
+
+
+arbitraryFileRouteMap
+  :: (MonadGen m) => Range Int -> MonikerMap -> m FileRouteMap
+arbitraryFileRouteMap range monikers =
+  Gen.map range $ do
+    key <- osPath (singleton 1)
+    value <- fileRoute' (constant 0 5) monikers environmentPredicate
+    return (key, value)
+
+
+ignoreMap :: (MonadGen m) => m (Map.Map OsPath [String])
+ignoreMap = Gen.map (constantFrom 0 0 5) $ do
+  path <- osPath (singleton 1)
+  patterns <- Gen.list (constantFrom 1 1 5) $ Gen.string (constant 0 20) osChar
+  pure (path, patterns)
 
 
 manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
 manifest' monikerMapRange fileRouteMapRange = do
   monikers <- monikerMap' monikerMapRange
   fileRoutes <- fileRouteMap fileRouteMapRange monikers
+  ignorePatterns <- ignoreMap
   hooks <- hookMap (constant 0 3)
-  return $ Manifest monikers fileRoutes Data.Map.Strict.empty hooks
+  return $ Manifest monikers fileRoutes ignorePatterns hooks
 
 
 manifest :: (MonadGen m) => m Manifest
 manifest = manifest' (constantFrom 0 0 5) (constantFrom 0 0 5)
+
+
+arbitraryManifest :: (MonadGen m) => m Manifest
+arbitraryManifest = do
+  monikers <- monikerMap' (constantFrom 0 0 5)
+  fileRoutes <- arbitraryFileRouteMap (constantFrom 0 0 5) monikers
+  ignorePatterns <- ignoreMap
+  hooks <- hookMap (constant 0 3)
+  return $ Manifest monikers fileRoutes ignorePatterns hooks
 
 
 hook :: (MonadGen m) => m Hook
