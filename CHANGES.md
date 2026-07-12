@@ -4,7 +4,7 @@ Dojang changelog
 Version 0.2.1
 -------------
 
-To be released.
+Released on July 12, 2026.
 
  -  Fixed a bug where `dojang reflect` crashed after deleting the intermediate
     copy when a managed file had been removed at its destination.
