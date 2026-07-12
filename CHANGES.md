@@ -6,13 +6,20 @@ Version 0.3.0
 
 To be released.
 
+ -  Added a pure, direction-aware reconciliation planner and a shared
+    filesystem operation executor.  Plans expose conflicts, skipped entries,
+    and destructive operations before execution, providing the foundation for
+    unifying `dojang apply` and `dojang reflect`.  [[#29], [#61]]
+
  -  Unified file-state observation and delta calculation for single-file and
     directory routes.  Dojang now detects symbolic links without following
     them, reports removal of every tracked entry kind consistently, and
     compares equal-size regular files by content.  [[#30], [#60]]
 
+[#29]: https://github.com/dahlia/dojang/issues/29
 [#30]: https://github.com/dahlia/dojang/issues/30
 [#60]: https://github.com/dahlia/dojang/pull/60
+[#61]: https://github.com/dahlia/dojang/pull/61
 
 
 Version 0.2.1

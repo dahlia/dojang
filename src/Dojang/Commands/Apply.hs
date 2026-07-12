@@ -60,6 +60,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Hook (HookType (..))
+import Dojang.Types.Reconciliation (SyncOp (..), executeSyncOp)
 import Dojang.Types.Registry
   ( Registry (..)
   , readRegistry
@@ -147,7 +148,7 @@ apply force filePaths = do
           & nub
             . sort
   shimOps <- liftIO $ dryRunIO $ do
-    forM_ ops doSyncOp
+    forM_ ops executeSyncOp
     let ctx' = Context ctx.repository ctx.environment lookupEnv'
     (files', _) <- makeCorrespond ctx'
     syncIntermediateToDestination
@@ -200,7 +201,7 @@ apply force filePaths = do
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ status defaultStatusOptions)
-  forM_ ops $ \path -> printSyncOp path >> doSyncOp path
+  forM_ ops $ \path -> printSyncOp path >> executeSyncOp path
   when debug' (void $ status defaultStatusOptions)
   (files', _) <- makeCorrespond ctx
   $(logDebugSH) files'
@@ -210,7 +211,7 @@ apply force filePaths = do
       [ (fc.intermediate, fc.destination, fc.destinationDelta)
       | fc <- files'
       ]
-  forM_ (nub $ sort ops') $ \path -> printSyncOp path >> doSyncOp path
+  forM_ (nub $ sort ops') $ \path -> printSyncOp path >> executeSyncOp path
   printWarnings ws
 
   -- Run post-apply hooks
@@ -279,27 +280,6 @@ filterConflicts = filterM $ \c -> case (c.sourceDelta, c.destinationDelta) of
   _ -> return True
 
 
-data SyncOp
-  = RemoveDirs OsPath
-  | RemoveFile OsPath
-  | CopyFile OsPath OsPath
-  | CreateDir OsPath
-  | CreateDirs OsPath
-  deriving (Eq, Show)
-
-
-syncOpOrdKey :: SyncOp -> (OsPath, Int, OsPath)
-syncOpOrdKey (RemoveFile path) = (takeDirectory path, 1, path)
-syncOpOrdKey (RemoveDirs path) = (path, 2, path)
-syncOpOrdKey (CreateDir path) = (path, 3, path)
-syncOpOrdKey (CreateDirs path) = (path, 4, path)
-syncOpOrdKey (CopyFile _ dst) = (takeDirectory dst, 5, dst)
-
-
-instance Ord SyncOp where
-  compare a b = compare (syncOpOrdKey a) (syncOpOrdKey b)
-
-
 printSyncOp :: (MonadIO i) => SyncOp -> App i ()
 printSyncOp (RemoveDirs path) = do
   pathStyle <- pathStyleFor stderr
@@ -320,14 +300,6 @@ printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
-
-
-doSyncOp :: (MonadFileSystem i) => SyncOp -> i ()
-doSyncOp (RemoveDirs path) = removeDirectoryRecursively path
-doSyncOp (RemoveFile path) = removeFile path
-doSyncOp (CopyFile src dst) = copyFile src dst
-doSyncOp (CreateDir path) = createDirectory path
-doSyncOp (CreateDirs path) = createDirectories path
 
 
 syncSourceToIntermediate

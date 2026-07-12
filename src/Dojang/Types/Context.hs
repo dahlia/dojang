@@ -15,6 +15,7 @@ module Dojang.Types.Context
   , RouteMatch (..)
   , RouteState (..)
   , UnregisteredFile (..)
+  , calculateFileDelta
   , calculateSpecificity
   , filterBySpecificity
   , findCandidateRoutesFor
