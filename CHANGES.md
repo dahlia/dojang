@@ -11,7 +11,14 @@ To be released.
     Destination-side deletions are now reflected to the source and can also be
     selected by naming the deleted destination path explicitly.  [[#24]]
 
+ -  Fixed hook commands discarding the parent process environment.  Hooks now
+    inherit variables such as `PATH` and `HOME`, while the `DOJANG_*` variables
+    supplied by Dojang override any existing values.  This allows hook commands
+    and programs invoked by hook scripts to be found through `PATH` as
+    documented.  [[#25]]
+
 [#24]: https://github.com/dahlia/dojang/issues/24
+[#25]: https://github.com/dahlia/dojang/issues/25
 
 
 Version 0.2.0
