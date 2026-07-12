@@ -430,6 +430,27 @@ spec = do
       fmap (.outcome) plan.items
         `shouldBe` [Skipped $ IgnoredDestination route "ignored"]
 
+    it "updates the intermediate while preserving an ignored destination" $ do
+      let input =
+            makeInput
+              paths
+              (File 3)
+              (File 4)
+              (File 4)
+              Modified
+              Unchanged
+              ReplicasDifferent
+              (Ignored route "ignored")
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp
+                       IntermediateReplica
+                       (CopyFile paths.source paths.intermediate)
+                   ]
+      fmap (.outcome) plan.items
+        `shouldBe` [Skipped $ IgnoredDestination route "ignored"]
+
     it "collapses descendant work under a recursive replacement" $ do
       tree <- encodeFS "tree"
       child <- encodeFS "child"

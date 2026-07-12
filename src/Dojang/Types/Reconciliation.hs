@@ -377,7 +377,12 @@ planSupportedInput direction input
 
   planExisting :: (ReconciliationOutcome, [TaggedOperation])
   planExisting =
-    let intermediateOperations =
+    let ignored = case (direction, input.destinationRouteState) of
+          (SourceToDestination, Ignored route pattern)
+            | targetNeedsUpdate ->
+                Just $ IgnoredDestination route pattern
+          _ -> Nothing
+        intermediateOperations =
           if authoritativeDelta == Unchanged
             then []
             else
@@ -386,13 +391,20 @@ planSupportedInput direction input
         stagedIntermediate =
           FileEntry correspondence.intermediate.path authoritative.stat
         targetOperations =
-          if not targetNeedsUpdate
-            then []
-            else
-              tagOperations SecondPhase overwrittenReplica $
-                replaceEntry stagedIntermediate overwritten
+          case ignored of
+            Just _ -> []
+            Nothing
+              | not targetNeedsUpdate -> []
+              | otherwise ->
+                  tagOperations SecondPhase overwrittenReplica $
+                    replaceEntry stagedIntermediate overwritten
         operations = intermediateOperations ++ targetOperations
-    in (if null operations then NoChange else WillReconcile, operations)
+        outcome = case ignored of
+          Just reason -> Skipped reason
+          Nothing
+            | null operations -> NoChange
+            | otherwise -> WillReconcile
+    in (outcome, operations)
 
 
 isSymlinkStat :: FileStat -> Bool
