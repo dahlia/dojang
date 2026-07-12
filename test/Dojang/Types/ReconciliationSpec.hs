@@ -7,7 +7,7 @@
 
 module Dojang.Types.ReconciliationSpec (spec) where
 
-import System.IO.Error (ioeGetErrorType)
+import System.IO.Error (ioeGetFileName)
 import System.OsPath (OsPath, encodeFS, takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, runIO)
 import Test.Hspec.Expectations.Pretty (shouldBe)
@@ -15,7 +15,6 @@ import Test.Hspec.Expectations.Pretty (shouldBe)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import GHC.IO.Exception (IOErrorType (InappropriateType))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
 import Test.Hspec.Expectations.Pretty
@@ -810,7 +809,8 @@ spec = do
                 DestinationToSource
                 RefuseConflicts
                 [input]
+        sourcePath <- FileSystem.decodePath failurePaths.source
         executeReconciliationPlan plan
-          `shouldThrow` (\e -> ioeGetErrorType e == InappropriateType)
+          `shouldThrow` (\e -> ioeGetFileName e == Just sourcePath)
         FileSystem.readFile failurePaths.intermediate
           `shouldReturn` "recovery"
