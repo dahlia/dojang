@@ -1,5 +1,5 @@
 name: &name dojang
-version: 0.2.1
+version: 0.2.2
 synopsis: A cross-platform dotfiles manager
 description: See also the README.md file.
 homepage: https://dojang.dev/
