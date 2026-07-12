@@ -6,16 +6,20 @@
 module Dojang.Commands.Hook
   ( HookEnv (..)
   , executeHooks
+  , mergeHookEnvironment
   , shouldRunHook
   ) where
 
 import Control.Monad (forM_, unless)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
+import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
+import System.Info (os)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logError, logInfo)
+import Data.CaseInsensitive (mk)
 import Data.Map.Strict (lookup)
 import Data.Text (Text, pack, unpack)
 import System.Directory.OsPath (makeAbsolute)
@@ -64,6 +68,27 @@ shouldRunHook :: MonikerMap -> Environment -> Hook -> Bool
 shouldRunHook monikers environment hook =
   let (result, _) = evaluate environment monikers hook.condition
   in result
+
+
+-- | Overlay the variables supplied by Dojang on the parent environment.
+mergeHookEnvironment
+  :: String
+  -- ^ The host platform identifier from 'System.Info.os'.
+  -> [(String, String)]
+  -- ^ The variables supplied by Dojang.
+  -> [(String, String)]
+  -- ^ The parent process environment.
+  -> [(String, String)]
+  -- ^ The combined hook environment.
+mergeHookEnvironment platform envVars parentEnv =
+  envVars
+    ++ filter
+      (\(name, _) -> all (not . sameName name . fst) envVars)
+      parentEnv
+ where
+  sameName left right
+    | platform == "mingw32" = mk left == mk right
+    | otherwise = left == right
 
 
 -- | Execute all hooks of a given type.
@@ -135,11 +160,12 @@ executeHook hookEnv hook = do
             , ("DOJANG_OS", unpack hookEnv.currentOS)
             , ("DOJANG_ARCH", unpack hookEnv.currentArch)
             ]
+      parentEnv <- liftIO getEnvironment
 
       let createProc =
             (proc cmdPath argsStr)
               { cwd = workDir
-              , env = Just envVars
+              , env = Just $ mergeHookEnvironment os envVars parentEnv
               , delegate_ctlc = True
               }
 

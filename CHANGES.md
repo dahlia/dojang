@@ -7,6 +7,34 @@ Version 0.3.0
 To be released.
 
 
+Version 0.2.1
+-------------
+
+Released on July 12, 2026.
+
+ -  Fixed a bug where `dojang reflect` crashed after deleting the intermediate
+    copy when a managed file had been removed at its destination.
+    Destination-side deletions are now reflected to the source and can also be
+    selected by naming the deleted destination path explicitly.  [[#24]]
+
+ -  Fixed hook commands discarding the parent process environment.  Hooks now
+    inherit variables such as `PATH` and `HOME`, while the `DOJANG_*` variables
+    supplied by Dojang override any existing values.  This allows hook commands
+    and programs invoked by hook scripts to be found through `PATH` as
+    documented.  [[#25]]
+
+ -  Fixed `writeManifest` silently dropping file route predicates that could
+    not be represented by a moniker or that collided after moniker resolution.
+    It now returns a `WriteError`, and `writeManifestFile` raises an I/O error,
+    instead of writing an incomplete manifest.  When multiple monikers
+    represent the same predicate, the writer now selects the first name in a
+    deterministic order.  [[#26]]
+
+[#24]: https://github.com/dahlia/dojang/issues/24
+[#25]: https://github.com/dahlia/dojang/issues/25
+[#26]: https://github.com/dahlia/dojang/issues/26
+
+
 Version 0.2.0
 -------------
 

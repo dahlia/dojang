@@ -7,13 +7,13 @@ LABEL "org.opencontainers.image.licenses"="GPL-3.0-or-later"
 RUN apk add --no-cache \
         bash=5.3.3-r1 \
         build-base=0.5-r3 \
-        curl=8.17.0-r1 \
+        curl=8.19.0-r0 \
         gmp-dev=6.3.0-r4 \
         gmp-static=6.3.0-r4 \
         libffi-dev=3.5.2-r0 \
         ncurses-dev=6.5_p20251123-r0 \
-        zlib-dev=1.3.1-r2 \
-        zlib-static=1.3.1-r2
+        zlib-dev=1.3.2-r0 \
+        zlib-static=1.3.2-r0
 
 # Install ghcup, GHC 9.10.3, and cabal
 ENV BOOTSTRAP_HASKELL_NONINTERACTIVE=1

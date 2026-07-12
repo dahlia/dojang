@@ -1,8 +1,8 @@
 class Dojang < Formula
   desc "Cross-platform dotfiles manager"
   homepage "https://dojang.dev/"
-  url "https://github.com/dahlia/dojang/archive/refs/tags/0.2.0.tar.gz"
-  sha256 "3940739f311a6a80891cfb9e45d7b84f1acea8386171fa1e60bd8edd50d5ee39"
+  url "https://github.com/dahlia/dojang/archive/refs/tags/0.2.1.tar.gz"
+  sha256 "bc111a8f949ae38404286d2733e2265b4684b4a38cbdcf16ebb053503762e5ff"
   license "GPL-3.0-or-later"
 
   head do

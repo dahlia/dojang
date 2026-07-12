@@ -2,19 +2,57 @@
 python = "3.14"
 stack = "latest"
 
+[tools."github:fourmolu/fourmolu"]
+version = "0.20.0.0"
+# Fourmolu does not publish Windows binaries.
+os = ["linux", "macos"]
+
 [tools."github:dahlia/hongdown"]
-version = "0.4.3"
+version = "0.5.1"
 
 [tools."github:dahlia/hongdown".platforms]
 linux-x64 = "hongdown-*-x86_64-unknown-linux-musl.tar.bz2"
 linux-arm64 = "hongdown-*-aarch64-unknown-linux-musl.tar.bz2"
 
-[settings.python]
-default_packages_file = "doc/requirements.txt"
+[settings]
+experimental = true
+
+[env]
+_.python.venv = { path = ".venv", create = true, uv_create_args = ["--seed"] }
+
+[hooks]
+postinstall = [
+  "mise deps",
+  { task = "hooks:install" },
+]
+
+[deps.stack]
+auto = true
+description = "Install Haskell dependencies"
+sources = ["package.yaml", "stack.yaml", "stack.yaml.lock"]
+outputs = [".stack-work/"]
+run = "stack build --only-dependencies"
+
+[deps.python]
+auto = true
+description = "Install Python dependencies"
+sources = ["doc/requirements.txt"]
+outputs = [".venv/"]
+run = "python -m pip install --requirement doc/requirements.txt"
 
 [tasks.check]
 description = "Check code quality and documentation"
-depends = ["build:fast", "md:check", "doc:check"]
+depends = ["fmt:check", "build:fast", "doc:check"]
+
+[tasks.fmt]
+description = "Format Haskell and Markdown files"
+depends = ["md:fmt"]
+run = "fourmolu -i src/ app/ test/"
+
+[tasks."fmt:check"]
+description = "Check Haskell and Markdown files for formatting issues"
+depends = ["md:check"]
+run = "fourmolu --mode check src/ app/ test/"
 
 [tasks.build]
 description = "Build the project"

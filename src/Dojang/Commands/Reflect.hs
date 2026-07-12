@@ -244,13 +244,17 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
           liftIO $ exitWith userCancelledError
 reflect force allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
-  nonExistents <- filterM (fmap not . exists) paths
   pathStyle <- pathStyleFor stderr
-  unless (null nonExistents) $ do
-    dieWithErrors
-      fileNotFoundError
-      ["No such file: " <> pathStyle p <> "." | p <- nonExistents]
   absPaths <- liftIO $ mapM makeAbsolute paths
+  nonExistents <- filterM (fmap not . exists) absPaths
+  let rejectUntrackedMissingPath path (correspond :: FileCorrespondence) =
+        when
+          ( path `elem` nonExistents
+              && correspond.intermediate.stat == Missing
+          )
+          $ die'
+            fileNotFoundError
+            ("No such file: " <> pathStyle path <> ".")
   $(logDebugSH) (absPaths :: [OsPath])
   sourcePath' <- liftIO $ makeAbsolute ctx.repository.sourcePath
   let sourcePathPrefix = splitDirectories sourcePath'
@@ -287,15 +291,21 @@ reflect force allFlag _includeUnregistered explicitSource paths = do
     (state, ws) <- getRouteState ctx absPath
     case state of
       NotRouted -> do
-        manifestFile' <- asks (.manifestFile)
-        printWarnings ws
-        printStderr'
-          Error
-          ("File " <> pathStyle absPath <> " is not routed.")
-        printStderr'
-          Hint
-          ("Add a route for it in " <> pathStyle manifestFile' <> ".")
-        liftIO $ exitWith fileNotRoutedError
+        if absPath `elem` nonExistents
+          then
+            die'
+              fileNotFoundError
+              ("No such file: " <> pathStyle absPath <> ".")
+          else do
+            manifestFile' <- asks (.manifestFile)
+            printWarnings ws
+            printStderr'
+              Error
+              ("File " <> pathStyle absPath <> " is not routed.")
+            printStderr'
+              Hint
+              ("Add a route for it in " <> pathStyle manifestFile' <> ".")
+            liftIO $ exitWith fileNotRoutedError
       Routed _ -> do
         return ws
       Ignored name pattern -> do
@@ -342,6 +352,7 @@ reflect force allFlag _includeUnregistered explicitSource paths = do
         die' fileNotRoutedError ("File " <> pathStyle p <> " is not routed.")
       SingleMatch route -> do
         correspond <- makeCorrespondForRoute ctx p route
+        rejectUntrackedMissingPath p correspond
         return correspond
       AmbiguousMatch candidates -> do
         maybeRoute <- disambiguateRoutes autoSelectMode explicitSource candidates
@@ -367,6 +378,7 @@ reflect force allFlag _includeUnregistered explicitSource paths = do
             liftIO $ exitWith ambiguousRouteError
           Just route -> do
             correspond <- makeCorrespondForRoute ctx p route
+            rejectUntrackedMissingPath p correspond
             return correspond
   -- Combine directory files and individual file correspondences
   let allCorrespondences = dirFiles ++ fileCorrespondences
@@ -477,10 +489,15 @@ reflectCorrespondences force files = do
             <> " to "
             <> pathStyle c.source.path
             <> "..."
-        cleanup c.intermediate
-        copy c.destination c.intermediate
-        cleanup c.source
-        copy c.intermediate c.source
+        if c.destinationDelta == Removed
+          then do
+            cleanupExisting c.source
+            cleanupExisting c.intermediate
+          else do
+            cleanup c.intermediate
+            copy c.destination c.intermediate
+            cleanup c.source
+            copy c.intermediate c.source
 
 
 -- | Create a 'FileCorrespondence' from a route result and destination path.
@@ -526,6 +543,12 @@ cleanup fileEntry = do
     _ -> do
       $(logDebug) $ "Remove file: " <> pack path
       removeFile fileEntry.path
+
+
+cleanupExisting :: (MonadFileSystem i, MonadIO i) => FileEntry -> App i ()
+cleanupExisting fileEntry = do
+  pathExists <- (||) <$> exists fileEntry.path <*> isSymlink fileEntry.path
+  when pathExists $ cleanup fileEntry
 
 
 copy :: (MonadFileSystem i, MonadIO i) => FileEntry -> FileEntry -> App i ()
