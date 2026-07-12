@@ -20,6 +20,7 @@ module Dojang.Types.Reconciliation
   , SyncOp (..)
   , destructiveOperations
   , executeReconciliationPlan
+  , executeReconciliationPlanWith
   , executeSyncOp
   , isDestructiveSyncOp
   , observeReconciliationInput
@@ -559,9 +560,25 @@ executeReconciliationPlan
   -- ^ The plan to execute.
   -> m (Either (NonEmpty ReconciliationConflict) ())
   -- ^ Refused conflicts, or success after all ordered operations complete.
-executeReconciliationPlan plan =
+executeReconciliationPlan = executeReconciliationPlanWith $ const $ return ()
+
+
+-- | Executes a plan in order, invoking an observer immediately before each
+-- filesystem operation.  A refused conflict returns before the observer or
+-- filesystem is touched.
+executeReconciliationPlanWith
+  :: (MonadFileSystem m)
+  => (PlannedSyncOp -> m ())
+  -- ^ An action invoked immediately before each operation is executed.
+  -> ReconciliationPlan
+  -- ^ The plan to execute.
+  -> m (Either (NonEmpty ReconciliationConflict) ())
+  -- ^ Refused conflicts, or success after all ordered operations complete.
+executeReconciliationPlanWith observe plan =
   case (plan.conflictPolicy, NE.nonEmpty plan.conflicts) of
     (RefuseConflicts, Just conflicts) -> return $ Left conflicts
     _ -> do
-      forM_ plan.operations $ executeSyncOp . (.syncOp)
+      forM_ plan.operations $ \operation -> do
+        observe operation
+        executeSyncOp operation.syncOp
       return $ Right ()

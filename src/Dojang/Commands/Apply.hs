@@ -5,11 +5,10 @@
 
 module Dojang.Commands.Apply (apply) where
 
-import Control.Monad (filterM, forM, forM_, unless, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
-import Data.Function ((&))
-import Data.List (nub, sort)
+import Data.Text (Text, pack)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (hIsTerminalDevice, stderr, stdin)
 import Prelude hiding (readFile)
@@ -22,7 +21,6 @@ import System.Directory.OsPath (getHomeDirectory, makeAbsolute)
 import System.OsPath
   ( OsPath
   , addTrailingPathSeparator
-  , takeDirectory
   , (</>)
   )
 
@@ -30,7 +28,6 @@ import Dojang.App
   ( App
   , AppEnv (debug, dryRun, manifestFile, sourceDirectory)
   , ensureContext
-  , lookupEnv'
   )
 import Dojang.Commands
   ( Admonition (..)
@@ -47,23 +44,32 @@ import Dojang.ExitCodes
   , conflictError
   , fileNotRoutedError
   )
-import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
+import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
-  , FileDeltaKind (..)
   , FileEntry (..)
-  , FileStat (..)
   , RouteState (..)
-  , getRouteState
   , makeCorrespond
   )
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Hook (HookType (..))
 import Dojang.Types.Reconciliation
-  ( SyncOp (..)
-  , executeSyncOp
-  , isDestructiveSyncOp
+  ( ConflictPolicy (..)
+  , PlannedSyncOp (..)
+  , ReconciliationConflict (..)
+  , ReconciliationDirection (..)
+  , ReconciliationInput (..)
+  , ReconciliationItem (..)
+  , ReconciliationOutcome (..)
+  , ReconciliationPlan (..)
+  , ReconciliationSkipReason (..)
+  , Replica (..)
+  , SyncOp (..)
+  , destructiveOperations
+  , executeReconciliationPlanWith
+  , observeReconciliationInput
+  , planReconciliation
   )
 import Dojang.Types.Registry
   ( Registry (..)
@@ -128,11 +134,19 @@ apply force filePaths = do
             , srcAbsPath `elem` filePaths'
             ]
   $(logDebugSH) files
-  -- Check if there are any conflicts:
-  conflicts <- filterConflicts files
+  inputs <- mapM (observeSelectedReconciliationInput ctx) files
+  let conflictPolicy =
+        if force then PreferAuthoritative else RefuseConflicts
+  let plan =
+        planReconciliation SourceToDestination conflictPolicy inputs
+  let conflicts = plan.conflicts
   codeStyle <- codeStyleFor stderr
+  forM_ plan.items $ \item -> case item.outcome of
+    Skipped reason -> printSkippedReconciliation pathStyle item.correspondence reason
+    _ -> return ()
   unless (null conflicts) $ do
-    forM_ conflicts $ \c -> do
+    forM_ conflicts $ \conflict -> do
+      let c = conflict.correspondence
       printStderr' (if force then Warning else Error) $
         "There is a conflict between "
           <> pathStyle c.source.path
@@ -143,25 +157,13 @@ apply force filePaths = do
       "Use `"
         <> codeStyle "dojang diff"
         <> "' to see the actual changes on both sides."
-  -- Check if there are any accidental deletions:
-  let ops =
-        syncSourceToIntermediate
-          [ (fc.source, fc.intermediate, fc.sourceDelta)
-          | fc <- files
-          ]
-          & nub
-            . sort
-  shimOps <- liftIO $ dryRunIO $ do
-    forM_ ops executeSyncOp
-    let ctx' = Context ctx.repository ctx.environment lookupEnv'
-    (files', _) <- makeCorrespond ctx'
-    syncIntermediateToDestination
-      ctx'
-      [ (fc.intermediate, fc.destination, fc.destinationDelta)
-      | fc <- files'
-      ]
-  when (any isDestructiveSyncOp shimOps) $ do
-    forM_ shimOps $ \case
+  let destructiveDestinationOps =
+        [ operation.syncOp
+        | operation <- destructiveOperations plan
+        , operation.replica == DestinationReplica
+        ]
+  unless (null destructiveDestinationOps) $ do
+    forM_ destructiveDestinationOps $ \case
       RemoveDirs path -> do
         let path' = addTrailingPathSeparator path
         if force
@@ -191,7 +193,7 @@ apply force filePaths = do
         <> ")."
   -- Exit if there are any problems (unless forced):
   when
-    (not force && (not (null conflicts) || any isDestructiveSyncOp shimOps))
+    (not force && (not (null conflicts) || not (null destructiveDestinationOps)))
     $ do
       printStderr' Hint $
         "Use "
@@ -207,17 +209,11 @@ apply force filePaths = do
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ status defaultStatusOptions)
-  forM_ ops $ \path -> printSyncOp path >> executeSyncOp path
+  void $
+    executeReconciliationPlanWith
+      (printSyncOp . (.syncOp))
+      plan
   when debug' (void $ status defaultStatusOptions)
-  (files', _) <- makeCorrespond ctx
-  $(logDebugSH) files'
-  ops' <-
-    syncIntermediateToDestination
-      ctx
-      [ (fc.intermediate, fc.destination, fc.destinationDelta)
-      | fc <- files'
-      ]
-  forM_ (nub $ sort ops') $ \path -> printSyncOp path >> executeSyncOp path
   printWarnings ws
 
   -- Run post-apply hooks
@@ -259,26 +255,41 @@ apply force filePaths = do
   return ExitSuccess
 
 
--- TODO: This should be in another module:
-filterConflicts
+-- | Observes a correspondence that the command has already selected.  A
+-- tracked file remains managed even if its destination path also matches an
+-- ignore pattern.
+observeSelectedReconciliationInput
   :: (MonadFileSystem i, MonadIO i)
-  => [FileCorrespondence]
-  -> i [FileCorrespondence]
-filterConflicts = filterM $ \c -> case (c.sourceDelta, c.destinationDelta) of
-  (Unchanged, _) -> return False
-  (_, Unchanged) -> return False
-  (Removed, Removed) -> return False
-  (Added, Added) -> case (c.source.stat, c.destination.stat) of
-    (Directory, Directory) -> return False
-    (File srcSize, File dstSize) ->
-      if srcSize /= dstSize
-        then return True
-        else do
-          src <- readFile c.source.path
-          dst <- readFile c.destination.path
-          return (src /= dst)
-    _ -> return True
-  _ -> return True
+  => Context i
+  -> FileCorrespondence
+  -> i ReconciliationInput
+observeSelectedReconciliationInput ctx correspondence = do
+  input <- observeReconciliationInput ctx correspondence
+  return $ case input.destinationRouteState of
+    Ignored route _ -> input{destinationRouteState = Routed route}
+    _ -> input
+
+
+printSkippedReconciliation
+  :: (MonadIO i)
+  => (OsPath -> Text)
+  -> FileCorrespondence
+  -> ReconciliationSkipReason
+  -> App i ()
+printSkippedReconciliation pathStyle correspondence reason =
+  case reason of
+    IgnoredDestination _ pattern ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle correspondence.destination.path
+          <> " because it is ignored by pattern "
+          <> pack (show pattern)
+          <> "."
+    UnsupportedSymlink ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle correspondence.source.path
+          <> " because symbolic link synchronization is not supported."
 
 
 printSyncOp :: (MonadIO i) => SyncOp -> App i ()
@@ -301,57 +312,3 @@ printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
-
-
-syncSourceToIntermediate
-  :: [(FileEntry, FileEntry, FileDeltaKind)]
-  -> [SyncOp]
-syncSourceToIntermediate files =
-  concat
-    [ case delta of
-        Unchanged -> []
-        Removed ->
-          if to.stat == Directory
-            then [RemoveDirs to.path]
-            else [RemoveFile to.path]
-        Modified ->
-          case (from.stat, to.stat) of
-            (Directory, _) -> [RemoveFile to.path, CreateDir to.path]
-            (_, Directory) -> [RemoveDirs to.path, CopyFile from.path to.path]
-            _ -> [CopyFile from.path to.path]
-        Added ->
-          if from.stat == Directory
-            then [CreateDirs to.path]
-            else [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
-    | (from, to, delta) <- files
-    ]
-
-
-syncIntermediateToDestination
-  :: (MonadFileSystem i, MonadIO i)
-  => Context i
-  -> [(FileEntry, FileEntry, FileDeltaKind)]
-  -> i [SyncOp]
-syncIntermediateToDestination ctx files =
-  (fmap concat . sequence)
-    [ case delta of
-        Unchanged -> return []
-        Removed ->
-          if from.stat == Directory
-            then return [CreateDirs to.path]
-            else return [CreateDirs $ takeDirectory to.path, CopyFile from.path to.path]
-        Modified ->
-          case (from.stat, to.stat) of
-            (Directory, _) -> return [RemoveFile to.path, CreateDir to.path]
-            (_, Directory) -> return [RemoveDirs to.path, CopyFile from.path to.path]
-            _ -> return [CopyFile from.path to.path]
-        Added -> do
-          (state, _) <- getRouteState ctx to.path
-          case state of
-            Ignored _ _ -> return []
-            _ ->
-              if to.stat == Directory
-                then return [RemoveDirs to.path]
-                else return [RemoveFile to.path]
-    | (from, to, delta) <- files
-    ]

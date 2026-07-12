@@ -596,9 +596,9 @@ instance MonadFileSystem DryRunIO where
       (Nothing, _) | not parentIsDir -> throwError $ notInsideDirError dst'
       (_, Just ((_, Contents _) :| _)) -> throwError $ dstIsFileError dst'
       (_, Just ((_, Copied _) :| _)) -> throwError $ dstIsFileError dst'
-      (Nothing, _) | isFile' -> throwError $ dstIsFileError dst'
+      (_, Nothing) | isFile' -> throwError $ dstIsFileError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
-      _ | isDir && not isSymlink' -> throwError $ dstIsDirError dst'
+      (_, Nothing) | isDir && not isSymlink' -> throwError $ dstIsDirError dst'
       _ -> do
         addChangeToFile dst Directory'
         return ()

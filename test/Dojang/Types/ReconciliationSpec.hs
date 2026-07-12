@@ -7,15 +7,22 @@
 
 module Dojang.Types.ReconciliationSpec (spec) where
 
+import System.IO.Error (ioeGetErrorType)
 import System.OsPath (OsPath, encodeFS, takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, runIO)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import GHC.IO.Exception (IOErrorType (InappropriateType))
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
-import Test.Hspec.Expectations.Pretty (shouldReturn, shouldSatisfy)
+import Test.Hspec.Expectations.Pretty
+  ( shouldReturn
+  , shouldSatisfy
+  , shouldThrow
+  )
 import Test.Hspec.Hedgehog (MonadGen, forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem qualified as FileSystem
@@ -44,6 +51,7 @@ import Dojang.Types.Reconciliation
   , SyncOp (..)
   , destructiveOperations
   , executeReconciliationPlan
+  , executeReconciliationPlanWith
   , executeSyncOp
   , observeReconciliationInput
   , planReconciliation
@@ -688,6 +696,37 @@ spec = do
       FileSystem.readFile executionPaths.intermediate `shouldReturn` "contents"
       FileSystem.readFile executionPaths.destination `shouldReturn` "contents"
 
+    it "observes each operation immediately before execution" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "source-file"
+        intermediateName <- encodeFS "intermediate-file"
+        destinationName <- encodeFS "destination-file"
+        let executionPaths =
+              Paths
+                { source = tmpDir </> sourceName
+                , intermediate = tmpDir </> intermediateName
+                , destination = tmpDir </> destinationName
+                }
+        FileSystem.writeFile executionPaths.source "contents"
+        let input =
+              makeInput
+                executionPaths
+                (File 8)
+                Missing
+                Missing
+                Added
+                Unchanged
+                ReplicasDifferent
+                routed
+        let plan =
+              planReconciliation SourceToDestination RefuseConflicts [input]
+        observed <- newIORef []
+        executeReconciliationPlanWith
+          (modifyIORef' observed . (:))
+          plan
+          `shouldReturn` Right ()
+        reverse <$> readIORef observed `shouldReturn` plan.operations
+
     it "refuses the whole plan before any mutation" $ withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source-file"
       intermediateName <- encodeFS "intermediate-file"
@@ -731,9 +770,47 @@ spec = do
               SourceToDestination
               RefuseConflicts
               [addition, conflict]
-      result <- executeReconciliationPlan plan
+      observed <- newIORef []
+      result <-
+        executeReconciliationPlanWith
+          (modifyIORef' observed . (:))
+          plan
       result `shouldSatisfy` \case
         Left _ -> True
         Right _ -> False
+      readIORef observed `shouldReturn` []
       FileSystem.exists additionPaths.intermediate `shouldReturn` False
       FileSystem.exists additionPaths.destination `shouldReturn` False
+
+    it "keeps the recovery copy when the overwritten replica cannot be removed" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "source"
+        intermediateName <- encodeFS "intermediate"
+        destinationName <- encodeFS "destination"
+        let failurePaths =
+              Paths
+                { source = tmpDir </> sourceName
+                , intermediate = tmpDir </> intermediateName
+                , destination = tmpDir </> destinationName
+                }
+        FileSystem.createDirectories failurePaths.source
+        FileSystem.writeFile failurePaths.intermediate "recovery"
+        let input =
+              makeInput
+                failurePaths
+                (File 8)
+                (File 8)
+                Missing
+                Unchanged
+                Removed
+                ReplicasDifferent
+                routed
+        let plan =
+              planReconciliation
+                DestinationToSource
+                RefuseConflicts
+                [input]
+        executeReconciliationPlan plan
+          `shouldThrow` (\e -> ioeGetErrorType e == InappropriateType)
+        FileSystem.readFile failurePaths.intermediate
+          `shouldReturn` "recovery"
