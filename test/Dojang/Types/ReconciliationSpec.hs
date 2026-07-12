@@ -451,6 +451,23 @@ spec = do
       fmap (.outcome) plan.items
         `shouldBe` [Skipped $ IgnoredDestination route "ignored"]
 
+    it "does not reflect an ignored destination" $ do
+      let input =
+            makeInput
+              paths
+              Missing
+              Missing
+              (File 3)
+              Unchanged
+              Added
+              ReplicasDifferent
+              (Ignored route "ignored")
+      let plan =
+            planReconciliation DestinationToSource RefuseConflicts [input]
+      plan.operations `shouldBe` []
+      fmap (.outcome) plan.items
+        `shouldBe` [Skipped $ IgnoredDestination route "ignored"]
+
     it "collapses descendant work under a recursive replacement" $ do
       tree <- encodeFS "tree"
       child <- encodeFS "child"

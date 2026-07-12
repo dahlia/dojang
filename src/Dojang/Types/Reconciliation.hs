@@ -328,6 +328,7 @@ planSupportedInput
   -> ReconciliationInput
   -> (ReconciliationOutcome, [TaggedOperation])
 planSupportedInput direction input
+  | Just reason <- ignoredAuthoritative = (Skipped reason, [])
   | isSymlinkStat authoritative.stat
       && (authoritativeDelta /= Unchanged || targetNeedsUpdate) =
       (Skipped UnsupportedSymlink, [])
@@ -351,6 +352,12 @@ planSupportedInput direction input
         )
   targetNeedsUpdate =
     input.sourceDestinationComparison == ReplicasDifferent
+  ignoredAuthoritative =
+    case (direction, input.destinationRouteState) of
+      (DestinationToSource, Ignored route pattern)
+        | authoritativeDelta /= Unchanged || targetNeedsUpdate ->
+            Just $ IgnoredDestination route pattern
+      _ -> Nothing
   planRemoval :: (ReconciliationOutcome, [TaggedOperation])
   planRemoval =
     let ignored = case (direction, input.destinationRouteState) of
