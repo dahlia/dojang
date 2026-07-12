@@ -1,9 +1,9 @@
 cask "dojang" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.1.0"
-  sha256 arm:   "c5e221b577c2e7734b9f65c09365fae92a8a8fcc1312a00f174d092843cbc4ee",
-         intel: "e923d1dadb96a39b37747992567feaf2716b6c3a43dbc0efabf2dc1b60323342"
+  version "0.2.1"
+  sha256 arm:   "5ec6d9c35def97cb75440cb9b6de08e884f275c72f1b52eb930c74ac7b894ba0",
+         intel: "c89e475712ab4f66569299355febf5e18e510aab7a63365e8d58017feb1041de"
 
   url "https://github.com/dahlia/dojang/releases/download/#{version}/dojang-#{version}-macos-#{arch}.tar.xz"
   name "Dojang (binary)"
