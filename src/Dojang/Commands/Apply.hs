@@ -60,7 +60,11 @@ import Dojang.Types.Context
   )
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Hook (HookType (..))
-import Dojang.Types.Reconciliation (SyncOp (..), executeSyncOp)
+import Dojang.Types.Reconciliation
+  ( SyncOp (..)
+  , executeSyncOp
+  , isDestructiveSyncOp
+  )
 import Dojang.Types.Registry
   ( Registry (..)
   , readRegistry
@@ -156,7 +160,7 @@ apply force filePaths = do
       [ (fc.intermediate, fc.destination, fc.destinationDelta)
       | fc <- files'
       ]
-  when (any isDeletion shimOps) $ do
+  when (any isDestructiveSyncOp shimOps) $ do
     forM_ shimOps $ \case
       RemoveDirs path -> do
         let path' = addTrailingPathSeparator path
@@ -186,18 +190,20 @@ apply force filePaths = do
         <> pathStyle manifestFile'
         <> ")."
   -- Exit if there are any problems (unless forced):
-  when (not force && (not (null conflicts) || any isDeletion shimOps)) $ do
-    printStderr' Hint $
-      "Use "
-        <> codeStyle "-f"
-        <> "/"
-        <> codeStyle "--force"
-        <> " to ignore these warnings and go ahead."
-    liftIO $
-      exitWith $
-        if not (null conflicts)
-          then conflictError
-          else accidentalDeletionWarning
+  when
+    (not force && (not (null conflicts) || any isDestructiveSyncOp shimOps))
+    $ do
+      printStderr' Hint $
+        "Use "
+          <> codeStyle "-f"
+          <> "/"
+          <> codeStyle "--force"
+          <> " to ignore these warnings and go ahead."
+      liftIO $
+        exitWith $
+          if not (null conflicts)
+            then conflictError
+            else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ status defaultStatusOptions)
@@ -251,11 +257,6 @@ apply force filePaths = do
                 return True
           when proceed $ writeRegistry registryPath $ Registry currentRepo
   return ExitSuccess
- where
-  isDeletion :: SyncOp -> Bool
-  isDeletion (RemoveDirs _) = True
-  isDeletion (RemoveFile _) = True
-  isDeletion _ = False
 
 
 -- TODO: This should be in another module:
