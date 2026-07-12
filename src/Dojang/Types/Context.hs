@@ -1,6 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -39,7 +38,6 @@ import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( ioeSetErrorString
-  , ioeSetFileName
   , isPermissionError
   , mkIOError
   )
@@ -136,6 +134,72 @@ data FileEntry = FileEntry
 -- | The kind of change that was made to a file.
 data FileDeltaKind = Unchanged | Added | Removed | Modified
   deriving (Eq, Ord, Show)
+
+
+-- | Observes the state of a filesystem entry without following symbolic links.
+observeFileStat
+  :: (HasCallStack, MonadFileSystem m)
+  => OsPath
+  -> m FileStat
+observeFileStat path = do
+  isSymlink' <- isSymlink path
+  if isSymlink'
+    then observeKnownFileStat Dojang.MonadFileSystem.Symlink path
+    else do
+      isDirectory' <- isDirectory path
+      if isDirectory'
+        then observeKnownFileStat Dojang.MonadFileSystem.Directory path
+        else do
+          isFile' <- isFile path
+          if isFile'
+            then observeKnownFileStat Dojang.MonadFileSystem.File path
+            else return Missing
+
+
+-- | Converts a known filesystem entry type to its observed state.
+observeKnownFileStat
+  :: (HasCallStack, MonadFileSystem m)
+  => Dojang.MonadFileSystem.FileType
+  -> OsPath
+  -> m FileStat
+observeKnownFileStat Dojang.MonadFileSystem.Directory _ = return Directory
+observeKnownFileStat Dojang.MonadFileSystem.File path = File <$> getFileSize path
+observeKnownFileStat Dojang.MonadFileSystem.Symlink path =
+  Symlink <$> readSymlinkTarget path
+
+
+-- | Calculates how a current filesystem entry differs from its intermediate
+-- state.
+calculateFileDelta
+  :: (HasCallStack, MonadFileSystem m)
+  => FileEntry
+  -> FileEntry
+  -> m FileDeltaKind
+calculateFileDelta (FileEntry _ Missing) (FileEntry _ Missing) =
+  return Unchanged
+calculateFileDelta (FileEntry _ Missing) (FileEntry _ _) = return Added
+calculateFileDelta (FileEntry _ _) (FileEntry _ Missing) = return Removed
+calculateFileDelta (FileEntry _ Directory) (FileEntry _ Directory) =
+  return Unchanged
+calculateFileDelta
+  (FileEntry _ (Symlink intermediateTarget))
+  (FileEntry _ (Symlink currentTarget)) =
+    return $
+      if intermediateTarget == currentTarget
+        then Unchanged
+        else Modified
+calculateFileDelta
+  intermediateEntry@(FileEntry _ (File intermediateSize))
+  currentEntry@(FileEntry _ (File currentSize))
+    | intermediateSize /= currentSize = return Modified
+    | otherwise = do
+        intermediateContents <- readFile intermediateEntry.path
+        currentContents <- readFile currentEntry.path
+        return $
+          if intermediateContents == currentContents
+            then Unchanged
+            else Modified
+calculateFileDelta _ _ = return Modified
 
 
 -- | A correspondence between a source file, an intermediate file, and
@@ -273,14 +337,14 @@ makeCorrespondBetweenThreeFiles
   -> OsPath
   -> m FileCorrespondence
 makeCorrespondBetweenThreeFiles intermediatePath srcPath dstPath = do
-  interStat <- getFileStat intermediatePath
+  interStat <- observeFileStat intermediatePath
   let interEntry = FileEntry intermediatePath interStat
-  srcStat <- getFileStat srcPath
+  srcStat <- observeFileStat srcPath
   let srcEntry = FileEntry srcPath srcStat
-  srcDelta <- getDelta interEntry srcEntry
-  dstStat <- getFileStat dstPath
+  srcDelta <- calculateFileDelta interEntry srcEntry
+  dstStat <- observeFileStat dstPath
   let dstEntry = FileEntry dstPath dstStat
-  dstDelta <- getDelta interEntry dstEntry
+  dstDelta <- calculateFileDelta interEntry dstEntry
   return
     FileCorrespondence
       { source = srcEntry
@@ -289,40 +353,6 @@ makeCorrespondBetweenThreeFiles intermediatePath srcPath dstPath = do
       , destination = dstEntry
       , destinationDelta = dstDelta
       }
- where
-  getFileStat :: OsPath -> m FileStat
-  getFileStat path = do
-    isDir <- isDirectory path
-    when isDir $ do
-      path' <- decodePath path
-      throwError $
-        userError
-          ( "makeCorrespondBetweenThreeFiles: "
-              ++ "expected a file, but got a directory"
-          )
-          `ioeSetFileName` path'
-    exists' <- exists path
-    if exists'
-      then do
-        size <- getFileSize path
-        return $ File size
-      else return Missing
-  getDelta :: FileEntry -> FileEntry -> m FileDeltaKind
-  getDelta (FileEntry _ Missing) (FileEntry _ Missing) = return Unchanged
-  getDelta (FileEntry _ Missing) (FileEntry _ _) = return Added
-  getDelta (FileEntry _ File{}) (FileEntry _ Missing) = return Removed
-  getDelta (FileEntry _ Symlink{}) (FileEntry _ Missing) = return Removed
-  getDelta (FileEntry _ (Symlink path)) (FileEntry _ (Symlink path')) =
-    if path == path'
-      then return Unchanged
-      else return Modified
-  getDelta interEntry targetEntry =
-    if interEntry.stat /= targetEntry.stat
-      then return Modified
-      else do
-        interData <- readFile interEntry.path
-        targetData <- readFile targetEntry.path
-        return $ if interData == targetData then Unchanged else Modified
 
 
 makeCorrespondBetweenThreeDirs
@@ -343,20 +373,20 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
     (interEntry, srcEntry, srcDelta) <- case srcEntries !? path of
       Nothing -> return (missing, missing, Unchanged)
       Just (interEntry', srcEntry') -> do
-        delta <-
-          getDelta path srcPath interEntry'.stat srcEntry'.stat
+        delta <- getDelta path srcPath interEntry' srcEntry'
         return (interEntry', srcEntry', delta)
     (interEntry2, dstEntry, dstDelta) <- case dstEntries !? path of
       Nothing -> return (missing, missing, Unchanged)
       Just (interEntry', dstEntry') -> do
-        delta <- getDelta path dstPath interEntry'.stat dstEntry'.stat
+        delta <- getDelta path dstPath interEntry' dstEntry'
         return (interEntry', dstEntry', delta)
     (dstEntry', dstDelta') <-
       if null ignores || dstEntry.stat /= Missing
         then return (dstEntry, dstDelta)
         else do
-          actualDstStat <- getFileStat (dstPath </> path)
-          actualDelta <- getDelta path dstPath interEntry2.stat actualDstStat
+          actualDstStat <- observeFileStat (dstPath </> path)
+          let actualDstEntry = FileEntry path actualDstStat
+          actualDelta <- getDelta path dstPath interEntry2 actualDstEntry
           return (dstEntry{stat = actualDstStat}, actualDelta)
     return $
       FileCorrespondence
@@ -375,49 +405,15 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
     -- \^ The relative path to the file.
     -> OsPath
     -- \^ The path to the target directory.
-    -> FileStat
-    -- \^ An intermediate file stat.
-    -> FileStat
-    -- \^ A target (source or destination) file stat.
+    -> FileEntry
+    -- \^ An intermediate file entry.
+    -> FileEntry
+    -- \^ A target (source or destination) file entry.
     -> m FileDeltaKind
-  getDelta _ _ Directory Directory = return Unchanged
-  getDelta _ _ Directory Missing = return Removed
-  getDelta _ _ Directory _ = return Modified
-  getDelta path targetPath (File size) (File size') =
-    if size /= size'
-      then return Modified
-      else do
-        interData <- readFile (intermediatePath </> path)
-        targetData <- readFile (targetPath </> path)
-        return $ if interData == targetData then Unchanged else Modified
-  getDelta _ _ (File _) Missing = return Removed
-  getDelta _ _ (File _) _ = return Modified
-  getDelta _ _ (Symlink path) (Symlink path') =
-    if path == path'
-      then return Unchanged
-      else return Modified
-  getDelta _ _ (Symlink _) Missing = return Added
-  getDelta _ _ (Symlink _) _ = return Modified
-  getDelta _ _ Missing Missing = return Unchanged
-  getDelta _ _ Missing _ = return Added
-  getFileStat :: OsPath -> m FileStat
-  getFileStat path' = do
-    isSym <- isSymlink path'
-    if isSym
-      then do
-        target <- readSymlinkTarget path'
-        return $ Symlink target
-      else do
-        isDir <- isDirectory path'
-        if isDir
-          then return Directory
-          else do
-            isFle <- isFile path'
-            if isFle
-              then do
-                size <- getFileSize path'
-                return $ File size
-              else return Missing
+  getDelta path targetPath intermediateEntry targetEntry =
+    calculateFileDelta
+      intermediateEntry{path = intermediatePath </> path}
+      targetEntry{path = targetPath </> path}
 
 
 makeCorrespondBetweenTwoDirs
@@ -490,15 +486,9 @@ listFiles path ignorePatterns = do
           if isPermissionError e
             then return []
             else throwError e
-      forM entries $ \case
-        (Dojang.MonadFileSystem.Directory, d) ->
-          return $ FileEntry d Directory
-        (Dojang.MonadFileSystem.File, f) -> do
-          size <- getFileSize $ path </> f
-          return $ FileEntry f $ File size
-        (Dojang.MonadFileSystem.Symlink, s) -> do
-          target <- readSymlinkTarget $ path </> s
-          return $ FileEntry s $ Symlink target
+      forM entries $ \(fileType, entryPath) -> do
+        stat <- observeKnownFileStat fileType $ path </> entryPath
+        return $ FileEntry entryPath stat
     else return []
 
 
@@ -697,7 +687,7 @@ getIgnoredFiles ctx = do
           then return []
           else do
             -- List all files (including those that would be ignored)
-            allFiles <- listFilesWithoutIgnore route.destinationPath
+            allFiles <- listFiles route.destinationPath []
             -- Find which files match ignore patterns
             forM allFiles $ \entry -> do
               relPath <- decodePath entry.path
@@ -717,27 +707,6 @@ getIgnoredFiles ctx = do
  where
   ignorePatterns :: Map OsPath [FilePattern]
   ignorePatterns = ctx.repository.manifest.ignorePatterns
-
-  listFilesWithoutIgnore :: OsPath -> m [FileEntry]
-  listFilesWithoutIgnore path = do
-    exists' <- exists path
-    if exists'
-      then do
-        entries <-
-          listDirectoryRecursively path [] `catchError` \e ->
-            if isPermissionError e
-              then return []
-              else throwError e
-        forM entries $ \case
-          (Dojang.MonadFileSystem.Directory, d) ->
-            return $ FileEntry d Directory
-          (Dojang.MonadFileSystem.File, f) -> do
-            size <- getFileSize $ path </> f
-            return $ FileEntry f $ File size
-          (Dojang.MonadFileSystem.Symlink, s) -> do
-            target <- readSymlinkTarget $ path </> s
-            return $ FileEntry s $ Symlink target
-      else return []
 
 
 -- | Represents a file that is not registered in any route.
@@ -774,7 +743,7 @@ getUnregisteredFiles ctx = do
   unregisteredLists <- forM routes $ \route ->
     case route.fileType of
       Dojang.MonadFileSystem.Directory -> do
-        allFiles <- listFilesInDir route.destinationPath
+        allFiles <- listFiles route.destinationPath []
         let unregistered =
               [ f
               | f <- allFiles
@@ -791,29 +760,7 @@ getUnregisteredFiles ctx = do
               , candidateRoutes = candidates
               }
       _ -> return []
-
   return $ concat unregisteredLists
- where
-  listFilesInDir :: OsPath -> m [FileEntry]
-  listFilesInDir path = do
-    exists' <- exists path
-    if exists'
-      then do
-        entries <-
-          listDirectoryRecursively path [] `catchError` \e ->
-            if isPermissionError e
-              then return []
-              else throwError e
-        forM entries $ \case
-          (Dojang.MonadFileSystem.Directory, d) ->
-            return $ FileEntry d Directory
-          (Dojang.MonadFileSystem.File, f) -> do
-            size <- getFileSize $ path </> f
-            return $ FileEntry f $ File size
-          (Dojang.MonadFileSystem.Symlink, s) -> do
-            target <- readSymlinkTarget $ path </> s
-            return $ FileEntry s $ Symlink target
-      else return []
 
 
 -- | Finds candidate routes for an unregistered file.
