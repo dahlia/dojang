@@ -6,22 +6,29 @@
 
 module Dojang.Types.ContextSpec (spec) where
 
-import Data.List (isInfixOf, sort, sortOn)
+import Control.Monad (forM_)
+import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.List (find, isInfixOf, sort, sortOn)
 import System.IO.Error
-  ( ioeGetErrorString
-  , ioeGetErrorType
+  ( ioeGetErrorType
   , ioeGetFileName
   , ioeGetLocation
   )
 import Prelude hiding (readFile, writeFile)
 
+import Control.Monad.Except (MonadError (catchError))
 import Data.ByteString qualified (length)
+import Data.ByteString qualified as ByteString
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map, fromList)
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range (linear)
+import System.Directory.OsPath (createDirectoryLink, createFileLink)
 import System.FilePath (combine)
 import System.OsPath (OsPath, encodeFS, (</>))
-import Test.Hspec (Spec, describe, it, runIO, specify)
+import Test.Hspec (Spec, describe, it, runIO, specify, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Test.Hspec.Hedgehog (MonadGen, forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
@@ -67,6 +74,119 @@ import Dojang.Types.Repository
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 
 
+data TestFileState
+  = TestMissing
+  | TestDirectory
+  | TestFile ByteString.ByteString
+  | TestSymlink TestLinkTarget
+  deriving (Eq, Show)
+
+
+data TestLinkTarget = TestFileTarget | TestDirectoryTarget
+  deriving (Eq, Show)
+
+
+expectedDelta :: TestFileState -> TestFileState -> FileDeltaKind
+expectedDelta TestMissing TestMissing = Unchanged
+expectedDelta TestMissing _ = Added
+expectedDelta _ TestMissing = Removed
+expectedDelta TestDirectory TestDirectory = Unchanged
+expectedDelta (TestFile a) (TestFile b)
+  | a == b = Unchanged
+  | otherwise = Modified
+expectedDelta (TestSymlink a) (TestSymlink b)
+  | a == b = Unchanged
+  | otherwise = Modified
+expectedDelta _ _ = Modified
+
+
+testFileState :: (MonadGen m) => Bool -> m TestFileState
+testFileState symlinkAvailable =
+  Gen.choice $
+    [ return TestMissing
+    , return TestDirectory
+    , TestFile <$> Gen.bytes (linear 0 64)
+    ]
+      ++ [ TestSymlink
+             <$> Gen.element
+               ([TestFileTarget, TestDirectoryTarget] :: [TestLinkTarget])
+         | symlinkAvailable
+         ]
+
+
+observeTransitionBothWays
+  :: TestFileState
+  -> TestFileState
+  -> IO (FileDeltaKind, FileDeltaKind)
+observeTransitionBothWays intermediateState currentState =
+  withTempDir $ \tmpDir _ -> do
+    inter <- encodePath "inter"
+    src <- encodePath "src"
+    dst <- encodePath "dst"
+    interDir <- encodePath "inter-dir"
+    srcDir <- encodePath "src-dir"
+    dstDir <- encodePath "dst-dir"
+    entry <- encodePath "entry"
+    fileTarget <- encodePath "file-target"
+    directoryTarget <- encodePath "directory-target"
+    let fileTargetPath = tmpDir </> fileTarget
+    let directoryTargetPath = tmpDir </> directoryTarget
+    writeFile fileTargetPath "target"
+    createDirectory directoryTargetPath
+    createDirectory $ tmpDir </> interDir
+    createDirectory $ tmpDir </> srcDir
+    createDirectory $ tmpDir </> dstDir
+    materializeState
+      fileTargetPath
+      directoryTargetPath
+      (tmpDir </> inter)
+      intermediateState
+    materializeState
+      fileTargetPath
+      directoryTargetPath
+      (tmpDir </> src)
+      currentState
+    materializeState
+      fileTargetPath
+      directoryTargetPath
+      (tmpDir </> interDir </> entry)
+      intermediateState
+    materializeState
+      fileTargetPath
+      directoryTargetPath
+      (tmpDir </> srcDir </> entry)
+      currentState
+    single <-
+      makeCorrespondBetweenThreeFiles
+        (tmpDir </> inter)
+        (tmpDir </> src)
+        (tmpDir </> dst)
+    directory <-
+      makeCorrespondBetweenThreeDirs
+        (tmpDir </> interDir)
+        (tmpDir </> srcDir)
+        (tmpDir </> dstDir)
+        []
+    let directoryDelta =
+          maybe Unchanged (.sourceDelta) $
+            find ((== entry) . (.source.path)) directory
+    return (single.sourceDelta, directoryDelta)
+ where
+  materializeState
+    :: OsPath
+    -> OsPath
+    -> OsPath
+    -> TestFileState
+    -> IO ()
+  materializeState _ _ _ TestMissing = return ()
+  materializeState _ _ path TestDirectory = createDirectory path
+  materializeState _ _ path (TestFile contents) = writeFile path contents
+  materializeState fileTarget _ path (TestSymlink TestFileTarget) =
+    createFileLink fileTarget path
+  materializeState _ directoryTarget path (TestSymlink TestDirectoryTarget) =
+    createDirectoryLink directoryTarget path
+
+
 spec :: Spec
 spec = do
   src <- runIO $ encodeFS "src"
@@ -81,6 +201,15 @@ spec = do
   corge <- runIO $ encodeFS "corge"
   intermediateDir <- runIO $ encodeFS ".dojang"
   manifestFilename' <- runIO $ encodeFS "dojang.toml"
+
+  symlinkAvailable <- runIO $ withTempDir $ \tmpDir _ ->
+    ( do
+        writeFile (tmpDir </> foo) ""
+        createFileLink (tmpDir </> foo) (tmpDir </> bar)
+        return True
+    )
+      `catchError` const (return False)
+  let symIt = if symlinkAvailable then it else xit
 
   let Right posix = parseMonikerName "posix"
   let Right undefined' = parseMonikerName "undefined"
@@ -390,15 +519,104 @@ spec = do
         , destinationDelta = Removed
         }
 
-    writeFile (tmpDir </> inter) "dir is disallowed"
+    writeFile (tmpDir </> inter) "file to directory"
     createDirectory (tmpDir </> src)
-    filename <- decodePath $ tmpDir </> src
-    makeCorrespond_ `shouldThrow` \e ->
-      ( ioeGetErrorString e
-          == "makeCorrespondBetweenThreeFiles: "
-            ++ "expected a file, but got a directory"
-      )
-        && (ioeGetFileName e == Just filename)
+    makeCorrespond_
+      `shouldReturn` FileCorrespondence
+        { source = FileEntry (tmpDir </> src) Directory
+        , sourceDelta = Modified
+        , intermediate = FileEntry (tmpDir </> inter) $ File 17
+        , destination = FileEntry (tmpDir </> dst) Missing
+        , destinationDelta = Removed
+        }
+
+  describe "file delta semantics" $ do
+    let representativeStates =
+          [TestMissing, TestDirectory, TestFile "contents"]
+            ++ if symlinkAvailable
+              then
+                [ TestSymlink TestFileTarget
+                , TestSymlink TestDirectoryTarget
+                ]
+              else []
+    forM_ representativeStates $ \intermediateState ->
+      forM_ representativeStates $ \currentState ->
+        it
+          ( "classifies "
+              ++ show intermediateState
+              ++ " to "
+              ++ show currentState
+          )
+          $ do
+            (singleDelta, directoryDelta) <-
+              observeTransitionBothWays intermediateState currentState
+            let expected = expectedDelta intermediateState currentState
+            singleDelta `shouldBe` expected
+            directoryDelta `shouldBe` expected
+
+    it "keeps single-file and directory deltas equivalent" $ hedgehog $ do
+      intermediateState <- forAll $ testFileState symlinkAvailable
+      currentState <- forAll $ testFileState symlinkAvailable
+      (singleDelta, directoryDelta) <-
+        liftIO $ observeTransitionBothWays intermediateState currentState
+      let expected = expectedDelta intermediateState currentState
+      singleDelta === expected
+      directoryDelta === expected
+
+    it "compares arbitrary equal file contents" $ hedgehog $ do
+      contents <- forAll $ Gen.bytes (linear 0 64)
+      (singleDelta, directoryDelta) <-
+        liftIO $
+          observeTransitionBothWays
+            (TestFile contents)
+            (TestFile contents)
+      singleDelta === Unchanged
+      directoryDelta === Unchanged
+
+    it "compares arbitrary unequal same-size file contents" $ hedgehog $ do
+      prefix <- forAll $ Gen.bytes (linear 0 63)
+      let intermediateContents = prefix <> ByteString.singleton 0
+      let currentContents = prefix <> ByteString.singleton 1
+      (singleDelta, directoryDelta) <-
+        liftIO $
+          observeTransitionBothWays
+            (TestFile intermediateContents)
+            (TestFile currentContents)
+      singleDelta === Modified
+      directoryDelta === Modified
+
+    symIt "observes symlinks without following their targets" $
+      withTempDir $ \tmpDir _ -> do
+        fileTarget <- encodePath "file-target"
+        directoryTarget <- encodePath "directory-target"
+        interLink <- encodePath "inter-link"
+        srcLink <- encodePath "src-link"
+        dstLink <- encodePath "dst-link"
+        writeFile (tmpDir </> fileTarget) "target"
+        createDirectory $ tmpDir </> directoryTarget
+        createFileLink (tmpDir </> fileTarget) (tmpDir </> interLink)
+        createFileLink (tmpDir </> fileTarget) (tmpDir </> srcLink)
+        createDirectoryLink
+          (tmpDir </> directoryTarget)
+          (tmpDir </> dstLink)
+        correspond <-
+          makeCorrespondBetweenThreeFiles
+            (tmpDir </> interLink)
+            (tmpDir </> srcLink)
+            (tmpDir </> dstLink)
+        correspond
+          `shouldBe` FileCorrespondence
+            { source =
+                FileEntry (tmpDir </> srcLink) $ Symlink (tmpDir </> fileTarget)
+            , sourceDelta = Unchanged
+            , intermediate =
+                FileEntry (tmpDir </> interLink) $ Symlink (tmpDir </> fileTarget)
+            , destination =
+                FileEntry
+                  (tmpDir </> dstLink)
+                  (Symlink $ tmpDir </> directoryTarget)
+            , destinationDelta = Modified
+            }
 
   specify "makeCorrespondBetweenThreeDirs" $ withTempDir $ \tmpDir _ -> do
     () <-

@@ -6,6 +6,14 @@ Version 0.3.0
 
 To be released.
 
+ -  Unified file-state observation and delta calculation for single-file and
+    directory routes.  Dojang now detects symbolic links without following
+    them, reports removal of every tracked entry kind consistently, and
+    compares equal-size regular files by content.  [[#30], [#60]]
+
+[#30]: https://github.com/dahlia/dojang/issues/30
+[#60]: https://github.com/dahlia/dojang/pull/60
+
 
 Version 0.2.1
 -------------
