@@ -24,7 +24,7 @@ import Dojang.Commands.Apply (apply)
 import Dojang.Commands.Reflect (reflect)
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
-  , sourceCannotBeTargetError
+  , conflictError
   )
 import Dojang.MonadFileSystem
   ( DryRunIO
@@ -87,7 +87,7 @@ spec = sequential $ do
         (EntryFile "destination")
       $ \appEnv paths -> do
         runAppWithoutLogging appEnv (reflect False True False Nothing [])
-          `shouldThrow` (== sourceCannotBeTargetError)
+          `shouldThrow` (== conflictError)
         states <- readFixture paths
         states
           `shouldBe` [ EntryFile "source"

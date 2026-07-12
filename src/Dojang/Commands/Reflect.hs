@@ -44,6 +44,7 @@ import Dojang.Commands.Disambiguation
 import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
+  , conflictError
   , fileNotFoundError
   , fileNotRoutedError
   , ignoredFileError
@@ -479,7 +480,7 @@ reflectCorrespondences ctx force selectedCorrespondences = do
   $(logDebugSH) plan
   unless (force || null plan.conflicts) $ do
     dieWithErrors
-      sourceCannotBeTargetError
+      conflictError
       [ "Cannot reflect "
           <> pathStyle c.destination.path
           <> ", since "
