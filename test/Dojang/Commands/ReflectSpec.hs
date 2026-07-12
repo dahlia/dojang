@@ -4,6 +4,7 @@
 module Dojang.Commands.ReflectSpec (spec) where
 
 import Control.Exception (bracket_)
+import Data.ByteString (ByteString)
 import Data.HashMap.Strict (singleton)
 import qualified Data.Map.Strict as Map
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -68,109 +69,91 @@ spec = sequential $ do
 
 
 withDeletedDestination :: (AppEnv -> OsPath -> OsPath -> OsPath -> IO a) -> IO a
-withDeletedDestination action = withTempDir $ \tmpDir _ -> do
-  sourceDir <- encodeFS "source"
-  intermediateDir <- encodeFS ".dojang"
-  manifestFilename <- encodeFS "dojang.toml"
-  envFilename <- encodeFS "dojang-env.toml"
-  routeName <- encodeFS "managed-file"
-  destination <- encodeFS "destination"
-  let repository = tmpDir </> sourceDir
-  let intermediate = repository </> intermediateDir </> routeName
-  let source = repository </> routeName
-  let destinationPath = tmpDir </> destination
-  let Right always = parseMonikerName "always"
-  let manifest' =
-        manifest
-          (singleton always Always)
-          (Map.singleton routeName [(always, Just $ Substitution "DEST")])
-          mempty
-          mempty
-          mempty
-  let appEnv =
-        AppEnv
-          repository
-          intermediateDir
-          manifestFilename
-          envFilename
-          False
-          False
-
-  createDirectories $ repository </> intermediateDir
-  writeManifestFile manifest' $ repository </> manifestFilename
-  writeFile source "managed contents"
-  writeFile intermediate "managed contents"
-
-  withEnvVar "DEST" (Just destinationPath) $
-    action appEnv source intermediate destinationPath
+withDeletedDestination =
+  withManagedFile "managed contents" "managed contents" Nothing
 
 
 withSourceOnlyChange :: (AppEnv -> OsPath -> OsPath -> OsPath -> IO a) -> IO a
-withSourceOnlyChange action = withTempDir $ \tmpDir _ -> do
-  sourceDir <- encodeFS "source"
-  intermediateDir <- encodeFS ".dojang"
-  manifestFilename <- encodeFS "dojang.toml"
-  envFilename <- encodeFS "dojang-env.toml"
-  routeName <- encodeFS "managed-file"
-  destination <- encodeFS "destination"
-  let repository = tmpDir </> sourceDir
-  let intermediate = repository </> intermediateDir </> routeName
-  let source = repository </> routeName
-  let destinationPath = tmpDir </> destination
-  let Right always = parseMonikerName "always"
-  let manifest' =
-        manifest
-          (singleton always Always)
-          (Map.singleton routeName [(always, Just $ Substitution "DEST")])
-          mempty
-          mempty
-          mempty
-  let appEnv =
-        AppEnv
-          repository
-          intermediateDir
-          manifestFilename
-          envFilename
-          False
-          False
+withSourceOnlyChange =
+  withManagedFile
+    "source contents"
+    "managed contents"
+    (Just "managed contents")
 
-  createDirectories $ repository </> intermediateDir
-  writeManifestFile manifest' $ repository </> manifestFilename
-  writeFile source "source contents"
-  writeFile intermediate "managed contents"
-  writeFile destinationPath "managed contents"
 
-  withEnvVar "DEST" (Just destinationPath) $
-    action appEnv source intermediate destinationPath
+withManagedFile
+  :: ByteString
+  -> ByteString
+  -> Maybe ByteString
+  -> (AppEnv -> OsPath -> OsPath -> OsPath -> IO a)
+  -> IO a
+withManagedFile sourceContents intermediateContents destinationContents action =
+  withReflectRepository $ \tmpDir repository intermediateDir manifestPath appEnv -> do
+    routeName <- encodeFS "managed-file"
+    destination <- encodeFS "destination"
+    let intermediate = repository </> intermediateDir </> routeName
+    let source = repository </> routeName
+    let destinationPath = tmpDir </> destination
+    let Right always = parseMonikerName "always"
+    let manifest' =
+          manifest
+            (singleton always Always)
+            (Map.singleton routeName [(always, Just $ Substitution "DEST")])
+            mempty
+            mempty
+            mempty
+
+    writeManifestFile manifest' manifestPath
+    writeFile source sourceContents
+    writeFile intermediate intermediateContents
+    maybe (return ()) (writeFile destinationPath) destinationContents
+
+    withEnvVar "DEST" (Just destinationPath) $
+      action appEnv source intermediate destinationPath
 
 
 withIgnoredDestination
   :: (AppEnv -> OsPath -> OsPath -> OsPath -> IO a)
   -> IO a
-withIgnoredDestination action = withTempDir $ \tmpDir _ -> do
+withIgnoredDestination action =
+  withReflectRepository $ \tmpDir repository intermediateDir manifestPath appEnv -> do
+    routeName <- encodeFS "managed-directory"
+    filename <- encodeFS "ignored-file"
+    destinationDir <- encodeFS "destination"
+    let intermediate = repository </> intermediateDir </> routeName </> filename
+    let source = repository </> routeName </> filename
+    let destinationRoot = tmpDir </> destinationDir
+    let destination = destinationRoot </> filename
+    let Right always = parseMonikerName "always"
+    let manifest' =
+          manifest
+            (singleton always Always)
+            mempty
+            ( Map.singleton
+                routeName
+                [(always, Just $ Substitution "DEST_DIR")]
+            )
+            (Map.singleton routeName ["*"])
+            mempty
+
+    createDirectories destinationRoot
+    writeManifestFile manifest' manifestPath
+    writeFile destination "ignored contents"
+
+    withEnvVar "DEST_DIR" (Just destinationRoot) $
+      action appEnv source intermediate destination
+
+
+withReflectRepository
+  :: (OsPath -> OsPath -> OsPath -> OsPath -> AppEnv -> IO a)
+  -> IO a
+withReflectRepository action = withTempDir $ \tmpDir _ -> do
   sourceDir <- encodeFS "source"
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
   envFilename <- encodeFS "dojang-env.toml"
-  routeName <- encodeFS "managed-directory"
-  filename <- encodeFS "ignored-file"
-  destinationDir <- encodeFS "destination"
   let repository = tmpDir </> sourceDir
-  let intermediate = repository </> intermediateDir </> routeName </> filename
-  let source = repository </> routeName </> filename
-  let destinationRoot = tmpDir </> destinationDir
-  let destination = destinationRoot </> filename
-  let Right always = parseMonikerName "always"
-  let manifest' =
-        manifest
-          (singleton always Always)
-          mempty
-          ( Map.singleton
-              routeName
-              [(always, Just $ Substitution "DEST_DIR")]
-          )
-          (Map.singleton routeName ["*"])
-          mempty
+  let manifestPath = repository </> manifestFilename
   let appEnv =
         AppEnv
           repository
@@ -181,12 +164,7 @@ withIgnoredDestination action = withTempDir $ \tmpDir _ -> do
           False
 
   createDirectories $ repository </> intermediateDir
-  createDirectories destinationRoot
-  writeManifestFile manifest' $ repository </> manifestFilename
-  writeFile destination "ignored contents"
-
-  withEnvVar "DEST_DIR" (Just destinationRoot) $
-    action appEnv source intermediate destination
+  action tmpDir repository intermediateDir manifestPath appEnv
 
 
 withEnvVar :: String -> Maybe OsPath -> IO a -> IO a
