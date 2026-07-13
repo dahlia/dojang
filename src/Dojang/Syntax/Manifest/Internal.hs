@@ -7,7 +7,8 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Dojang.Syntax.Manifest.Internal
-  ( FileRoute'
+  ( FileRoute' (..)
+  , FileRouteBranch' (..)
   , FileRouteMap'
   , EnvironmentPredicate' (..)
   , FlatOrNonEmptyStrings (..)
@@ -26,6 +27,7 @@ import Prelude hiding (all, any)
 
 import Data.CaseInsensitive (CI (original))
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text, pack, unpack)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import System.FilePattern (FilePattern)
@@ -33,8 +35,10 @@ import Toml (Value (..))
 import Toml.FromValue
   ( FromKey (..)
   , FromValue (..)
+  , getTable
   , optKey
   , parseTableFromValue
+  , setTable
   )
 import Toml.FromValue.Generic (genericParseTable)
 import Toml.FromValue.Matcher (Matcher)
@@ -173,7 +177,56 @@ instance ToTable EnvironmentPredicate' where
 type MonikerMap' = Map MonikerName EnvironmentPredicate'
 
 
-type FileRoute' = Map MonikerName Text
+data FileRoute'
+  = CompactFileRoute (Map MonikerName Text)
+  | DetailedFileRoute [FileRouteBranch']
+  deriving (Eq, Show)
+
+
+instance FromValue FileRoute' where
+  fromValue value@Table{} = CompactFileRoute <$> fromValue value
+  fromValue value@Array{} = DetailedFileRoute <$> fromValue value
+  fromValue value = typeError value "table or array of route branches"
+
+
+instance ToValue FileRoute' where
+  toValue (CompactFileRoute route) = toValue route
+  toValue (DetailedFileRoute branches) = toValue branches
+
+
+data FileRouteBranch' = FileRouteBranch'
+  { routeMoniker :: Maybe MonikerName
+  , routeCondition :: Maybe Text
+  , routePath :: Maybe Text
+  , routeUnexpectedFields :: [Text]
+  }
+  deriving (Eq, Show)
+
+
+instance FromValue FileRouteBranch' where
+  fromValue = parseTableFromValue $ do
+    moniker <- optKey "moniker"
+    condition <- optKey "when"
+    path <- optKey "path"
+    unexpectedFields <- fmap pack . Map.keys <$> getTable
+    setTable Map.empty
+    return $ FileRouteBranch' moniker condition path unexpectedFields
+
+
+instance ToValue FileRouteBranch' where
+  toValue = defaultTableToValue
+
+
+instance ToTable FileRouteBranch' where
+  toTable branch =
+    table $
+      maybeField "moniker" branch.routeMoniker
+        ++ maybeField "when" branch.routeCondition
+        ++ maybeField "path" branch.routePath
+   where
+    maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
+    maybeField key (Just value) = [(key, toValue value)]
+    maybeField _ Nothing = []
 
 
 type FileRouteMap' = Map FilePath FileRoute'

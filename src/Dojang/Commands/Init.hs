@@ -13,7 +13,6 @@ module Dojang.Commands.Init
   ) where
 
 import Control.Monad (forM_, when)
-import Control.Monad.Except (MonadError (throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Function ((&))
 import Data.List (maximumBy, sortOn)
@@ -358,9 +357,7 @@ init presets noInteractive = do
   debug' <- asks (.debug)
   dryRun' <- asks (.dryRun)
   when (debug' || dryRun') $ do
-    manifestText <- case writeManifest manifest of
-      Left err -> throwError $ userError $ show err
-      Right toml -> pure $ indent toml
+    let manifestText = indent $ writeManifest manifest
     printStderr' Note $
       "The manifest file looks like below:\n\n"
         <> manifestText

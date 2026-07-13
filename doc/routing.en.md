@@ -173,14 +173,51 @@ os = "windows"
 ~~~~
 
 
+Inline route conditions
+-----------------------
+
+The compact syntax above is useful when a route can be expressed entirely
+with named monikers.  A detailed route can instead place an environment
+predicate directly in a branch's `when` field:
+
+~~~~ toml
+[[files.".psqlrc"]]
+moniker = "posix"
+path = "${PSQLRC:-$HOME/.psqlrc}"
+
+[[files.".psqlrc"]]
+when = "os = windows && arch = aarch64"
+path = "${PSQLRC:-$UserProfile/AppData/Roaming/postgresql/psqlrc.conf}"
+
+[[files.".psqlrc"]]
+when = "os = android"
+~~~~
+
+Detailed routes are ordered arrays.  Every branch must contain exactly one of
+`moniker` or `when`, and may contain a `path`.  A `moniker` branch refers to a
+moniker defined in the same manifest.  A `when` branch accepts the full
+[environment predicate](environment-predicate.en.md) syntax.  If `path` is
+omitted, the branch is a null route.
+
+Branches are tried in their listed order, and the first matching branch
+determines the destination.  This order is explicit: a later branch does not
+move ahead merely because its predicate is more specific.  Compact routes use
+the specificity rules described below instead.
+
+Use the detailed form when an inline predicate is clearer, when conditions
+would map to the same moniker, or when repeated branches must remain distinct.
+The compact form remains valid and is preferable for simple moniker-only
+routes.
+
+
 Route priority
 --------------
 
-When a single file or directory has multiple routes that could match
-the current environment, Dojang determines which route to use based on
-**specificity**.  The more specific a predicate is, the higher its priority.
-This ensures that specialized configurations take precedence over
-general ones.
+When a compact route has multiple entries that could match the current
+environment, Dojang determines which one to use based on **specificity**.  The
+more specific a predicate is, the higher its priority.  This ensures that
+specialized configurations take precedence over general ones.  Detailed routes
+use their explicit branch order instead, as described above.
 
 ### How specificity is calculated
 

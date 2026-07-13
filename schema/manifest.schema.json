@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schema.dojang.dev/2026-01/manifest.schema.json",
+  "$id": "https://schema.dojang.dev/2026-07/manifest.schema.json",
   "title": "Dojang manifest",
   "description": "Dojang manifest (so-called dojang.toml) is a TOML file that describes a Dojang repository.",
   "$defs": {
@@ -9,18 +9,65 @@
       "description": "A map of route names to their corresponding route definitions.",
       "type": "object",
       "additionalProperties": {
-        "title": "Route definition",
-        "description": "A route definition which describes how to copy files/directories from the source to the destination for certain environments.",
-        "type": "object",
-        "propertyNames": {
+        "$ref": "#/$defs/route"
+      }
+    },
+    "route": {
+      "title": "Route definition",
+      "description": "A route definition which describes how to copy files/directories from the source to the destination for certain environments.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/compactRoute"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/detailedRouteBranch"
+          }
+        }
+      ]
+    },
+    "compactRoute": {
+      "title": "Compact route definition",
+      "description": "A map of moniker names to destination path expressions.  An empty path represents a null route.",
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/monikerName"
+      },
+      "additionalProperties": {
+        "title": "File path expression",
+        "description": "A file path expression which represents a destination path.  It can contain expandable variables.",
+        "type": "string"
+      }
+    },
+    "detailedRouteBranch": {
+      "title": "Detailed route branch",
+      "description": "An ordered route branch selected by either a moniker or an inline environment predicate.  If path is omitted, the branch is a null route.",
+      "type": "object",
+      "properties": {
+        "moniker": {
           "$ref": "#/$defs/monikerName"
         },
-        "additionalProperties": {
+        "when": {
+          "title": "Inline environment predicate",
+          "description": "An environment predicate expression that selects this route branch.",
+          "type": "string"
+        },
+        "path": {
           "title": "File path expression",
           "description": "A file path expression which represents a destination path.  It can contain expandable variables.",
           "type": "string"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": ["moniker"]
+        },
+        {
+          "required": ["when"]
+        }
+      ],
+      "additionalProperties": false
     },
     "environmentPredicate": {
       "title": "Environment predicate",

@@ -410,15 +410,29 @@ arbitraryFileRouteMap
 arbitraryFileRouteMap range monikers =
   Gen.map range $ do
     key <- osPath (singleton 1)
-    value <- fileRoute' (constant 0 5) monikers environmentPredicate
+    predicates <- Gen.list (constant 0 5) environmentPredicate
+    let cardinality = Prelude.length predicates
+    paths <-
+      Gen.list (constant cardinality cardinality) $
+        Gen.maybe filePathExpression
+    fileOrDir <- Gen.element [File, Directory]
+    let value =
+          FileRoute.fileRoute'
+            (`lookup` monikers)
+            (predicates `zip` paths)
+            fileOrDir
     return (key, value)
 
 
-ignoreMap :: (MonadGen m) => m (Map.Map OsPath [String])
-ignoreMap = Gen.map (constantFrom 0 0 5) $ do
+ignoreMap' :: (MonadGen m) => Range Int -> m (Map.Map OsPath [String])
+ignoreMap' range = Gen.map range $ do
   path <- osPath (singleton 1)
   patterns <- Gen.list (constantFrom 1 1 5) $ Gen.string (constant 0 20) osChar
   pure (path, patterns)
+
+
+ignoreMap :: (MonadGen m) => m (Map.Map OsPath [String])
+ignoreMap = ignoreMap' (constantFrom 0 0 5)
 
 
 manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
@@ -438,7 +452,7 @@ arbitraryManifest :: (MonadGen m) => m Manifest
 arbitraryManifest = do
   monikers <- monikerMap' (constantFrom 0 0 5)
   fileRoutes <- arbitraryFileRouteMap (constantFrom 0 0 5) monikers
-  ignorePatterns <- ignoreMap
+  ignorePatterns <- ignoreMap' (constantFrom 1 1 5)
   hooks <- hookMap (constant 0 3)
   return $ Manifest monikers fileRoutes ignorePatterns hooks
 

@@ -1,11 +1,10 @@
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Syntax.Manifest.WriterSpec (spec) where
 
 import qualified Data.HashMap.Strict as HashMap
-import Data.List (sort)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (listToMaybe)
 import Data.Text (isInfixOf, unpack)
 import System.OsPath (encodeFS)
 import Test.Hspec (Spec, runIO, specify)
@@ -20,14 +19,23 @@ import Test.Hspec.Hedgehog
   )
 
 import Dojang.MonadFileSystem (FileType (File))
-import Dojang.Syntax.Manifest.Parser (readManifest)
-import Dojang.Syntax.Manifest.Writer (WriteError (..), writeManifest)
+import Dojang.Syntax.Manifest.Parser (formatErrors, readManifest)
+import Dojang.Syntax.Manifest.Writer (writeManifest)
 import Dojang.Types.EnvironmentPredicate
-  ( EnvironmentPredicate (Moniker, OperatingSystem)
+  ( EnvironmentPredicate (Always, Architecture, Moniker, OperatingSystem, Or)
   , normalizePredicate
   )
-import Dojang.Types.FileRoute (FileRoute (FileRoute), fileRoute')
-import Dojang.Types.Gen as Gen (arbitraryManifest, manifest)
+import Dojang.Types.FileRoute
+  ( FileRoute (FileRoute)
+  , fileRoute'
+  , fileRoutePreservingOrder
+  )
+import Dojang.Types.Gen as Gen
+  ( arbitraryManifest
+  , architecture
+  , manifest
+  , operatingSystem
+  )
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.MonikerName (parseMonikerName)
 
@@ -39,74 +47,144 @@ spec = do
       Right zeta = parseMonikerName "zeta"
       linux = OperatingSystem "linux"
 
-  specify "writeManifest" $ hedgehog $ do
+  specify "round-trips representable manifests" $ hedgehog $ do
     manifest' <- forAll Gen.manifest
-    let Right toml = writeManifest manifest'
+    let toml = writeManifest manifest'
     annotate $ unpack toml
-    let Right (parsed, _) = readManifest toml
-    annotateShow parsed
-    parsed === manifest'
+    case readManifest toml of
+      Left err -> annotateShow (formatErrors err) >> assert False
+      Right (parsed, _) -> do
+        annotateShow parsed
+        parsed === manifest'
 
-  specify "rejects route predicates that cannot be represented" $ do
-    let route = fileRoute' (const Nothing) [(linux, Nothing)] File
-        manifest' = Manifest HashMap.empty (Map.singleton path route) Map.empty Map.empty
-    writeManifest manifest'
-      `shouldBe` Left (UnrepresentableRoutePredicate path linux)
-
-  specify "rejects route predicates that map to the same moniker" $ do
-    let monikers = HashMap.singleton alpha linux
-        route =
-          fileRoute'
-            (`HashMap.lookup` monikers)
-            [(Moniker alpha, Nothing), (linux, Nothing)]
-            File
-        manifest' = Manifest monikers (Map.singleton path route) Map.empty Map.empty
-    writeManifest manifest'
-      `shouldBe` Left (DuplicateRouteMoniker path alpha)
-
-  specify "never drops arbitrary route predicates" $ hedgehog $ do
+  specify "preserves arbitrary manifest route semantics" $ hedgehog $ do
     manifest'@(Manifest monikers routes ignores hooks) <-
       forAll Gen.arbitraryManifest
-    case writeManifest manifest' of
-      Left (UnrepresentableRoutePredicate routePath predicate) -> do
-        let Just (FileRoute _ predicates _) = Map.lookup routePath routes
-        assert $
-          predicate `elem` (normalizePredicate . fst <$> predicates)
-        assert $
-          all
-            ((/= predicate) . normalizePredicate)
-            (HashMap.elems monikers)
-      Left (DuplicateRouteMoniker routePath moniker) -> do
-        let Just (FileRoute _ predicates _) = Map.lookup routePath routes
-            resolve predicate = case normalizePredicate predicate of
-              Moniker name -> Just name
-              normalizedPredicate ->
-                listToMaybe $
-                  sort
-                    [ name
-                    | (name, definition) <- HashMap.toList monikers
-                    , normalizePredicate definition == normalizedPredicate
-                    ]
-            matches =
-              [ ()
-              | (predicate, _) <- predicates
-              , resolve predicate == Just moniker
-              ]
-        assert $ length matches > 1
-      Right toml -> do
-        annotate $ unpack toml
-        let Right (Manifest monikers' routes' ignores' hooks', _) =
-              readManifest toml
-            routeShape (FileRoute _ predicates fileType) =
-              (sort $ show . snd <$> predicates, fileType)
+    let toml = writeManifest manifest'
+    annotate $ unpack toml
+    case readManifest toml of
+      Left err -> annotateShow (formatErrors err) >> assert False
+      Right (parsed@(Manifest monikers' routes' ignores' hooks'), _) -> do
+        annotateShow parsed
+        let routeShape (FileRoute _ predicates fileType) =
+              ( [ (normalizePredicate predicate, destination)
+                | (predicate, destination) <- predicates
+                ]
+              , fileType
+              )
         monikers' === monikers
         Map.map routeShape routes' === Map.map routeShape routes
         ignores' === ignores
         hooks' === hooks
 
-  specify "selects deterministically between equivalent monikers" $ do
-    let monikers = HashMap.fromList [(zeta, linux), (alpha, linux)]
+  specify "keeps compact routes when every condition is a unique moniker" $ do
+    let monikers = HashMap.singleton alpha linux
+        route = fileRoute' (`HashMap.lookup` monikers) [(Moniker alpha, Nothing)] File
+        manifest' = Manifest monikers (Map.singleton path route) Map.empty Map.empty
+        toml = writeManifest manifest'
+    toml `shouldSatisfy` isInfixOf "foo.alpha = \"\""
+    toml `shouldSatisfy` isInfixOf "alpha = \"\""
+
+  specify "keeps detailed routes when compacting would change tie order" $
+    hedgehog $ do
+      os <- forAll Gen.operatingSystem
+      let predicate = OperatingSystem os
+          monikers = HashMap.fromList [(alpha, predicate), (zeta, predicate)]
+          route =
+            fileRoutePreservingOrder
+              (`HashMap.lookup` monikers)
+              [(Moniker alpha, Just "first"), (Moniker zeta, Just "second")]
+              File
+          manifest' =
+            Manifest monikers (Map.singleton path route) Map.empty Map.empty
+          toml = writeManifest manifest'
+      annotate $ unpack toml
+      assert $ isInfixOf "[[files.foo]]" toml
+      let Right (parsed, _) = readManifest toml
+      parsed === manifest'
+
+  specify "uses an inline condition instead of looking back to a moniker" $ do
+    let monikers = HashMap.singleton alpha linux
         route = fileRoute' (`HashMap.lookup` monikers) [(linux, Nothing)] File
         manifest' = Manifest monikers (Map.singleton path route) Map.empty Map.empty
-        Right toml = writeManifest manifest'
-    toml `shouldSatisfy` isInfixOf "alpha = \"\""
+        toml = writeManifest manifest'
+    toml `shouldSatisfy` isInfixOf "[[files.foo]]"
+    toml `shouldSatisfy` isInfixOf "when = \"os = linux\""
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
+
+  specify "preserves colliding moniker and inline conditions" $ do
+    let monikers = HashMap.singleton alpha linux
+        route =
+          fileRoute'
+            (`HashMap.lookup` monikers)
+            [(Moniker alpha, Nothing), (linux, Just "target")]
+            File
+        manifest' = Manifest monikers (Map.singleton path route) Map.empty Map.empty
+        toml = writeManifest manifest'
+    toml `shouldSatisfy` isInfixOf "[[files.foo]]"
+    toml `shouldSatisfy` isInfixOf "moniker = \"alpha\""
+    toml `shouldSatisfy` isInfixOf "when = \"os = linux\""
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
+
+  specify "preserves repeated route conditions" $ hedgehog $ do
+    os <- forAll Gen.operatingSystem
+    let predicate = OperatingSystem os
+        route =
+          fileRoute'
+            (const Nothing)
+            [(predicate, Nothing), (predicate, Just "target")]
+            File
+        manifest' =
+          Manifest HashMap.empty (Map.singleton path route) Map.empty Map.empty
+        toml = writeManifest manifest'
+    annotate $ unpack toml
+    let Right (parsed, _) = readManifest toml
+    parsed === manifest'
+
+  specify "normalizes predicates without changing detailed branch order" $
+    hedgehog $ do
+      os <- forAll Gen.operatingSystem
+      arch <- forAll Gen.architecture
+      let reducible = Or [Always, OperatingSystem os]
+          route =
+            fileRoute'
+              (const Nothing)
+              [(reducible, Just "first"), (Architecture arch, Just "second")]
+              File
+          manifest' =
+            Manifest HashMap.empty (Map.singleton path route) Map.empty Map.empty
+          toml = writeManifest manifest'
+      annotate $ unpack toml
+      let Right (Manifest _ parsedRoutes _ _, _) = readManifest toml
+          Just (FileRoute _ parsedPredicates _) = Map.lookup path parsedRoutes
+      parsedPredicates
+        === [ (Always, Just "first")
+            , (Architecture arch, Just "second")
+            ]
+
+  specify "preserves explicitly constructed dispatch order" $ hedgehog $ do
+    os <- forAll Gen.operatingSystem
+    let route =
+          FileRoute
+            (const Nothing)
+            [ (Always, Just "general")
+            , (OperatingSystem os, Just "specific")
+            ]
+            File
+        manifest' =
+          Manifest HashMap.empty (Map.singleton path route) Map.empty Map.empty
+        toml = writeManifest manifest'
+    annotate $ unpack toml
+    let Right (parsed, _) = readManifest toml
+    parsed === manifest'
+
+  specify "writes equivalent moniker maps deterministically" $ do
+    let first = HashMap.fromList [(zeta, linux), (alpha, linux)]
+        second = HashMap.fromList [(alpha, linux), (zeta, linux)]
+        route monikers =
+          fileRoute' (`HashMap.lookup` monikers) [(linux, Nothing)] File
+        manifestFor monikers =
+          Manifest monikers (Map.singleton path $ route monikers) Map.empty Map.empty
+    writeManifest (manifestFor first) `shouldBe` writeManifest (manifestFor second)

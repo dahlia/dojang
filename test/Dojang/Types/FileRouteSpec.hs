@@ -26,6 +26,7 @@ import Dojang.Types.FileRoute
   , dispatch
   , fileRoute
   , fileRoute'
+  , fileRoutePreservingOrder
   , routePath
   )
 import Dojang.Types.Gen qualified as Gen
@@ -118,6 +119,16 @@ spec = do
                      ]
                        :: [(EnvironmentPredicate, Maybe FilePathExpression)]
                    )
+
+    specify "preserves input predicate order" $ hedgehog $ do
+      first <- forAll Gen.environmentPredicate
+      second <- forAll Gen.environmentPredicate
+      let orderedRoute =
+            fileRoutePreservingOrder
+              (const Nothing)
+              [(first, Nothing), (second, Nothing)]
+              File
+      (fst <$> orderedRoute.predicates) === [first, second]
 
     specify "Show" $ do
       show route

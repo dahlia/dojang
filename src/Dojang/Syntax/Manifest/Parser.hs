@@ -5,7 +5,8 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Syntax.Manifest.Parser
-  ( Error (..)
+  ( DetailedRouteError (..)
+  , Error (..)
   , formatErrors
   , readManifest
   , readManifestFile
@@ -20,12 +21,13 @@ import Data.Void (Void)
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (readFile)
 
+import Data.CaseInsensitive (CI (original))
 import Data.HashMap.Strict as HashMap (fromList)
 import Data.Map.Strict as Map (Map, empty, fromList, toList)
-import Data.Text (Text, pack, unpack)
+import Data.Text (Text, intercalate, pack, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient)
 import System.FilePattern (FilePattern)
-import System.OsPath (OsPath, encodeFS)
+import System.OsPath (OsPath, decodeFS, encodeFS)
 import Toml (Result (..), decode)
 
 import qualified Data.HashMap.Strict as HashMap
@@ -41,7 +43,8 @@ import Dojang.Syntax.FilePathExpression.Parser
   )
 import Dojang.Syntax.Manifest.Internal
   ( EnvironmentPredicate' (..)
-  , FileRoute'
+  , FileRoute' (..)
+  , FileRouteBranch' (..)
   , FileRouteMap'
   , FlatOrNonEmptyStrings (..)
   , Manifest' (..)
@@ -53,7 +56,11 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (FilePathExpression)
-import Dojang.Types.FileRoute (FileRoute, fileRoute)
+import Dojang.Types.FileRoute
+  ( FileRoute
+  , fileRoute
+  , fileRoutePreservingOrder
+  )
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (Manifest))
@@ -69,6 +76,21 @@ data Error
     EnvironmentPredicateError (ParseErrorBundle Text Void)
   | -- | An error made during parsing a 'FilePathExpression'.
     FilePathExpressionError (ParseErrorBundle Text Void)
+  | -- | An invalid branch in a detailed file route.
+    FileRouteBranchError FileType OsPath Int DetailedRouteError
+
+
+-- | An error in a branch of a detailed file route.
+data DetailedRouteError
+  = -- | The branch has neither a @moniker@ nor a @when@ field.
+    MissingRouteCondition
+  | -- | The branch has both a @moniker@ and a @when@ field.
+    ConflictingRouteConditions
+  | -- | The @moniker@ field refers to an undefined moniker.
+    UnknownRouteMoniker MonikerName
+  | -- | The branch contains fields other than @moniker@, @when@, and @path@.
+    UnexpectedRouteFields [Text]
+  deriving (Eq, Show)
 
 
 -- | A warning message made during parsing.
@@ -110,6 +132,30 @@ formatErrors (EnvironmentPredicateError e) =
   [Dojang.Syntax.EnvironmentPredicate.Parser.errorBundlePretty e]
 formatErrors (FilePathExpressionError e) =
   [Dojang.Syntax.FilePathExpression.Parser.errorBundlePretty e]
+formatErrors (FileRouteBranchError fileType path index reason) =
+  [ prefix <> formatReason reason
+  ]
+ where
+  prefix =
+    "Detailed "
+      <> ( case fileType of
+             Directory -> "directory"
+             File -> "file"
+             Symlink -> "symbolic link"
+         )
+      <> " route branch "
+      <> pack (show $ index + 1)
+      <> " for "
+      <> pack (decodePath path)
+      <> " "
+  formatReason MissingRouteCondition =
+    "must specify either moniker or when."
+  formatReason ConflictingRouteConditions =
+    "cannot specify both moniker and when."
+  formatReason (UnknownRouteMoniker name) =
+    "refers to undefined moniker " <> original name.name <> "."
+  formatReason (UnexpectedRouteFields fields) =
+    "contains unexpected field(s): " <> intercalate ", " fields <> "."
 
 
 mapManifest :: Manifest' -> Either Error Manifest
@@ -214,11 +260,15 @@ mapFileRouteMap monikerMap dirs files =
  where
   results :: [(OsPath, Either Error FileRoute)]
   results =
-    [ (encodePath name, mapFileRoute monikerMap route Directory)
+    [ ( path
+      , mapFileRoute monikerMap path route Directory
+      )
     | (name, route) <- toList dirs
+    , let path = encodePath name
     ]
-      ++ [ (encodePath name, mapFileRoute monikerMap route File)
+      ++ [ (path, mapFileRoute monikerMap path route File)
          | (name, route) <- toList files
+         , let path = encodePath name
          ]
   errors :: [Error]
   errors = lefts [r | (_, r) <- results]
@@ -228,12 +278,17 @@ encodePath :: String -> OsPath
 encodePath = unsafePerformIO . encodeFS
 
 
+decodePath :: OsPath -> FilePath
+decodePath = unsafePerformIO . decodeFS
+
+
 mapFileRoute
   :: MonikerMap
+  -> OsPath
   -> FileRoute'
   -> FileType
   -> Either Error FileRoute
-mapFileRoute monikerMap fileRoute' fileType =
+mapFileRoute monikerMap _ (CompactFileRoute route) fileType =
   case errors of
     e : _ -> Left $ FilePathExpressionError e
     _ ->
@@ -254,10 +309,62 @@ mapFileRoute monikerMap fileRoute' fileType =
     [ ( name
       , if expr == "" then Nothing else Just $ parseFilePathExpression "" expr
       )
-    | (name, expr) <- toList fileRoute'
+    | (name, expr) <- toList route
     ]
   errors :: [ParseErrorBundle Text Void]
   errors = lefts [r | (_, Just r) <- results]
+mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
+  fileRoutePreservingOrder (`HashMap.lookup` monikerMap)
+    <$> traverse (uncurry mapBranch) (zip [0 ..] branches)
+    <*> pure fileType
+ where
+  mapBranch
+    :: Int
+    -> FileRouteBranch'
+    -> Either Error (EnvironmentPredicate, Maybe FilePathExpression)
+  mapBranch index branch
+    | not $ null branch.routeUnexpectedFields =
+        Left $
+          FileRouteBranchError
+            fileType
+            routePath
+            index
+            (UnexpectedRouteFields branch.routeUnexpectedFields)
+    | otherwise = do
+        predicate <- case (branch.routeMoniker, branch.routeCondition) of
+          (Nothing, Nothing) -> branchError index MissingRouteCondition
+          (Just _, Just _) -> branchError index ConflictingRouteConditions
+          (Just name, Nothing)
+            | HashMap.member name monikerMap -> Right $ Moniker name
+            | otherwise -> branchError index $ UnknownRouteMoniker name
+          (Nothing, Just condition) ->
+            first
+              EnvironmentPredicateError
+              ( normalizePredicate
+                  <$> parseEnvironmentPredicate
+                    (branchSource index "when")
+                    condition
+              )
+        path <-
+          traverse
+            ( first FilePathExpressionError
+                . parseFilePathExpression (branchSource index "path")
+            )
+            branch.routePath
+        pure (predicate, path)
+  branchError index =
+    Left . FileRouteBranchError fileType routePath index
+  branchSource index field =
+    ( case fileType of
+        Directory -> "dirs."
+        File -> "files."
+        Symlink -> "symlinks."
+    )
+      <> decodePath routePath
+      <> "["
+      <> show index
+      <> "]."
+      <> field
 
 
 mapHooks :: MonikerMap -> Maybe Internal.Hooks' -> Either Error HookMap

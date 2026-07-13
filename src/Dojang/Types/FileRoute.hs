@@ -6,6 +6,7 @@ module Dojang.Types.FileRoute
   , RouteWarning (..)
   , fileRoute
   , fileRoute'
+  , fileRoutePreservingOrder
   , dispatch
   , routePath
   ) where
@@ -120,6 +121,21 @@ fileRoute' resolver predicates' =
     :: (EnvironmentPredicate, Maybe FilePathExpression)
     -> Down (Specificity, String)
   sortKey (pred', _) = Down (specificity resolver pred', show pred')
+
+
+-- | Creates a 'FileRoute' while preserving the input order of predicates.
+-- The input must already be in dispatch-priority order.
+fileRoutePreservingOrder
+  :: MonikerResolver
+  -- ^ A function that resolves 'MonikerName's in predicates.
+  -> [(EnvironmentPredicate, Maybe FilePathExpression)]
+  -- ^ Predicate and destination path pairs in declaration order.
+  -> FileType
+  -- ^ Whether the route represents a file or a directory.
+  -> FileRoute
+  -- ^ A route whose predicates remain in the given order.
+fileRoutePreservingOrder resolver predicates' =
+  FileRoute resolver predicates'
 
 
 -- | Dispatches the given 'FileRoute' against the given 'Environment'.

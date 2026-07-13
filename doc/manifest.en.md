@@ -149,6 +149,33 @@ os = ["linux", "macos"]
 os = ["windows"]
 ~~~~
 
+This compact route syntax maps each moniker directly to a path.  It remains the
+shortest form when every branch uses a different moniker.  To use an
+environment predicate directly, preserve repeated conditions, or mix both
+forms in one route, write the route as an ordered array of branch tables:
+
+~~~~ toml
+[[files.".bashrc"]]
+moniker = "posix"
+path = "$HOME/.bashrc"
+
+[[files.".bashrc"]]
+when = "os = windows && arch = aarch64"
+path = "$UserProfile/.bashrc"
+
+[[files.".bashrc"]]
+when = "os = android"
+~~~~
+
+Each detailed branch must have exactly one of `moniker` or `when`.  A
+`moniker` value must name a moniker defined in the same manifest, while `when`
+accepts an [environment predicate](environment-predicate.en.md).  The `path`
+field is optional.  Omitting it creates a null route for that condition.
+Dojang preserves detailed branches in their route order, including repeated
+conditions.  Branches are tried in that order, and the first matching branch
+determines the destination.  Compact routes continue to use predicate
+specificity to determine priority.
+
 A route can be named like `home_directory` in the example above,
 which actually refers to the path where the source of config files are located
 within the repository.  If it says `home_directory`, it refers to
