@@ -56,7 +56,8 @@
         "path": {
           "title": "File path expression",
           "description": "A file path expression which represents a destination path.  It can contain expandable variables.",
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
       },
       "oneOf": [
