@@ -55,7 +55,9 @@ import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
   )
-import Dojang.Types.FilePathExpression (FilePathExpression)
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent)
+  )
 import Dojang.Types.FileRoute
   ( FileRoute
   , fileRoute
@@ -345,13 +347,13 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
                     (branchSource index "when")
                     condition
               )
-        path <-
-          traverse
-            ( first FilePathExpressionError
-                . parseFilePathExpression (branchSource index "path")
-            )
-            branch.routePath
+        path <- traverse parseDetailedPath branch.routePath
         pure (predicate, path)
+   where
+    parseDetailedPath "" = Right $ BareComponent ""
+    parseDetailedPath expression =
+      first FilePathExpressionError $
+        parseFilePathExpression (branchSource index "path") expression
   branchError index =
     Left . FileRouteBranchError fileType routePath index
   branchSource index field =

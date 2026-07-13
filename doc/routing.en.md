@@ -197,7 +197,8 @@ Detailed routes are ordered arrays.  Every branch must contain exactly one of
 `moniker` or `when`, and may contain a `path`.  A `moniker` branch refers to a
 moniker defined in the same manifest.  A `when` branch accepts the full
 [environment predicate](environment-predicate.en.md) syntax.  If `path` is
-omitted, the branch is a null route.
+omitted, the branch is a null route.  An explicit `path = ""` is instead an
+empty path expression.
 
 Branches are tried in their listed order, and the first matching branch
 determines the destination.  This order is explicit: a later branch does not

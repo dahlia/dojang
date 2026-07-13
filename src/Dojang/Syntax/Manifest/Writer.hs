@@ -164,8 +164,10 @@ mapFileRoute' monikers fileRoute =
   mapCompactPredicate
     :: (EnvironmentPredicate, Maybe FilePathExpression)
     -> Maybe (MonikerName, Text)
-  mapCompactPredicate (Moniker name, path) =
-    Just (name, maybe "" toPathText path)
+  mapCompactPredicate (Moniker name, Nothing) = Just (name, "")
+  mapCompactPredicate (Moniker name, Just path)
+    | toPathText path == "" = Nothing
+    | otherwise = Just (name, toPathText path)
   mapCompactPredicate _ = Nothing
   mapDetailedPredicate
     :: (EnvironmentPredicate, Maybe FilePathExpression)

@@ -25,6 +25,7 @@ import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Always, Architecture, Moniker, OperatingSystem, Or)
   , normalizePredicate
   )
+import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.FileRoute
   ( FileRoute (FileRoute)
   , fileRoute'
@@ -179,6 +180,21 @@ spec = do
     annotate $ unpack toml
     let Right (parsed, _) = readManifest toml
     parsed === manifest'
+
+  specify "distinguishes empty destinations from null routes" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [ (Always, Just $ BareComponent "")
+            , (linux, Nothing)
+            ]
+            File
+        manifest' =
+          Manifest HashMap.empty (Map.singleton path route) Map.empty Map.empty
+        toml = writeManifest manifest'
+    toml `shouldSatisfy` isInfixOf "path = \"\""
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
 
   specify "writes equivalent moniker maps deterministically" $ do
     let first = HashMap.fromList [(zeta, linux), (alpha, linux)]

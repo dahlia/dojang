@@ -21,7 +21,10 @@ import Dojang.Syntax.Manifest.Parser
   )
 import Dojang.Types.Environment (Environment (Environment), Kernel (Kernel))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
-import Dojang.Types.FilePathExpression (toPathText)
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent)
+  , toPathText
+  )
 import Dojang.Types.FileRoute (FileRoute (..), dispatch)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerName (parseMonikerName)
@@ -198,9 +201,18 @@ spec = do
           `shouldSatisfy` any (isInfixOf "files.foo[0].when")
       Right _ -> expectationFailure "Expected the predicate to be rejected."
 
-  specify "identifies invalid detailed branch paths" $ do
+  specify "accepts an explicit empty detailed branch path" $ do
     let result =
           readManifest $ detailedManifest "{ when = \"always\", path = \"\" }"
+    case result of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (Manifest _ routes _ _, _) -> do
+        let Just route = Map.lookup foo routes
+        route.predicates `shouldBe` [(Always, Just $ BareComponent "")]
+
+  specify "identifies invalid detailed branch paths" $ do
+    let result =
+          readManifest $ detailedManifest "{ when = \"always\", path = \"$\" }"
     case result of
       Left err ->
         formatErrors err

@@ -171,6 +171,7 @@ Each detailed branch must have exactly one of `moniker` or `when`.  A
 `moniker` value must name a moniker defined in the same manifest, while `when`
 accepts an [environment predicate](environment-predicate.en.md).  The `path`
 field is optional.  Omitting it creates a null route for that condition.
+Writing `path = ""` instead specifies an explicit empty path expression.
 Dojang preserves detailed branches in their route order, including repeated
 conditions.  Branches are tried in that order, and the first matching branch
 determines the destination.  Compact routes continue to use predicate

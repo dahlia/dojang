@@ -55,9 +55,8 @@
         },
         "path": {
           "title": "File path expression",
-          "description": "A file path expression which represents a destination path.  It can contain expandable variables.",
-          "type": "string",
-          "minLength": 1
+          "description": "A file path expression which represents a destination path.  It can contain expandable variables, and an empty string represents an explicit empty path rather than a null route.",
+          "type": "string"
         }
       },
       "oneOf": [

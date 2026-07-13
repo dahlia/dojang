@@ -414,7 +414,7 @@ arbitraryFileRouteMap range monikers =
     let cardinality = Prelude.length predicates
     paths <-
       Gen.list (constant cardinality cardinality) $
-        Gen.maybe filePathExpression
+        Gen.maybe arbitraryFilePathExpression
     fileOrDir <- Gen.element [File, Directory]
     let value =
           FileRoute.fileRoute'
@@ -422,6 +422,12 @@ arbitraryFileRouteMap range monikers =
             (predicates `zip` paths)
             fileOrDir
     return (key, value)
+ where
+  arbitraryFilePathExpression =
+    Gen.frequency
+      [ (1, pure $ BareComponent $ pack "")
+      , (9, filePathExpression)
+      ]
 
 
 ignoreMap' :: (MonadGen m) => Range Int -> m (Map.Map OsPath [String])
