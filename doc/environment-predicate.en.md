@@ -3,7 +3,8 @@ Environment predicate
 
 An **environment predicate** is a small grammar that describes conditions on
 an [environment](environment.en.md).  In a [manifest](manifest.en.md) file,
-environment predicates can be used in the `when` field of the `moniker` section.
+environment predicates can be used in the `when` field of a moniker definition
+or a detailed route branch.
 Here are some examples of different environment predicates.
 One predicate per line:
 

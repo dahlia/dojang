@@ -6,6 +6,13 @@ Version 0.3.0
 
 To be released.
 
+ -  Added detailed file and directory routes with ordered `moniker` or inline
+    `when` conditions.  Existing compact routes remain valid, while detailed
+    routes can represent repeated conditions, direct environment predicates,
+    and null routes without losing information.  Manifest writing is now total
+    and uses the detailed form whenever the compact form would change a route's
+    condition semantics, priority, or multiplicity.  [[#32], [#63]]
+
  -  Unified `dojang apply` and `dojang reflect` around the shared
     reconciliation planner and executor.  Both commands now inspect conflicts
     and destructive operations before running one ordered plan.  A source-only
@@ -26,9 +33,11 @@ To be released.
 [#29]: https://github.com/dahlia/dojang/issues/29
 [#30]: https://github.com/dahlia/dojang/issues/30
 [#31]: https://github.com/dahlia/dojang/issues/31
+[#32]: https://github.com/dahlia/dojang/issues/32
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#61]: https://github.com/dahlia/dojang/pull/61
 [#62]: https://github.com/dahlia/dojang/pull/62
+[#63]: https://github.com/dahlia/dojang/pull/63
 
 
 Version 0.2.1

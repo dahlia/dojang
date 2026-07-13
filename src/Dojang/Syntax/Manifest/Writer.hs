@@ -3,23 +3,19 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Syntax.Manifest.Writer
-  ( WriteError (..)
-  , writeManifest
+  ( writeManifest
   , writeManifestFile
   ) where
 
-import Control.Monad.Except (MonadError (throwError))
 import Data.Bifunctor (Bifunctor (second))
-import Data.List (group, partition, sort)
-import Data.List.NonEmpty (NonEmpty ((:|)), length, toList)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.List (partition)
+import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.Maybe (fromMaybe)
 import GHC.IsList (IsList (fromList))
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (all, any, writeFile)
 
 import Data.CaseInsensitive (CI (original))
-import Data.HashMap.Strict (toList)
-import Data.Map.Strict (toList)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import System.OsPath (OsPath, decodeFS)
@@ -27,6 +23,8 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Toml.Pretty (prettyTomlOrdered)
 import Toml.ToValue (ToTable (toTable))
 
+import qualified Data.HashMap.Strict
+import qualified Data.List.NonEmpty
 import qualified Data.Map.Strict
 import Dojang.MonadFileSystem
   ( FileType (Directory)
@@ -35,7 +33,8 @@ import Dojang.MonadFileSystem
 import Dojang.Syntax.EnvironmentPredicate.Writer (writeEnvironmentPredicate)
 import Dojang.Syntax.Manifest.Internal
   ( EnvironmentPredicate' (..)
-  , FileRoute'
+  , FileRoute' (CompactFileRoute, DetailedFileRoute)
+  , FileRouteBranch' (FileRouteBranch')
   , FileRouteMap'
   , FlatOrNonEmptyStrings (..)
   , Hooks' (..)
@@ -51,6 +50,7 @@ import Dojang.Types.EnvironmentPredicate
   )
 import Dojang.Types.FilePathExpression (FilePathExpression, toPathText)
 import Dojang.Types.FileRoute (FileRoute (..))
+import qualified Dojang.Types.FileRoute as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (..))
@@ -59,59 +59,22 @@ import Dojang.Types.MonikerName (MonikerName)
 
 
 schema :: Text
-schema = "https://schema.dojang.dev/2023-11/manifest.schema.json"
-
-
--- | An error that can occur while encoding a 'Manifest'.
-data WriteError
-  = -- | A route contains an environment predicate that cannot be represented
-    -- by any moniker in the manifest.
-    UnrepresentableRoutePredicate
-      OsPath
-      -- ^ The source path of the route.
-      EnvironmentPredicate
-      -- ^ The predicate that cannot be represented.
-  | -- | Multiple route predicates resolve to the same moniker and therefore
-    -- cannot be represented as distinct entries in the manifest.
-    DuplicateRouteMoniker
-      OsPath
-      -- ^ The source path of the route.
-      MonikerName
-      -- ^ The moniker shared by multiple route predicates.
-  deriving (Eq)
-
-
-instance Show WriteError where
-  show (UnrepresentableRoutePredicate path predicate) =
-    "Route predicate "
-      <> show predicate
-      <> " for path "
-      <> show (decodePath path)
-      <> " cannot be represented by any moniker."
-  show (DuplicateRouteMoniker path moniker) =
-    "Multiple route predicates for path "
-      <> show (decodePath path)
-      <> " resolve to moniker "
-      <> show moniker
-      <> "."
+schema = "https://schema.dojang.dev/2026-07/manifest.schema.json"
 
 
 -- | Encodes a 'Manifest' into a TOML document.
 writeManifest
   :: Manifest
   -- ^ The 'Manifest' to encode.
-  -> Either WriteError Text
-  -- ^ The encoded TOML document, or an error if the manifest contains route
-  -- predicates that the TOML format cannot represent without data loss.
-writeManifest manifest = do
-  manifest' <- mapManifest' manifest
-  let tbl = toTable manifest'
-  pure $
-    "#:schema "
-      <> schema
-      <> "\n\n"
-      <> (showt $ FromStringShow $ prettyTomlOrdered order tbl)
+  -> Text
+  -- ^ The encoded TOML document.
+writeManifest manifest =
+  "#:schema "
+    <> schema
+    <> "\n\n"
+    <> (showt $ FromStringShow $ prettyTomlOrdered order tbl)
  where
+  tbl = toTable $ mapManifest' manifest
   order :: [String] -> String -> Either Int String
   order [] field = case field of
     "dirs" -> Left 1
@@ -132,16 +95,13 @@ writeManifestFile
   -- ^ The path to write the 'Manifest' to.
   -> m ()
 writeManifestFile manifest filePath =
-  case writeManifest manifest of
-    Left err -> throwError $ userError $ show err
-    Right toml -> writeFile filePath $ encodeUtf8 toml
+  writeFile filePath $ encodeUtf8 $ writeManifest manifest
 
 
-mapManifest' :: Manifest -> Either WriteError Manifest'
-mapManifest' manifest = do
-  (dirs, files) <- mapFiles manifest.fileRoutes manifest.monikers
-  pure $ Manifest' monikers' dirs files ignores hooks'
+mapManifest' :: Manifest -> Manifest'
+mapManifest' manifest = Manifest' monikers' dirs files ignores hooks'
  where
+  (dirs, files) = mapFiles manifest.fileRoutes manifest.monikers
   monikers' :: MonikerMap'
   monikers' = mapMonikers' manifest.monikers
   ignores :: IgnoreMap'
@@ -160,16 +120,12 @@ mapManifest' manifest = do
 mapFiles
   :: FileRouteMap
   -> MonikerMap
-  -> Either WriteError (FileRouteMap', FileRouteMap')
-mapFiles fileRouteMap monikers = do
-  dirs' <- traverse mapRoute dirs
-  files' <- traverse mapRoute files
-  pure (fromList dirs', fromList files')
+  -> (FileRouteMap', FileRouteMap')
+mapFiles fileRouteMap monikers =
+  (fromList $ mapRoute <$> dirs, fromList $ mapRoute <$> files)
  where
-  mapRoute :: (OsPath, FileRoute) -> Either WriteError (FilePath, FileRoute')
-  mapRoute (path, route) = do
-    route' <- mapFileRoute' path route monikers
-    pure (decodePath path, route')
+  mapRoute :: (OsPath, FileRoute) -> (FilePath, FileRoute')
+  mapRoute (path, route) = (decodePath path, mapFileRoute' monikers route)
   dirs :: [(OsPath, FileRoute)]
   files :: [(OsPath, FileRoute)]
   (dirs, files) =
@@ -182,45 +138,51 @@ decodePath :: OsPath -> FilePath
 decodePath = unsafePerformIO . decodeFS
 
 
-mapFileRoute'
-  :: OsPath -> FileRoute -> MonikerMap -> Either WriteError FileRoute'
-mapFileRoute' routePath fileRoute monikers = do
-  mappedPredicates <- traverse mapPredicate fileRoute.predicates
-  case duplicateMoniker mappedPredicates of
-    Nothing -> Right $ fromList mappedPredicates
-    Just moniker -> Left $ DuplicateRouteMoniker routePath moniker
+mapFileRoute' :: MonikerMap -> FileRoute -> FileRoute'
+mapFileRoute' monikers fileRoute =
+  case traverse mapCompactPredicate routePredicates of
+    Just entries
+      | Data.Map.Strict.size (Data.Map.Strict.fromList entries)
+          == Prelude.length entries
+      , compactPredicates == routePredicates ->
+          CompactFileRoute $ fromList entries
+    _ -> DetailedFileRoute $ mapDetailedPredicate <$> routePredicates
  where
-  duplicateMoniker :: [(MonikerName, Text)] -> Maybe MonikerName
-  duplicateMoniker entries =
-    listToMaybe
-      [ moniker
-      | moniker : _ : _ <- group $ sort $ fst <$> entries
-      ]
-  mapPredicate
+  routePredicates
+    :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+  routePredicates = fileRoute.predicates
+  compactPredicates
+    :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+  compactPredicates =
+    ( FileRoute.fileRoute
+        monikers
+        [ (name, path)
+        | (Moniker name, path) <- routePredicates
+        ]
+        fileRoute.fileType
+    ).predicates
+  mapCompactPredicate
     :: (EnvironmentPredicate, Maybe FilePathExpression)
-    -> Either WriteError (MonikerName, Text)
-  mapPredicate (predicate, filePath) =
-    case normalizePredicate predicate of
-      Moniker name -> Right (name, path)
-      normalizedPredicate -> case lookBack monikers normalizedPredicate of
-        Just name -> Right (name, path)
-        Nothing ->
-          Left $ UnrepresentableRoutePredicate routePath normalizedPredicate
-   where
-    path = maybe "" toPathText filePath
-
-
-lookBack :: MonikerMap -> EnvironmentPredicate -> Maybe MonikerName
-lookBack monikers predicate =
-  listToMaybe $
-    sort
-      [ n
-      | (n, p) <- Data.HashMap.Strict.toList monikers
-      , normalizePredicate p == normalizedPred
-      ]
- where
-  normalizedPred :: EnvironmentPredicate
-  normalizedPred = normalizePredicate predicate
+    -> Maybe (MonikerName, Text)
+  mapCompactPredicate (Moniker name, Nothing) = Just (name, "")
+  mapCompactPredicate (Moniker name, Just path)
+    | toPathText path == "" = Nothing
+    | otherwise = Just (name, toPathText path)
+  mapCompactPredicate _ = Nothing
+  mapDetailedPredicate
+    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    -> FileRouteBranch'
+  mapDetailedPredicate (predicate, filePath) =
+    FileRouteBranch'
+      { Internal.routeMoniker = case predicate of
+          Moniker name | Data.HashMap.Strict.member name monikers -> Just name
+          _ -> Nothing
+      , Internal.routeCondition = case predicate of
+          Moniker name | Data.HashMap.Strict.member name monikers -> Nothing
+          _ -> Just $ writeEnvironmentPredicate predicate
+      , Internal.routePath = toPathText <$> filePath
+      , Internal.routeUnexpectedFields = []
+      }
 
 
 mapMonikers' :: MonikerMap -> MonikerMap'
