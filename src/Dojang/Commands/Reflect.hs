@@ -6,7 +6,7 @@
 
 module Dojang.Commands.Reflect (reflect) where
 
-import Control.Monad (filterM, forM, forM_, unless, when)
+import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, nub)
 import System.Exit (ExitCode (..), exitWith)
@@ -15,7 +15,7 @@ import System.IO (hIsTerminalDevice, stderr, stdin)
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (pack)
+import Data.Text (Text, pack)
 import FortyTwo.Prompts.Confirm (confirm)
 import FortyTwo.Prompts.Select (select)
 import System.Directory.OsPath (makeAbsolute)
@@ -24,7 +24,6 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
-  , takeDirectory
   , (</>)
   )
 
@@ -45,6 +44,7 @@ import Dojang.Commands.Disambiguation
 import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
+  , conflictError
   , fileNotFoundError
   , fileNotRoutedError
   , ignoredFileError
@@ -58,7 +58,7 @@ import Dojang.Types.Context
   , FileCorrespondence (..)
   , FileDeltaKind (..)
   , FileEntry (..)
-  , FileStat (..)
+  , FileStat (Missing)
   , IgnoredFile (..)
   , RouteMatch (..)
   , RouteState (..)
@@ -69,6 +69,21 @@ import Dojang.Types.Context
   , getUnregisteredFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeFiles
+  )
+import Dojang.Types.Reconciliation
+  ( ConflictPolicy (..)
+  , PlannedSyncOp (..)
+  , ReconciliationConflict (..)
+  , ReconciliationDirection (..)
+  , ReconciliationInput (..)
+  , ReconciliationItem (..)
+  , ReconciliationOutcome (..)
+  , ReconciliationPlan (..)
+  , ReconciliationSkipReason (..)
+  , SyncOp (..)
+  , executeReconciliationPlanWith
+  , observeReconciliationInput
+  , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 
@@ -212,8 +227,11 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
                 return [c | Just c <- correspondences]
       else return []
 
-  let allChangedFiles =
-        changedFiles ++ changedIgnored ++ unregisteredCorrespondences
+  let selectedCorrespondences =
+        [(True, file) | file <- changedFiles]
+          ++ [(True, file) | file <- changedIgnored]
+          ++ [(force, file) | file <- unregisteredCorrespondences]
+  let allChangedFiles = fmap snd selectedCorrespondences
   if null allChangedFiles
     then do
       printStderr "No changed files to reflect."
@@ -237,7 +255,7 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
               else return True -- Non-interactive: proceed
       if proceed
         then do
-          reflectCorrespondences force allChangedFiles
+          reflectCorrespondences ctx force selectedCorrespondences
           return ExitSuccess
         else do
           printStderr "Cancelled."
@@ -398,20 +416,10 @@ reflect force allFlag _includeUnregistered explicitSource paths = do
     unless proceed $ do
       printStderr "Cancelled."
       liftIO $ exitWith userCancelledError
-  let conflicts = filterConflicts allCorrespondences
-  $(logDebugSH) conflicts
-  unless (force || null conflicts) $ do
-    printWarnings $ nub $ concat warningLists
-    dieWithErrors
-      sourceCannotBeTargetError
-      [ "Cannot reflect "
-          <> pathStyle c.destination.path
-          <> ", since "
-          <> pathStyle c.source.path
-          <> " is also changed."
-      | c <- conflicts
-      ]
-  reflectCorrespondences force allCorrespondences
+  reflectCorrespondences
+    ctx
+    force
+    [(True, correspondence) | correspondence <- allCorrespondences]
   printWarnings $ nub $ concat warningLists
   return ExitSuccess
 
@@ -454,26 +462,37 @@ filterFilesInDirs dirPaths correspondences = do
 -- | Perform the actual reflect operation on file correspondences.
 reflectCorrespondences
   :: (MonadFileSystem i, MonadIO i)
-  => Bool
+  => Context (App i)
+  -> Bool
   -- ^ Force flag.
-  -> [FileCorrespondence]
+  -> [(Bool, FileCorrespondence)]
+  -- ^ Selected correspondences and whether an ignored destination was
+  -- explicitly admitted by command-level selection.
   -> App i ()
-reflectCorrespondences force files = do
+reflectCorrespondences ctx force selectedCorrespondences = do
   pathStyle <- pathStyleFor stderr
-  let conflicts = filterConflicts files
-  unless (force || null conflicts) $ do
+  inputs <-
+    mapM
+      (uncurry $ observeSelectedReconciliationInput ctx)
+      selectedCorrespondences
+  let policy = if force then PreferAuthoritative else RefuseConflicts
+  let plan = planReconciliation DestinationToSource policy inputs
+  $(logDebugSH) plan
+  unless (force || null plan.conflicts) $ do
     dieWithErrors
-      sourceCannotBeTargetError
+      conflictError
       [ "Cannot reflect "
           <> pathStyle c.destination.path
           <> ", since "
           <> pathStyle c.source.path
           <> " is also changed."
-      | c <- conflicts
+      | conflict <- plan.conflicts
+      , let c = conflict.correspondence
       ]
-  forM_ files $ \c -> do
-    if c.sourceDelta == Unchanged && c.destinationDelta == Unchanged
-      then
+  forM_ plan.items $ \item -> do
+    let c = item.correspondence
+    case item.outcome of
+      NoChange ->
         printStderr'
           Note
           ( "File "
@@ -482,22 +501,79 @@ reflectCorrespondences force files = do
               <> pathStyle c.source.path
               <> "."
           )
-      else do
+      WillReconcile ->
         printStderr $
           "Reflect "
             <> pathStyle c.destination.path
             <> " to "
             <> pathStyle c.source.path
             <> "..."
-        if c.destinationDelta == Removed
-          then do
-            cleanupExisting c.source
-            cleanupExisting c.intermediate
-          else do
-            cleanup c.intermediate
-            copy c.destination c.intermediate
-            cleanup c.source
-            copy c.intermediate c.source
+      ConflictDetected -> return ()
+      Skipped reason -> printSkippedReconciliation pathStyle c reason
+  void $
+    executeReconciliationPlanWith
+      (logSyncOp . (.syncOp))
+      plan
+
+
+-- | Observes a correspondence that the command has already selected.  Route
+-- selection and the force flag remain responsible for admitting ignored files.
+observeSelectedReconciliationInput
+  :: (MonadFileSystem i, MonadIO i)
+  => Context (App i)
+  -> Bool
+  -- ^ Whether command-level selection explicitly admitted an ignored path.
+  -> FileCorrespondence
+  -> App i ReconciliationInput
+observeSelectedReconciliationInput ctx allowIgnored correspondence = do
+  input <- observeReconciliationInput ctx correspondence
+  return $
+    if allowIgnored
+      then case input.destinationRouteState of
+        Ignored route _ -> input{destinationRouteState = Routed route}
+        _ -> input
+      else input
+
+
+printSkippedReconciliation
+  :: (MonadIO i)
+  => (OsPath -> Text)
+  -> FileCorrespondence
+  -> ReconciliationSkipReason
+  -> App i ()
+printSkippedReconciliation pathStyle correspondence reason =
+  case reason of
+    IgnoredDestination _ pattern ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle correspondence.destination.path
+          <> " because it is ignored by pattern "
+          <> pack (show pattern)
+          <> "."
+    UnsupportedSymlink ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle correspondence.destination.path
+          <> " because symbolic link synchronization is not supported."
+
+
+logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
+logSyncOp (RemoveDirs path) = do
+  path' <- decodePath path
+  $(logDebug) $ "Remove directory recursively: " <> pack path'
+logSyncOp (RemoveFile path) = do
+  path' <- decodePath path
+  $(logDebug) $ "Remove file: " <> pack path'
+logSyncOp (CopyFile source destination) = do
+  source' <- decodePath source
+  destination' <- decodePath destination
+  $(logDebug) $ "Copy file: " <> pack source' <> " -> " <> pack destination'
+logSyncOp (CreateDir path) = do
+  path' <- decodePath path
+  $(logDebug) $ "Create directory: " <> pack path'
+logSyncOp (CreateDirs path) = do
+  path' <- decodePath path
+  $(logDebug) $ "Create directory recursively: " <> pack path'
 
 
 -- | Create a 'FileCorrespondence' from a route result and destination path.
@@ -532,48 +608,6 @@ makeCorrespondForRoute ctx dstPath route = do
   makeCorrespondBetweenThreeFiles interPath srcPath dstPath
 
 
-cleanup :: (MonadFileSystem i, MonadIO i) => FileEntry -> App i ()
-cleanup fileEntry = do
-  path <- decodePath fileEntry.path
-  case fileEntry.stat of
-    Missing -> return ()
-    Directory -> do
-      $(logDebug) $ "Remove directory recursively: " <> pack path
-      removeDirectoryRecursively fileEntry.path
-    _ -> do
-      $(logDebug) $ "Remove file: " <> pack path
-      removeFile fileEntry.path
-
-
-cleanupExisting :: (MonadFileSystem i, MonadIO i) => FileEntry -> App i ()
-cleanupExisting fileEntry = do
-  pathExists <- (||) <$> exists fileEntry.path <*> isSymlink fileEntry.path
-  when pathExists $ cleanup fileEntry
-
-
-copy :: (MonadFileSystem i, MonadIO i) => FileEntry -> FileEntry -> App i ()
-copy from to = do
-  from' <- decodePath from.path
-  to' <- decodePath to.path
-  case from.stat of
-    Directory -> do
-      $(logDebug) $ "Create directory recursively: " <> pack to'
-      createDirectories to.path
-    _ -> do
-      let parent = takeDirectory to.path
-      parent' <- decodePath parent
-      $(logDebug) $ "Create directory recursively: " <> pack parent'
-      createDirectories parent
-      $(logDebug) $ "Copy file: " <> pack from' <> " -> " <> pack to'
-      copyFile from.path to.path
-
-
-filterConflicts
-  :: [FileCorrespondence]
-  -> [FileCorrespondence]
-filterConflicts corresponds = [c | c <- corresponds, c.sourceDelta /= Unchanged]
-
-
 -- | Create a FileCorrespondence for an unregistered file.
 -- The source file doesn't exist yet, so we create a correspondence that
 -- will copy from destination to source.
@@ -599,29 +633,4 @@ createUnregisteredCorrespondence ctx unreg route = do
                 ctx.repository.intermediatePath </> route.routeName </> relPath
             , normalise $ route.sourcePath </> relPath
             )
-  -- Create correspondence: source doesn't exist, destination exists
-  dstStat <- getFileStat unreg.filePath
-  let srcEntry = FileEntry srcPath Missing
-  let interEntry = FileEntry interPath Missing
-  let dstEntry = FileEntry unreg.filePath dstStat
-  return
-    FileCorrespondence
-      { source = srcEntry
-      , sourceDelta = Removed -- Source is "missing" relative to intermediate
-      , intermediate = interEntry
-      , destination = dstEntry
-      , destinationDelta = Added -- Destination was "added" relative to intermediate
-      }
- where
-  getFileStat :: OsPath -> m FileStat
-  getFileStat path = do
-    isDir <- isDirectory path
-    if isDir
-      then return Directory
-      else do
-        exists' <- exists path
-        if exists'
-          then do
-            size <- getFileSize path
-            return $ File size
-          else return Missing
+  makeCorrespondBetweenThreeFiles interPath srcPath unreg.filePath

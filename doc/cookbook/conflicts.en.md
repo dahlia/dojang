@@ -8,12 +8,20 @@ they can immediately reflect that change to the source with
 the `dojang reflect` command, but if they forget and make another change
 to the source settings, a conflict can occur.
 
-Once a conflict is detected, `dojang apply` will print a warning and
-(unless you have the `-f`/`--force` options turned on) cancel what it
-was about to do.  To resolve the conflict, you first need to determine
-which config file is causing the conflict.  You can see which config file
-is causing the conflict by running the `dojang status` command.
-For example, you might see output like below:
+A conflict exists when the source and destination have both changed from their
+common intermediate snapshot and the resulting states are incompatible.  Both
+`dojang apply` and `dojang reflect` stop before changing the filesystem when
+they detect such a conflict, unless you use `-f`/`--force`.
+
+A change only on the side that the command will overwrite is not a conflict.
+`dojang apply` treats the source as authoritative, while `dojang reflect`
+treats the destination as authoritative.  Running `dojang reflect` can
+therefore replace a source-only change with the destination version without
+`--force`.
+
+To resolve a conflict, first determine which config file is causing it.  Run
+`dojang status` to find the file.  For example, you might see output like
+below:
 
 ~~~~ console
 $ dojang status

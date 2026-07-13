@@ -672,6 +672,14 @@ spec = do
         dryRunIO (createDirectory nonExistentP >> isDirectory nonExistentP)
           `shouldReturn` True
 
+      it "creates a directory after removing a backing file" $ do
+        ( dryRunIO $ do
+            removeFile packageYamlP
+            createDirectory packageYamlP
+            isDirectory packageYamlP
+          )
+          `shouldReturn` True
+
       it "can't create a directory inside a non-existent path" $ do
         Left failToCreate <- tryDryRunIO $ do
           createDirectory (nonExistentP </> nonExistentP)
