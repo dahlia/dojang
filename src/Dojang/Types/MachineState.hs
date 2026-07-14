@@ -187,18 +187,26 @@ resolveStateRoot :: OperatingSystem -> StateRootInputs -> OsPath
 resolveStateRoot operatingSystem inputs = normalise $ case operatingSystem of
   Linux ->
     maybe
-      (inputs.homeDirectory </> path ".local/share")
+      (inputs.homeDirectory </> path ".local" </> path "share")
       id
       (inputs.xdgDataHome >>= validAbsolutePath)
       </> path "dojang"
-  MacOS -> inputs.homeDirectory </> path "Library/Application Support/dojang"
+  MacOS ->
+    inputs.homeDirectory
+      </> path "Library"
+      </> path "Application Support"
+      </> path "dojang"
   Windows ->
     maybe
-      (inputs.homeDirectory </> path "AppData/Local")
+      (inputs.homeDirectory </> path "AppData" </> path "Local")
       id
       (inputs.localAppData >>= validAbsolutePath)
       </> path "dojang"
-  _ -> inputs.homeDirectory </> path ".local/share/dojang"
+  _ ->
+    inputs.homeDirectory
+      </> path ".local"
+      </> path "share"
+      </> path "dojang"
  where
   validAbsolutePath candidate
     | isAbsolute candidate = Just candidate
@@ -696,7 +704,10 @@ repositoryStateLockPath root identifier =
 -- | Default full intermediate snapshot path for a repository.
 defaultIntermediatePath :: OsPath -> RepositoryId -> OsPath
 defaultIntermediatePath root identifier =
-  repositoryStateDirectory root identifier </> path "snapshots/current"
+  normalise $
+    repositoryStateDirectory root identifier
+      </> path "snapshots"
+      </> path "current"
 
 
 -- | Marker used to make an interrupted legacy migration retryable.
@@ -761,33 +772,59 @@ readMachineId
   => OsPath
   -> m (Either StateError (Maybe MachineId))
 readMachineId root = catchStateIOErrors $ do
-  let filename = root </> path "machine.toml"
-  validated <- validateStateDocument "machine identity" filename
-  case validated of
+  validatedRoot <- validateStateRoot root
+  case validatedRoot of
     Left err -> return $ Left err
-    Right False -> do
-      hasRepositoryData <- repositoryStoreHasData root
-      return $
-        if hasRepositoryData
-          then
-            Left $
-              MalformedState
-                "The machine identity is missing while repository state remains."
-          else Right Nothing
-    Right True -> do
-      contents <- readFile filename
-      return $ do
-        source <- decodeStateUtf8 contents
-        let decoded :: Result String MachineDocument
-            decoded = decode $ Text.unpack source
-        case decoded of
-          Failure errors ->
-            Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
-          Success _ document ->
-            Just
-              <$> mapLeft
-                MalformedState
-                (parseMachineId document.documentMachineIdentity)
+    Right () -> do
+      let filename = root </> path "machine.toml"
+      validated <- validateStateDocument "machine identity" filename
+      case validated of
+        Left err -> return $ Left err
+        Right False -> do
+          hasRepositoryData <- repositoryStoreHasData root
+          return $
+            if hasRepositoryData
+              then
+                Left $
+                  MalformedState
+                    "The machine identity is missing while repository state remains."
+              else Right Nothing
+        Right True -> do
+          contents <- readFile filename
+          return $ do
+            source <- decodeStateUtf8 contents
+            let decoded :: Result String MachineDocument
+                decoded = decode $ Text.unpack source
+            case decoded of
+              Failure errors ->
+                Left $
+                  MalformedState $
+                    Text.intercalate "\n" $
+                      Text.pack <$> errors
+              Success _ document ->
+                Just
+                  <$> mapLeft
+                    MalformedState
+                    (parseMachineId document.documentMachineIdentity)
+
+
+validateStateRoot
+  :: (MonadFileSystem m)
+  => OsPath
+  -> m (Either StateError ())
+validateStateRoot root = do
+  symlink <- isSymlink root
+  present <- exists root
+  directory <- isDirectory root
+  return $
+    if symlink || present && not directory
+      then
+        Left $
+          MalformedState $
+            "Machine-state root "
+              <> osPathText root
+              <> " is not a regular directory."
+      else Right ()
 
 
 validateStateDocument
@@ -865,20 +902,24 @@ validateRepositoryStoreRoot
   => OsPath
   -> m (Either StateError ())
 validateRepositoryStoreRoot root = do
-  let repositories = root </> path "repositories"
-  symlink <- isSymlink repositories
-  present <- exists repositories
-  directory <- isDirectory repositories
-  if symlink || present && not directory
-    then do
-      repositoriesPath <- Text.pack <$> decodePath repositories
-      return $
-        Left $
-          MalformedState $
-            "Repository state store "
-              <> repositoriesPath
-              <> " is not a regular directory."
-    else return $ Right ()
+  validatedRoot <- validateStateRoot root
+  case validatedRoot of
+    Left err -> return $ Left err
+    Right () -> do
+      let repositories = root </> path "repositories"
+      symlink <- isSymlink repositories
+      present <- exists repositories
+      directory <- isDirectory repositories
+      if symlink || present && not directory
+        then do
+          repositoriesPath <- Text.pack <$> decodePath repositories
+          return $
+            Left $
+              MalformedState $
+                "Repository state store "
+                  <> repositoriesPath
+                  <> " is not a regular directory."
+        else return $ Right ()
 
 
 validateRepositoryStateDirectory

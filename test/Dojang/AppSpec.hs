@@ -587,13 +587,16 @@ posixUnreadableRegistrySpec =
 
 
 withHome :: OsPath -> IO a -> IO a
-withHome home action = bracket (lookupEnv "HOME") restore $ \_ -> do
-  home' <- decodeFS home
-  setEnv "HOME" home'
-  action
+withHome home action =
+  bracket (lookupEnv "HOME") (restore "HOME") $ \_ ->
+    bracket (lookupEnv "USERPROFILE") (restore "USERPROFILE") $ \_ -> do
+      home' <- decodeFS home
+      setEnv "HOME" home'
+      setEnv "USERPROFILE" home'
+      action
  where
-  restore Nothing = unsetEnv "HOME"
-  restore (Just previous) = setEnv "HOME" previous
+  restore name Nothing = unsetEnv name
+  restore name (Just previous) = setEnv name previous
 
 
 catchIO :: IO a -> (IOError -> IO a) -> IO a

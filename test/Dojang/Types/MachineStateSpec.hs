@@ -20,7 +20,6 @@ import Control.Monad.Except
   ( ExceptT
   , MonadError (catchError, throwError)
   , runExceptT
-  , tryError
   )
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader (ask), ReaderT (..), runReaderT)
@@ -108,13 +107,24 @@ spec = do
   let symlinkIt = if symlinkAvailable then it else xit
 
   describe "resolveStateRoot" $ do
-    home <- runIO $ encodeFS "/home/tester"
-    xdg <- runIO $ encodeFS "/data"
-    local <- runIO $ encodeFS "/local"
-    appSupport <- runIO $ encodeFS "Library/Application Support/dojang"
-    linuxFallback <- runIO $ encodeFS ".local/share/dojang"
-    windowsFallback <- runIO $ encodeFS "AppData/Local/dojang"
+    currentDirectory <- runIO System.Directory.OsPath.getCurrentDirectory
+    homeName <- runIO $ encodeFS "home"
+    testerName <- runIO $ encodeFS "tester"
+    dataName <- runIO $ encodeFS "data"
+    localName <- runIO $ encodeFS "local"
+    libraryName <- runIO $ encodeFS "Library"
+    applicationSupportName <- runIO $ encodeFS "Application Support"
+    appDataName <- runIO $ encodeFS "AppData"
+    localDirectoryName <- runIO $ encodeFS "Local"
+    hiddenLocalName <- runIO $ encodeFS ".local"
+    shareName <- runIO $ encodeFS "share"
     dojang <- runIO $ encodeFS "dojang"
+    let home = currentDirectory </> homeName </> testerName
+    let xdg = currentDirectory </> dataName
+    let local = currentDirectory </> localName
+    let appSupport = libraryName </> applicationSupportName </> dojang
+    let linuxFallback = hiddenLocalName </> shareName </> dojang
+    let windowsFallback = appDataName </> localDirectoryName </> dojang
 
     it "uses the native data directory on every supported platform" $ do
       resolveStateRoot Linux (StateRootInputs home (Just xdg) Nothing)
@@ -388,8 +398,8 @@ spec = do
         rootName <- encodeFS "state"
         let root = tmp </> rootName
         writeFile root "not a directory"
-        result <- tryError $ validateMachineStateStore root
-        result `shouldSatisfy` isStateIOErrorResult
+        result <- validateMachineStateStore root
+        result `shouldSatisfy` isMalformed
 
     it "rejects arbitrary non-directory repository-store roots" $ hedgehog $ do
       payload <- forAll $ Gen.bytes (linear 0 256)
@@ -442,8 +452,8 @@ spec = do
         rootName <- encodeFS "state"
         let root = tmp </> rootName
         writeFile root "not a directory"
-        result <- tryError $ readMachineId root
-        result `shouldSatisfy` isStateIOErrorResult
+        result <- readMachineId root
+        result `shouldSatisfy` isMalformed
 
     it "rejects a repository state path that is not a regular file" $
       withTempDir $ \root _ -> do
@@ -676,8 +686,8 @@ spec = do
         stored.checkoutPath `shouldBe` paths.checkout
         stored.manifestPath `shouldBe` manifest
         stored.intermediatePath `shouldBe` current
-        removeFile checkoutAlias
-        removeFile snapshotAlias
+        System.Directory.OsPath.removeDirectoryLink checkoutAlias
+        System.Directory.OsPath.removeDirectoryLink snapshotAlias
         exists stored.checkoutPath >>= (`shouldBe` True)
         exists stored.manifestPath >>= (`shouldBe` True)
         exists stored.intermediatePath >>= (`shouldBe` True)
@@ -2089,9 +2099,13 @@ fixtureState = do
   machineId' <- machineId "323e4567-e89b-42d3-a456-426614174000"
   checkoutName <- encodeFS "checkout"
   manifestName <- encodeFS "dojang.toml"
-  intermediateName <- encodeFS "state/snapshots/current"
+  stateName <- encodeFS "state"
+  snapshotsName <- encodeFS "snapshots"
+  currentName <- encodeFS "current"
   checkout <- System.Directory.OsPath.makeAbsolute checkoutName
-  intermediate <- System.Directory.OsPath.makeAbsolute intermediateName
+  intermediate <-
+    System.Directory.OsPath.makeAbsolute $
+      stateName </> snapshotsName </> currentName
   return $
     MachineState
       1
