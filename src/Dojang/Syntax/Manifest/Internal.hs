@@ -1,5 +1,4 @@
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -22,7 +21,7 @@ module Dojang.Syntax.Manifest.Internal
   ) where
 
 import Data.List.NonEmpty (NonEmpty)
-import GHC.Generics (Generic)
+import Data.Maybe (fromMaybe)
 import Prelude hiding (all, any)
 
 import Data.CaseInsensitive (CI (original))
@@ -40,7 +39,6 @@ import Toml.FromValue
   , parseTableFromValue
   , setTable
   )
-import Toml.FromValue.Generic (genericParseTable)
 import Toml.FromValue.Matcher (Matcher)
 import Toml.ToValue
   ( ToKey (..)
@@ -49,7 +47,6 @@ import Toml.ToValue
   , defaultTableToValue
   , table
   )
-import Toml.ToValue.Generic (genericToTable)
 
 
 data FlatOrNonEmptyStrings
@@ -338,17 +335,26 @@ instance ToTable Hooks' where
 
 
 data Manifest' = Manifest'
-  { monikers :: MonikerMap'
+  { repositoryId :: Maybe Text
+  , monikers :: MonikerMap'
   , dirs :: FileRouteMap'
   , files :: FileRouteMap'
   , ignores :: IgnoreMap'
   , hooks :: Maybe Hooks'
   }
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show)
 
 
 instance FromValue Manifest' where
-  fromValue = parseTableFromValue genericParseTable
+  fromValue =
+    parseTableFromValue $
+      Manifest'
+        <$> optKey "repository-id"
+        <*> (fromMaybe Map.empty <$> optKey "monikers")
+        <*> (fromMaybe Map.empty <$> optKey "dirs")
+        <*> (fromMaybe Map.empty <$> optKey "files")
+        <*> (fromMaybe Map.empty <$> optKey "ignores")
+        <*> optKey "hooks"
 
 
 instance ToValue Manifest' where
@@ -356,4 +362,16 @@ instance ToValue Manifest' where
 
 
 instance ToTable Manifest' where
-  toTable = genericToTable
+  toTable manifest =
+    table $
+      maybeField "repository-id" manifest.repositoryId
+        ++ [ ("monikers", toValue manifest.monikers)
+           , ("dirs", toValue manifest.dirs)
+           , ("files", toValue manifest.files)
+           , ("ignores", toValue manifest.ignores)
+           ]
+        ++ maybeField "hooks" manifest.hooks
+   where
+    maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
+    maybeField key (Just value) = [(key, toValue value)]
+    maybeField _ Nothing = []

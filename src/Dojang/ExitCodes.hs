@@ -41,6 +41,10 @@ manifestAlreadyExists :: ExitCode
 manifestAlreadyExists = ExitFailure 12
 
 
+machineStateError :: ExitCode
+machineStateError = ExitFailure 13
+
+
 noEnvFile :: ExitCode
 noEnvFile = ExitFailure 20
 

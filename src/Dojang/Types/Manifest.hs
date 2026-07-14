@@ -18,6 +18,7 @@ import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook (HookMap)
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
+import Dojang.Types.RepositoryId (RepositoryId)
 
 
 -- | A map of directory routes to file patterns that should be ignored.
@@ -27,7 +28,10 @@ type IgnoreMap = Map OsPath [FilePattern]
 -- | A manifest of the directory routes and the definitions of monikers that
 -- are used to resolve them.
 data Manifest = Manifest
-  { monikers :: MonikerMap
+  { repositoryId :: Maybe RepositoryId
+  -- ^ The stable identity of the repository.  Legacy manifests omit it until
+  -- they are explicitly migrated.
+  , monikers :: MonikerMap
   -- ^ The definitions of monikers that are used to resolve the directory routes.
   , fileRoutes :: FileRouteMap
   -- ^ The directory routes that are resolved by the monikers.
@@ -65,7 +69,8 @@ manifest
   -- ^ The made 'Manifest'.
 manifest monikers' fileRoutes' dirRoutes' ignorePatterns' hooks' =
   Manifest
-    { monikers = monikers'
+    { repositoryId = Nothing
+    , monikers = monikers'
     , fileRoutes = fromList $ files ++ dirs
     , ignorePatterns = ignores
     , hooks = hooks'

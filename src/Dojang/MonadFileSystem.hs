@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
@@ -10,6 +11,7 @@ module Dojang.MonadFileSystem
   , dryRunIO
   , dryRunIO'
   , tryDryRunIO
+  , writeFileAtomically
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -26,6 +28,7 @@ import System.IO.Error
   , ioeGetLocation
   , ioeSetErrorString
   , ioeSetLocation
+  , isAlreadyExistsError
   , isDoesNotExistError
   , isPermissionError
   , mkIOError
@@ -43,8 +46,9 @@ import Control.Monad.State.Strict
   , runStateT
   )
 import Data.ByteString (ByteString)
-import Data.ByteString qualified (length, readFile, writeFile)
+import Data.ByteString qualified (hPut, length, readFile, writeFile)
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
+import System.Directory qualified as Directory
 import System.Directory.OsPath
   ( doesDirectoryExist
   , doesFileExist
@@ -53,15 +57,19 @@ import System.Directory.OsPath
   , pathIsSymbolicLink
   , removeDirectoryRecursive
   )
-import System.Directory.OsPath qualified
-  ( copyFile
-  , createDirectory
-  , getFileSize
-  , listDirectory
-  , removeDirectory
-  , removeFile
-  )
+import System.Directory.OsPath qualified as OsDirectory
+import System.FileLock qualified as FileLock
+
+
+#ifndef mingw32_HOST_OS
+import System.Posix.Files qualified as Posix
+#endif
 import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
+import System.IO
+  ( hClose
+  , hFlush
+  , openBinaryTempFile
+  )
 import System.OsPath
   ( OsPath
   , decodeFS
@@ -107,6 +115,10 @@ class (MonadError IOError m) => MonadFileSystem m where
   isFile :: (HasCallStack) => OsPath -> m Bool
 
 
+  -- | Checks if a path exists and is a regular, non-symbolic-link file.
+  isRegularFile :: (HasCallStack) => OsPath -> m Bool
+
+
   -- | Checks if a path exists and is a directory.  If a path is a symbolic
   -- link, then it tells whether the target of the symbolic link is a directory.
   isDirectory :: (HasCallStack) => OsPath -> m Bool
@@ -124,6 +136,43 @@ class (MonadError IOError m) => MonadFileSystem m where
   writeFile :: (HasCallStack) => OsPath -> ByteString -> m ()
 
 
+  -- | Replaces the destination file with the source file.
+  --
+  -- Both paths must be on the same filesystem.  Implementations should use
+  -- the platform's atomic replacement operation where one is available.
+  replaceFile :: (HasCallStack) => OsPath -> OsPath -> m ()
+
+
+  -- | Writes a uniquely named temporary file in the given directory.
+  --
+  -- The returned path belongs to the caller, which should replace or remove
+  -- it after use.
+  writeTemporaryFile
+    :: (HasCallStack)
+    => OsPath
+    -- ^ Parent directory.
+    -> FilePath
+    -- ^ Filename template.
+    -> ByteString
+    -- ^ File contents.
+    -> m OsPath
+  writeTemporaryFile directory template contents = do
+    filename <- encodePath template
+    let temporary = directory </> filename
+    writeFile temporary contents
+    return temporary
+
+
+  -- | Runs an action while holding an exclusive inter-process file lock.
+  withFileLock :: (HasCallStack) => OsPath -> m a -> m a
+  withFileLock _ action = action
+
+
+  -- | Resolves symbolic links and other filesystem aliases in a path.
+  canonicalizePath :: (HasCallStack) => OsPath -> m OsPath
+  canonicalizePath = return . normalise
+
+
   -- | Tells the target path of a symbolic link.  If the path is not a symbolic
   -- link, then it throws an 'IOError'.  The target path is relative to the
   -- symbolic link (i.e., resolved from the directory that contains the
@@ -139,6 +188,35 @@ class (MonadError IOError m) => MonadFileSystem m where
     -> OsPath
     -- ^ Destination path.
     -> m ()
+
+
+  -- | Copies a file together with its filesystem metadata.
+  --
+  -- The default implementation copies only the contents.  Filesystem-backed
+  -- implementations should preserve permissions and other supported metadata.
+  copyFileWithMetadata
+    :: (HasCallStack)
+    => OsPath
+    -- ^ Source path.
+    -> OsPath
+    -- ^ Destination path.
+    -> m ()
+  copyFileWithMetadata = copyFile
+
+
+  -- | Copies filesystem permissions without replacing file contents.
+  --
+  -- The default implementation does nothing.  Filesystem-backed
+  -- implementations should preserve every supported permission bit or
+  -- attribute.
+  copyFilePermissions
+    :: (HasCallStack)
+    => OsPath
+    -- ^ Source path.
+    -> OsPath
+    -- ^ Destination path.
+    -> m ()
+  copyFilePermissions _ _ = return ()
 
 
   -- | Creates a directory at the given path.
@@ -161,7 +239,13 @@ class (MonadError IOError m) => MonadFileSystem m where
               then do
                 ancestor' <- decodePath ancestor
                 throwError $ fileError ancestor'
-              else createDirectory ancestor
+              else
+                createDirectory ancestor `catchError` \err ->
+                  if isAlreadyExistsError err
+                    then do
+                      createdByPeer <- isDirectory ancestor
+                      unless createdByPeer $ throwError err
+                    else throwError err
     )
       `mapError` (`ioePrependLocation` "createDirectories")
    where
@@ -229,6 +313,31 @@ class (MonadError IOError m) => MonadFileSystem m where
   getFileSize :: (HasCallStack) => OsPath -> m Integer
 
 
+-- | Writes a sibling temporary file and atomically replaces the destination.
+writeFileAtomically
+  :: (HasCallStack, MonadFileSystem m)
+  => OsPath
+  -- ^ Destination file.
+  -> FilePath
+  -- ^ Temporary filename template.
+  -> ByteString
+  -- ^ Complete replacement contents.
+  -> m ()
+writeFileAtomically destination template contents = do
+  let directory = takeDirectory destination
+  temporary <- writeTemporaryFile directory template contents
+  ( do
+      destinationExists <- exists destination
+      when destinationExists $
+        copyFilePermissions destination temporary
+      replaceFile temporary destination
+    )
+    `catchError` \err -> do
+      temporaryExists <- exists temporary
+      when temporaryExists $ removeFile temporary
+      throwError err
+
+
 listDirectoryRecursively'
   :: (HasCallStack, MonadFileSystem m)
   => OsPath
@@ -254,6 +363,76 @@ listDirectoryRecursively' path ptnStep = do
     subentries <- listDirectoryRecursively' (path </> dir) step
     return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
   return $ files' ++ symlinks' ++ concat dirs'
+#ifdef mingw32_HOST_OS
+replaceFileIO :: OsPath -> OsPath -> IO ()
+replaceFileIO source destination = do
+  destinationExists <- doesPathExist destination
+  if not destinationExists
+    then OsDirectory.renameFile source destination
+    else do
+      permissions <- OsDirectory.getPermissions destination
+      -- MoveFileEx cannot replace a destination with the read-only attribute.
+      -- The source already carries the original permissions, so a successful
+      -- replacement restores the attribute as part of the move.
+      OsDirectory.setPermissions
+        destination
+        (Directory.setOwnerWritable True permissions)
+      OsDirectory.renameFile source destination `catchError` \err -> do
+        destinationStillExists <- doesPathExist destination
+        when destinationStillExists $
+          OsDirectory.setPermissions destination permissions
+        sourceStillExists <- doesPathExist source
+        when sourceStillExists $ do
+          sourcePermissions <- OsDirectory.getPermissions source
+          OsDirectory.setPermissions
+            source
+            (Directory.setOwnerWritable True sourcePermissions)
+        throwError err
+
+
+copyFilePermissionsIO :: OsPath -> OsPath -> IO ()
+copyFilePermissionsIO source destination = do
+  permissions <- OsDirectory.getPermissions source
+  OsDirectory.setPermissions destination permissions
+
+
+isRegularFileIO :: OsPath -> IO Bool
+isRegularFileIO path =
+  (&&) <$> doesFileExist path <*> (not <$> isSymlink path)
+#else
+replaceFileIO :: OsPath -> OsPath -> IO ()
+replaceFileIO = OsDirectory.renameFile
+
+
+copyFilePermissionsIO :: OsPath -> OsPath -> IO ()
+copyFilePermissionsIO source destination = do
+  source' <- decodeFS source
+  destination' <- decodeFS destination
+  mode <- Posix.fileMode <$> Posix.getFileStatus source'
+  Posix.setFileMode destination' mode
+
+
+isRegularFileIO :: OsPath -> IO Bool
+isRegularFileIO path = do
+  path' <- decodeFS path
+  (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus path')
+    `catchError` \err ->
+      if isDoesNotExistError err then return False else throwError err
+#endif
+
+
+validateFileLockPath :: OsPath -> IO ()
+validateFileLockPath lockPath = do
+  symbolicLink <-
+    pathIsSymbolicLink lockPath `catchError` \err ->
+      if isDoesNotExistError err then return False else throwError err
+  present <- doesPathExist lockPath
+  regularFile <- isRegularFileIO lockPath
+  when (symbolicLink || present && not regularFile) $ do
+    lockPath' <- decodeFS lockPath
+    throwError $
+      mkIOError InappropriateType "withFileLock" Nothing (Just lockPath')
+        `ioeSetErrorString` "lock path is not a regular file"
 
 
 instance MonadFileSystem IO where
@@ -267,6 +446,9 @@ instance MonadFileSystem IO where
 
 
   isFile = doesFileExist
+
+
+  isRegularFile = isRegularFileIO
 
 
   isDirectory = doesDirectoryExist
@@ -285,16 +467,51 @@ instance MonadFileSystem IO where
     Data.ByteString.writeFile dst' contents
 
 
+  replaceFile = replaceFileIO
+
+
+  copyFileWithMetadata = OsDirectory.copyFileWithMetadata
+
+
+  copyFilePermissions = copyFilePermissionsIO
+
+
+  writeTemporaryFile directory template contents = do
+    directory' <- decodePath directory
+    (filename, handle) <- openBinaryTempFile directory' template
+    ( do
+        Data.ByteString.hPut handle contents
+        hFlush handle
+        hClose handle
+        encodePath filename
+      )
+      `catchError` \err -> do
+        hClose handle `catchError` const (return ())
+        Directory.removeFile filename `catchError` const (return ())
+        throwError err
+
+
+  withFileLock lockPath action = do
+    validateFileLockPath lockPath
+    lockPath' <- decodePath lockPath
+    FileLock.withFileLock lockPath' FileLock.Exclusive $ const $ do
+      validateFileLockPath lockPath
+      action
+
+
+  canonicalizePath = OsDirectory.canonicalizePath
+
+
   readSymlinkTarget = getSymbolicLinkTarget
 
 
-  createDirectory = System.Directory.OsPath.createDirectory
+  createDirectory = OsDirectory.createDirectory
 
 
-  removeFile = System.Directory.OsPath.removeFile
+  removeFile = OsDirectory.removeFile
 
 
-  removeDirectory = System.Directory.OsPath.removeDirectory
+  removeDirectory = OsDirectory.removeDirectory
 
 
   removeDirectoryRecursively =
@@ -314,7 +531,7 @@ instance MonadFileSystem IO where
               else throwError e
 
 
-  listDirectory = System.Directory.OsPath.listDirectory
+  listDirectory = OsDirectory.listDirectory
 
 
   getFileSize path = do
@@ -324,10 +541,10 @@ instance MonadFileSystem IO where
       throwError $
         mkIOError InappropriateType "getFileSize" Nothing (Just path')
           `ioeSetErrorString` "it is a directory"
-    System.Directory.OsPath.getFileSize path
+    OsDirectory.getFileSize path
 
 
-  copyFile = System.Directory.OsPath.copyFile
+  copyFile = OsDirectory.copyFile
 
 
 type SeqNo = Int
@@ -447,6 +664,15 @@ instance MonadFileSystem DryRunIO where
       Nothing -> liftIO $ doesFileExist path
 
 
+  isRegularFile path = do
+    oFiles <- gets overlaidFiles
+    case oFiles !? normalise path of
+      Just ((_, Contents _) :| _) -> return True
+      Just ((_, Copied _) :| _) -> return True
+      Just (_ :| _) -> return False
+      Nothing -> liftIO (isRegularFile path :: IO Bool)
+
+
   isDirectory path = do
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
@@ -501,6 +727,26 @@ instance MonadFileSystem DryRunIO where
     notInsideDirError dst' =
       mkIOError InappropriateType "writeFile" Nothing (Just dst')
         `ioeSetErrorString` "not inside a directory"
+
+
+  replaceFile src dst = do
+    contents <- readFile src
+    writeFile dst contents
+    removeFile src
+
+
+  writeTemporaryFile directory template contents = do
+    sequenceNumber <- gets nextSequenceNumber
+    filename <- encodePath $ template <> show sequenceNumber
+    let temporary = directory </> filename
+    writeFile temporary contents
+    return temporary
+
+
+  withFileLock _ action = action
+
+
+  canonicalizePath path = liftIO $ OsDirectory.canonicalizePath path
 
 
   readSymlinkTarget path = do
@@ -718,7 +964,7 @@ instance MonadFileSystem DryRunIO where
         when (isSymlink' || isFile') $ throwError (nonDirError pathFP)
         files <-
           liftIO $
-            System.Directory.OsPath.listDirectory path
+            OsDirectory.listDirectory path
               `mapError` (`ioePrependLocation` "listDirectory")
         let directOChildren' = directOChildren oFiles
         let result =
@@ -784,7 +1030,7 @@ instance MonadFileSystem DryRunIO where
         if isDir
           then throwError $ nonFileError path'
           else
-            liftIO (System.Directory.OsPath.getFileSize path)
+            liftIO (OsDirectory.getFileSize path)
               `mapError` (`ioeSetLocation` "getFileSize")
    where
     noFileError :: FilePath -> IOError

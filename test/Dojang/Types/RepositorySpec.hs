@@ -53,7 +53,8 @@ spec = do
     let dirRoute expr = fileRoute monikers [(any', Just expr)] Directory
     let manifest =
           Manifest
-            { monikers = monikers
+            { repositoryId = Nothing
+            , monikers = monikers
             , fileRoutes =
                 [ (foo, dirRoute $ if win then "C:\\dst\\foo" else "/dst/foo")
                 ,

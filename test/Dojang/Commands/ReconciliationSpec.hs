@@ -35,8 +35,9 @@ import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
-import Dojang.Types.Manifest (manifest)
+import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.MonikerName (parseMonikerName)
+import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
 data EntryState
@@ -149,6 +150,7 @@ withFixture sourceState intermediateState destinationState action =
     intermediateDir <- encodeFS ".dojang"
     manifestFilename <- encodeFS "dojang.toml"
     envFilename <- encodeFS "dojang-env.toml"
+    stateDir <- encodeFS ".state"
     routeName <- encodeFS "managed-file"
     destinationName <- encodeFS "destination"
     homeName <- encodeFS "home"
@@ -159,17 +161,24 @@ withFixture sourceState intermediateState destinationState action =
     let paths = FixturePaths sourcePath intermediatePath destinationPath
     let home = tmpDir </> homeName
     let Right always = parseMonikerName "always"
+    let Right repositoryId' =
+          parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
     let manifest' =
-          manifest
-            (singleton always Always)
-            (Map.singleton routeName [(always, Just $ Substitution "DEST")])
-            mempty
-            mempty
-            mempty
+          ( manifest
+              (singleton always Always)
+              (Map.singleton routeName [(always, Just $ Substitution "DEST")])
+              mempty
+              mempty
+              mempty
+          )
+            { repositoryId = Just repositoryId'
+            }
     let appEnv =
           AppEnv
             repository
-            intermediateDir
+            False
+            (Just intermediateDir)
+            (tmpDir </> stateDir)
             manifestFilename
             envFilename
             False

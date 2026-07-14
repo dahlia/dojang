@@ -3,23 +3,26 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Syntax.Manifest.Writer
-  ( writeManifest
+  ( insertRepositoryId
+  , writeManifest
   , writeManifestFile
   ) where
 
 import Data.Bifunctor (Bifunctor (second))
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty ((:|)))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import GHC.IsList (IsList (fromList))
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (all, any, writeFile)
 
 import Data.CaseInsensitive (CI (original))
 import Data.Text (Text, pack, unpack)
+import qualified Data.Text as Text
 import Data.Text.Encoding (encodeUtf8)
 import System.OsPath (OsPath, decodeFS)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
+import Toml (Result (Failure, Success), decode)
 import Toml.Pretty (prettyTomlOrdered)
 import Toml.ToValue (ToTable (toTable))
 
@@ -56,10 +59,35 @@ import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
+import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
 
 
 schema :: Text
 schema = "https://schema.dojang.dev/2026-07/manifest.schema.json"
+
+
+-- | Adds a repository identity while preserving the rest of a manifest.
+--
+-- This is used by explicit migration so comments and hand-written formatting
+-- are not replaced by a full parse-and-render cycle.  The source must be a
+-- valid manifest.  Calling it again with a manifest that already declares an
+-- identity is a no-op.
+insertRepositoryId :: RepositoryId -> Text -> Text
+insertRepositoryId repositoryId source
+  | hasTopLevelRepositoryId = source
+  | "#:schema " `Text.isPrefixOf` firstLine =
+      firstLine <> "\n\n" <> identityLine <> "\n\n" <> remaining
+  | otherwise = identityLine <> "\n\n" <> source
+ where
+  (firstLine, afterFirstLine) = Text.breakOn "\n" source
+  remaining = Text.dropWhile (== '\n') afterFirstLine
+  identityLine =
+    "repository-id = \"" <> repositoryIdText repositoryId <> "\""
+  hasTopLevelRepositoryId = case decoded of
+    Success _ manifest -> isJust manifest.repositoryId
+    Failure _ -> False
+  decoded :: Result String Manifest'
+  decoded = decode $ unpack source
 
 
 -- | Encodes a 'Manifest' into a TOML document.
@@ -77,6 +105,7 @@ writeManifest manifest =
   tbl = toTable $ mapManifest' manifest
   order :: [String] -> String -> Either Int String
   order [] field = case field of
+    "repository-id" -> Left 0
     "dirs" -> Left 1
     "files" -> Left 2
     "ignores" -> Left 3
@@ -99,7 +128,14 @@ writeManifestFile manifest filePath =
 
 
 mapManifest' :: Manifest -> Manifest'
-mapManifest' manifest = Manifest' monikers' dirs files ignores hooks'
+mapManifest' manifest =
+  Manifest'
+    (repositoryIdText <$> manifest.repositoryId)
+    monikers'
+    dirs
+    files
+    ignores
+    hooks'
  where
   (dirs, files) = mapFiles manifest.fileRoutes manifest.monikers
   monikers' :: MonikerMap'

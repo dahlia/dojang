@@ -42,6 +42,7 @@ import Prelude hiding (lookup)
 import Data.CaseInsensitive (CI, mk)
 import Data.HashMap.Strict (HashMap, fromList, keys, lookup)
 import Data.Text (Text, cons, length, pack)
+import Data.Text qualified as Text
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (Range, constant, constantFrom, singleton)
 import System.OsPath (OsPath, encodeFS, joinPath)
@@ -75,6 +76,7 @@ import Dojang.Types.MonikerName
   , MonikerNameError (..)
   , parseMonikerName
   )
+import Dojang.Types.RepositoryId (RepositoryId, parseRepositoryId)
 
 
 ciText :: (MonadGen m) => Range Int -> m Char -> m (CI Text)
@@ -443,11 +445,12 @@ ignoreMap = ignoreMap' (constantFrom 0 0 5)
 
 manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
 manifest' monikerMapRange fileRouteMapRange = do
+  repositoryId <- Gen.maybe repositoryIdGen
   monikers <- monikerMap' monikerMapRange
   fileRoutes <- fileRouteMap fileRouteMapRange monikers
   ignorePatterns <- ignoreMap
   hooks <- hookMap (constant 0 3)
-  return $ Manifest monikers fileRoutes ignorePatterns hooks
+  return $ Manifest repositoryId monikers fileRoutes ignorePatterns hooks
 
 
 manifest :: (MonadGen m) => m Manifest
@@ -456,11 +459,23 @@ manifest = manifest' (constantFrom 0 0 5) (constantFrom 0 0 5)
 
 arbitraryManifest :: (MonadGen m) => m Manifest
 arbitraryManifest = do
+  repositoryId <- Gen.maybe repositoryIdGen
   monikers <- monikerMap' (constantFrom 0 0 5)
   fileRoutes <- arbitraryFileRouteMap (constantFrom 0 0 5) monikers
   ignorePatterns <- ignoreMap' (constantFrom 1 1 5)
   hooks <- hookMap (constant 0 3)
-  return $ Manifest monikers fileRoutes ignorePatterns hooks
+  return $ Manifest repositoryId monikers fileRoutes ignorePatterns hooks
+
+
+repositoryIdGen :: (MonadGen m) => m RepositoryId
+repositoryIdGen = do
+  groups <-
+    traverse
+      (\length' -> Gen.text (constant length' length') Gen.hexit)
+      [8, 4, 4, 4, 12]
+  let Right repositoryId =
+        parseRepositoryId $ Text.intercalate (Text.singleton '-') groups
+  return repositoryId
 
 
 hook :: (MonadGen m) => m Hook

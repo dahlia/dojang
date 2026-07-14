@@ -11,9 +11,11 @@ it returns the following exit codes, depending on the situation.
  -  4: External program terminated with an error (non-zero exit code).
  -  9: Not supported in the environment (platform).
  -  10: The manifest file is missing or the repository is not initialized.
- -  11: The manifest file cannot be read due to problems such as invalid format
-    or permissions.
+ -  11: The manifest file cannot be read or updated due to problems such as an
+    invalid format, permissions, or another filesystem failure.
  -  12: Unable to create a new manifest file because it already exists.
+ -  13: Machine state cannot be read or updated, is missing an identity,
+    malformed, unsupported, ambiguous, or owned by another machine.
  -  20: The env file is missing.
  -  21: The env file cannot be read due to invalid format or permissions.
  -  30: The change cannot be applied because there are conflicting changes

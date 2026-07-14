@@ -130,6 +130,7 @@ spec = sequential $ do
         manifestFilename <- encodeFS "dojang.toml"
         intermediateDir <- encodeFS ".dojang"
         envFilename <- encodeFS "dojang-env.toml"
+        stateDir <- encodeFS ".state"
         let hook =
               Hook
                 { command = fst command
@@ -139,14 +140,17 @@ spec = sequential $ do
                 , ignoreFailure = False
                 }
         let manifest' =
-              Manifest empty Map.empty Map.empty $ Map.singleton PreApply [hook]
+              Manifest Nothing empty Map.empty Map.empty $
+                Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
         let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
         let context = Context repository environment (const $ pure Nothing)
         let appEnv =
               AppEnv
                 tmpDir
-                intermediateDir
+                False
+                (Just intermediateDir)
+                (tmpDir </> stateDir)
                 manifestFilename
                 envFilename
                 False

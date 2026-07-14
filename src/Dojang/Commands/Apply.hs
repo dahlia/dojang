@@ -10,24 +10,24 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.Text (Text, pack)
 import System.Exit (ExitCode (..), exitWith)
-import System.IO (hIsTerminalDevice, stderr, stdin)
+import System.IO (stderr)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Data.CaseInsensitive (original)
 import Data.Map.Strict (fromList, notMember, toList)
-import FortyTwo.Prompts.Confirm (confirm)
-import System.Directory.OsPath (getHomeDirectory, makeAbsolute)
+import System.Directory.OsPath (makeAbsolute)
 import System.OsPath
   ( OsPath
   , addTrailingPathSeparator
-  , (</>)
   )
 
 import Dojang.App
   ( App
   , AppEnv (debug, dryRun, manifestFile, sourceDirectory)
   , ensureContext
+  , markMachineStateApplied
+  , prepareMachineState
   )
 import Dojang.Commands
   ( Admonition (..)
@@ -54,6 +54,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Hook (HookType (..))
+import Dojang.Types.MachineState (MachineState (..))
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
   , PlannedSyncOp (..)
@@ -71,26 +72,14 @@ import Dojang.Types.Reconciliation
   , observeReconciliationInput
   , planReconciliation
   )
-import Dojang.Types.Registry
-  ( Registry (..)
-  , readRegistry
-  , registryFilename
-  , writeRegistry
-  )
 import Dojang.Types.Repository (Repository (..))
 
 
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
 apply force filePaths = do
   ctx <- ensureContext
-
-  -- Determine if this is the first apply (registry doesn't exist)
-  homeDir <- liftIO getHomeDirectory
-  let registryPath = homeDir </> registryFilename
-  existingRegistry <- readRegistry registryPath
-  let isFirstApply = case existingRegistry of
-        Nothing -> True
-        Just _ -> False
+  machineState <- prepareMachineState ctx.repository.manifest
+  let isFirstApply = not machineState.firstApplied
 
   -- Build hook environment
   sourceDir <- asks (.sourceDirectory)
@@ -222,36 +211,7 @@ apply force filePaths = do
     executeHooks hookEnv ctx PostFirstApply
   $(logDebug) "Running post-apply hooks..."
   executeHooks hookEnv ctx PostApply
-
-  -- Update registry with current repository path:
-  currentRepo <- liftIO $ makeAbsolute ctx.repository.sourcePath
-  case existingRegistry of
-    Nothing -> do
-      -- No existing registry, create one
-      writeRegistry registryPath $ Registry currentRepo
-    Just reg
-      | reg.repositoryPath == currentRepo ->
-          -- Same repository, no need to update
-          return ()
-      | otherwise -> do
-          -- Different repository, ask user
-          isTerminal <- liftIO $ hIsTerminalDevice stdin
-          proceed <-
-            if isTerminal
-              then do
-                oldPath <- decodePath reg.repositoryPath
-                newPath <- decodePath currentRepo
-                let msg =
-                      "The registry already points to "
-                        <> oldPath
-                        <> ". Overwrite with "
-                        <> newPath
-                        <> "?"
-                liftIO $ confirm msg
-              else
-                -- Non-interactive mode, just overwrite
-                return True
-          when proceed $ writeRegistry registryPath $ Registry currentRepo
+  when isFirstApply $ markMachineStateApplied machineState
   return ExitSuccess
 
 

@@ -67,6 +67,7 @@ ManifestValidator = extend(Draft202012Validator, {"pattern": validate_pattern})
 validator = ManifestValidator(manifest_schema, format_checker=format_checker)
 
 valid_manifests = [
+    {"repository-id": "123e4567-e89b-42d3-a456-426614174000"},
     {"files": {"vimrc": {"linux": "~/.vimrc", "windows": ""}}},
     {
         "files": {
@@ -78,6 +79,7 @@ valid_manifests = [
     },
 ]
 invalid_manifests = [
+    {"repository-id": "not-a-uuid"},
     {"files": {"vimrc": "~/.vimrc"}},
     {"files": {"vimrc": [{"path": "~/.vimrc"}]}},
     {

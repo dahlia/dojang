@@ -10,8 +10,11 @@ module Main (main) where
 import Control.Applicative (Alternative ((<|>)), optional, (<**>))
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.Maybe (catMaybes, maybeToList)
+import Data.Function ((&))
+import Data.Maybe (catMaybes, fromMaybe, maybeToList)
+import Data.String (fromString)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import System.IO.CodePage (withCP65001)
@@ -58,10 +61,26 @@ import TextShow (TextShow (showt))
 import Dojang.App
   ( App
   , AppEnv (..)
+  , applyAutomaticRepositorySelection
   , runAppWithStderrLogging
   , runAppWithoutLogging
+  , validateRepositoryCheckout
   )
-import Dojang.Commands (Admonition (Error, Note), codeStyleFor, printStderr')
+import Dojang.Cli.CommandMode
+  ( CommandMode (..)
+  , ambiguousRepositoryExitCode
+  , environmentCommandMode
+  , initializationCommandMode
+  , metaCommandMode
+  , migrationCommandMode
+  , repositoryCommandMode
+  )
+import Dojang.Commands
+  ( Admonition (Error, Hint, Note)
+  , codeStyleFor
+  , pathStyleFor
+  , printStderr'
+  )
 import Dojang.Commands.Apply qualified (apply)
 import Dojang.Commands.Diff (DiffMode (..))
 import Dojang.Commands.Diff qualified (diff)
@@ -69,21 +88,34 @@ import Dojang.Commands.Edit qualified (edit)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
 import Dojang.Commands.Init qualified (init)
+import Dojang.Commands.Migrate qualified (migrate)
 import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status (StatusOptions (..))
 import Dojang.Commands.Status qualified (status)
-import Dojang.ExitCodes (unhandledError)
-import Dojang.MonadFileSystem (DryRunIO, MonadFileSystem, dryRunIO')
+import Dojang.ExitCodes (machineStateError, unhandledError)
+import Dojang.MonadFileSystem
+  ( DryRunIO
+  , MonadFileSystem
+  , dryRunIO'
+  )
+import Dojang.Types.Environment (OperatingSystem (..))
+import Dojang.Types.MachineState
+  ( MachineState (..)
+  , RepositorySelection (..)
+  , StateRootInputs (..)
+  , canonicalizeStateRoot
+  , formatStateError
+  , listRepositoryStates
+  , readMachineId
+  , resolveStateRoot
+  , selectRepositoryState
+  , validateMachineStateStore
+  )
 import Dojang.Types.Registry (Registry (..), readRegistry, registryFilename)
 import Dojang.Version (toString, version)
 import Options.Applicative.Path (hyphen, pathArgument, pathOption, period)
 import System.Directory (getHomeDirectory)
 import System.OsPath qualified as OsPath
-
-
-intermediateDirname :: OsPath
-intermediateDirname = unsafePerformIO $ encodeFS ".dojang"
-{-# NOINLINE intermediateDirname #-}
 
 
 manifestFilename :: OsPath
@@ -96,50 +128,74 @@ envFilename = unsafePerformIO $ encodeFS "dojang-env.toml"
 {-# NOINLINE envFilename #-}
 
 
+data ParsedApp i
+  = ParsedApp CommandMode Bool AppEnv (App i ExitCode)
+
+
 appP
   :: (MonadFileSystem i, MonadIO i)
   => OsPath
+  -- ^ The platform-native machine-state root.
+  -> OsPath
   -- ^ The default repository path (from registry or current directory).
-  -> Parser (AppEnv, App i ExitCode)
-appP defaultRepoPath = do
-  sourceDirectory' <-
+  -> Parser (ParsedApp i)
+appP stateRoot defaultRepoPath =
+  makeApp
+    <$> optional repositoryOption
+    <*> optional intermediateOption
+    <*> optional manifestOption
+    <*> environmentOption
+    <*> dryRunOption
+    <*> debugOption
+    <*> cmdP stateRoot defaultRepoPath
+ where
+  makeApp repository intermediate manifest envFile' dryRun' debug' command' =
+    ParsedApp
+      (fst command')
+      (case manifest of Just _ -> True; Nothing -> False)
+      ( AppEnv
+          (fromMaybe defaultRepoPath repository)
+          (case repository of Just _ -> True; Nothing -> False)
+          intermediate
+          stateRoot
+          (fromMaybe manifestFilename manifest)
+          envFile'
+          dryRun'
+          debug'
+      )
+      (snd command')
+  repositoryOption =
     pathOption
       ( long "repository-dir"
           <> short 'r'
           <> metavar "PATH"
-          <> value defaultRepoPath
-          <> showDefault
           <> action "directory"
           <> help "Repository (i.e., source tree) directory"
       )
-  intermediateDirectory' <-
+  intermediateOption =
     pathOption
       ( long "intermediate-dir"
           <> short 'i'
           <> metavar "PATH"
-          <> value intermediateDirname
-          <> showDefault
           <> action "directory"
           <> help
             ( "Intermediate directory which is managed by Dojang.  "
-                ++ "Relative to source tree directory (-s/--source-dir) "
-                ++ "if not absolute"
+                ++ "Relative to repository directory if not absolute.  "
+                ++ "The selected path is persisted"
             )
       )
-  manifestFile' <-
+  manifestOption =
     pathOption
       ( long "manifest-file"
           <> short 'm'
           <> metavar "PATH"
-          <> value manifestFilename
-          <> showDefault
           <> action "file"
           <> help
-            ( "Manifest file.  Relative to source tree directory "
-                ++ "(-s/--source-dir) if not absolute"
+            ( "Manifest file, relative to the repository if not absolute.  "
+                ++ "Defaults to dojang.toml"
             )
       )
-  envFile' <-
+  environmentOption =
     pathOption
       ( long "env-file"
           <> short 'e'
@@ -148,12 +204,11 @@ appP defaultRepoPath = do
           <> showDefault
           <> action "file"
           <> help
-            ( "Environment file.  Relative to source tree directory "
-                ++ "(-s/--source-dir) if not absolute.  It will be silently "
-                ++ "ignored if the file does not exist"
+            ( "Environment file, relative to the repository if not absolute.  "
+                ++ "A missing file is ignored"
             )
       )
-  dryRun' <-
+  dryRunOption =
     switch
       ( long "dry-run"
           <> help
@@ -161,18 +216,8 @@ appP defaultRepoPath = do
                 ++ "This option probably lets the program run much slower"
             )
       )
-  debug' <- switch (long "debug" <> short 'd' <> help "Enable debug logging")
-  cmd <- cmdP defaultRepoPath
-  return
-    ( AppEnv
-        sourceDirectory'
-        intermediateDirectory'
-        manifestFile'
-        envFile'
-        dryRun'
-        debug'
-    , cmd
-    )
+  debugOption =
+    switch (long "debug" <> short 'd' <> help "Enable debug logging")
 
 
 initPresetP :: Parser [InitPreset]
@@ -200,9 +245,10 @@ initPresetP =
 cmdP
   :: (MonadFileSystem i, MonadIO i)
   => OsPath
+  -> OsPath
   -- ^ The default repository path (from registry or current directory).
-  -> Parser (App i ExitCode)
-cmdP defaultRepoPath =
+  -> Parser (CommandMode, App i ExitCode)
+cmdP stateRoot defaultRepoPath =
   subparser
     ( commandGroup "Managing commands:"
         <> command
@@ -216,13 +262,24 @@ cmdP defaultRepoPath =
                         <> help "Do not prompt for anything"
                     )
                   <**> helper
+                  & initializationCommandP
               )
               (progDesc "Initialize repository")
           )
         <> command
+          "migrate"
+          ( info
+              (pure Dojang.Commands.Migrate.migrate <**> helper & migrationCommandP)
+              (progDesc "Migrate repository to machine-scoped state")
+          )
+        <> command
           "env"
           ( info
-              ( Dojang.Commands.Env.env
+              ( ( \ignoreEnvFile outputPath ->
+                    ( environmentCommandMode ignoreEnvFile
+                    , Dojang.Commands.Env.env ignoreEnvFile outputPath
+                    )
+                )
                   <$> switch
                     ( long "ignore-env-file"
                         <> short 'i'
@@ -275,6 +332,7 @@ cmdP defaultRepoPath =
                             )
                       )
                   <**> helper
+                  & repositoryCommandP
               )
               ( progDesc
                   "Show status of repository and target (destination) tree"
@@ -320,6 +378,7 @@ cmdP defaultRepoPath =
                     )
                   <*> many (pathArgument $ metavar "FILE" <> action "file")
                   <**> helper
+                  & repositoryCommandP
               )
               ( progDesc $
                   "Show changes between source tree and target "
@@ -360,6 +419,7 @@ cmdP defaultRepoPath =
                     )
                   <*> many (pathArgument $ metavar "PATH" <> action "file")
                   <**> helper
+                  & repositoryCommandP
               )
               (progDesc "Let the repository reflect the target file")
           )
@@ -377,6 +437,7 @@ cmdP defaultRepoPath =
                     )
                   <*> many (pathArgument $ metavar "FILE" <> action "file")
                   <**> helper
+                  & repositoryCommandP
               )
               (progDesc "Apply changes to target tree")
           )
@@ -434,6 +495,7 @@ cmdP defaultRepoPath =
                     )
                   <*> many (pathArgument $ metavar "PATH" <> action "file")
                   <**> helper
+                  & repositoryCommandP
               )
               (progDesc "Edit source file of a target file and apply changes")
           )
@@ -443,20 +505,42 @@ cmdP defaultRepoPath =
           <> command
             "version"
             ( info
-                (pure versionCmd <**> helper)
+                (pure versionCmd <**> helper & metaCommandP)
                 (progDesc "Show version")
             )
-          <> command "help" (info (helpP defaultRepoPath) (progDesc "Show help"))
+          <> command
+            "help"
+            ( info
+                (helpP stateRoot defaultRepoPath & metaCommandP)
+                (progDesc "Show help")
+            )
       )
+
+
+repositoryCommandP :: Parser a -> Parser (CommandMode, a)
+repositoryCommandP = fmap ((,) repositoryCommandMode)
+
+
+initializationCommandP :: Parser a -> Parser (CommandMode, a)
+initializationCommandP = fmap ((,) initializationCommandMode)
+
+
+migrationCommandP :: Parser a -> Parser (CommandMode, a)
+migrationCommandP = fmap ((,) migrationCommandMode)
+
+
+metaCommandP :: Parser a -> Parser (CommandMode, a)
+metaCommandP = fmap ((,) metaCommandMode)
 
 
 helpP
   :: (MonadFileSystem i, MonadIO i)
   => OsPath
+  -> OsPath
   -- ^ The default repository path (from registry or current directory).
   -> Parser (App i ExitCode)
-helpP defaultRepoPath =
-  helpCmd defaultRepoPath
+helpP stateRoot defaultRepoPath =
+  helpCmd stateRoot defaultRepoPath
     <$> optional (argument str (metavar "COMMAND"))
     <**> helper
 
@@ -464,11 +548,12 @@ helpP defaultRepoPath =
 parser
   :: (MonadFileSystem i, MonadIO i)
   => OsPath
+  -> OsPath
   -- ^ The default repository path (from registry or current directory).
-  -> ParserInfo (AppEnv, App i ExitCode)
-parser defaultRepoPath =
+  -> ParserInfo (ParsedApp i)
+parser stateRoot defaultRepoPath =
   info
-    (appP defaultRepoPath <**> helper)
+    (appP stateRoot defaultRepoPath <**> helper)
     ( fullDesc
         <> progDesc "Manage dotfiles"
         <> header "Dojang: A cross-platform dotfiles manager"
@@ -490,37 +575,81 @@ helpCmd
   :: forall i
    . (MonadFileSystem i, MonadIO i)
   => OsPath
+  -> OsPath
   -- ^ The default repository path (from registry or current directory).
   -> Maybe String
   -> App i ExitCode
-helpCmd defaultRepoPath cmdString = do
+helpCmd stateRoot defaultRepoPath cmdString = do
   void $ liftIO $ handleParseResult result
   return ExitSuccess
  where
   args = maybeToList cmdString ++ ["--help"]
-  result :: ParserResult (AppEnv, App i ExitCode)
-  result = execParserPure parserPrefs (parser defaultRepoPath) args
+  result :: ParserResult (ParsedApp i)
+  result = execParserPure parserPrefs (parser stateRoot defaultRepoPath) args
 
 
 main :: IO ()
 main = withCP65001 $ do
   when (System.Info.os == "mingw32") $ setLocaleEncoding utf8
-  -- Try to read the repository path from the registry file (~/.dojang).
-  -- If the registry exists, use it as the default repository path.
-  -- Otherwise, default to the current directory.
-  defaultRepoPath <- do
-    homeDir <- OsPath.encodeFS =<< getHomeDirectory
-    let registryPath = homeDir OsPath.</> registryFilename
-    maybeRegistry <- readRegistry registryPath
-    return $ maybe period (.repositoryPath) maybeRegistry
-  (appEnv, _) <-
-    liftIO $ customExecParser parserPrefs (parser defaultRepoPath)
-      :: IO (AppEnv, App DryRunIO ExitCode)
+  unresolvedStateRoot <- nativeStateRoot
+  ParsedApp commandMode manifestExplicit unresolvedAppEnv _ <-
+    liftIO $ customExecParser parserPrefs (parser unresolvedStateRoot period)
+      :: IO (ParsedApp DryRunIO)
+  stateRoot <-
+    if commandMode.readsMachineState
+      then canonicalizeStateRootOrExit unresolvedStateRoot
+      else return unresolvedStateRoot
+  let parsedAppEnv = unresolvedAppEnv{stateDirectory = stateRoot}
+  when commandMode.readsMachineState $ validateMachineStateStoreOrExit stateRoot
+  appEnv <-
+    if not commandMode.autoSelectsRepository || parsedAppEnv.repositoryExplicit
+      then return parsedAppEnv
+      else do
+        (selectedState, ambiguous) <-
+          defaultRepository stateRoot
+        let defaultRepoPath = maybe period (.checkoutPath) selectedState
+        when ambiguous $ do
+          printStderr' Error "More than one repository is registered on this machine."
+          printStderr' Hint "Select one explicitly with -r/--repository-dir."
+          exitWith ambiguousRepositoryExitCode
+        when (defaultRepoPath == period) $ do
+          homeDir <- OsPath.encodeFS =<< getHomeDirectory
+          let registryPath = homeDir OsPath.</> registryFilename
+          legacyRegistry <- readRegistry registryPath
+          case legacyRegistry of
+            Nothing -> return ()
+            Just registry -> do
+              pathStyle <- pathStyleFor stderr
+              printStderr' Note $
+                "The legacy registry points to "
+                  <> pathStyle registry.repositoryPath
+                  <> ", but it is no longer used for automatic selection."
+              printStderr' Hint "Run `dojang -r PATH migrate' for that repository."
+        return $ case selectedState of
+          Nothing -> parsedAppEnv
+          Just state ->
+            applyAutomaticRepositorySelection
+              manifestExplicit
+              state
+              parsedAppEnv
   (exitCode, ops) <-
     if appEnv.dryRun
-      then dryRunIO' $ run defaultRepoPath appEnv
+      then do
+        ParsedApp _ _ _ cmd <-
+          liftIO $
+            customExecParser
+              parserPrefs
+              (parser stateRoot appEnv.sourceDirectory)
+            :: IO (ParsedApp DryRunIO)
+        dryRunIO' $ run appEnv cmd
       else do
-        exitCode' <- run defaultRepoPath appEnv
+        ParsedApp _ _ _ cmd <-
+          liftIO $
+            customExecParser
+              parserPrefs
+              (parser stateRoot appEnv.sourceDirectory)
+            :: IO (ParsedApp IO)
+        exitCode' <- run appEnv cmd
         return (exitCode', -1)
   codeColor <- codeStyleFor stderr
   when (appEnv.dryRun && ops > 0) $ do
@@ -532,9 +661,12 @@ main = withCP65001 $ do
         <> " changes were not actually committed to the filesystem."
   exitWith exitCode
  where
-  run :: (MonadFileSystem i, MonadIO i) => OsPath -> AppEnv -> i ExitCode
-  run defaultRepoPath appEnv = do
-    (_, cmd) <- liftIO $ customExecParser parserPrefs (parser defaultRepoPath)
+  run
+    :: (MonadFileSystem i, MonadIO i)
+    => AppEnv
+    -> App i ExitCode
+    -> i ExitCode
+  run appEnv cmd = do
     (if appEnv.debug then runAppWithStderrLogging else runAppWithoutLogging)
       appEnv
       $ cmd
@@ -543,3 +675,63 @@ main = withCP65001 $ do
             "An unexpected error occurred; you may report this as a bug: "
               <> showt e
           return unhandledError
+
+
+nativeStateRoot :: IO OsPath
+nativeStateRoot = do
+  home <- OsPath.encodeFS =<< getHomeDirectory
+  xdg <- traverse OsPath.encodeFS =<< lookupEnv "XDG_DATA_HOME"
+  local <- traverse OsPath.encodeFS =<< lookupEnv "LOCALAPPDATA"
+  let operatingSystem = case System.Info.os of
+        "linux" -> Linux
+        "darwin" -> MacOS
+        "mingw32" -> Windows
+        other -> OtherOS $ fromString other
+  return $ resolveStateRoot operatingSystem $ StateRootInputs home xdg local
+
+
+defaultRepository :: OsPath -> IO (Maybe MachineState, Bool)
+defaultRepository stateRoot = do
+  machine <- readMachineId stateRoot
+  case machine of
+    Left err -> do
+      printStderr' Error $ formatStateError err
+      exitWith machineStateError
+    Right Nothing -> return (Nothing, False)
+    Right (Just machineId) -> do
+      loaded <- listRepositoryStates stateRoot machineId
+      states <- case loaded of
+        Left err -> do
+          printStderr' Error $ formatStateError err
+          exitWith machineStateError
+        Right values -> return values
+      case selectRepositoryState states of
+        NoRepositoryState -> return (Nothing, False)
+        AmbiguousRepositoryStates -> return (Nothing, True)
+        SelectedRepositoryState state -> do
+          validated <- validateRepositoryCheckout state
+          case validated of
+            Left err -> do
+              printStderr' Error $ formatStateError err
+              exitWith machineStateError
+            Right _ -> return (Just state, False)
+
+
+validateMachineStateStoreOrExit :: OsPath -> IO ()
+validateMachineStateStoreOrExit stateRoot = do
+  validated <- validateMachineStateStore stateRoot
+  case validated of
+    Left err -> do
+      printStderr' Error $ formatStateError err
+      exitWith machineStateError
+    Right () -> return ()
+
+
+canonicalizeStateRootOrExit :: OsPath -> IO OsPath
+canonicalizeStateRootOrExit stateRoot = do
+  resolved <- canonicalizeStateRoot stateRoot
+  case resolved of
+    Left err -> do
+      printStderr' Error $ formatStateError err
+      exitWith machineStateError
+    Right path' -> return path'

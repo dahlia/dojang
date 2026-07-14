@@ -12,6 +12,24 @@ This document assumes that the reader knows the basic syntax of TOML.
 [TOML]: https://toml.io/
 
 
+Repository identity
+-------------------
+
+The top-level `repository-id` field is a UUID created by `dojang init` or
+`dojang migrate`:
+
+~~~~ toml
+repository-id = "123e4567-e89b-42d3-a456-426614174000"
+~~~~
+
+This identity travels with the repository and remains unchanged when its
+checkout is moved or renamed.  Do not edit it or copy it into another
+repository.  Dojang uses it to isolate the repository's [machine state] on each
+device.
+
+[machine state]: machine-state.en.md
+
+
 Moniker
 -------
 

@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -30,7 +31,14 @@ import System.Directory.OsPath
   )
 import System.Directory.OsPath qualified (createDirectory)
 import System.FilePath (combine)
-import System.OsPath (dropFileName, encodeFS, (</>))
+
+
+#ifndef mingw32_HOST_OS
+import System.Posix.Files qualified as Posix
+#endif
+
+import System.OsPath (decodeFS, dropFileName, encodeFS, (</>))
+import System.Timeout (timeout)
 import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -65,6 +73,46 @@ nonExistentFP = "---non-existent---"
 
 nonExistentFP' :: FilePath
 nonExistentFP' = "---non-existent-2---"
+
+#ifdef mingw32_HOST_OS
+posixRegularFileSpec :: Spec
+posixRegularFileSpec = pure ()
+
+
+posixLockFileSpec :: Spec
+posixLockFileSpec = pure ()
+#else
+posixRegularFileSpec :: Spec
+posixRegularFileSpec =
+  specify "isRegularFile rejects special files" $
+    withTempDir $ \tmpDir _ -> do
+      pipeName <- encodeFS "named-pipe"
+      let pipe = tmpDir </> pipeName
+      pipe' <- decodeFS pipe
+      Posix.createNamedPipe pipe' 0o600
+      isFile pipe `shouldReturn` True
+      isRegularFile pipe `shouldReturn` False
+
+
+posixLockFileSpec :: Spec
+posixLockFileSpec =
+  specify "withFileLock rejects special files" $
+    withTempDir $ \tmpDir _ -> do
+      pipeName <- encodeFS "named-pipe.lock"
+      let pipe = tmpDir </> pipeName
+      pipe' <- decodeFS pipe
+      Posix.createNamedPipe pipe' 0o600
+      completed <- timeout 1000000 $ tryError $ withFileLock pipe $ return ()
+      case completed of
+        Just (Left err) -> ioeGetErrorType err `shouldBe` InappropriateType
+        Just (Right ()) -> fail "withFileLock accepted a named pipe."
+        Nothing -> fail "withFileLock blocked while opening a named pipe."
+#endif
+
+
+isInappropriateTypeError :: Either IOError a -> Bool
+isInappropriateTypeError (Left err) = ioeGetErrorType err == InappropriateType
+isInappropriateTypeError (Right _) = False
 
 
 spec :: Spec
@@ -117,6 +165,13 @@ spec = do
       isFile testP `shouldReturn` False
       isFile nonExistentP `shouldReturn` False
 
+    specify "isRegularFile" $ do
+      isRegularFile packageYamlP `shouldReturn` True
+      isRegularFile testP `shouldReturn` False
+      isRegularFile nonExistentP `shouldReturn` False
+
+    posixRegularFileSpec
+
     specify "isDirectory" $ do
       isDirectory packageYamlP `shouldReturn` False
       isDirectory testP `shouldReturn` True
@@ -143,6 +198,54 @@ spec = do
       () <- writeFile (tmpDirP </> nonExistentP) "foo"
       Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
         `shouldReturn` "foo"
+
+    specify "replaceFile" $ withTempDir $ \tmpDirP _ -> do
+      writeFile (tmpDirP </> foo) "new"
+      writeFile (tmpDirP </> bar) "old"
+      replaceFile (tmpDirP </> foo) (tmpDirP </> bar)
+      readFile (tmpDirP </> bar) `shouldReturn` "new"
+      exists (tmpDirP </> foo) `shouldReturn` False
+
+    describe "withFileLock" $ do
+      it "creates a missing regular lock file" $
+        withTempDir $ \tmpDir _ -> do
+          let lock = tmpDir </> nonExistentP
+          withFileLock lock (return True) `shouldReturn` True
+          isRegularFile lock `shouldReturn` True
+
+      it "accepts an existing regular lock file" $
+        withTempDir $ \tmpDir _ -> do
+          let lock = tmpDir </> nonExistentP
+          writeFile lock ""
+          withFileLock lock (return True) `shouldReturn` True
+
+      symIt "rejects a symlinked lock file" $
+        withTempDir $ \tmpDir _ -> do
+          let target = tmpDir </> nonExistentP
+          let lock = tmpDir </> nonExistentP'
+          writeFile target ""
+          createFileLink nonExistentP lock
+          result <- tryError $ withFileLock lock $ return ()
+          result `shouldSatisfy` isInappropriateTypeError
+
+      symIt "rejects a dangling lock symlink without creating its target" $
+        withTempDir $ \tmpDir _ -> do
+          let target = tmpDir </> nonExistentP
+          let lock = tmpDir </> nonExistentP'
+          createFileLink nonExistentP lock
+          result <- tryError $ withFileLock lock $ return ()
+          result `shouldSatisfy` isInappropriateTypeError
+          exists target `shouldReturn` False
+          isSymlink lock `shouldReturn` True
+
+      it "rejects a directory as a lock file" $
+        withTempDir $ \tmpDir _ -> do
+          let lock = tmpDir </> nonExistentP
+          createDirectory lock
+          result <- tryError $ withFileLock lock $ return ()
+          result `shouldSatisfy` isInappropriateTypeError
+
+      posixLockFileSpec
 
     describe "readSymlinkTarget" $ do
       symIt "tells the target path of a symbolic link" $ withTempDir $ \tmpDir tmpDir' -> do
@@ -517,6 +620,20 @@ spec = do
           `shouldBe` Just (nonExistentFP `combine` nonExistentFP)
         ioeGetLocation failToWrite'' `shouldBe` "writeFile"
         show failToWrite'' `shouldContain` "not inside a directory"
+
+    describe "replaceFile" $ do
+      it "replaces the destination only in the dry-run overlay" $
+        withTempDir $ \tmpDir tmpDir' -> do
+          Prelude.writeFile (tmpDir' `combine` "foo") "source"
+          Prelude.writeFile (tmpDir' `combine` "bar") "destination"
+          (sourceExists, destinationContents) <- dryRunIO $ do
+            replaceFile (tmpDir </> foo) (tmpDir </> bar)
+            (,) <$> exists (tmpDir </> foo) <*> readFile (tmpDir </> bar)
+          sourceExists `shouldBe` False
+          destinationContents `shouldBe` "source"
+          Prelude.readFile (tmpDir' `combine` "foo") `shouldReturn` "source"
+          Prelude.readFile (tmpDir' `combine` "bar")
+            `shouldReturn` "destination"
 
     describe "readSymlinkTarget" $ do
       symIt "returns the target path of a symbolic link" $
