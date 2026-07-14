@@ -6,7 +6,7 @@
 module Dojang.Commands.Migrate (migrate) where
 
 import Control.Monad (when)
-import Control.Monad.Except (MonadError (catchError))
+import Control.Monad.Except (MonadError (catchError), tryError)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.Text (Text)
@@ -22,6 +22,7 @@ import Dojang.App
   , AppEnv (manifestFile, sourceDirectory, stateDirectory)
   , loadManifest
   , prepareMachineState
+  , prepareMachineStateBeforeMigration
   )
 import Dojang.Commands
   ( Admonition (..)
@@ -70,11 +71,11 @@ migrate = do
   case stateRootResult of
     Left err -> die' machineStateError $ formatStateError err
     Right () -> return ()
-  lockedManifest <-
+  lockedState <-
     withStateFileLock (manifestIdentityLockPath stateRoot) $ do
       manifest <- loadRequiredManifest
       case manifest.repositoryId of
-        Just _ -> return manifest
+        Just _ -> prepareMachineState manifest
         Nothing -> do
           manifestFile' <- asks (.manifestFile)
           let filename = sourceDir </> manifestFile'
@@ -91,19 +92,24 @@ migrate = do
             Left err ->
               dieWithErrors manifestReadError [invalidUtf8Message err]
             Right source -> return source
-          ( writeFileAtomically filename "dojang.toml.tmp" $
-              encodeUtf8 $
-                insertRepositoryId identifier original
-            )
-            `catchError` manifestWriteIOError
-          pathStyle <- pathStyleFor stderr
-          printStderr $
-            "Stable repository identity added to " <> pathStyle filename <> "."
-          return manifest{repositoryId = Just identifier}
-  migratedManifest <- case lockedManifest of
+          let migratedManifest = manifest{repositoryId = Just identifier}
+          prepareMachineStateBeforeMigration migratedManifest $ do
+            written <-
+              tryError $
+                writeFileAtomically filename "dojang.toml.tmp" $
+                  encodeUtf8 $
+                    insertRepositoryId identifier original
+            case written of
+              Left err -> manifestWriteIOError err
+              Right () -> return ()
+            pathStyle <- pathStyleFor stderr
+            printStderr $
+              "Stable repository identity added to "
+                <> pathStyle filename
+                <> "."
+  state <- case lockedState of
     Left err -> die' machineStateError $ formatStateError err
-    Right manifest -> return manifest
-  state <- prepareMachineState migratedManifest
+    Right value -> return value
   let MachineState _ _ _ _ _ intermediatePath _ _ _ = state
   pathStyle <- pathStyleFor stderr
   printStderr $

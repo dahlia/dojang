@@ -26,6 +26,7 @@ module Dojang.App
   , loadRepository
   , markMachineStateApplied
   , prepareMachineState
+  , prepareMachineStateBeforeMigration
   , prepareNewMachineState
   , readValidatedLegacyRegistry
   , lookupEnv'
@@ -111,7 +112,7 @@ import Dojang.Types.MachineState
   , ensureMachineId
   , formatStateError
   , markFirstApplied
-  , prepareRepositoryStateWithOwnership
+  , prepareRepositoryStateWithOwnershipBeforeMigration
   , readRepositoryState
   , sameExistingPath
   )
@@ -383,6 +384,17 @@ prepareMachineState
 prepareMachineState = prepareMachineStateWithLegacyHistory True
 
 
+-- | Loads or creates machine state after validating a new migration and then
+-- running the supplied action before migration changes the snapshot layout.
+prepareMachineStateBeforeMigration
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest
+  -> App i ()
+  -> App i MachineState
+prepareMachineStateBeforeMigration =
+  prepareMachineState' True
+
+
 -- | Creates machine state for a newly initialized repository identity.
 --
 -- Unlike migration, initialization must not adopt a legacy snapshot or inherit
@@ -422,6 +434,16 @@ prepareMachineStateWithLegacyHistory
   -> Manifest
   -> App i MachineState
 prepareMachineStateWithLegacyHistory inheritLegacyHistory manifest =
+  prepareMachineState' inheritLegacyHistory manifest (return ())
+
+
+prepareMachineState'
+  :: (MonadFileSystem i, MonadIO i)
+  => Bool
+  -> Manifest
+  -> App i ()
+  -> App i MachineState
+prepareMachineState' inheritLegacyHistory manifest beforeMigration =
   case manifest.repositoryId of
     Nothing -> do
       codeStyle <- codeStyleFor stderr
@@ -463,7 +485,7 @@ prepareMachineStateWithLegacyHistory inheritLegacyHistory manifest =
       now <- liftIO getCurrentTime
       stateResult <-
         catchStateIOErrors $
-          prepareRepositoryStateWithOwnership
+          prepareRepositoryStateWithOwnershipBeforeMigration
             stateDir
             repositoryId
             machineId
@@ -478,6 +500,7 @@ prepareMachineStateWithLegacyHistory inheritLegacyHistory manifest =
             )
             legacyFirstApplied
             now
+            beforeMigration
       case stateResult of
         Left err -> die' machineStateError $ formatStateError err
         Right (state, _) -> return state

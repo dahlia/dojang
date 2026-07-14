@@ -27,6 +27,7 @@ module Dojang.Types.MachineState
   , prepareRepositoryState
   , prepareRepositoryStateWithLegacyHistory
   , prepareRepositoryStateWithOwnership
+  , prepareRepositoryStateWithOwnershipBeforeMigration
   , readMachineId
   , readRepositoryState
   , repositoryStateDirectory
@@ -1164,7 +1165,51 @@ prepareRepositoryStateWithOwnership
   explicit
   checkoutOwnsIdentity
   legacyFirstApplied
-  now = do
+  now =
+    prepareRepositoryStateWithOwnershipBeforeMigration
+      root
+      repositoryId'
+      machineId'
+      checkout
+      manifest
+      explicit
+      checkoutOwnsIdentity
+      legacyFirstApplied
+      now
+      (return ())
+
+
+-- | Prepares state after running an action once a new snapshot layout has
+-- passed validation but before migration changes it.
+--
+-- This lets callers publish metadata needed to retry an interrupted migration
+-- without publishing it for a snapshot layout that is already known to be
+-- invalid.  The action is not run when an existing repository state is reused.
+prepareRepositoryStateWithOwnershipBeforeMigration
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> MachineId
+  -> OsPath
+  -> OsPath
+  -> Maybe OsPath
+  -> (OsPath -> OsPath -> m Bool)
+  -> Bool
+  -> UTCTime
+  -> m ()
+  -- ^ Action to run after validating a new migration.
+  -> m (Either StateError (MachineState, MigrationResult))
+prepareRepositoryStateWithOwnershipBeforeMigration
+  root
+  repositoryId'
+  machineId'
+  checkout
+  manifest
+  explicit
+  checkoutOwnsIdentity
+  legacyFirstApplied
+  now
+  beforeMigration = do
     validatedStore <- validateRepositoryStoreRoot root
     case validatedStore of
       Left err -> return $ Left err
@@ -1185,6 +1230,7 @@ prepareRepositoryStateWithOwnership
                 checkoutOwnsIdentity
                 legacyFirstApplied
                 now
+                beforeMigration
 
 
 prepareRepositoryStateUnlocked
@@ -1198,6 +1244,7 @@ prepareRepositoryStateUnlocked
   -> (OsPath -> OsPath -> m Bool)
   -> Bool
   -> UTCTime
+  -> m ()
   -> m (Either StateError (MachineState, MigrationResult))
 prepareRepositoryStateUnlocked
   root
@@ -1208,7 +1255,8 @@ prepareRepositoryStateUnlocked
   explicit
   checkoutOwnsIdentity
   legacyFirstApplied
-  now = do
+  now
+  beforeMigration = do
     loaded <- readRepositoryState root repositoryId' machineId'
     case loaded of
       Left err -> return $ Left err
@@ -1333,7 +1381,12 @@ prepareRepositoryStateUnlocked
                   resolvedRequested <- canonicalizePath requested
                   if isProperDescendant resolvedLegacy resolvedRequested
                     then return $ Left $ SnapshotInsideLegacy legacy requested
-                    else prepareNewPaths resolvedLegacy resolvedRequested
+                    else do
+                      validatedPaths <-
+                        validateNewPaths resolvedLegacy resolvedRequested
+                      case validatedPaths of
+                        Left err -> return $ Left err
+                        Right () -> beforeMigration >> prepareNewPaths resolvedLegacy resolvedRequested
 
     findUnsupportedSnapshotSymlink snapshotPath = do
       directSymlink <- isSymlink snapshotPath
@@ -1454,6 +1507,79 @@ prepareRepositoryStateUnlocked
                             | otherwise ->
                                 return $ Left $ UnownedSnapshot requested
                         else persistAndCleanup CreatedRepositoryState
+
+    validateNewPaths resolvedLegacy resolvedRequested = do
+      markerExists <- doesMigrationMarkerExist
+      legacyPresent <- exists legacy
+      legacyExists <- isDirectory legacy
+      destinationPresent <- exists requested
+      destinationExists <- isDirectory requested
+      let sameDestination = resolvedLegacy == resolvedRequested
+      if legacyPresent && not legacyExists
+        then return $ Left $ InvalidSnapshotLocation legacy
+        else
+          if destinationPresent && not destinationExists
+            then return $ Left $ InvalidSnapshotLocation requested
+            else
+              if markerExists
+                then do
+                  validated <- validateMigrationMarker legacy requested
+                  case validated of
+                    Left err -> return $ Left err
+                    Right () ->
+                      if not legacyExists
+                        then return $ Left $ MissingSnapshot legacy
+                        else
+                          if sameDestination
+                            then validateSnapshot legacy
+                            else validateRecoverableCopy legacy requested
+                else
+                  if legacyExists && not sameDestination
+                    then
+                      if destinationExists
+                        then do
+                          comparison <- treesEqual legacy requested
+                          return $ case comparison of
+                            Left err -> Left err
+                            Right True -> Right ()
+                            Right False ->
+                              Left $ ConflictingSnapshots legacy requested
+                        else validateSnapshot legacy
+                    else
+                      if destinationExists && not legacyExists
+                        then do
+                          snapshot <- snapshotEntries requested
+                          return $ case snapshot of
+                            Left err -> Left err
+                            Right entries -> case explicit of
+                              Just _ -> Right ()
+                              Nothing
+                                | requested == defaultPath && null entries ->
+                                    Right ()
+                                | otherwise -> Left $ UnownedSnapshot requested
+                        else
+                          if legacyExists
+                            then validateSnapshot legacy
+                            else return $ Right ()
+
+    validateSnapshot snapshotPath =
+      fmap (const ()) <$> snapshotEntries snapshotPath
+
+    validateRecoverableCopy sourcePath destinationPath = do
+      sourceSnapshot <- snapshotEntries sourcePath
+      case sourceSnapshot of
+        Left err -> return $ Left err
+        Right _ -> do
+          destinationPresent <- exists destinationPath
+          if not destinationPresent
+            then return $ Right ()
+            else do
+              compatible <- partialSnapshotMatches sourcePath destinationPath
+              return $ case compatible of
+                Left err -> Left err
+                Right True -> Right ()
+                Right False ->
+                  Left $ ConflictingSnapshots sourcePath destinationPath
 
     migrateLegacy result = do
       createDirectories $ repositoryStateDirectory root repositoryId'

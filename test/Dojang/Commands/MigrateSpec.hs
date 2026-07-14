@@ -46,7 +46,7 @@ import System.FileLock qualified as FileLock
 import System.Posix.Files qualified as Posix
 #endif
 import System.Exit (ExitCode)
-import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
+import System.OsPath (OsPath, decodeFS, encodeFS, takeDirectory, (</>))
 import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
@@ -228,6 +228,44 @@ spec = sequential $ do
         Left exitCode -> exitCode `shouldBe` manifestReadError
         Right result -> fail $ "Unexpected migration result: " <> show result
       readFile manifestPath >>= (`shouldBe` encodeUtf8 original)
+
+  it "does not publish an identity before snapshot validation succeeds" $
+    withTempDir $ \tmp _ -> do
+      repositoryName <- encodeFS "repository"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      legacyName <- encodeFS ".dojang"
+      snapshotName <- encodeFS "snapshot"
+      trackedName <- encodeFS "tracked"
+      let repository = tmp </> repositoryName
+      let legacy = repository </> legacyName
+      let snapshot = tmp </> snapshotName
+      let manifestPath = repository </> manifestName
+      let home = tmp </> homeName
+      let original = "[monikers]\n"
+      createDirectories legacy
+      createDirectories snapshot
+      createDirectories home
+      writeFile manifestPath original
+      writeFile (legacy </> trackedName) "legacy"
+      writeFile (snapshot </> trackedName) "conflict"
+      let appEnv =
+            AppEnv
+              repository
+              True
+              (Just snapshot)
+              (tmp </> stateName)
+              manifestName
+              envName
+              False
+              False
+      withHome home (runAppWithoutLogging appEnv migrate)
+        `shouldThrow` (== machineStateError)
+      readFile manifestPath >>= (`shouldBe` original)
+      readFile (legacy </> trackedName) >>= (`shouldBe` "legacy")
+      readFile (snapshot </> trackedName) >>= (`shouldBe` "conflict")
 
   posixPermissionSpec
 
@@ -616,11 +654,17 @@ instance MonadFileSystem FailingManifestWriteIO where
       else liftIO (writeFile filename contents :: IO ())
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
-  writeTemporaryFile directory template _ = do
-    temporary <- liftIO $ encodePath $ template <> "injected"
-    let filename = directory </> temporary
-    liftIO (writeFile filename "partial" :: IO ())
-    throwError $ userError "injected temporary write failure"
+  writeTemporaryFile directory template contents = do
+    target <- ask
+    if directory == takeDirectory target
+      then do
+        temporary <- liftIO $ encodePath $ template <> "injected"
+        let filename = directory </> temporary
+        liftIO (writeFile filename "partial" :: IO ())
+        throwError $ userError "injected temporary write failure"
+      else
+        liftIO
+          (writeTemporaryFile directory template contents :: IO OsPath)
   withFileLock _ action = action
   canonicalizePath value = liftIO (canonicalizePath value :: IO OsPath)
   readSymlinkTarget value = liftIO (readSymlinkTarget value :: IO OsPath)
