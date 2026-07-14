@@ -28,6 +28,7 @@ import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
 import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
+import System.Timeout (timeout)
 import Test.Hspec (Spec, it, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
 import Prelude hiding (init, readFile, writeFile)
@@ -319,7 +320,13 @@ instance MonadFileSystem CoordinatedInitIO where
         atomicModifyIORef' gate.checkCount $ \count ->
           let next = count + 1 in (next, next)
       case checkNumber of
-        1 -> readMVar gate.secondCheck
+        1 -> do
+          arrived <- timeout 5000000 $ readMVar gate.secondCheck
+          case arrived of
+            Nothing ->
+              Exception.throwIO $
+                userError "second manifest check never arrived"
+            Just () -> return ()
         2 -> void $ tryPutMVar gate.secondCheck ()
         _ -> return ()
     liftIO (exists value :: IO Bool)
