@@ -39,18 +39,18 @@ import System.Directory.OsPath qualified
 
 #ifndef mingw32_HOST_OS
 import System.Posix.Files qualified as Posix
+import System.OsPath (decodeFS)
+import System.Timeout (timeout)
 #endif
 
 import System.OsPath
   ( OsPath
-  , decodeFS
   , encodeFS
   , isAbsolute
   , normalise
   , takeDirectory
   , (</>)
   )
-import System.Timeout (timeout)
 import Test.Hspec (Spec, describe, it, runIO, shouldSatisfy, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))

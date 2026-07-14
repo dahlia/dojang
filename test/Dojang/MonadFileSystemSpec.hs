@@ -35,10 +35,11 @@ import System.FilePath (combine)
 
 #ifndef mingw32_HOST_OS
 import System.Posix.Files qualified as Posix
+import System.OsPath (decodeFS)
+import System.Timeout (timeout)
 #endif
 
-import System.OsPath (decodeFS, dropFileName, encodeFS, (</>))
-import System.Timeout (timeout)
+import System.OsPath (dropFileName, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
