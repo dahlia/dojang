@@ -45,7 +45,7 @@ import Dojang.MonadFileSystem
 import Dojang.Syntax.Manifest.Parser (formatErrors)
 import Dojang.Syntax.Manifest.Writer (insertRepositoryId)
 import Dojang.Types.MachineState
-  ( MachineState (MachineState)
+  ( MachineState (intermediatePath)
   , catchStateIOErrors
   , formatStateError
   , manifestIdentityLockPath
@@ -110,11 +110,10 @@ migrate = do
   state <- case lockedState of
     Left err -> die' machineStateError $ formatStateError err
     Right value -> return value
-  let MachineState _ _ _ _ _ intermediatePath _ _ _ = state
   pathStyle <- pathStyleFor stderr
   printStderr $
     "Repository machine state is ready at "
-      <> pathStyle intermediatePath
+      <> pathStyle state.intermediatePath
       <> "."
   return ExitSuccess
  where
