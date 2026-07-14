@@ -22,7 +22,6 @@ import Control.Monad.Logger (logDebug, logError, logInfo)
 import Data.CaseInsensitive (mk)
 import Data.Map.Strict (lookup)
 import Data.Text (Text, pack, unpack)
-import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (OsPath, decodeFS)
 import System.Process
   ( CreateProcess (..)
@@ -35,7 +34,7 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Dojang.App (App, AppEnv (..))
 import Dojang.Commands (Admonition (..), die', pathStyleFor, printStderr')
 import Dojang.ExitCodes (hookFailedError)
-import Dojang.MonadFileSystem (MonadFileSystem)
+import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context (Context (..))
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate (evaluate)
@@ -119,7 +118,7 @@ executeHooks hookEnv ctx hookType = do
 
 -- | Execute a single hook.
 executeHook
-  :: (MonadIO i)
+  :: (MonadFileSystem i, MonadIO i)
   => HookEnv
   -> Hook
   -> App i ()
@@ -151,10 +150,7 @@ executeHook hookEnv hook = do
         Nothing -> Just <$> liftIO (decodeFS hookEnv.repositoryPath)
 
       -- Set up environment variables
-      repoPath <-
-        liftIO $
-          System.Directory.OsPath.makeAbsolute hookEnv.repositoryPath
-            >>= decodeFS
+      repoPath <- makeAbsolute hookEnv.repositoryPath >>= decodePath
       manifestPath' <- liftIO $ decodeFS hookEnv.manifestPath
       let envVars =
             [ ("DOJANG_REPOSITORY", repoPath)

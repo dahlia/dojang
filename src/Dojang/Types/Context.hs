@@ -33,7 +33,7 @@ module Dojang.Types.Context
   ) where
 
 import Control.Monad (forM, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf)
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
@@ -54,7 +54,6 @@ import Data.Map.Strict
   , unionWith
   , (!?)
   )
-import System.Directory.OsPath (makeAbsolute)
 import System.FilePattern (FilePattern, matchMany)
 import System.OsPath
   ( OsPath
@@ -644,12 +643,11 @@ getRouteState
   -> m (RouteState, [RouteMapWarning])
   -- ^ The route state of the path, along with any warnings that were generated.
 getRouteState ctx path = do
-  absPath <- liftIO $ System.Directory.OsPath.makeAbsolute path
+  absPath <- makeAbsolute path
   let dirs = splitDirectories absPath
   (routes, ws) <- routePaths ctx
   states <- forM routes $ \route -> do
-    dstPath <-
-      liftIO $ System.Directory.OsPath.makeAbsolute route.destinationPath
+    dstPath <- makeAbsolute route.destinationPath
     let prefix = splitDirectories dstPath
     if prefix `isPrefixOf` dirs
       then do

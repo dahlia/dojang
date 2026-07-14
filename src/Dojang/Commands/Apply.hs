@@ -16,7 +16,6 @@ import Prelude hiding (readFile)
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Data.CaseInsensitive (original)
 import Data.Map.Strict (fromList, notMember, toList)
-import System.Directory.OsPath (makeAbsolute)
 import System.OsPath
   ( OsPath
   , addTrailingPathSeparator
@@ -103,11 +102,11 @@ apply force filePaths = do
 
   (allFiles, ws) <- makeCorrespond ctx
   fileMap <- fmap fromList $ forM allFiles $ \fc -> do
-    srcAbsPath <- liftIO $ System.Directory.OsPath.makeAbsolute fc.source.path
+    srcAbsPath <- makeAbsolute fc.source.path
     return (srcAbsPath, fc)
   pathStyle <- pathStyleFor stderr
   filePaths' <- forM filePaths $ \fp -> do
-    fp' <- liftIO $ System.Directory.OsPath.makeAbsolute fp
+    fp' <- makeAbsolute fp
     when (fp' `notMember` fileMap) $ do
       die' fileNotRoutedError $
         "File "

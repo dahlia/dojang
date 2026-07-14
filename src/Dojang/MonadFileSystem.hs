@@ -168,16 +168,10 @@ class (MonadError IOError m) => MonadFileSystem m where
     -> ByteString
     -- ^ File contents.
     -> m OsPath
-  writeTemporaryFile directory template contents = do
-    filename <- encodePath template
-    let temporary = directory </> filename
-    writeFile temporary contents
-    return temporary
 
 
   -- | Runs an action while holding an exclusive inter-process file lock.
   withFileLock :: (HasCallStack) => OsPath -> m a -> m a
-  withFileLock _ action = action
 
 
   -- | Resolves symbolic links and other filesystem aliases in a path.
