@@ -27,6 +27,8 @@ withTempDir action = do
     action tmpDir' tmpDir
 
 
+-- | Runs an action with both home-directory environment variables set to the
+-- supplied path, restoring their previous values afterward.
 withHome :: OsPath -> IO a -> IO a
 withHome home action =
   bracket (lookupEnv "HOME") (restore "HOME") $ \_ ->
