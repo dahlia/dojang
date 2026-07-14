@@ -299,27 +299,20 @@ select which route to use.  After you save and close the editor,
 `dojang apply` will copy the new file to the target location.
 
 
-*.dojang* directory
--------------------
+Machine state
+-------------
 
-Dojang keeps internal records in the *.dojang* directory in order to do
-three-way diffs between the config files applied to your device and the source
-config files.  This directory is placed at the root of the repository.
-The contents of this directory should not be modified or deleted by you,
-and it should not be put on a SCM because its contents are device-specific.
+Dojang keeps its full intermediate snapshot in the platform's user data
+directory, outside the repository.  New repositories receive a stable
+`repository-id` when `dojang init` runs, so no generated *.gitignore* entry is
+needed.
 
-Therefore, when using a SCM like Git or Mercurial, you should tell it to ignore
-this directory.  If you're using Git, you can do this by adding it to your
-*~/.gitignore* file like below:
+Repositories created by an older Dojang release may still have a *.dojang/*
+directory in the worktree.  Run `dojang migrate` to copy and verify that
+snapshot before the old directory is removed.  See [Machine state] for the
+platform paths, dry-run procedure, override behavior, and recovery steps.
 
-~~~~ gitignore
-.dojang/
-~~~~
-
-> [!TIP]
->
-> If you ran the `git init` command before running the `dojang init` command,
-> `dojang init` will automatically generate a *.gitignore* file.
+[Machine state]: machine-state.en.md
 
 
 Adding a new config file

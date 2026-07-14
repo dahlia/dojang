@@ -28,6 +28,9 @@ import Dojang.Types.FilePathExpression
 import Dojang.Types.FileRoute (FileRoute (..), dispatch)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerName (parseMonikerName)
+import Dojang.Types.RepositoryId
+  ( parseRepositoryId
+  )
 
 
 detailedManifest :: Text -> Text
@@ -65,6 +68,21 @@ spec = do
   foo <- runIO $ encodeFS "foo"
   let Right posix = parseMonikerName "posix"
 
+  specify "reads a repository identity" $ do
+    let repositoryIdText = "123e4567-e89b-42d3-a456-426614174000"
+        Right expected = parseRepositoryId repositoryIdText
+        toml =
+          Text.unlines
+            [ "repository-id = \"" <> repositoryIdText <> "\""
+            , "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers]"
+            ]
+    case readManifest toml of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (manifest, _) -> manifest.repositoryId `shouldBe` Just expected
+
   specify "accepts compact and detailed routes in the same manifest" $ do
     let toml =
           Text.unlines
@@ -83,7 +101,7 @@ spec = do
             , "[monikers.posix]"
             , "os = [\"linux\", \"macos\"]"
             ]
-        Right (Manifest _ routes _ _, warnings) = readManifest toml
+        Right (Manifest _ _ routes _ _, warnings) = readManifest toml
         Just homeRoute = Map.lookup home routes
         Just bashrcRoute = Map.lookup bashrc routes
         routeShape :: FileRoute -> [(String, Maybe Text)]
@@ -117,7 +135,7 @@ spec = do
             , ""
             , "[monikers]"
             ]
-        Right (Manifest _ routes _ _, _) = readManifest toml
+        Right (Manifest _ _ routes _ _, _) = readManifest toml
         Just route = Map.lookup gitconfig routes
     [ (show predicate, toPathText <$> path)
       | (predicate, path) <- route.predicates
@@ -143,7 +161,7 @@ spec = do
             ]
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ routes _ _, _) -> do
+      Right (Manifest _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
         [ (show predicate, toPathText <$> path)
           | (predicate, path) <- route.predicates
@@ -158,7 +176,7 @@ spec = do
             "{ when = \"os = plan9 || always\", path = \"target\" }"
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ routes _ _, _) -> do
+      Right (Manifest _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
         route.predicates `shouldBe` [(Always, Just "target")]
         dispatch
@@ -206,7 +224,7 @@ spec = do
           readManifest $ detailedManifest "{ when = \"always\", path = \"\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ routes _ _, _) -> do
+      Right (Manifest _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
         route.predicates `shouldBe` [(Always, Just $ BareComponent "")]
 

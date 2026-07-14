@@ -250,6 +250,12 @@
   },
   "type": "object",
   "properties": {
+    "repository-id": {
+      "title": "Repository identity",
+      "description": "A stable UUID that travels with the repository and keys machine-local state.",
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
     "files": {
       "$ref": "#/$defs/routeMap"
     },

@@ -10,7 +10,7 @@ module Dojang.Commands.Status
   ) where
 
 import Control.Monad (forM, forM_)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, stderr)
@@ -18,7 +18,6 @@ import System.IO (Handle, stderr)
 import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
 import System.Console.Pretty (Color (..))
-import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
@@ -67,13 +66,13 @@ status options = do
   ctx <- ensureContext
   (files, ws) <- makeCorrespond ctx
   let files' = if options.onlyChanges then filter isChanged files else files
-  sourcePath <- liftIO $ makeAbsolute ctx.repository.sourcePath
+  sourcePath <- makeAbsolute ctx.repository.sourcePath
   rows <- forM files' $ \file -> do
     displayPath <-
       if options.showDestinationPath
-        then liftIO $ makeAbsolute file.destination.path
+        then makeAbsolute file.destination.path
         else do
-          path <- liftIO $ makeAbsolute file.source.path
+          path <- makeAbsolute file.source.path
           return $ makeRelative sourcePath path
     let displayPathS =
           if not options.noTrailingSlash

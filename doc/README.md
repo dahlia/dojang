@@ -22,6 +22,7 @@ These docs describe how to use it:
 There are also reference docs for various topics:
 
  -  [Manifest](manifest.en.md) (*dojang.toml*)
+ -  [Machine state](machine-state.en.md)
  -  [Hooks](hooks.en.md)
  -  [Routing](routing.en.md)
  -  [Environment](environment.en.md)

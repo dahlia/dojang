@@ -26,7 +26,6 @@ import Data.List.NonEmpty qualified as NE
 import Data.Text (Text, pack)
 import FortyTwo.Prompts.Confirm (confirm)
 import FortyTwo.Prompts.Select (select)
-import System.Directory.OsPath (makeAbsolute)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
 import TextShow (showt)
 
@@ -225,11 +224,11 @@ edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSo
   codeStyle <- codeStyleFor stderr
 
   -- Make paths absolute first.
-  absPaths <- liftIO $ mapM makeAbsolute paths
+  absPaths <- mapM makeAbsolute paths
   $(logDebugSH) (absPaths :: [OsPath])
 
   -- Check if any target is inside the source repository (not allowed).
-  sourcePath' <- liftIO $ makeAbsolute ctx.repository.sourcePath
+  sourcePath' <- makeAbsolute ctx.repository.sourcePath
   let sourcePathPrefix = splitDirectories sourcePath'
   let overlappedPaths =
         [ p

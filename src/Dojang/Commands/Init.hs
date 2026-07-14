@@ -23,7 +23,7 @@ import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info qualified (os)
-import Prelude hiding (init, writeFile)
+import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo)
 import Control.Monad.Reader (asks)
@@ -51,12 +51,13 @@ import FortyTwo.Prompts.Multiselect (multiselect)
 import System.FilePattern (FilePattern)
 import System.OsPath (OsPath, encodeFS, (</>))
 
-import Data.ByteString (ByteString)
-import Data.Text.Encoding (encodeUtf8)
 import Dojang.App
   ( App
-  , AppEnv (debug, dryRun, sourceDirectory)
+  , AppEnv (debug, dryRun, sourceDirectory, stateDirectory)
   , doesManifestExist
+  , ensureNoLegacySnapshotForInitialization
+  , prepareNewMachineStateBeforeMigration
+  , readValidatedLegacyRegistry
   , saveManifest
   )
 import Dojang.Commands
@@ -67,7 +68,11 @@ import Dojang.Commands
   , printStderr
   , printStderr'
   )
-import Dojang.ExitCodes (manifestAlreadyExists, unsupportedOnEnvError)
+import Dojang.ExitCodes
+  ( machineStateError
+  , manifestAlreadyExists
+  , unsupportedOnEnvError
+  )
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifest)
 import Dojang.Types.Environment
@@ -82,9 +87,16 @@ import Dojang.Types.EnvironmentPredicate.Specificity (specificity)
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FileRoute (FileRoute (fileType), fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.MachineState
+  ( catchStateIOErrors
+  , formatStateError
+  , manifestIdentityLockPath
+  , withStateFileLock
+  )
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
+import Dojang.Types.RepositoryId (RepositoryId, newRepositoryId)
 
 
 data InitPreset
@@ -293,9 +305,9 @@ makeRouteMap neededMonikers monikers' =
     ]
 
 
-makeManifest :: [InitPreset] -> Manifest
-makeManifest presets =
-  Manifest monikers' routeMap ignorePatterns'' empty
+makeManifest :: RepositoryId -> [InitPreset] -> Manifest
+makeManifest repositoryId presets =
+  Manifest (Just repositoryId) monikers' routeMap ignorePatterns'' empty
  where
   neededMonikers :: [(InitPreset, NonEmpty MonikerName)]
   neededMonikers = listNeededMonikers presets
@@ -338,31 +350,48 @@ init presets noInteractive = do
         <> (codeStyle "-h" <> "/" <> codeStyle "--help")
         <> " for command-line options."
     liftIO $ exitWith unsupportedOnEnvError
+  _ <- readValidatedLegacyRegistry
+  ensureNoLegacySnapshotForInitialization
   presets' <-
     if null presets && not noInteractive
       then askPresets
       else pure presets
   $(logDebugSH) presets'
-  let manifest = makeManifest presets'
-  repoDir <- asks (.sourceDirectory)
-  pathStyle <- pathStyleFor stderr
-  forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
-    when (route'.fileType == Directory) $ do
-      let dirPath = repoDir </> path'
-      createDirectories dirPath
-      printStderr $ "Directory created: " <> pathStyle dirPath <> "."
-  filename <- saveManifest manifest
-  printStderr $ "Manifest created: " <> pathStyle filename <> "."
-  generateGitIgnore
-  debug' <- asks (.debug)
-  dryRun' <- asks (.dryRun)
-  when (debug' || dryRun') $ do
-    let manifestText = indent $ writeManifest manifest
-    printStderr' Note $
-      "The manifest file looks like below:\n\n"
-        <> manifestText
-        <> "\n"
-  return ExitSuccess
+  stateRoot <- asks (.stateDirectory)
+  stateRootResult <- catchStateIOErrors $ do
+    createDirectories stateRoot
+    return $ Right ()
+  case stateRootResult of
+    Left err -> die' machineStateError $ formatStateError err
+    Right () -> return ()
+  initialized <- withStateFileLock (manifestIdentityLockPath stateRoot) $ do
+    manifestCreated <- doesManifestExist
+    when manifestCreated $ do
+      die' manifestAlreadyExists "Manifest already exists."
+    repositoryId <- newRepositoryId
+    let manifest = makeManifest repositoryId presets'
+    _ <- prepareNewMachineStateBeforeMigration manifest $ do
+      repoDir <- asks (.sourceDirectory)
+      pathStyle <- pathStyleFor stderr
+      forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
+        when (route'.fileType == Directory) $ do
+          let dirPath = repoDir </> path'
+          createDirectories dirPath
+          printStderr $ "Directory created: " <> pathStyle dirPath <> "."
+      filename <- saveManifest manifest
+      printStderr $ "Manifest created: " <> pathStyle filename <> "."
+    debug' <- asks (.debug)
+    dryRun' <- asks (.dryRun)
+    when (debug' || dryRun') $ do
+      let manifestText = indent $ writeManifest manifest
+      printStderr' Note $
+        "The manifest file looks like below:\n\n"
+          <> manifestText
+          <> "\n"
+    return ExitSuccess
+  case initialized of
+    Left err -> die' machineStateError $ formatStateError err
+    Right exitCode -> return exitCode
 
 
 posixHome :: FilePathExpression
@@ -410,19 +439,3 @@ askPresets = do
 
 indent :: Text -> Text
 indent = Data.Text.unlines . map ("  " <>) . Data.Text.lines
-
-
-generateGitIgnore :: (MonadFileSystem i, MonadIO i) => App i ()
-generateGitIgnore = do
-  sourceDir <- asks (.sourceDirectory)
-  gitDir <- encodePath ".git"
-  gitDirExists <- isDirectory (sourceDir </> gitDir)
-  gitIgnore <- encodePath ".gitignore"
-  gitIgnoreExists <- isFile (sourceDir </> gitIgnore)
-  when (gitDirExists && not gitIgnoreExists) $ do
-    writeFile gitIgnore gitIgnoreContents
-    printStderr ".gitignore created"
-
-
-gitIgnoreContents :: ByteString
-gitIgnoreContents = encodeUtf8 "# Generated by Dojang\n.dojang/\n"

@@ -9,14 +9,14 @@
 module Dojang.Types.Registry
   ( Registry (..)
   , readRegistry
+  , readRegistryStrict
   , registryFilename
   , writeRegistry
   ) where
 
-import Control.DeepSeq (force)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text, pack, unpack)
-import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
+import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import System.IO.Unsafe (unsafePerformIO)
 
 import System.OsPath (OsPath, decodeFS, encodeFS)
@@ -84,15 +84,36 @@ readRegistry
   -- ^ The path to the registry file.
   -> m (Maybe Registry)
 readRegistry path = do
+  result <- readRegistryStrict path
+  return $ either (const Nothing) id result
+
+
+-- | Reads the registry without confusing malformed contents with absence.
+readRegistryStrict
+  :: (MonadFileSystem m, MonadIO m)
+  => OsPath
+  -- ^ The path to the registry file.
+  -> m (Either [Text] (Maybe Registry))
+  -- ^ The decoded registry, its absence, or decoding errors.
+readRegistryStrict path = do
   fileExists <- exists path
-  if not fileExists
-    then return Nothing
-    else do
-      contents <- Dojang.MonadFileSystem.readFile path
-      let textContents = decodeUtf8Lenient contents
-      case decode $ unpack $ force textContents of
-        Success _ reg -> return $ Just reg
-        Failure _ -> return Nothing
+  symbolicLink <- isSymlink path
+  if symbolicLink
+    then return $ Left ["The legacy registry must not be a symbolic link."]
+    else
+      if not fileExists
+        then return $ Right Nothing
+        else do
+          regularFile <- isRegularFile path
+          if not regularFile
+            then return $ Left ["The legacy registry must be a regular file."]
+            else decodeRegistry <$> Dojang.MonadFileSystem.readFile path
+ where
+  decodeRegistry contents = case decodeUtf8' contents of
+    Left err -> Left [pack $ show err]
+    Right textContents -> case decode $ unpack textContents of
+      Success _ reg -> Right $ Just reg
+      Failure errors -> Left $ pack <$> errors
 
 
 -- | Write the registry to a file.

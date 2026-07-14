@@ -20,8 +20,9 @@ import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
-import Dojang.Types.Manifest (manifest)
+import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.MonikerName (parseMonikerName)
+import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
 spec :: Spec
@@ -58,6 +59,7 @@ withTwoManagedFiles action = withTempDir $ \tmpDir _ -> do
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
   envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
   routeA <- encodeFS "managed-a"
   routeB <- encodeFS "managed-b"
   destinationAName <- encodeFS "destination-a"
@@ -72,21 +74,28 @@ withTwoManagedFiles action = withTempDir $ \tmpDir _ -> do
   let destinationB = tmpDir </> destinationBName
   let home = tmpDir </> homeName
   let Right always = parseMonikerName "always"
+  let Right repositoryId' =
+        parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
   let manifest' =
-        manifest
-          (singleton always Always)
-          ( Map.fromList
-              [ (routeA, [(always, Just $ Substitution "DEST_A")])
-              , (routeB, [(always, Just $ Substitution "DEST_B")])
-              ]
-          )
-          mempty
-          mempty
-          mempty
+        ( manifest
+            (singleton always Always)
+            ( Map.fromList
+                [ (routeA, [(always, Just $ Substitution "DEST_A")])
+                , (routeB, [(always, Just $ Substitution "DEST_B")])
+                ]
+            )
+            mempty
+            mempty
+            mempty
+        )
+          { repositoryId = Just repositoryId'
+          }
   let appEnv =
         AppEnv
           repository
-          intermediateDir
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
           manifestFilename
           envFilename
           False
@@ -119,6 +128,7 @@ withTrackedIgnoredFile action = withTempDir $ \tmpDir _ -> do
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
   envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
   routeName <- encodeFS "managed-directory"
   filename <- encodeFS "tracked-file"
   destinationDir <- encodeFS "destination"
@@ -132,20 +142,27 @@ withTrackedIgnoredFile action = withTempDir $ \tmpDir _ -> do
   let destination = destinationRoot </> filename
   let home = tmpDir </> homeName
   let Right always = parseMonikerName "always"
+  let Right repositoryId' =
+        parseRepositoryId "223e4567-e89b-42d3-a456-426614174000"
   let manifest' =
-        manifest
-          (singleton always Always)
-          mempty
-          ( Map.singleton
-              routeName
-              [(always, Just $ Substitution "DEST_DIR")]
-          )
-          (Map.singleton routeName ["*"])
-          mempty
+        ( manifest
+            (singleton always Always)
+            mempty
+            ( Map.singleton
+                routeName
+                [(always, Just $ Substitution "DEST_DIR")]
+            )
+            (Map.singleton routeName ["*"])
+            mempty
+        )
+          { repositoryId = Just repositoryId'
+          }
   let appEnv =
         AppEnv
           repository
-          intermediateDir
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
           manifestFilename
           envFilename
           False

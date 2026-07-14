@@ -18,7 +18,6 @@ import Data.List.NonEmpty qualified as NE
 import Data.Text (Text, pack)
 import FortyTwo.Prompts.Confirm (confirm)
 import FortyTwo.Prompts.Select (select)
-import System.Directory.OsPath (makeAbsolute)
 import System.OsPath
   ( OsPath
   , makeRelative
@@ -263,7 +262,7 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
 reflect force allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
-  absPaths <- liftIO $ mapM makeAbsolute paths
+  absPaths <- mapM makeAbsolute paths
   nonExistents <- filterM (fmap not . exists) absPaths
   let rejectUntrackedMissingPath path (correspond :: FileCorrespondence) =
         when
@@ -274,7 +273,7 @@ reflect force allFlag _includeUnregistered explicitSource paths = do
             fileNotFoundError
             ("No such file: " <> pathStyle path <> ".")
   $(logDebugSH) (absPaths :: [OsPath])
-  sourcePath' <- liftIO $ makeAbsolute ctx.repository.sourcePath
+  sourcePath' <- makeAbsolute ctx.repository.sourcePath
   let sourcePathPrefix = splitDirectories sourcePath'
   $(logDebugSH) sourcePathPrefix
   let overlappedPaths =

@@ -22,8 +22,9 @@ import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
-import Dojang.Types.Manifest (manifest)
+import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.MonikerName (parseMonikerName)
+import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
 spec :: Spec
@@ -95,13 +96,18 @@ withManagedFile sourceContents intermediateContents destinationContents action =
     let source = repository </> routeName
     let destinationPath = tmpDir </> destination
     let Right always = parseMonikerName "always"
+    let Right repositoryId' =
+          parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
     let manifest' =
-          manifest
-            (singleton always Always)
-            (Map.singleton routeName [(always, Just $ Substitution "DEST")])
-            mempty
-            mempty
-            mempty
+          ( manifest
+              (singleton always Always)
+              (Map.singleton routeName [(always, Just $ Substitution "DEST")])
+              mempty
+              mempty
+              mempty
+          )
+            { repositoryId = Just repositoryId'
+            }
 
     writeManifestFile manifest' manifestPath
     writeFile source sourceContents
@@ -125,16 +131,21 @@ withIgnoredDestination action =
     let destinationRoot = tmpDir </> destinationDir
     let destination = destinationRoot </> filename
     let Right always = parseMonikerName "always"
+    let Right repositoryId' =
+          parseRepositoryId "223e4567-e89b-42d3-a456-426614174000"
     let manifest' =
-          manifest
-            (singleton always Always)
-            mempty
-            ( Map.singleton
-                routeName
-                [(always, Just $ Substitution "DEST_DIR")]
-            )
-            (Map.singleton routeName ["*"])
-            mempty
+          ( manifest
+              (singleton always Always)
+              mempty
+              ( Map.singleton
+                  routeName
+                  [(always, Just $ Substitution "DEST_DIR")]
+              )
+              (Map.singleton routeName ["*"])
+              mempty
+          )
+            { repositoryId = Just repositoryId'
+            }
 
     createDirectories destinationRoot
     writeManifestFile manifest' manifestPath
@@ -152,12 +163,15 @@ withReflectRepository action = withTempDir $ \tmpDir _ -> do
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
   envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
   let repository = tmpDir </> sourceDir
   let manifestPath = repository </> manifestFilename
   let appEnv =
         AppEnv
           repository
-          intermediateDir
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
           manifestFilename
           envFilename
           False

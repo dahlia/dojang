@@ -25,7 +25,7 @@ import Data.CaseInsensitive (CI (original))
 import Data.HashMap.Strict as HashMap (fromList)
 import Data.Map.Strict as Map (Map, empty, fromList, toList)
 import Data.Text (Text, intercalate, pack, unpack)
-import Data.Text.Encoding (decodeUtf8Lenient)
+import Data.Text.Encoding (decodeUtf8')
 import System.FilePattern (FilePattern)
 import System.OsPath (OsPath, decodeFS, encodeFS)
 import Toml (Result (..), decode)
@@ -68,11 +68,14 @@ import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
+import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
 -- | An error made during parsing.
 data Error
-  = -- | TOML parsing errors.
+  = -- | The manifest is not valid UTF-8.
+    InvalidUtf8 Text
+  | -- | TOML parsing errors.
     TomlErrors (NonEmpty String)
   | -- | An error made during parsing an 'EnvironmentPredicate'.
     EnvironmentPredicateError (ParseErrorBundle Text Void)
@@ -80,6 +83,8 @@ data Error
     FilePathExpressionError (ParseErrorBundle Text Void)
   | -- | An invalid branch in a detailed file route.
     FileRouteBranchError FileType OsPath Int DetailedRouteError
+  | -- | The repository identity is not a UUID.
+    RepositoryIdError Text
 
 
 -- | An error in a branch of a detailed file route.
@@ -124,11 +129,15 @@ readManifestFile
   -- ^ A decoded manifest with warnings, or a list of errors.
 readManifestFile filePath = do
   content <- readFile filePath
-  return $ readManifest $ decodeUtf8Lenient content
+  return $ case decodeUtf8' content of
+    Left err -> Left $ InvalidUtf8 $ pack $ show err
+    Right source -> readManifest source
 
 
 -- | Format error messages.
 formatErrors :: Error -> [Text]
+formatErrors (InvalidUtf8 details) =
+  ["The manifest is not valid UTF-8: " <> details]
 formatErrors (TomlErrors es) = Data.List.NonEmpty.toList $ fmap pack es
 formatErrors (EnvironmentPredicateError e) =
   [Dojang.Syntax.EnvironmentPredicate.Parser.errorBundlePretty e]
@@ -158,21 +167,29 @@ formatErrors (FileRouteBranchError fileType path index reason) =
     "refers to undefined moniker " <> original name.name <> "."
   formatReason (UnexpectedRouteFields fields) =
     "contains unexpected field(s): " <> intercalate ", " fields <> "."
+formatErrors (RepositoryIdError message) = [message]
 
 
 mapManifest :: Manifest' -> Either Error Manifest
 mapManifest manifest' =
-  case monikersResult of
+  case repositoryIdResult of
     Left e -> Left e
-    Right monikers' ->
-      case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
-        Left e -> Left e
-        Right fileRoutes' ->
-          case mapHooks monikers' manifest'.hooks of
-            Left e -> Left e
-            Right hooks' ->
-              Right $ Manifest monikers' fileRoutes' ignores' hooks'
+    Right repositoryId' -> case monikersResult of
+      Left e -> Left e
+      Right monikers' ->
+        case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
+          Left e -> Left e
+          Right fileRoutes' ->
+            case mapHooks monikers' manifest'.hooks of
+              Left e -> Left e
+              Right hooks' ->
+                Right $
+                  Manifest repositoryId' monikers' fileRoutes' ignores' hooks'
  where
+  repositoryIdResult =
+    traverse
+      (first RepositoryIdError . parseRepositoryId)
+      manifest'.repositoryId
   monikersResult :: Either Error MonikerMap
   monikersResult = mapMonikerMap manifest'.monikers
   ignores' :: Map OsPath [FilePattern]

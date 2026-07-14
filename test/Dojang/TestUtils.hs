@@ -1,11 +1,20 @@
 {-# LANGUAGE LambdaCase #-}
 
-module Dojang.TestUtils (Entry (..), Tree, makeFixtureTree, withTempDir) where
+module Dojang.TestUtils
+  ( Entry (..)
+  , Tree
+  , makeFixtureTree
+  , withHome
+  , withTempDir
+  )
+where
 
+import Control.Exception (bracket)
 import Control.Monad (forM_, unless, void)
 
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO.Temp (withSystemTempDirectory)
-import System.OsPath (OsPath, encodeFS, (</>))
+import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 
 import Data.ByteString (ByteString)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
@@ -16,6 +25,21 @@ withTempDir action = do
   withSystemTempDirectory "dojang-spec-" $ \tmpDir -> do
     tmpDir' <- encodeFS tmpDir
     action tmpDir' tmpDir
+
+
+-- | Runs an action with both home-directory environment variables set to the
+-- supplied path, restoring their previous values afterward.
+withHome :: OsPath -> IO a -> IO a
+withHome home action =
+  bracket (lookupEnv "HOME") (restore "HOME") $ \_ ->
+    bracket (lookupEnv "USERPROFILE") (restore "USERPROFILE") $ \_ -> do
+      home' <- decodeFS home
+      setEnv "HOME" home'
+      setEnv "USERPROFILE" home'
+      action
+ where
+  restore name Nothing = unsetEnv name
+  restore name (Just previous) = setEnv name previous
 
 
 data Entry = F ByteString | D Tree
