@@ -1610,14 +1610,25 @@ prepareRepositoryStateUnlocked
             markerExists <- doesMigrationMarkerExist
             unless markerExists $
               writeMigrationMarker marker legacy requested
-          writeState root state
-          cleanup <- cleanupSnapshot legacy requested
-          case cleanup of
+          comparison <-
+            if result == MigratedLegacySnapshot
+              && legacyExists
+              && requested /= legacy
+              then treesEqual legacy requested
+              else return $ Right True
+          case comparison of
             Left err -> return $ Left err
-            Right () -> do
-              markerExists <- doesMigrationMarkerExist
-              when markerExists $ removeFile marker
-              return $ Right (state, result)
+            Right False ->
+              return $ Left $ ConflictingSnapshots legacy requested
+            Right True -> do
+              writeState root state
+              cleanup <- cleanupSnapshot legacy requested
+              case cleanup of
+                Left err -> return $ Left err
+                Right () -> do
+                  markerExists <- doesMigrationMarkerExist
+                  when markerExists $ removeFile marker
+                  return $ Right (state, result)
 
     recoverMigration currentPath desiredPath = do
       markerExists <- doesMigrationMarkerExist

@@ -80,6 +80,7 @@ import Dojang.Types.MachineState
   , prepareRepositoryState
   , prepareRepositoryStateWithLegacyHistory
   , prepareRepositoryStateWithOwnership
+  , prepareRepositoryStateWithOwnershipBeforeMigration
   , readMachineId
   , readRepositoryState
   , repositoryStateDirectory
@@ -828,6 +829,33 @@ spec = do
         result `shouldBe` Left (ConflictingSnapshots paths.legacy paths.external)
         readFile (paths.legacy </> paths.file) >>= (`shouldBe` "old")
         readFile (paths.external </> paths.file) >>= (`shouldBe` "new")
+
+    it "rechecks matching snapshots before publishing state" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        manifestName <- encodeFS "dojang.toml"
+        let manifest = paths.checkout </> manifestName
+        createDirectories paths.legacy
+        createDirectories paths.external
+        writeFile (paths.legacy </> paths.file) "same"
+        writeFile (paths.external </> paths.file) "same"
+        result <-
+          prepareRepositoryStateWithOwnershipBeforeMigration
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            manifest
+            Nothing
+            (\_ _ -> return False)
+            False
+            fixtureTime
+            (writeFile (paths.legacy </> paths.file) "changed")
+        result `shouldBe` Left (ConflictingSnapshots paths.legacy paths.external)
+        readFile (paths.legacy </> paths.file) >>= (`shouldBe` "changed")
+        readFile (paths.external </> paths.file) >>= (`shouldBe` "same")
+        exists (repositoryStatePath paths.root paths.repositoryId)
+          >>= (`shouldBe` False)
 
     it "does not publish a migration marker when atomic replacement fails" $
       withTempDir $ \tmp _ -> do
