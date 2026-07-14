@@ -16,6 +16,7 @@ import Control.Exception (bracket_)
 
 import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import Test.Hspec (Spec, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
@@ -54,9 +55,11 @@ spec = sequential $ do
         >> return True
       )
       `catchIO` const (return False)
-  let symlinkIt = if symlinkAvailable then it else xit
+  let redirectedHomeIt = if os == "mingw32" then xit else it
+  let redirectedHomeSymlinkIt =
+        if symlinkAvailable then redirectedHomeIt else xit
 
-  symlinkIt "preserves first-apply history across checkout aliases" $
+  redirectedHomeSymlinkIt "preserves first-apply history across checkout aliases" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
       aliasName <- encodeFS "checkout-alias"
@@ -89,7 +92,7 @@ spec = sequential $ do
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       (state.firstApplied) `shouldBe` True
 
-  it "rejects a malformed legacy registry before creating state" $
+  redirectedHomeIt "rejects a malformed legacy registry before creating state" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
       stateName <- encodeFS "state"

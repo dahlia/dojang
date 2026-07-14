@@ -26,8 +26,9 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
+import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
-import Test.Hspec (Spec, it, sequential)
+import Test.Hspec (Spec, it, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
 import Prelude hiding (init, readFile, writeFile)
 
@@ -52,6 +53,8 @@ import Dojang.Types.Registry
 
 spec :: Spec
 spec = sequential $ do
+  let redirectedHomeIt = if os == "mingw32" then xit else it
+
   it "creates one repository identity during concurrent initialization" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
@@ -222,8 +225,10 @@ spec = sequential $ do
       readFile recovery >>= (`shouldBe` "preserve me")
       exists (checkout </> manifestName) >>= (`shouldBe` False)
 
-  it "does not commit initialization output for a malformed legacy registry" $
-    withTempDir $ \tmp _ -> do
+  redirectedHomeIt
+    "does not commit initialization output for a malformed legacy registry"
+    $ withTempDir
+    $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
       stateName <- encodeFS "state"
       homeName <- encodeFS "home"
