@@ -191,6 +191,44 @@ spec = sequential $ do
         `shouldThrow` (== machineStateError)
       exists (checkout </> manifestName) >>= (`shouldBe` False)
 
+  it "does not save the manifest when intermediate validation fails" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      intermediateName <- encodeFS "intermediate"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      let intermediate = tmp </> intermediateName
+      createDirectories checkout
+      createDirectories home
+      writeFile intermediate "not a directory"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              (Just intermediate)
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.init [Init.Amd64Linux] True)
+        `shouldThrow` (== machineStateError)
+      exists (checkout </> manifestName) >>= (`shouldBe` False)
+      removeFile intermediate
+      retried <-
+        withHome
+          home
+          (runAppWithoutLogging appEnv $ Init.init [Init.Amd64Linux] True)
+      retried `shouldBe` ExitSuccess
+      exists (checkout </> manifestName) >>= (`shouldBe` True)
+
   it "refuses to consume a pre-existing legacy snapshot" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"

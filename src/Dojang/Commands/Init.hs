@@ -370,6 +370,7 @@ init presets noInteractive = do
       die' manifestAlreadyExists "Manifest already exists."
     repositoryId <- newRepositoryId
     let manifest = makeManifest repositoryId presets'
+    _ <- prepareNewMachineState manifest
     repoDir <- asks (.sourceDirectory)
     pathStyle <- pathStyleFor stderr
     forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
@@ -379,7 +380,6 @@ init presets noInteractive = do
         printStderr $ "Directory created: " <> pathStyle dirPath <> "."
     filename <- saveManifest manifest
     printStderr $ "Manifest created: " <> pathStyle filename <> "."
-    _ <- prepareNewMachineState manifest
     debug' <- asks (.debug)
     dryRun' <- asks (.dryRun)
     when (debug' || dryRun') $ do
