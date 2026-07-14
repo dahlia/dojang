@@ -15,7 +15,7 @@ import Control.Concurrent
   , takeMVar
   , tryPutMVar
   )
-import Control.Exception (SomeException, bracket)
+import Control.Exception (SomeException)
 import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Except (MonadError)
@@ -23,7 +23,6 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader (ask), ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
-import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
 import System.Info (os)
@@ -39,7 +38,7 @@ import Dojang.ExitCodes (machineStateError, manifestAlreadyExists)
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
   )
-import Dojang.TestUtils (withTempDir)
+import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.MachineState
   ( MachineState (firstApplied)
   , listRepositoryStates
@@ -268,19 +267,6 @@ spec = sequential $ do
           (runAppWithoutLogging appEnv $ Init.init [Init.Amd64Linux] True)
       retried `shouldBe` ExitSuccess
       exists (checkout </> manifestName) >>= (`shouldBe` True)
-
-
-withHome :: OsPath -> IO a -> IO a
-withHome home action =
-  bracket (lookupEnv "HOME") (restore "HOME") $ \_ ->
-    bracket (lookupEnv "USERPROFILE") (restore "USERPROFILE") $ \_ -> do
-      home' <- decodeFS home
-      setEnv "HOME" home'
-      setEnv "USERPROFILE" home'
-      action
- where
-  restore name Nothing = unsetEnv name
-  restore name (Just previous) = setEnv name previous
 
 
 data ManifestCheckGate = ManifestCheckGate

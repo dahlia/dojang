@@ -6,7 +6,6 @@
 
 module Dojang.AppSpec (spec) where
 
-import Control.Exception (bracket)
 import Control.Exception qualified
 
 
@@ -15,9 +14,8 @@ import Control.Exception (bracket_)
 #endif
 
 import System.Directory.OsPath qualified
-import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Info (os)
-import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
+import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
 import Prelude hiding (writeFile)
@@ -33,7 +31,7 @@ import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
   ( MonadFileSystem (createDirectories, writeFile)
   )
-import Dojang.TestUtils (withTempDir)
+import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.MachineState (MachineState (..), StateError (..))
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.Registry
@@ -587,19 +585,6 @@ posixUnreadableRegistrySpec =
             `shouldThrow` (== machineStateError)
         )
 #endif
-
-
-withHome :: OsPath -> IO a -> IO a
-withHome home action =
-  bracket (lookupEnv "HOME") (restore "HOME") $ \_ ->
-    bracket (lookupEnv "USERPROFILE") (restore "USERPROFILE") $ \_ -> do
-      home' <- decodeFS home
-      setEnv "HOME" home'
-      setEnv "USERPROFILE" home'
-      action
- where
-  restore name Nothing = unsetEnv name
-  restore name (Just previous) = setEnv name previous
 
 
 catchIO :: IO a -> (IOError -> IO a) -> IO a

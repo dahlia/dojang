@@ -17,7 +17,7 @@ import Control.Concurrent
   , tryPutMVar
   , tryReadMVar
   )
-import Control.Exception (SomeException, bracket, bracket_)
+import Control.Exception (SomeException, bracket_)
 import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Except
@@ -38,7 +38,6 @@ import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import System.Directory.OsPath qualified as Directory
-import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FileLock qualified as FileLock
 
 
@@ -64,7 +63,7 @@ import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Migrate (migrate)
 import Dojang.ExitCodes (machineStateError, manifestReadError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.TestUtils (withTempDir)
+import Dojang.TestUtils (withHome, withTempDir)
 
 
 spec :: Spec
@@ -494,19 +493,6 @@ posixPermissionSpec = do
       mode <- Posix.fileMode <$> Posix.getFileStatus manifestPath'
       mode .&. 0o777 `shouldBe` 0o640
 #endif
-
-
-withHome :: OsPath -> IO a -> IO a
-withHome home action =
-  bracket (lookupEnv "HOME") (restore "HOME") $ \_ ->
-    bracket (lookupEnv "USERPROFILE") (restore "USERPROFILE") $ \_ -> do
-      home' <- decodeFS home
-      setEnv "HOME" home'
-      setEnv "USERPROFILE" home'
-      action
- where
-  restore name Nothing = unsetEnv name
-  restore name (Just previous) = setEnv name previous
 
 
 data ManifestReadGate = ManifestReadGate
