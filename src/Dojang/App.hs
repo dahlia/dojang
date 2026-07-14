@@ -17,6 +17,7 @@ module Dojang.App
   , LogSource
   , LogStr
   , applyAutomaticRepositorySelection
+  , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
   , doesManifestExist
   , ensureContext
@@ -378,6 +379,26 @@ applyAutomaticRepositorySelection manifestExplicit state appEnv =
     , manifestFile =
         if manifestExplicit then appEnv.manifestFile else state.manifestPath
     }
+
+
+-- | Tells whether an explicitly configured manifest is contained by the
+-- checkout that machine state would select automatically.
+automaticSelectionUsesCheckoutManifest
+  :: (MonadFileSystem m) => MachineState -> AppEnv -> m Bool
+automaticSelectionUsesCheckoutManifest state appEnv = do
+  parentComponent <- encodePath ".."
+  let configuredManifest = appEnv.manifestFile
+  let manifest =
+        normalise $
+          if isAbsolute configuredManifest
+            then configuredManifest
+            else state.checkoutPath </> configuredManifest
+  let relative = makeRelative state.checkoutPath manifest
+  return $
+    not (isAbsolute relative)
+      && case splitDirectories relative of
+        [] -> True
+        first : _ -> first /= parentComponent
 
 
 -- | Loads or creates machine state, preserving known legacy apply history.

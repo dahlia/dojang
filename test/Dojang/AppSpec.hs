@@ -23,6 +23,7 @@ import Prelude hiding (writeFile)
 import Dojang.App
   ( AppEnv (..)
   , applyAutomaticRepositorySelection
+  , automaticSelectionUsesCheckoutManifest
   , prepareMachineState
   , runAppWithoutLogging
   , validateRepositoryCheckout
@@ -268,6 +269,13 @@ spec = sequential $ do
               state
               parsedAppEnv{manifestFile = explicitManifestName}
       explicitlySelected.manifestFile `shouldBe` explicitManifestName
+
+      automaticSelectionUsesCheckoutManifest state explicitlySelected
+        >>= (`shouldBe` True)
+      automaticSelectionUsesCheckoutManifest
+        state
+        explicitlySelected{manifestFile = tmp </> explicitManifestName}
+        >>= (`shouldBe` False)
 
   it "rejects a missing auto-selected checkout" $
     withTempDir $ \tmp _ -> do

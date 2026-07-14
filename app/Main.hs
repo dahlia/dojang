@@ -62,6 +62,7 @@ import Dojang.App
   ( App
   , AppEnv (..)
   , applyAutomaticRepositorySelection
+  , automaticSelectionUsesCheckoutManifest
   , runAppWithStderrLogging
   , runAppWithoutLogging
   , validateRepositoryCheckout
@@ -625,6 +626,19 @@ main = withCP65001 $ do
                   <> pathStyle registry.repositoryPath
                   <> ", but it is no longer used for automatic selection."
               printStderr' Hint "Run `dojang -r PATH migrate' for that repository."
+        case selectedState of
+          Just state | manifestExplicit -> do
+            manifestInsideCheckout <-
+              automaticSelectionUsesCheckoutManifest state parsedAppEnv
+            when (not manifestInsideCheckout) $ do
+              printStderr' Error $
+                "Cannot use a manifest outside an automatically selected "
+                  <> "repository checkout."
+              printStderr' Hint $
+                "Select the repository explicitly with "
+                  <> "-r/--repository-dir."
+              exitWith ambiguousRepositoryExitCode
+          _ -> return ()
         return $ case selectedState of
           Nothing -> parsedAppEnv
           Just state ->
