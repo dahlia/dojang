@@ -328,6 +328,15 @@ data MigrationResult
   deriving (Eq, Show)
 
 
+-- | A validated action for preparing a repository without an existing record.
+data NewStatePlan
+  = RejectNewState StateError
+  | PersistNewState MigrationResult
+  | MigrateLegacySnapshot MigrationResult
+  | RecoverLegacySnapshot MigrationResult
+  deriving (Eq, Show)
+
+
 -- | Formats a state failure as an actionable diagnostic.
 formatStateError :: StateError -> Text
 formatStateError (StateIOError details) =
@@ -1382,11 +1391,10 @@ prepareRepositoryStateUnlocked
                   if isProperDescendant resolvedLegacy resolvedRequested
                     then return $ Left $ SnapshotInsideLegacy legacy requested
                     else do
-                      validatedPaths <-
-                        validateNewPaths resolvedLegacy resolvedRequested
-                      case validatedPaths of
+                      plan <- planNewPaths resolvedLegacy resolvedRequested
+                      case validateNewPaths plan of
                         Left err -> return $ Left err
-                        Right () -> beforeMigration >> prepareNewPaths resolvedLegacy resolvedRequested
+                        Right () -> beforeMigration >> prepareNewPaths plan
 
     findUnsupportedSnapshotSymlink snapshotPath = do
       directSymlink <- isSymlink snapshotPath
@@ -1450,7 +1458,7 @@ prepareRepositoryStateUnlocked
                       (repositoryStateDirectory root repositoryId')
                 else Right ()
 
-    prepareNewPaths resolvedLegacy resolvedRequested = do
+    planNewPaths resolvedLegacy resolvedRequested = do
       markerExists <- doesMigrationMarkerExist
       legacyPresent <- exists legacy
       legacyExists <- isDirectory legacy
@@ -1458,27 +1466,32 @@ prepareRepositoryStateUnlocked
       destinationExists <- isDirectory requested
       let sameDestination = resolvedLegacy == resolvedRequested
       if legacyPresent && not legacyExists
-        then return $ Left $ InvalidSnapshotLocation legacy
+        then return $ RejectNewState $ InvalidSnapshotLocation legacy
         else
           if destinationPresent && not destinationExists
-            then return $ Left $ InvalidSnapshotLocation requested
+            then return $ RejectNewState $ InvalidSnapshotLocation requested
             else
               if markerExists
                 then do
                   validated <- validateMigrationMarker legacy requested
                   case validated of
-                    Left err -> return $ Left err
+                    Left err -> return $ RejectNewState err
                     Right () ->
                       if not legacyExists
-                        then return $ Left $ MissingSnapshot legacy
+                        then return $ RejectNewState $ MissingSnapshot legacy
                         else
                           if sameDestination
-                            then persistAndCleanup RecoveredInterruptedMigration
-                            else do
-                              recovered <- recoverCopyDestination legacy requested
-                              case recovered of
-                                Left err -> return $ Left err
-                                Right () -> migrateLegacy RecoveredInterruptedMigration
+                            then
+                              planValidatedSnapshot
+                                legacy
+                                (PersistNewState RecoveredInterruptedMigration)
+                            else
+                              planRecoverableCopy
+                                legacy
+                                requested
+                                ( RecoverLegacySnapshot
+                                    RecoveredInterruptedMigration
+                                )
                 else
                   if legacyExists && not sameDestination
                     then
@@ -1486,81 +1499,59 @@ prepareRepositoryStateUnlocked
                         then do
                           comparison <- treesEqual legacy requested
                           case comparison of
-                            Left err -> return $ Left err
-                            Right True -> persistAndCleanup MigratedLegacySnapshot
+                            Left err -> return $ RejectNewState err
+                            Right True ->
+                              return $
+                                PersistNewState MigratedLegacySnapshot
                             Right False ->
-                              return $ Left $ ConflictingSnapshots legacy requested
-                        else migrateLegacy MigratedLegacySnapshot
-                    else
-                      if destinationExists && not legacyExists
-                        then case explicit of
-                          Just _ -> persistAndCleanup MigratedLegacySnapshot
-                          Nothing
-                            | requested == defaultPath -> do
-                                snapshot <- snapshotEntries requested
-                                case snapshot of
-                                  Right [] ->
-                                    persistAndCleanup CreatedRepositoryState
-                                  Right _ ->
-                                    return $ Left $ UnownedSnapshot requested
-                                  Left err -> return $ Left err
-                            | otherwise ->
-                                return $ Left $ UnownedSnapshot requested
-                        else persistAndCleanup CreatedRepositoryState
-
-    validateNewPaths resolvedLegacy resolvedRequested = do
-      markerExists <- doesMigrationMarkerExist
-      legacyPresent <- exists legacy
-      legacyExists <- isDirectory legacy
-      destinationPresent <- exists requested
-      destinationExists <- isDirectory requested
-      let sameDestination = resolvedLegacy == resolvedRequested
-      if legacyPresent && not legacyExists
-        then return $ Left $ InvalidSnapshotLocation legacy
-        else
-          if destinationPresent && not destinationExists
-            then return $ Left $ InvalidSnapshotLocation requested
-            else
-              if markerExists
-                then do
-                  validated <- validateMigrationMarker legacy requested
-                  case validated of
-                    Left err -> return $ Left err
-                    Right () ->
-                      if not legacyExists
-                        then return $ Left $ MissingSnapshot legacy
+                              return $
+                                RejectNewState $
+                                  ConflictingSnapshots legacy requested
                         else
-                          if sameDestination
-                            then validateSnapshot legacy
-                            else validateRecoverableCopy legacy requested
-                else
-                  if legacyExists && not sameDestination
-                    then
-                      if destinationExists
-                        then do
-                          comparison <- treesEqual legacy requested
-                          return $ case comparison of
-                            Left err -> Left err
-                            Right True -> Right ()
-                            Right False ->
-                              Left $ ConflictingSnapshots legacy requested
-                        else validateSnapshot legacy
+                          planValidatedSnapshot
+                            legacy
+                            (MigrateLegacySnapshot MigratedLegacySnapshot)
                     else
                       if destinationExists && not legacyExists
                         then do
                           snapshot <- snapshotEntries requested
                           return $ case snapshot of
-                            Left err -> Left err
+                            Left err -> RejectNewState err
                             Right entries -> case explicit of
-                              Just _ -> Right ()
+                              Just _ ->
+                                PersistNewState MigratedLegacySnapshot
                               Nothing
                                 | requested == defaultPath && null entries ->
-                                    Right ()
-                                | otherwise -> Left $ UnownedSnapshot requested
+                                    PersistNewState CreatedRepositoryState
+                                | otherwise ->
+                                    RejectNewState $ UnownedSnapshot requested
                         else
                           if legacyExists
-                            then validateSnapshot legacy
-                            else return $ Right ()
+                            then
+                              planValidatedSnapshot
+                                legacy
+                                (PersistNewState CreatedRepositoryState)
+                            else return $ PersistNewState CreatedRepositoryState
+
+    planValidatedSnapshot snapshotPath plan = do
+      validated <- validateSnapshot snapshotPath
+      return $ either RejectNewState (const plan) validated
+
+    planRecoverableCopy sourcePath destinationPath plan = do
+      validated <- validateRecoverableCopy sourcePath destinationPath
+      return $ either RejectNewState (const plan) validated
+
+    validateNewPaths (RejectNewState err) = Left err
+    validateNewPaths _ = Right ()
+
+    prepareNewPaths (RejectNewState err) = return $ Left err
+    prepareNewPaths (PersistNewState result) = persistAndCleanup result
+    prepareNewPaths (MigrateLegacySnapshot result) = migrateLegacy result
+    prepareNewPaths (RecoverLegacySnapshot result) = do
+      recovered <- recoverCopyDestination legacy requested
+      case recovered of
+        Left err -> return $ Left err
+        Right () -> migrateLegacy result
 
     validateSnapshot snapshotPath =
       fmap (const ()) <$> snapshotEntries snapshotPath
