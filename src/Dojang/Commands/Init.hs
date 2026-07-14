@@ -56,7 +56,7 @@ import Dojang.App
   , AppEnv (debug, dryRun, sourceDirectory, stateDirectory)
   , doesManifestExist
   , ensureNoLegacySnapshotForInitialization
-  , prepareNewMachineState
+  , prepareNewMachineStateBeforeMigration
   , readValidatedLegacyRegistry
   , saveManifest
   )
@@ -370,16 +370,16 @@ init presets noInteractive = do
       die' manifestAlreadyExists "Manifest already exists."
     repositoryId <- newRepositoryId
     let manifest = makeManifest repositoryId presets'
-    _ <- prepareNewMachineState manifest
-    repoDir <- asks (.sourceDirectory)
-    pathStyle <- pathStyleFor stderr
-    forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
-      when (route'.fileType == Directory) $ do
-        let dirPath = repoDir </> path'
-        createDirectories dirPath
-        printStderr $ "Directory created: " <> pathStyle dirPath <> "."
-    filename <- saveManifest manifest
-    printStderr $ "Manifest created: " <> pathStyle filename <> "."
+    _ <- prepareNewMachineStateBeforeMigration manifest $ do
+      repoDir <- asks (.sourceDirectory)
+      pathStyle <- pathStyleFor stderr
+      forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
+        when (route'.fileType == Directory) $ do
+          let dirPath = repoDir </> path'
+          createDirectories dirPath
+          printStderr $ "Directory created: " <> pathStyle dirPath <> "."
+      filename <- saveManifest manifest
+      printStderr $ "Manifest created: " <> pathStyle filename <> "."
     debug' <- asks (.debug)
     dryRun' <- asks (.dryRun)
     when (debug' || dryRun') $ do

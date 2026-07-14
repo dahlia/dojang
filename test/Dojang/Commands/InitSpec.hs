@@ -229,6 +229,51 @@ spec = sequential $ do
       retried `shouldBe` ExitSuccess
       exists (checkout </> manifestName) >>= (`shouldBe` True)
 
+  it "does not publish state when checkout output fails" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      homeRouteName <- encodeFS "HOME"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      let blockedRoute = checkout </> homeRouteName
+      createDirectories checkout
+      createDirectories home
+      writeFile blockedRoute "not a directory"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.init [Init.Amd64Linux] True)
+        `shouldThrow` (== machineStateError)
+      exists (checkout </> manifestName) >>= (`shouldBe` False)
+      machineResult <- readMachineId stateRoot
+      machineId' <- case machineResult of
+        Right (Just identifier) -> return identifier
+        unexpected -> fail $ "Unexpected machine identity: " <> show unexpected
+      statesResult <- listRepositoryStates stateRoot machineId'
+      statesResult `shouldBe` Right []
+      removeFile blockedRoute
+      retried <-
+        withHome
+          home
+          (runAppWithoutLogging appEnv $ Init.init [Init.Amd64Linux] True)
+      retried `shouldBe` ExitSuccess
+      retriedStates <- listRepositoryStates stateRoot machineId'
+      fmap length retriedStates `shouldBe` Right 1
+
   it "refuses to consume a pre-existing legacy snapshot" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"

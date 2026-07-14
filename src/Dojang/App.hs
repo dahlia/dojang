@@ -28,6 +28,7 @@ module Dojang.App
   , prepareMachineState
   , prepareMachineStateBeforeMigration
   , prepareNewMachineState
+  , prepareNewMachineStateBeforeMigration
   , readValidatedLegacyRegistry
   , lookupEnv'
   , runAppWithLogging
@@ -402,16 +403,27 @@ prepareMachineStateBeforeMigration =
 -- lifecycle history from a repository at the same checkout path.
 prepareNewMachineState
   :: (MonadFileSystem i, MonadIO i) => Manifest -> App i MachineState
-prepareNewMachineState manifest = do
+prepareNewMachineState manifest =
+  prepareNewMachineStateBeforeMigration manifest (return ())
+
+
+-- | Creates machine state after validating a new repository and running an
+-- action that publishes its checkout files.
+prepareNewMachineStateBeforeMigration
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest
+  -> App i ()
+  -> App i MachineState
+prepareNewMachineStateBeforeMigration manifest beforeMigration = do
   ensureNoLegacySnapshotForInitialization
-  prepareMachineStateWithLegacyHistory False manifest
+  prepareMachineState' False manifest beforeMigration
 
 
 -- | Refuses initialization when the checkout already has legacy state.
 --
 -- Migration is the only command allowed to adopt and remove a worktree-local
 -- snapshot.  This check runs before initialization output is written and is
--- repeated by 'prepareNewMachineState' to keep that API safe on its own.
+-- repeated by the new-state preparation APIs to keep them safe on their own.
 ensureNoLegacySnapshotForInitialization
   :: (MonadFileSystem i, MonadIO i) => App i ()
 ensureNoLegacySnapshotForInitialization = do
