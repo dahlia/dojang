@@ -750,7 +750,7 @@ ensureMachineId root = catchStateIOErrors $ do
             let document = MachineDocument $ machineIdText identifier
             writeFileAtomically
               (root </> path "machine.toml")
-              "machine.toml.tmp."
+              "machine.toml.tmp"
               (encodeUtf8 $ showt $ FromStringShow $ encode document)
             return $ Right identifier
 
@@ -1706,7 +1706,7 @@ writeState root state = do
   createDirectories directory
   writeFileAtomically
     destination
-    "state.toml.tmp."
+    "state.toml.tmp"
     (encodeUtf8 $ encodeMachineState state)
 
 
@@ -1715,7 +1715,7 @@ writeMigrationMarker
 writeMigrationMarker marker source destination =
   writeFileAtomically
     marker
-    "migration-in-progress.tmp."
+    "migration-in-progress.tmp"
     (encodeMigrationMarker source destination)
 
 

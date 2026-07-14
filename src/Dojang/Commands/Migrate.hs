@@ -91,7 +91,7 @@ migrate = do
             Left err ->
               dieWithErrors manifestReadError [invalidUtf8Message err]
             Right source -> return source
-          ( writeFileAtomically filename "dojang.toml.tmp." $
+          ( writeFileAtomically filename "dojang.toml.tmp" $
               encodeUtf8 $
                 insertRepositoryId identifier original
             )

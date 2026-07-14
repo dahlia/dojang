@@ -28,7 +28,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.Char (chr)
 import Data.Either (isRight)
-import Data.List (isPrefixOf, nub)
+import Data.List (isSuffixOf, nub)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time (UTCTime, defaultTimeLocale, parseTimeOrError)
@@ -841,7 +841,7 @@ spec = do
           listDirectory $ repositoryStateDirectory paths.root paths.repositoryId
         filenames <- mapM decodePath entries
         filenames
-          `shouldSatisfy` all (not . isPrefixOf "migration-in-progress.tmp.")
+          `shouldSatisfy` all (not . isSuffixOf ".tmp")
         retried <-
           prepareRepositoryState
             paths.root
@@ -1824,7 +1824,7 @@ spec = do
         entries <-
           listDirectory $ repositoryStateDirectory paths.root paths.repositoryId
         filenames <- mapM decodePath entries
-        filenames `shouldSatisfy` all (not . isPrefixOf "state.toml.tmp.")
+        filenames `shouldSatisfy` all (not . isSuffixOf ".tmp")
 
     it "returns a state error when recording first apply fails" $
       withTempDir $ \tmp _ -> do
@@ -1890,7 +1890,7 @@ spec = do
       withTempDir $ \tmp _ -> do
         results <-
           concurrently 32 $
-            writeTemporaryFile tmp "state.toml.tmp." "temporary state"
+            writeTemporaryFile tmp "state.toml.tmp" "temporary state"
         temporaryPaths <- case sequence results of
           Left err -> fail $ show err
           Right paths -> return paths
