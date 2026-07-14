@@ -14,8 +14,9 @@ it returns the following exit codes, depending on the situation.
  -  11: The manifest file cannot be read or updated due to problems such as an
     invalid format, permissions, or another filesystem failure.
  -  12: Unable to create a new manifest file because it already exists.
- -  13: Machine state cannot be read or updated, is missing an identity,
-    malformed, unsupported, ambiguous, or owned by another machine.
+ -  13: Machine state cannot be read or updated because it is missing an
+    identity, is malformed, is unsupported, is ambiguous, or is owned by
+    another machine.
  -  20: The env file is missing.
  -  21: The env file cannot be read due to invalid format or permissions.
  -  30: The change cannot be applied because there are conflicting changes
