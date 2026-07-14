@@ -103,6 +103,8 @@ Run migration explicitly from the existing checkout:
 
 ~~~~ console
 $ dojang -r /path/to/dotfiles migrate
+Stable repository identity added to /path/to/dotfiles/dojang.toml.
+Repository machine state is ready at .../snapshots/current.
 ~~~~
 
 Use `--dry-run` first to inspect the file operations without changing the
@@ -110,6 +112,10 @@ manifest, snapshot, or state store:
 
 ~~~~ console
 $ dojang --dry-run -r /path/to/dotfiles migrate
+Stable repository identity added to /path/to/dotfiles/dojang.toml.
+Repository machine state is ready at .../snapshots/current.
+Note: Since --dry-run was specified, those 8 changes were not actually
+committed to the filesystem.
 ~~~~
 
 The machine-state root must not overlap the legacy *.dojang/* snapshot.  Dojang
@@ -154,6 +160,8 @@ same directory while migrating:
 
 ~~~~ console
 $ dojang -r /path/to/dotfiles -i /path/to/existing-snapshot migrate
+Stable repository identity added to /path/to/dotfiles/dojang.toml.
+Repository machine state is ready at /path/to/existing-snapshot.
 ~~~~
 
 Dojang validates an explicitly selected existing snapshot, then records it in
