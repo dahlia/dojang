@@ -542,6 +542,7 @@ runCoordinatedMigrationIO gate (CoordinatedMigrationIO action) =
 instance MonadFileSystem CoordinatedMigrationIO where
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
   exists value = liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
   isRegularFile value = liftIO (isRegularFile value :: IO Bool)
@@ -639,6 +640,7 @@ runFailingManifestWrite target (FailingManifestWriteIO action) =
 instance MonadFileSystem FailingManifestWriteIO where
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
   exists value = liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
   isRegularFile value = liftIO (isRegularFile value :: IO Bool)

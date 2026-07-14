@@ -43,7 +43,7 @@ import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
 import Data.Time (getCurrentTime)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import System.Directory.OsPath (getHomeDirectory, makeAbsolute)
+import System.Directory.OsPath (getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stderr)
@@ -174,6 +174,7 @@ instance
 instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   encodePath = App . lift . lift . encodePath
   decodePath = App . lift . lift . decodePath
+  getCurrentDirectory = App $ lift $ lift getCurrentDirectory
   exists = App . lift . lift . exists
   isFile = App . lift . lift . isFile
   isRegularFile = App . lift . lift . isRegularFile
@@ -415,7 +416,7 @@ ensureNoLegacySnapshotForInitialization
   :: (MonadFileSystem i, MonadIO i) => App i ()
 ensureNoLegacySnapshotForInitialization = do
   sourceDir' <- asks (.sourceDirectory)
-  sourceDir <- normalise <$> liftIO (makeAbsolute sourceDir')
+  sourceDir <- normalise <$> makeAbsolute sourceDir'
   legacyName <- encodePath ".dojang"
   let legacy = sourceDir </> legacyName
   present <- exists legacy
@@ -455,12 +456,12 @@ prepareMachineState' inheritLegacyHistory manifest beforeMigration =
       stateDir <- asks (.stateDirectory)
       sourceDir' <- asks (.sourceDirectory)
       manifestFile' <- asks (.manifestFile)
-      sourceDir <- normalise <$> liftIO (makeAbsolute sourceDir')
+      sourceDir <- normalise <$> makeAbsolute sourceDir'
       let configuredManifest =
             if isAbsolute manifestFile'
               then manifestFile'
               else sourceDir </> manifestFile'
-      resolvedManifest <- normalise <$> liftIO (makeAbsolute configuredManifest)
+      resolvedManifest <- normalise <$> makeAbsolute configuredManifest
       intermediate <- asks (.intermediateDirectory)
       machineResult <- ensureMachineId stateDir
       machineId <- case machineResult of

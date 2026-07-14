@@ -2229,6 +2229,7 @@ runFailingReplaceIO target (FailingReplaceIO action) =
 instance MonadFileSystem FailingReplaceIO where
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
   exists value = liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
   isRegularFile value = liftIO (isRegularFile value :: IO Bool)
@@ -2274,6 +2275,7 @@ runFailingCopyIO target (FailingCopyIO action) =
 instance MonadFileSystem FailingCopyIO where
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
   exists value = liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
   isRegularFile value = liftIO (isRegularFile value :: IO Bool)
@@ -2320,6 +2322,7 @@ runFailingRemoveIO target (FailingRemoveIO action) =
 instance MonadFileSystem FailingRemoveIO where
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
   exists value = liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
   isRegularFile value = liftIO (isRegularFile value :: IO Bool)

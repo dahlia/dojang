@@ -67,13 +67,14 @@ status options = do
   ctx <- ensureContext
   (files, ws) <- makeCorrespond ctx
   let files' = if options.onlyChanges then filter isChanged files else files
-  sourcePath <- liftIO $ makeAbsolute ctx.repository.sourcePath
+  sourcePath <-
+    liftIO $ System.Directory.OsPath.makeAbsolute ctx.repository.sourcePath
   rows <- forM files' $ \file -> do
     displayPath <-
       if options.showDestinationPath
-        then liftIO $ makeAbsolute file.destination.path
+        then liftIO $ System.Directory.OsPath.makeAbsolute file.destination.path
         else do
-          path <- liftIO $ makeAbsolute file.source.path
+          path <- liftIO $ System.Directory.OsPath.makeAbsolute file.source.path
           return $ makeRelative sourcePath path
     let displayPathS =
           if not options.noTrailingSlash

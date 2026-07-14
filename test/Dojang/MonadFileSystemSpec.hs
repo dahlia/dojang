@@ -29,7 +29,7 @@ import System.Directory.OsPath
   , doesFileExist
   , doesPathExist
   )
-import System.Directory.OsPath qualified (createDirectory)
+import System.Directory.OsPath qualified as OsDirectory
 import System.FilePath (combine)
 
 
@@ -39,7 +39,7 @@ import System.OsPath (decodeFS)
 import System.Timeout (timeout)
 #endif
 
-import System.OsPath (dropFileName, encodeFS, (</>))
+import System.OsPath (dropFileName, encodeFS, normalise, (</>))
 import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -143,10 +143,10 @@ spec = do
 
   let withFixture action = withTempDir $ \tmpDir tmpDir' -> do
         () <- Prelude.writeFile (tmpDir' `combine` "foo") ""
-        () <- System.Directory.OsPath.createDirectory $ tmpDir </> bar
-        () <- System.Directory.OsPath.createDirectory $ tmpDir </> baz
+        () <- OsDirectory.createDirectory $ tmpDir </> bar
+        () <- OsDirectory.createDirectory $ tmpDir </> baz
         () <-
-          System.Directory.OsPath.createDirectory
+          OsDirectory.createDirectory
             (tmpDir </> baz </> qux)
         action tmpDir tmpDir'
 
@@ -155,6 +155,11 @@ spec = do
       filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicode
       filePath' <- liftIO $ encodePath filePath >>= decodePath
       filePath' === filePath
+
+    specify "makeAbsolute" $ do
+      currentDirectory <- OsDirectory.getCurrentDirectory
+      makeAbsolute foo
+        `shouldReturn` normalise (currentDirectory </> foo)
 
     specify "exists" $ do
       exists packageYamlP `shouldReturn` True
@@ -348,6 +353,11 @@ spec = do
       filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicode
       filePath' <- liftIO $ dryRunIO (encodePath filePath >>= decodePath)
       filePath' === filePath
+
+    specify "makeAbsolute" $ do
+      currentDirectory <- OsDirectory.getCurrentDirectory
+      dryRunIO (makeAbsolute foo)
+        `shouldReturn` normalise (currentDirectory </> foo)
 
     describe "isFile" $ do
       it "checks an actual file that exists on the real file system" $ do

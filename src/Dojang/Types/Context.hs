@@ -644,11 +644,12 @@ getRouteState
   -> m (RouteState, [RouteMapWarning])
   -- ^ The route state of the path, along with any warnings that were generated.
 getRouteState ctx path = do
-  absPath <- liftIO $ makeAbsolute path
+  absPath <- liftIO $ System.Directory.OsPath.makeAbsolute path
   let dirs = splitDirectories absPath
   (routes, ws) <- routePaths ctx
   states <- forM routes $ \route -> do
-    dstPath <- liftIO $ makeAbsolute route.destinationPath
+    dstPath <-
+      liftIO $ System.Directory.OsPath.makeAbsolute route.destinationPath
     let prefix = splitDirectories dstPath
     if prefix `isPrefixOf` dirs
       then do

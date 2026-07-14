@@ -74,6 +74,7 @@ import System.OsPath
   ( OsPath
   , decodeFS
   , encodeFS
+  , isAbsolute
   , joinPath
   , normalise
   , splitDirectories
@@ -103,6 +104,17 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Decodes a 'OsPath' into a 'FilePath'.
   decodePath :: (HasCallStack) => OsPath -> m FilePath
+
+
+  -- | Gets the process current working directory.
+  getCurrentDirectory :: (HasCallStack) => m OsPath
+
+
+  -- | Makes a path absolute using the interpreter's current working directory.
+  makeAbsolute :: (HasCallStack) => OsPath -> m OsPath
+  makeAbsolute path
+    | isAbsolute path = return $ normalise path
+    | otherwise = normalise . (</> path) <$> getCurrentDirectory
 
 
   -- | Checks if a file (or directory) exists.  If a path is a symbolic link,
@@ -442,6 +454,9 @@ instance MonadFileSystem IO where
   decodePath = decodeFS
 
 
+  getCurrentDirectory = OsDirectory.getCurrentDirectory
+
+
   exists = doesPathExist
 
 
@@ -645,6 +660,9 @@ instance MonadFileSystem DryRunIO where
 
 
   decodePath = liftIO . decodeFS
+
+
+  getCurrentDirectory = liftIO OsDirectory.getCurrentDirectory
 
 
   exists path = do

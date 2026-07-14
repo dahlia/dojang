@@ -225,11 +225,12 @@ edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSo
   codeStyle <- codeStyleFor stderr
 
   -- Make paths absolute first.
-  absPaths <- liftIO $ mapM makeAbsolute paths
+  absPaths <- liftIO $ mapM System.Directory.OsPath.makeAbsolute paths
   $(logDebugSH) (absPaths :: [OsPath])
 
   -- Check if any target is inside the source repository (not allowed).
-  sourcePath' <- liftIO $ makeAbsolute ctx.repository.sourcePath
+  sourcePath' <-
+    liftIO $ System.Directory.OsPath.makeAbsolute ctx.repository.sourcePath
   let sourcePathPrefix = splitDirectories sourcePath'
   let overlappedPaths =
         [ p

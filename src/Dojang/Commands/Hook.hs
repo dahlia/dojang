@@ -151,7 +151,10 @@ executeHook hookEnv hook = do
         Nothing -> Just <$> liftIO (decodeFS hookEnv.repositoryPath)
 
       -- Set up environment variables
-      repoPath <- liftIO $ makeAbsolute hookEnv.repositoryPath >>= decodeFS
+      repoPath <-
+        liftIO $
+          System.Directory.OsPath.makeAbsolute hookEnv.repositoryPath
+            >>= decodeFS
       manifestPath' <- liftIO $ decodeFS hookEnv.manifestPath
       let envVars =
             [ ("DOJANG_REPOSITORY", repoPath)

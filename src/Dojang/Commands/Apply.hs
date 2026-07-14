@@ -103,11 +103,11 @@ apply force filePaths = do
 
   (allFiles, ws) <- makeCorrespond ctx
   fileMap <- fmap fromList $ forM allFiles $ \fc -> do
-    srcAbsPath <- liftIO $ makeAbsolute fc.source.path
+    srcAbsPath <- liftIO $ System.Directory.OsPath.makeAbsolute fc.source.path
     return (srcAbsPath, fc)
   pathStyle <- pathStyleFor stderr
   filePaths' <- forM filePaths $ \fp -> do
-    fp' <- liftIO $ makeAbsolute fp
+    fp' <- liftIO $ System.Directory.OsPath.makeAbsolute fp
     when (fp' `notMember` fileMap) $ do
       die' fileNotRoutedError $
         "File "

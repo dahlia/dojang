@@ -65,12 +65,13 @@ diff mode diffProgram files = do
   ctx <- ensureContext
   (corresponds, ws) <- makeCorrespond ctx
   routedFiles <- forM corresponds $ \c -> do
-    sourcePath <- liftIO $ makeAbsolute c.source.path
-    destinationPath <- liftIO $ makeAbsolute c.destination.path
+    sourcePath <- liftIO $ System.Directory.OsPath.makeAbsolute c.source.path
+    destinationPath <-
+      liftIO $ System.Directory.OsPath.makeAbsolute c.destination.path
     return (sourcePath, destinationPath)
   pathStyle <- pathStyleFor stderr
   nonExistents <- (`filterM` files) $ \file -> do
-    file' <- liftIO $ makeAbsolute file
+    file' <- liftIO $ System.Directory.OsPath.makeAbsolute file
     if any (\(src, dst) -> file' == src || file' == dst) routedFiles
       then return False
       else do
@@ -85,7 +86,7 @@ diff mode diffProgram files = do
       [] -> return corresponds
       _ -> do
         fs <- forM files $ \file -> do
-          file' <- liftIO $ makeAbsolute file
+          file' <- liftIO $ System.Directory.OsPath.makeAbsolute file
           let found =
                 find (\((src, dst), _) -> file' == src || file' == dst) $
                   zip routedFiles corresponds
