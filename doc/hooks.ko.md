@@ -17,13 +17,15 @@
 
 | 훅 종류            | 실행 시점                       |
 | ------------------ | ------------------------------- |
-| `pre-apply`        | 매 apply, 파일 동기화 직전      |
-| `pre-first-apply`  | 첫 apply만, 파일 동기화 직전    |
-| `post-first-apply` | 첫 apply만, 파일 동기화 완료 후 |
-| `post-apply`       | 매 apply, 파일 동기화 완료 후   |
+| `pre-apply`        | 매 적용의 파일 동기화 직전      |
+| `pre-first-apply`  | 최초 적용의 파일 동기화 직전    |
+| `post-first-apply` | 최초 적용의 파일 동기화 완료 후 |
+| `post-apply`       | 매 적용의 파일 동기화 완료 후   |
 
-**첫 apply**는 레지스트리 파일(*~/.dojang*)의 존재 여부로 판단합니다.
-`dojang apply`를 처음 실행하면 네 가지 훅이 모두 다음 순서로 실행됩니다:
+**최초 적용**은 저장소별·머신별 로컬 상태에 기록됩니다.  실패한 적용과 모의
+실행은 이 상태를 소비하지 않습니다.  체크아웃을 옮겨도 초기화되지 않지만,
+`dojang forget`을 실행하면 초기화됩니다. `dojang apply`를 처음 실행하면 네 가지
+훅이 모두 다음 순서로 실행됩니다:
 
 1.  `pre-apply`
 2.  `pre-first-apply`
@@ -31,7 +33,7 @@
 4.  `post-first-apply`
 5.  `post-apply`
 
-이후 apply에서는 `pre-apply`와 `post-apply`만 실행됩니다:
+이후 적용에서는 `pre-apply`와 `post-apply`만 실행됩니다:
 
 1.  `pre-apply`
 2.  *(파일 동기화)*
@@ -94,17 +96,17 @@ when = "os = macos"
 
 훅에서 사용할 수 있는 환경 변수:
 
-| 변수                | 설명                           |
-| ------------------- | ------------------------------ |
-| `DOJANG_REPOSITORY` | 저장소 디렉터리의 절대 경로    |
-| `DOJANG_MANIFEST`   | 선언 파일(*dojang.toml*) 경로  |
-| `DOJANG_DRY_RUN`    | dry-run 모드면 `1`, 아니면 `0` |
-| `DOJANG_OS`         | 현재 운영체제 식별자           |
-| `DOJANG_ARCH`       | 현재 프로세서 아키텍처 식별자  |
+| 변수                | 설명                          |
+| ------------------- | ----------------------------- |
+| `DOJANG_REPOSITORY` | 저장소 디렉터리의 절대 경로   |
+| `DOJANG_MANIFEST`   | 선언 파일(*dojang.toml*) 경로 |
+| `DOJANG_DRY_RUN`    | 모의 실행이면 `1`, 아니면 `0` |
+| `DOJANG_OS`         | 현재 운영체제 식별자          |
+| `DOJANG_ARCH`       | 현재 프로세서 아키텍처 식별자 |
 
 
-Dry-run 모드
-------------
+모의 실행
+---------
 
 `dojang apply --dry-run` 실행 시 훅은 실행되지 않습니다.  대신 Dojang이 실행될
 내용을 출력합니다:
@@ -134,7 +136,7 @@ ignore-failure = true
 
 ### 최초 설치 설정
 
-첫 apply에서만 설정 스크립트 실행:
+최초 적용에서만 설정 스크립트 실행:
 
 ~~~~ toml
 [[hooks.pre-first-apply]]

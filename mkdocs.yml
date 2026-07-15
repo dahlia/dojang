@@ -1,5 +1,7 @@
 site_name: Dojang
 docs_dir: doc
+exclude_docs: |
+  GLOSSARY.*.md
 
 markdown_extensions:
 - footnotes

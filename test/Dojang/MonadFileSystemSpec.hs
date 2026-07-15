@@ -39,7 +39,7 @@ import System.OsPath (decodeFS)
 import System.Timeout (timeout)
 #endif
 
-import System.OsPath (dropFileName, encodeFS, normalise, (</>))
+import System.OsPath (OsPath, dropFileName, encodeFS, normalise, (</>))
 import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -160,6 +160,10 @@ spec = do
       currentDirectory <- OsDirectory.getCurrentDirectory
       makeAbsolute foo
         `shouldReturn` normalise (currentDirectory </> foo)
+
+    specify "getHomeDirectory" $ do
+      homeDirectory <- OsDirectory.getHomeDirectory
+      (getHomeDirectory :: IO OsPath) `shouldReturn` homeDirectory
 
     specify "exists" $ do
       exists packageYamlP `shouldReturn` True
@@ -358,6 +362,10 @@ spec = do
       currentDirectory <- OsDirectory.getCurrentDirectory
       dryRunIO (makeAbsolute foo)
         `shouldReturn` normalise (currentDirectory </> foo)
+
+    specify "getHomeDirectory" $ do
+      homeDirectory <- OsDirectory.getHomeDirectory
+      dryRunIO getHomeDirectory `shouldReturn` homeDirectory
 
     describe "isFile" $ do
       it "checks an actual file that exists on the real file system" $ do

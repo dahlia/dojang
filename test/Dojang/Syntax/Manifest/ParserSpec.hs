@@ -4,6 +4,7 @@
 
 module Dojang.Syntax.Manifest.ParserSpec (spec) where
 
+import Control.Monad (forM_)
 import Data.List (sort)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text, isInfixOf, unpack)
@@ -82,6 +83,65 @@ spec = do
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
       Right (manifest, _) -> manifest.repositoryId `shouldBe` Just expected
+
+  specify "rejects route names containing parent traversal" $ do
+    let toml =
+          Text.unlines
+            [ "[dirs]"
+            , ""
+            , "[files]"
+            , "\"../outside\" = [{ when = \"always\", path = \"target\" }]"
+            , ""
+            , "[ignores]"
+            , ""
+            , "[monikers]"
+            ]
+    case readManifest toml of
+      Left err ->
+        formatErrors err
+          `shouldSatisfy` any ("parent traversal" `isInfixOf`)
+      Right _ -> expectationFailure "Expected the traversing route to be rejected."
+
+  specify "rejects rooted and drive-qualified Windows route names" $ do
+    forM_ ["C:foo", "C:\\foo", "\\foo"] $ \routeName -> do
+      let toml =
+            Text.unlines
+              [ "[dirs]"
+              , ""
+              , "[files]"
+              , "'" <> Text.pack routeName <> "' = [{ when = \"always\", path = \"target\" }]"
+              , ""
+              , "[ignores]"
+              , ""
+              , "[monikers]"
+              ]
+      case readManifest toml of
+        Left err ->
+          formatErrors err
+            `shouldSatisfy` any ("must be relative" `isInfixOf`)
+        Right _ ->
+          expectationFailure $
+            "Expected the Windows route to be rejected: " <> routeName
+
+  specify "rejects route names that collide after normalization" $ do
+    let toml =
+          Text.unlines
+            [ "[dirs]"
+            , ""
+            , "[files]"
+            , "foo = [{ when = \"always\", path = \"first\" }]"
+            , "\"./foo\" = [{ when = \"always\", path = \"second\" }]"
+            , ""
+            , "[ignores]"
+            , ""
+            , "[monikers]"
+            ]
+    case readManifest toml of
+      Left err ->
+        formatErrors err
+          `shouldSatisfy` any ("normalize to the same path" `isInfixOf`)
+      Right _ ->
+        expectationFailure "Expected normalized duplicate routes to be rejected."
 
   specify "accepts compact and detailed routes in the same manifest" $ do
     let toml =

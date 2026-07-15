@@ -1,6 +1,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
@@ -14,6 +15,12 @@ module Dojang.Types.Repository
   ) where
 
 import Control.Monad (forM)
+import Crypto.Hash.SHA256 qualified as SHA256
+import Data.ByteString qualified as ByteString
+import Data.ByteString.Builder (toLazyByteString, word32BE)
+import Data.ByteString.Lazy qualified as LazyByteString
+import Data.CaseInsensitive (original)
+import Data.Char (ord)
 import Data.Function ((&))
 import Data.List (isPrefixOf, nub)
 import Data.List.NonEmpty
@@ -26,6 +33,11 @@ import Data.List.NonEmpty
   )
 
 import Data.Map.Strict (Map, findWithDefault, fromListWith, toList)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text qualified as Text
+import Numeric (showHex)
 import System.FilePattern (FilePattern, matchMany)
 import System.OsPath
   ( OsPath
@@ -33,15 +45,27 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
+  , toChar
+  , unpack
   , (</>)
   )
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
-import Dojang.Types.Environment (Environment)
+import Dojang.Types.Environment (Environment (..), Kernel (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
-import Dojang.Types.FilePathExpression (EnvironmentVariable)
+import Dojang.Types.FilePathExpression
+  ( EnvironmentVariable
+  , FilePathExpression
+  , environmentVariables
+  , toPathText
+  )
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning)
-import Dojang.Types.FileRoute (FileRoute (..), RouteWarning, routePath)
+import Dojang.Types.FileRoute
+  ( FileRoute (..)
+  , RouteWarning
+  , dispatch
+  , routePath
+  )
 import Dojang.Types.FileRoute qualified as FileRoute (RouteWarning (..))
 import Dojang.Types.Manifest (Manifest (..))
 
@@ -69,6 +93,10 @@ data RouteResult = RouteResult
   -- ^ The destination path.   It is either absolute or relative to
   -- the current working directory.
   , fileType :: FileType
+  , routeDefinition :: Text
+  -- ^ Canonical selected destination expression.
+  , routeProvenance :: Map Text Text
+  -- ^ Environment facts and privacy-preserving input fingerprints.
   }
   deriving (Eq, Show)
 
@@ -108,10 +136,15 @@ routePaths
 routePaths repo env lookupEnvVar = do
   paths <- forM fileRoutes $ \(src, route) -> do
     (dstPath, warnings) <- routePath route env lookupEnvVar
-    return (src, dstPath, route.fileType, warnings)
+    let selected = case fst $ dispatch env route of
+          Just expression : _ -> Just expression
+          _ -> Nothing
+    provenance <- makeProvenance selected
+    let definition = maybe "" toPathText selected
+    return (src, dstPath, route.fileType, definition, provenance, warnings)
   let paths' =
-        [ RouteResult (repo.sourcePath </> src) src dst' ft
-        | (src, Just dst', ft, _) <- paths
+        [ RouteResult (repo.sourcePath </> src) src dst' ft definition provenance
+        | (src, Just dst', ft, definition, provenance, _) <- paths
         ]
   overlappingRoutes <-
     forM (Data.Map.Strict.toList $ findOverlappingRouteResults paths') $
@@ -121,7 +154,7 @@ routePaths repo env lookupEnvVar = do
         filtered <- filterIgnoredPathsFromOverlaps dst ignorePatterns overlaps'
         return ((name, dst), filtered)
   let warnings =
-        [translateWarning w | (_, _, _, ws) <- paths, w <- ws]
+        [translateWarning w | (_, _, _, _, _, ws) <- paths, w <- ws]
           ++ [ OverlapDestinationPathsWarning name dst (o :| overlaps')
              | ((name, dst), o : overlaps') <- overlappingRoutes
              ]
@@ -129,6 +162,26 @@ routePaths repo env lookupEnvVar = do
  where
   fileRoutes :: [(OsPath, FileRoute)]
   fileRoutes = Data.Map.Strict.toList repo.manifest.fileRoutes
+  makeProvenance :: Maybe FilePathExpression -> m (Map Text Text)
+  makeProvenance selected = do
+    inputs <- case selected of
+      Nothing -> return []
+      Just expression ->
+        forM (Set.toList $ environmentVariables expression) $ \variable -> do
+          value <- lookupEnvVar variable
+          rendered <- case value of
+            Nothing -> return "unset"
+            Just value' | value' == mempty -> return "empty"
+            Just value' -> return $ "sha256:" <> sha256OsString value'
+          return ("env." <> variable, rendered)
+    return $
+      Map.fromList $
+        [ ("operating-system", original env.operatingSystem.identifier)
+        , ("architecture", original env.architecture.identifier)
+        , ("kernel-name", original env.kernel.name)
+        , ("kernel-release", original env.kernel.release)
+        ]
+          ++ inputs
   filterIgnoredPathsFromOverlaps
     :: OsPath
     -> [FilePattern]
@@ -149,6 +202,24 @@ routePaths repo env lookupEnvVar = do
     patterns' =
       [((), pattern) | pattern <- patterns]
         ++ [((), pattern ++ "/**/*") | pattern <- patterns]
+
+
+sha256OsString :: OsString -> Text
+sha256OsString =
+  digestHex
+    . SHA256.hash
+    . LazyByteString.toStrict
+    . toLazyByteString
+    . foldMap (word32BE . fromIntegral . ord . toChar)
+    . unpack
+
+
+digestHex :: ByteString.ByteString -> Text
+digestHex = Text.pack . concatMap byteHex . ByteString.unpack
+ where
+  byteHex byte = case showHex byte "" of
+    [digit] -> ['0', digit]
+    digits -> digits
 
 
 translateWarning :: RouteWarning -> RouteMapWarning

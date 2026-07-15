@@ -25,6 +25,7 @@ dependencies:
   bytestring: ">=0.11 && <0.13"
   case-insensitive: ">=1.2.1.0 && <2"
   containers: ">0"
+  cryptohash-sha256: ">=0.11 && <0.12"
   Diff: ">=0.4.1 && <1.1"
   directory: ">=1.3.8 && <1.4"
   filelock: ">=0.1.1.7 && <0.2"

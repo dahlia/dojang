@@ -383,6 +383,7 @@ instance MonadFileSystem CoordinatedInitIO where
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
+  getHomeDirectory = liftIO (getHomeDirectory :: IO OsPath)
   exists value = do
     gate <- ask
     when (value == gate.manifestPath) $ liftIO $ do

@@ -11,6 +11,7 @@ module Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , ManagedCorrespondence (..)
   , IgnoredFile (..)
   , RouteMatch (..)
   , RouteState (..)
@@ -25,6 +26,7 @@ module Dojang.Types.Context
   , getUnregisteredFiles
   , listFiles
   , makeCorrespond
+  , makeManagedCorrespond
   , makeCorrespondBetweenThreeDirs
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
@@ -129,6 +131,18 @@ data FileEntry = FileEntry
   -- ^ Whether the file is a file, a directory, or missing.
   }
   deriving (Eq, Ord, Show)
+
+
+-- | A file correspondence together with the route entry that produced it.
+data ManagedCorrespondence = ManagedCorrespondence
+  { route :: RouteResult
+  -- ^ Currently selected manifest route.
+  , relativePath :: OsPath
+  -- ^ Entry path relative to the route root.
+  , correspondence :: FileCorrespondence
+  -- ^ Observed source, intermediate, and destination replicas.
+  }
+  deriving (Eq, Show)
 
 
 -- | The kind of change that was made to a file.
@@ -287,6 +301,18 @@ makeCorrespond
   -- 'FileCorrespondence' values are absolute, or relative to the current
   -- working directory at least.
 makeCorrespond ctx = do
+  (managed, warnings) <- makeManagedCorrespond ctx
+  return ((.correspondence) <$> managed, warnings)
+
+
+-- | Makes correspondences while retaining their producing route metadata.
+makeManagedCorrespond
+  :: (HasCallStack, MonadFileSystem m)
+  => Context m
+  -- ^ The context in which to perform path routing.
+  -> m ([ManagedCorrespondence], [RouteMapWarning])
+  -- ^ Managed correspondences and route warnings.
+makeManagedCorrespond ctx = do
   (paths, warnings) <- routePaths ctx
   files <- forM paths $ \expanded -> do
     let interAbsPath = repo.intermediatePath </> expanded.routeName
@@ -299,19 +325,24 @@ makeCorrespond ctx = do
             expanded.destinationPath
             (findWithDefault [] (normalise expanded.routeName) ignorePatterns)
         return
-          [ correspond
-              { source =
-                  correspond.source{path = expanded.sourcePath </> correspond.source.path}
-              , intermediate =
-                  correspond.intermediate
-                    { path = interAbsPath </> correspond.intermediate.path
-                    }
-              , destination =
-                  correspond.destination
-                    { path =
-                        expanded.destinationPath </> correspond.destination.path
-                    }
-              }
+          [ ManagedCorrespondence
+              expanded
+              correspond.source.path
+              correspond
+                { source =
+                    correspond.source
+                      { path = expanded.sourcePath </> correspond.source.path
+                      }
+                , intermediate =
+                    correspond.intermediate
+                      { path = interAbsPath </> correspond.intermediate.path
+                      }
+                , destination =
+                    correspond.destination
+                      { path =
+                          expanded.destinationPath </> correspond.destination.path
+                      }
+                }
           | correspond <- fs
           ]
       _ -> do
@@ -320,7 +351,7 @@ makeCorrespond ctx = do
             interAbsPath
             expanded.sourcePath
             expanded.destinationPath
-        return [f]
+        return [ManagedCorrespondence expanded mempty f]
   return (concat files, warnings)
  where
   repo :: Repository

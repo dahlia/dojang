@@ -24,9 +24,10 @@ it returns the following exit codes, depending on the situation.
  -  31: The file in the repository cannot be the target file.
  -  32: The file is not routed, so the operation cannot be performed.
  -  33: The file is ignored, so the operation cannot be performed.
- -  34: The operation is canceled because some of the target files may be
-    deleted.
+ -  34: The operation is canceled because target data may be deleted or local
+    evidence of a modified destination may be discarded.
  -  35: The route is ambiguous because multiple routes match the same
     destination.
  -  36: The operation is canceled by the user.
+ -  37: A lifecycle selection is empty, unknown, or still active.
  -  40: A hook failed with a non-zero exit code.

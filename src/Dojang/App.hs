@@ -19,8 +19,10 @@ module Dojang.App
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
+  , clearLegacyFirstApplyHistory
   , doesManifestExist
   , ensureContext
+  , ensureManifest
   , ensureNoLegacySnapshotForInitialization
   , ensureRepository
   , loadManifest
@@ -37,6 +39,7 @@ module Dojang.App
   , runAppWithoutLogging
   , saveManifest
   , validateRepositoryCheckout
+  , validateRepositoryStateOwnership
   ) where
 
 import Control.Monad (forM_, when)
@@ -45,7 +48,6 @@ import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
 import Data.Time (getCurrentTime)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import System.Directory.OsPath (getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stderr)
@@ -109,13 +111,14 @@ import Dojang.Types.Environment.Current
   )
 import Dojang.Types.MachineState
   ( MachineState (..)
-  , StateError (StaleRepositoryCheckout)
+  , StateError (DuplicateRepositoryIdentity, StaleRepositoryCheckout)
   , catchStateIOErrors
   , ensureMachineId
   , formatStateError
   , markFirstApplied
   , prepareRepositoryStateWithOwnershipBeforeMigration
   , readRepositoryState
+  , retryManagedTargetCleanup
   , sameExistingPath
   )
 import Dojang.Types.Manifest (Manifest (..))
@@ -177,6 +180,7 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   encodePath = App . lift . lift . encodePath
   decodePath = App . lift . lift . decodePath
   getCurrentDirectory = App $ lift $ lift getCurrentDirectory
+  getHomeDirectory = App $ lift $ lift getHomeDirectory
   exists = App . lift . lift . exists
   isFile = App . lift . lift . isFile
   isRegularFile = App . lift . lift . isRegularFile
@@ -360,6 +364,42 @@ validateRepositoryCheckout state = catchStateIOErrors $ do
       else Left $ StaleRepositoryCheckout state.repositoryId state.checkoutPath
 
 
+-- | Rejects a second live checkout before it mutates an existing record.
+--
+-- The current checkout is already known to declare the repository identity.
+-- This check preserves ownership when the recorded checkout is a distinct,
+-- still-live copy that declares the same identity through its stored manifest.
+validateRepositoryStateOwnership
+  :: (MonadFileSystem m)
+  => OsPath
+  -> MachineState
+  -> m (Either StateError ())
+validateRepositoryStateOwnership checkout state = catchStateIOErrors $ do
+  let checkout' = normalise checkout
+  recordedExists <- isDirectory state.checkoutPath
+  sameCheckout <-
+    if recordedExists
+      then sameExistingPath state.checkoutPath checkout'
+      else return False
+  recordedOwnsIdentity <-
+    if recordedExists && not sameCheckout
+      then
+        checkoutOwnsRecordedRepositoryIdentity
+          state.manifestPath
+          state.repositoryId
+          state.checkoutPath
+      else return False
+  return $
+    if recordedOwnsIdentity
+      then
+        Left $
+          DuplicateRepositoryIdentity
+            state.repositoryId
+            state.checkoutPath
+            checkout'
+      else Right ()
+
+
 -- | Applies a validated automatic repository selection to the application
 -- environment.
 --
@@ -537,7 +577,11 @@ prepareMachineState' inheritLegacyHistory manifest beforeMigration =
             beforeMigration
       case stateResult of
         Left err -> die' machineStateError $ formatStateError err
-        Right (state, _) -> return state
+        Right (state, _) -> do
+          cleanup <- retryManagedTargetCleanup stateDir state
+          case cleanup of
+            Left err -> die' machineStateError $ formatStateError err
+            Right cleaned -> return cleaned
 
 
 -- | Reads the legacy registry and reports malformed data as a machine-state
@@ -545,7 +589,7 @@ prepareMachineState' inheritLegacyHistory manifest beforeMigration =
 readValidatedLegacyRegistry
   :: (MonadFileSystem i, MonadIO i) => App i (Maybe Registry)
 readValidatedLegacyRegistry = do
-  homeDirectory <- liftIO getHomeDirectory
+  homeDirectory <- getHomeDirectory
   registryRead <-
     catchStateIOErrors $
       Right <$> readRegistryStrict (homeDirectory </> registryFilename)
@@ -559,6 +603,33 @@ readValidatedLegacyRegistry = do
           <> "creating machine state."
           : errors
     Right value -> return value
+
+
+-- | Removes legacy first-apply history when it belongs to one checkout.
+--
+-- A malformed registry remains an actionable machine-state error.  Missing or
+-- unrelated registries are left untouched.
+clearLegacyFirstApplyHistory
+  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i ()
+clearLegacyFirstApplyHistory checkout = do
+  legacyRegistry <- readValidatedLegacyRegistry
+  case legacyRegistry of
+    Nothing -> return ()
+    Just registry -> do
+      registryExists <- isDirectory registry.repositoryPath
+      checkoutExists <- isDirectory checkout
+      matches <-
+        if registryExists && checkoutExists
+          then sameExistingPath registry.repositoryPath checkout
+          else return False
+      when matches $ do
+        homeDirectory <- getHomeDirectory
+        removed <- catchStateIOErrors $ do
+          removeFile $ homeDirectory </> registryFilename
+          return $ Right ()
+        case removed of
+          Left err -> die' machineStateError $ formatStateError err
+          Right () -> return ()
 
 
 checkoutHasRepositoryIdentity
@@ -648,6 +719,22 @@ ensureRepository = do
         ("Run `" <> codeStyle "dojang init" <> "' to create one.")
       liftIO $ exitWith manifestUninitialized
     Right (Just repo) -> return repo
+
+
+-- | Loads the selected repository manifest without creating machine state.
+ensureManifest :: (MonadFileSystem i, MonadIO i) => App i Manifest
+ensureManifest = do
+  result <- loadManifest
+  case result of
+    Left err -> dieWithErrors manifestReadError $ formatErrors err
+    Right Nothing -> do
+      printStderr' Error "No manifest found."
+      codeStyle <- codeStyleFor stderr
+      printStderr'
+        Note
+        ("Run `" <> codeStyle "dojang init" <> "' to create one.")
+      liftIO $ exitWith manifestUninitialized
+    Right (Just manifest) -> return manifest
 
 
 ensureContext :: (MonadFileSystem i, MonadIO i) => App i (Context (App i))

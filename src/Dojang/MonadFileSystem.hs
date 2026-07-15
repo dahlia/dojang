@@ -110,6 +110,10 @@ class (MonadError IOError m) => MonadFileSystem m where
   getCurrentDirectory :: (HasCallStack) => m OsPath
 
 
+  -- | Gets the current user's home directory.
+  getHomeDirectory :: (HasCallStack) => m OsPath
+
+
   -- | Makes a path absolute using the interpreter's current working directory.
   makeAbsolute :: (HasCallStack) => OsPath -> m OsPath
   makeAbsolute path
@@ -451,6 +455,9 @@ instance MonadFileSystem IO where
   getCurrentDirectory = OsDirectory.getCurrentDirectory
 
 
+  getHomeDirectory = OsDirectory.getHomeDirectory
+
+
   exists = doesPathExist
 
 
@@ -657,6 +664,9 @@ instance MonadFileSystem DryRunIO where
 
 
   getCurrentDirectory = liftIO OsDirectory.getCurrentDirectory
+
+
+  getHomeDirectory = liftIO OsDirectory.getHomeDirectory
 
 
   exists path = do

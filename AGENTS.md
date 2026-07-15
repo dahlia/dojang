@@ -472,6 +472,18 @@ When creating or editing Markdown documentation files in this project,
 follow these style conventions to maintain consistency with existing
 documentation:
 
+### Korean translations
+
+When writing or editing Korean documentation, follow the
+[Korean translation glossary].  Use its Korean translations consistently
+throughout the documentation.  If a project term that needs translation is not
+listed, choose a clear Korean translation and update the glossary in the same
+change before using it.  Keep command names, option names, identifiers,
+filenames, and literal syntax in their original form, formatting them as code
+where appropriate.
+
+[Korean translation glossary]: doc/GLOSSARY.ko.md
+
 ### Headings
 
  -  *Setext-style headings*: Use underline-style for the document title

@@ -295,18 +295,22 @@ spec = do
   specify "routePaths" $ withContextFixture $ \ctx tmpDir -> do
     (results, ws) <- routePaths ctx
     ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
-    sortOn (.sourcePath) results
+    sortOn (.sourcePath) ((\route -> route{routeProvenance = mempty}) <$> results)
       `shouldBe` [ RouteResult
                      { sourcePath = tmpDir </> src </> bar
                      , routeName = bar
                      , destinationPath = tmpDir </> bar
                      , fileType = Dojang.MonadFileSystem.Directory
+                     , routeDefinition = "$BAR"
+                     , routeProvenance = mempty
                      }
                  , RouteResult
                      { sourcePath = tmpDir </> src </> foo
                      , routeName = foo
                      , destinationPath = tmpDir </> foo
                      , fileType = Dojang.MonadFileSystem.Directory
+                     , routeDefinition = "$FOO"
+                     , routeProvenance = mempty
                      }
                  ]
   specify "makeCorrespondWithDestination" $
@@ -1066,6 +1070,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       calculateSpecificity (tmpDir </> bar) route `shouldBe` 0
 
@@ -1076,6 +1082,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       calculateSpecificity (tmpDir </> bar </> baz) route `shouldBe` 1
 
@@ -1086,6 +1094,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       calculateSpecificity (tmpDir </> bar </> baz </> qux) route `shouldBe` 2
 
@@ -1100,6 +1110,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       let route2 =
             RouteResult
@@ -1107,6 +1119,8 @@ spec = do
               , routeName = baz
               , destinationPath = tmpDir </> bar </> qux
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       -- route1: specificity = 2 (bar/qux/foo)
       -- route2: specificity = 1 (qux/foo)
@@ -1120,6 +1134,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       let route2 =
             RouteResult
@@ -1127,6 +1143,8 @@ spec = do
               , routeName = bar
               , destinationPath = tmpDir </> dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       -- Both routes have the same destinationPath, so same specificity
       let target = tmpDir </> dst </> baz

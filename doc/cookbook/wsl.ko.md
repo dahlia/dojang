@@ -27,7 +27,7 @@ when = "kernel-release $= '-microsoft-standard-WSL2'"
 ~~~~
 
 일반적인 문자열 일치 비교가 아니라 `$=` (…로 끝남) 연산자를 사용해야 하기
-때문에 `when` 필드 안에 [환경 서술자 문법](../environment-predicate.ko.md)을
+때문에 `when` 필드 안에 [환경 서술어 문법](../environment-predicate.ko.md)을
 사용해야 한다는 점에 주의하세요.
 
 [^1]: [WSL에서 실행 중인지 감지하는 방법?][1] (英)

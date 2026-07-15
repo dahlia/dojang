@@ -6,6 +6,97 @@ Version 0.3.0
 
 To be released.
 
+ -  Added machine-local managed-target records for successful `dojang apply`
+    and `dojang reflect` operations.  Each record identifies its source route,
+    expanded destination, intermediate snapshot, SHA-256 fingerprint,
+    environment facts, privacy-preserving hashes of referenced environment
+    variables, and the command and time that last synchronized it.  Records
+    are published only after the corresponding entry has converged; a partial
+    failure updates only entries that already converged and preserves preceding
+    records for unfinished work.  `--dry-run` does not consume persistent
+    lifecycle state.  Expanded destinations are stored as absolute paths, and
+    target IDs preserve platform-native path identity without lossy Unicode
+    conversion.  Hashes of environment inputs also preserve distinct native
+    values that are not valid Unicode.  Immutable baselines are completed under
+    a new private root before their records are published, so a failed copy or
+    later synchronization cannot destroy an older orphan's observed status.
+    Records also preserve the producing route's file or directory type.
+    Manifest route names containing parent traversal, Windows drive qualifiers,
+    or Windows root-relative prefixes are rejected before any files are
+    synchronized.  Distinct route names that normalize to the same path are
+    also rejected instead of competing for one lifecycle identity.  Managed
+    source or baseline paths containing parent traversal are rejected as
+    malformed state.  Target IDs include the selected route definition and
+    file or directory type, while normalizing route names before hashing them.
+    Equivalent route spellings replace the same lifecycle record, but changed
+    route generations retain their orphan history.  Destination identity also
+    follows native path equality: Windows casing changes keep one target ID and
+    do not create false destination-change orphans.  A forced
+    reflection of a previously untracked ignored
+    destination now records the newly managed target.  A full reflection
+    records every converged route even when only some entries needed
+    synchronization.  An explicit reflection matches both normalized source
+    and destination paths, so it records only the selected route when routes
+    share a source entry.  Directory baselines are populated
+    one entry at a time instead of repeatedly copying each descendant for every
+    ancestor.  Directory records compare the directory entry itself;
+    descendant records track managed child contents.  Empty baseline transaction
+    roots are reclaimed after superseded records are removed.  Unsupported
+    converged symbolic links preserve any preceding record and baseline; only a
+    destination that converged to missing publishes a record deletion.  Cleanup
+    paths are journaled with the updated records, so a failed removal is
+    retried by the next stateful command instead of leaking an unreachable
+    snapshot.  An unpublished transaction is still discarded when the initial
+    state write fails.  Existing schema-version 1 state is upgraded in memory
+    to schema version 2.
+
+    `dojang status` now reports orphan records when a route is removed, becomes
+    inapplicable, changes definition, expands to another destination, or stops
+    producing a previously managed directory entry.  It
+    distinguishes unchanged, modified, and missing orphan destinations without
+    deleting them.  Use `dojang unmanage --route ROUTE [DESTINATION ...]` to
+    discard selected orphan records and unreachable baselines while preserving
+    destinations.  Retained directory records protect their descendant
+    baselines.  Successful deletions and explicit unmanagement reclaim
+    unreferenced baselines and common intermediate entries, while intermediate
+    entries used by current routes remain available even before those routes
+    publish new target records.  State updates, snapshot cleanup, and repository
+    forgetting share the repository lock, so concurrent commands cannot
+    overwrite fresh records or remove newly live data.  Current relative
+    destinations are resolved to absolute paths before
+    orphan comparison.  Named pipes, sockets, devices, and other special entries
+    are classified as modified without reading them.  `unmanage` revalidates the
+    complete selected ID set and its current status after acquiring the lock.
+    It lists every selected record and its current status before changing state.
+    `status` and `unmanage` share normalized indexes of current routes and the
+    entries they produce before checking whether targets remain active.  Active
+    or unknown selections are rejected, as is a selection whose record
+    disappears during the update.  On Windows, destination selectors use native
+    case-insensitive path equality.
+    Modified destinations require `--force`.  Use `dojang forget` to remove
+    only the selected repository's
+    machine-local records, snapshots, and first-apply history; source and
+    destination files remain untouched.  A second live checkout with the same
+    repository identity cannot forget the recorded checkout's state.  If no
+    record exists, `forget` neither creates machine state nor migrates a legacy
+    snapshot.  Successful cleanup also removes the empty private snapshot
+    parent so automatic repository discovery continues to treat the repository
+    as forgotten.  Before recursive deletion, `forget` revalidates the recorded
+    intermediate snapshot against protected checkout, state-store, and
+    symbolic-link paths.  Custom snapshot aliases are resolved before they are
+    persisted, and cleanup rechecks every external ancestor so a retargeted
+    link cannot redirect recursive deletion.  `forget` removes an interrupted
+    migration marker under the same lock before deleting the state document.
+    Once validation succeeds, a forget journal preserves that approval across
+    partial snapshot cleanup, so the same request remains retryable without
+    `--force`.  A retry also clears the journal when an interruption occurred
+    after state deletion.  Other
+    stateful commands are rejected until that cleanup finishes, including a
+    lock-time check before managed-target publication.  Pending managed cleanup
+    is completed before an intermediate-path override is persisted. A matching
+    legacy *~/.dojang* registry is removed on successful cleanup, so it cannot
+    restore forgotten first-apply history. [[#34], [#38], [#65]]
+
  -  Added versioned, repository-scoped machine state under each platform's user
     data directory.  New repositories receive a stable `repository-id`, and
     their full intermediate snapshots now default outside the worktree.  Run
@@ -19,60 +110,66 @@ To be released.
     files.  Snapshot aliases are resolved before overlap and cleanup checks,
     and temporary checkout or snapshot aliases are not persisted over stable
     recorded paths.  Symbolic links in private snapshot path components are
-    rejected.  Concurrent manifest identity assignment, machine identity
-    creation, state writes, and lifecycle writes are serialized; lifecycle
-    updates reload the current record instead of restoring stale paths.  An
-    empty default snapshot left by an interrupted initial state write can be
-    retried safely.  Recovery markers bind retries to their original
-    destination, preventing a changed override from deleting an unrelated
-    directory.  Migration never follows another registered checkout when
-    `-r`/`--repository-dir` is omitted.  Automatic repository selection
-    restores an in-checkout recorded manifest path unless
-    `-m`/`--manifest-file` is supplied explicitly.  Recorded external manifests
-    remain valid evidence when rejecting duplicate live checkouts.  State,
-    manifest, and migration-marker replacements use unique sibling temporary
-    files; state and manifest replacement also preserves complete POSIX
-    permission modes.  Manifests with invalid UTF-8 are rejected without
-    replacement.  Native non-UTF-8 path data is preserved, while invalid UTF-8
-    and relative checkout, manifest, or intermediate paths in a state record
-    are rejected as corruption.  Newer schema versions are identified before
-    their version-specific fields are decoded, so they produce upgrade
-    guidance rather than repair guidance.  A `state.toml` entry or
-    `machine.toml` document that is not a regular file is also rejected instead
-    of being followed or treated as absent.  A missing machine identity is
-    reported as corruption when repository data remains.  Native user-data
+    rejected, including ancestors of the managed-target baseline root when a
+    custom intermediate snapshot is stored elsewhere.  Automatic repository
+    enumeration applies the same ownership and symbolic-link checks to the
+    managed-target baseline root.  Concurrent manifest identity assignment,
+    machine identity creation, state writes, and lifecycle writes are
+    serialized; lifecycle updates reload the current record instead of
+    restoring stale paths.  Custom intermediate snapshots cannot equal, contain,
+    or sit below the managed-target baseline root.  An empty default snapshot
+    left by an interrupted initial state write can be retried safely.  Recovery
+    markers bind retries to their original destination, preventing a changed
+    override from deleting an unrelated directory.  Migration never follows
+    another registered checkout when `-r`/`--repository-dir` is omitted.
+    Automatic repository selection restores an in-checkout recorded manifest
+    path unless `-m`/`--manifest-file` is supplied explicitly.  Recorded
+    external manifests remain valid evidence when rejecting duplicate live
+    checkouts.  State, manifest, and migration-marker replacements use unique
+    sibling temporary files; state and manifest replacement also preserves
+    complete POSIX permission modes.  Manifests with invalid UTF-8 are rejected
+    without replacement.  Native non-UTF-8 path data is preserved, while
+    invalid UTF-8 and relative checkout, manifest, or intermediate paths in a
+    state record are rejected as corruption.  Newer schema versions are
+    identified before their version-specific fields are decoded, so they
+    produce upgrade guidance rather than repair guidance.  A `state.toml` entry
+    or `machine.toml` document that is not a regular file is also rejected
+    instead of being followed or treated as absent.  A missing machine identity
+    is reported as corruption when repository data remains.  Native user-data
     directory aliases are resolved before state is created, so a valid
     symbolic-link data root works without permitting links inside the private
     state layout. State preflight, root creation and locking, legacy registry
     reads, repository preparation, and first-apply state writes use the
     machine-state diagnostic and exit code 13 instead of escaping as unexpected
     exceptions. State lock paths must be regular files; symbolic links,
-    directories, and special files are rejected before opening a lock.
-    Manifest read and replacement failures during migration use the manifest
-    diagnostic and exit code 11.  Read-only manifests can be replaced when
-    their parent directory is writable, including on Windows. The old snapshot
-    remains until an intermediate-path override is committed, and override
-    copies are journaled even when the destination already matches, so copy or
-    cleanup retries do not delete divergent data or strand the old snapshot.
-    Repository discovery rejects an incomplete repository entry that has
-    recovery data but no `state.toml` record, as well as a nonempty entry whose
-    directory name is not a repository UUID, instead of selecting another
-    repository.  A `repositories` root that is a file or symbolic link is
-    likewise rejected as corruption before a state-reading command can modify
-    its checkout, including with explicit repository selection.  Repository-ID
-    directories must also be real directories rather than symbolic links.
-    Migration resolves path aliases and rejects a machine-state root that
-    overlaps the legacy *.dojang/* snapshot before creating state or changing
-    the manifest.  It validates an explicitly adopted snapshot before
-    publishing state and refuses snapshot locations that could remove the
-    checkout or machine-state metadata during later cleanup.  Commands validate
-    the stored custom snapshot rather than an unused default path.  A retry can
-    finish cleanup when the remaining old snapshot is a matching subset of the
-    verified new snapshot. `--dry-run` does not persist migration work.  An
-    explicit `--intermediate-dir` is still supported and is now saved for later
+    directories, and special files are rejected before opening a lock. Manifest
+    read and replacement failures during migration use the manifest diagnostic
+    and exit code 11.  Read-only manifests can be replaced when their parent
+    directory is writable, including on Windows. The old snapshot remains until
+    an intermediate-path override is committed, and override copies are
+    journaled even when the destination already matches, so copy or cleanup
+    retries do not delete divergent data or strand the old snapshot. Repository
+    discovery rejects an incomplete repository entry that has recovery data but
+    no `state.toml` record, as well as a nonempty entry whose directory name is
+    not a repository UUID, instead of selecting another repository.  A
+    `repositories` root that is a file or symbolic link is likewise rejected as
+    corruption before a state-reading command can modify its checkout,
+    including with explicit repository selection.  Repository-ID directories
+    must also be real directories rather than symbolic links.  Automatic
+    repository enumeration applies the same target-snapshot-root ownership and
+    symbolic-link checks as direct state reads.  Migration resolves path
+    aliases and rejects a machine-state root that overlaps the legacy
+    *.dojang/* snapshot before creating state or changing the manifest.  It
+    validates an explicitly adopted snapshot before publishing state and
+    refuses snapshot locations that could remove the checkout or machine-state
+    metadata during later cleanup. Commands validate the stored custom snapshot
+    rather than an unused default path.  A retry can finish cleanup when the
+    remaining old snapshot is a matching subset of the verified new snapshot.
+    `--dry-run` does not persist migration work. An explicit
+    `--intermediate-dir` is still supported and is now saved for later
     commands.  Existing custom intermediate snapshots can be migrated in place
     by selecting their path explicitly after their complete contents are
-    validated.  A legacy *.dojang* path that exists as a non-directory entry is
+    validated. A legacy *.dojang* path that exists as a non-directory entry is
     rejected instead of being mistaken for an absent snapshot.
 
     The old *~/.dojang* single-repository pointer no longer selects or records a
@@ -133,11 +230,13 @@ To be released.
 [#32]: https://github.com/dahlia/dojang/issues/32
 [#34]: https://github.com/dahlia/dojang/issues/34
 [#37]: https://github.com/dahlia/dojang/issues/37
+[#38]: https://github.com/dahlia/dojang/issues/38
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#61]: https://github.com/dahlia/dojang/pull/61
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
 [#64]: https://github.com/dahlia/dojang/pull/64
+[#65]: https://github.com/dahlia/dojang/pull/65
 
 
 Version 0.2.1

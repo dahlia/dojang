@@ -1,8 +1,10 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Types.FilePathExpression
   ( EnvironmentVariable
   , FilePathExpression (..)
+  , environmentVariables
   , toPathText
   , (++)
   , (+/+)
@@ -13,6 +15,8 @@ import Data.String (IsString (..))
 import Prelude hiding (head, null, (++))
 
 import Data.Hashable (Hashable (hashWithSalt))
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text, head, null, pack)
 
 
@@ -65,6 +69,25 @@ instance Hashable FilePathExpression where
     salt `hashWithSalt` (5 :: Int) `hashWithSalt` envVar `hashWithSalt` expr
   hashWithSalt salt (ConditionalSubstitution envVar expr) =
     salt `hashWithSalt` (6 :: Int) `hashWithSalt` envVar `hashWithSalt` expr
+
+
+-- | Collects every environment variable referenced by an expression.
+--
+-- The argument is the file-path expression to traverse.  The returned set
+-- contains every environment variable referenced directly or by a nested
+-- fallback or conditional expression.
+environmentVariables :: FilePathExpression -> Set EnvironmentVariable
+environmentVariables (BareComponent _) = Set.empty
+environmentVariables (Root _) = Set.empty
+environmentVariables (Concatenation left right) =
+  environmentVariables left <> environmentVariables right
+environmentVariables (PathSeparator left right) =
+  environmentVariables left <> environmentVariables right
+environmentVariables (Substitution variable) = Set.singleton variable
+environmentVariables (SubstitutionWithDefault variable expression) =
+  Set.insert variable $ environmentVariables expression
+environmentVariables (ConditionalSubstitution variable expression) =
+  Set.insert variable $ environmentVariables expression
 
 
 infixl 5 ++, +/+
