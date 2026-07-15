@@ -8,6 +8,7 @@ module Dojang.Commands.Status
   , formatWarning
   , printWarnings
   , status
+  , statusCore
   ) where
 
 import Control.Monad (forM, forM_)
@@ -32,6 +33,7 @@ import Dojang.Commands
   , printStderr'
   , printTable
   )
+import Dojang.Commands.Hook (withCommandHooks)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
   ( Context (..)
@@ -81,7 +83,13 @@ defaultStatusOptions =
 
 
 status :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
-status options = do
+status options =
+  withCommandHooks "status" [] $ statusCore options
+
+
+-- | Runs status reporting without lifecycle hooks for command-internal use.
+statusCore :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
+statusCore options = do
   ctx <- ensureContext
   machineState <- prepareMachineState ctx.repository.manifest
   (managed, ws) <- makeManagedCorrespond ctx

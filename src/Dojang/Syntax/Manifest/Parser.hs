@@ -80,7 +80,17 @@ import Dojang.Types.FileRoute
   , fileRoutePreservingOrder
   )
 import Dojang.Types.FileRouteMap (FileRouteMap)
-import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
+import Dojang.Types.Hook
+  ( Hook (..)
+  , HookId
+  , HookMap
+  , HookPolicy (..)
+  , HookType (..)
+  , duplicateStatefulHookIds
+  , parseHookId
+  , renderHookId
+  , validateHookConfiguration
+  )
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
@@ -105,6 +115,8 @@ data Error
     DuplicateNormalizedRoutePathError OsPath OsPath
   | -- | The repository identity is not a UUID.
     RepositoryIdError Text
+  | -- | A hook has an invalid identity or execution policy.
+    HookConfigurationError Text
 
 
 -- | An error in a branch of a detailed file route.
@@ -205,6 +217,7 @@ formatErrors (DuplicateNormalizedRoutePathError firstPath secondPath) =
       <> " normalize to the same path.  Use one canonical route name."
   ]
 formatErrors (RepositoryIdError message) = [message]
+formatErrors (HookConfigurationError message) = [message]
 
 
 mapManifest :: Manifest' -> Either Error Manifest
@@ -482,6 +495,16 @@ mapHooks monikers (Just hooks') =
     , (PreFirstApply, mapHookList monikers hooks'.preFirstApply)
     , (PostFirstApply, mapHookList monikers hooks'.postFirstApply)
     , (PostApply, mapHookList monikers hooks'.postApply)
+    , (PreReflect, mapHookList monikers hooks'.preReflect)
+    , (PostReflect, mapHookList monikers hooks'.postReflect)
+    , (PreDiff, mapHookList monikers hooks'.preDiff)
+    , (PostDiff, mapHookList monikers hooks'.postDiff)
+    , (PreStatus, mapHookList monikers hooks'.preStatus)
+    , (PostStatus, mapHookList monikers hooks'.postStatus)
+    , (PreEdit, mapHookList monikers hooks'.preEdit)
+    , (PostEdit, mapHookList monikers hooks'.postEdit)
+    , (PreUnmanage, mapHookList monikers hooks'.preUnmanage)
+    , (PostUnmanage, mapHookList monikers hooks'.postUnmanage)
     ]
   errors :: [Error]
   errors = lefts [r | (_, r) <- results]
@@ -492,28 +515,53 @@ mapHookList _ Nothing = Right []
 mapHookList monikers (Just hooks') =
   case errors of
     e : _ -> Left e
-    _ -> Right [hook | Right hook <- results]
+    _ -> case duplicateStatefulIds of
+      identifier : _ ->
+        Left $
+          HookConfigurationError $
+            "Duplicate stateful hook id in one lifecycle event: "
+              <> renderHookId identifier
+              <> "."
+      [] -> Right hooks
  where
   results :: [Either Error Hook]
   results = mapHook monikers <$> hooks'
   errors :: [Error]
   errors = lefts results
+  hooks = [hook | Right hook <- results]
+  duplicateStatefulIds = duplicateStatefulHookIds hooks
 
 
 mapHook :: MonikerMap -> Internal.Hook' -> Either Error Hook
-mapHook monikers hook' =
-  case conditionResult of
-    Left e -> Left e
-    Right cond ->
-      Right
+mapHook monikers hook' = do
+  identifier <- traverse parseIdentifier hook'.hookId
+  policy' <- parsePolicy hook'.policy
+  cond <- conditionResult
+  let hook =
         Hook
-          { command = encodePath $ unpack hook'.command
+          { hookId = identifier
+          , policy = policy'
+          , changeKey = hook'.changeKey
+          , command = encodePath $ unpack hook'.command
           , args = maybe [] id hook'.args
           , condition = cond
           , workingDirectory = encodePath <$> hook'.workingDirectory
           , ignoreFailure = maybe False id hook'.ignoreFailure
           }
+  first HookConfigurationError $ validateHookConfiguration hook
+  Right hook
  where
+  parseIdentifier :: Text -> Either Error HookId
+  parseIdentifier value =
+    first
+      (const $ HookConfigurationError $ "Invalid hook id: " <> value <> ".")
+      (parseHookId value)
+  parsePolicy Nothing = Right HookAlways
+  parsePolicy (Just "always") = Right HookAlways
+  parsePolicy (Just "once") = Right HookOnce
+  parsePolicy (Just "on-change") = Right HookOnChange
+  parsePolicy (Just value) =
+    Left $ HookConfigurationError $ "Unknown hook policy: " <> value <> "."
   conditionResult :: Either Error EnvironmentPredicate
   conditionResult = case hook'.moniker of
     Just monikerName ->

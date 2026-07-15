@@ -33,6 +33,10 @@ import Dojang.Commands
   , pathStyleFor
   , printStderr'
   )
+import Dojang.Commands.Hook
+  ( HookScopePath (CallerRelativePath, RepositoryRelativePath)
+  , withCommandHooks
+  )
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
   , lifecycleSelectionError
@@ -82,6 +86,26 @@ unmanage
 unmanage routeSelector destinations force = do
   when (routeSelector == Nothing && null destinations) $
     die' lifecycleSelectionError "Select a route or at least one destination."
+  withCommandHooks
+    "unmanage"
+    ( maybe
+        (CallerRelativePath <$> destinations)
+        ( \route ->
+            RepositoryRelativePath route
+              : (CallerRelativePath <$> destinations)
+        )
+        routeSelector
+    )
+    (unmanageCore routeSelector destinations force)
+
+
+unmanageCore
+  :: (MonadFileSystem i, MonadIO i)
+  => Maybe OsPath
+  -> [OsPath]
+  -> Bool
+  -> App i ExitCode
+unmanageCore routeSelector destinations force = do
   ctx <- ensureContext
   state <- prepareMachineState ctx.repository.manifest
   absoluteDestinations <- mapM (fmap normalise . makeAbsolute) destinations

@@ -50,6 +50,10 @@ import Dojang.Commands.Disambiguation
   ( disambiguateRoutes
   , getAutoSelectMode
   )
+import Dojang.Commands.Hook
+  ( disambiguatedHookScopePaths
+  , withCommandHooks
+  )
 import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
@@ -130,7 +134,22 @@ reflect
   -> [OsPath]
   -- ^ Target paths (may be empty for all changed files).
   -> App i ExitCode
-reflect force allFlag includeUnregistered _explicitSource [] = do
+reflect force allFlag includeUnregistered explicitSource paths =
+  withCommandHooks
+    "reflect"
+    (disambiguatedHookScopePaths explicitSource paths)
+    (reflectCore force allFlag includeUnregistered explicitSource paths)
+
+
+reflectCore
+  :: (MonadFileSystem i, MonadIO i)
+  => Bool
+  -> Bool
+  -> Bool
+  -> Maybe OsPath
+  -> [OsPath]
+  -> App i ExitCode
+reflectCore force allFlag includeUnregistered _explicitSource [] = do
   -- No arguments: reflect all changed files
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
@@ -292,7 +311,7 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
         else do
           printStderr "Cancelled."
           liftIO $ exitWith userCancelledError
-reflect force allFlag _includeUnregistered explicitSource paths = do
+reflectCore force allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   absPaths <- mapM makeAbsolute paths

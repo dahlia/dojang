@@ -44,6 +44,10 @@ import Dojang.Commands.Disambiguation
   ( disambiguateRoutes
   , getAutoSelectMode
   )
+import Dojang.Commands.Hook
+  ( disambiguatedHookScopePaths
+  , withCommandHooks
+  )
 import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
@@ -124,7 +128,34 @@ edit
   -> [OsPath]
   -- ^ The target file paths to edit (may be empty for all changed files).
   -> App i ExitCode
-edit editorOpt noApply force sequential allFlag _includeUnregistered _explicitSource [] = do
+edit editorOpt noApply force sequential allFlag includeUnregistered explicitSource paths =
+  withCommandHooks
+    "edit"
+    (disambiguatedHookScopePaths explicitSource paths)
+    ( editCore
+        editorOpt
+        noApply
+        force
+        sequential
+        allFlag
+        includeUnregistered
+        explicitSource
+        paths
+    )
+
+
+editCore
+  :: (MonadFileSystem i, MonadIO i)
+  => Maybe String
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Maybe OsPath
+  -> [OsPath]
+  -> App i ExitCode
+editCore editorOpt noApply force sequential allFlag _includeUnregistered _explicitSource [] = do
   -- No arguments: edit source files of all changed files
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
@@ -218,7 +249,7 @@ edit editorOpt noApply force sequential allFlag _includeUnregistered _explicitSo
         else do
           printStderr "Cancelled."
           liftIO $ exitWith userCancelledError
-edit editorOpt noApply force sequential _allFlag _includeUnregistered explicitSource paths = do
+editCore editorOpt noApply force sequential _allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr

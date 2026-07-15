@@ -425,6 +425,11 @@ Important conventions
  -  Follow *fourmolu.yaml* configuration (2-space indentation, 80-column limit)
  -  Use record dot syntax for field access (`OverloadedRecordDot`)
  -  Disable field selectors (`NoFieldSelectors`) and use HasField/record updates
+ -  Name identifiers that represent a time with a `Time` suffix and identifiers
+    that represent a calendar date with a `Date` suffix.  Do not use an `At`
+    suffix for either, such as `createdAt`; prefer names such as `createdTime`
+    and `releaseDate`.  An `At` suffix remains appropriate when it denotes a
+    position or location, as in `splitAt`.
  -  Include comprehensive Haddock documentation for exported functions
  -  All exported APIs must have Haddock comments describing their purpose,
     parameters, and return values

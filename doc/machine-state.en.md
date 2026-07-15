@@ -54,8 +54,11 @@ repositories/
 *state.toml* record has a schema version, repository and machine identities,
 the last known checkout path, the manifest path used by that checkout, the
 intermediate snapshot and managed-target baseline roots, timestamps, and typed
-sections reserved for target, hook, and lifecycle records.  A successful first
-apply is recorded per repository, not in a global current-repository file.
+sections for managed targets, hook execution history, and lifecycle records.
+Schema version 3 stores successful `once` and `on-change` hook executions by
+event and stable hook identity.  Schema versions 1 and 2 are upgraded in memory,
+and their opaque hook data is preserved.  A successful first apply is recorded
+per repository, not in a global current-repository file.
 
 These files are implementation details.  If a record is malformed, uses a
 newer schema version, names another repository, or belongs to another machine,
@@ -66,11 +69,13 @@ with another character.  If *machine.toml* is missing while repository data
 remains, Dojang reports corruption instead of assigning a new machine identity.
 Similarly, a repository directory that contains a migration marker or snapshot
 data but no *state.toml* record is reported as an interrupted or corrupted
-entry.  The only retryable exception is an empty private *snapshots/current/*
-directory left before the first atomic state write completed.  Discovery
-checks the entry while holding its state lock and does not silently select
-another repository.  A nonempty entry whose directory name is not a valid
-repository ID is also reported as corruption.  The *repositories/* store
+entry.  Persistent `hook-<sha256>.lock` files are ignored after `dojang forget`
+because they contain no repository state.  The only retryable snapshot
+exception is an empty private *snapshots/current/* directory left before the
+first atomic state write completed.  Discovery checks the entry while holding
+its state lock and does not silently select another repository.  A nonempty
+entry whose directory name is not a valid repository ID is also reported as
+corruption.  The *repositories/* store
 itself must be a regular directory; a file or symbolic link at that path is not
 treated as an empty store.  Commands that use machine state validate the store
 before modifying a checkout, including when `-r`/`--repository-dir` selects the

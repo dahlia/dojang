@@ -240,13 +240,11 @@ HOME = [
 훅
 --
 
-\*\*[훅](hooks.ko.md)\*\*을 사용하면 `dojang apply` 명령 전후에 사용자 정의
-스크립트를 실행할 수 있습니다.  네 가지 종류의 훅이 있습니다:
-
- -  `pre-apply`: 매 적용 전에 실행
- -  `pre-first-apply`: 최초 적용에서만 실행
- -  `post-first-apply`: 최초 적용에서만, 파일 동기화 후 실행
- -  `post-apply`: 매 적용 후에 실행
+\*\*[훅](hooks.ko.md)\*\*은 `apply`, `reflect`, `diff`, `status`, `edit`,
+`unmanage` 전후에 사용자 정의 스크립트를 실행합니다.  각 명령에는 `pre-*`와
+성공 시 `post-*` 이벤트가 있습니다.  `apply`의 최초 적용 이벤트도 그대로
+지원합니다.  훅은 `always`, 저장소와 머신마다 한 번 실행하는 `once`, 명시적인
+개정 키가 바뀌면 실행하는 `on-change` 정책을 사용할 수 있습니다.
 
 ~~~~ toml
 [[hooks.pre-apply]]
@@ -254,6 +252,9 @@ command = "/bin/echo"
 args = ["설정 파일 적용 중..."]
 
 [[hooks.post-apply]]
+id = "reload-service"
+policy = "on-change"
+change-key = "service-config-v2"
 command = "/usr/bin/systemctl"
 args = ["--user", "restart", "my-service"]
 when = "os = linux"

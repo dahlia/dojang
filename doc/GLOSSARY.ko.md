@@ -26,6 +26,7 @@
 | architecture                 | 프로세서 아키텍처          | `arch` 식별자는 그대로 씁니다.                                                               |
 | baseline                     | 기준 사본                  | 고아 상태 판정에 쓰는 보존된 사본을 뜻합니다.                                                |
 | checkout                     | 체크아웃                   |                                                                                              |
+| change key                   | 개정 키                    | `change-key` 필드 이름은 그대로 씁니다.                                                      |
 | command                      | 명령                       | `command line`은 “명령행”으로 씁니다.                                                        |
 | compact route                | 간결 경로 규칙             |                                                                                              |
 | conflict                     | 충돌                       |                                                                                              |
@@ -39,6 +40,7 @@
 | environment                  | 환경                       |                                                                                              |
 | environment facts            | 환경 정보                  | 키-값으로 다루는 기술 개념입니다. 일반 문장에서 참·거짓을 나타내는 `fact`는 “사실”로 씁니다. |
 | environment predicate        | 환경 서술어                |                                                                                              |
+| execution policy             | 실행 정책                  | `policy` 필드 값은 그대로 씁니다.                                                            |
 | file path expression         | 파일 경로 표현식           |                                                                                              |
 | filesystem                   | 파일 시스템                |                                                                                              |
 | fingerprint                  | 지문                       |                                                                                              |

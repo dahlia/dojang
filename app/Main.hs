@@ -14,7 +14,7 @@ import Data.Function ((&))
 import Data.Maybe (catMaybes, fromMaybe, maybeToList)
 import Data.String (fromString)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, setEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import System.IO.CodePage (withCP65001)
@@ -131,7 +131,7 @@ envFilename = unsafePerformIO $ encodeFS "dojang-env.toml"
 
 
 data ParsedApp i
-  = ParsedApp CommandMode Bool AppEnv (App i ExitCode)
+  = ParsedApp CommandMode Bool Bool AppEnv (App i ExitCode)
 
 
 appP
@@ -149,12 +149,14 @@ appP stateRoot defaultRepoPath =
     <*> environmentOption
     <*> dryRunOption
     <*> debugOption
+    <*> allowHookRecursionOption
     <*> cmdP stateRoot defaultRepoPath
  where
-  makeApp repository intermediate manifest envFile' dryRun' debug' command' =
+  makeApp repository intermediate manifest envFile' dryRun' debug' allowRecursion command' =
     ParsedApp
       (fst command')
       (case manifest of Just _ -> True; Nothing -> False)
+      allowRecursion
       ( AppEnv
           (fromMaybe defaultRepoPath repository)
           (case repository of Just _ -> True; Nothing -> False)
@@ -220,6 +222,11 @@ appP stateRoot defaultRepoPath =
       )
   debugOption =
     switch (long "debug" <> short 'd' <> help "Enable debug logging")
+  allowHookRecursionOption =
+    switch
+      ( long "allow-hook-recursion"
+          <> help "Allow hooks in one nested Dojang invocation"
+      )
 
 
 initPresetP :: Parser [InitPreset]
@@ -634,7 +641,7 @@ main :: IO ()
 main = withCP65001 $ do
   when (System.Info.os == "mingw32") $ setLocaleEncoding utf8
   unresolvedStateRoot <- nativeStateRoot
-  ParsedApp commandMode manifestExplicit unresolvedAppEnv _ <-
+  ParsedApp commandMode manifestExplicit allowHookRecursion unresolvedAppEnv _ <-
     liftIO $ customExecParser parserPrefs (parser unresolvedStateRoot period)
       :: IO (ParsedApp DryRunIO)
   stateRoot <-
@@ -642,6 +649,7 @@ main = withCP65001 $ do
       then canonicalizeStateRootOrExit unresolvedStateRoot
       else return unresolvedStateRoot
   let parsedAppEnv = unresolvedAppEnv{stateDirectory = stateRoot}
+  when allowHookRecursion $ setEnv "DOJANG_ALLOW_HOOK_RECURSION" "1"
   when commandMode.readsMachineState $ validateMachineStateStoreOrExit stateRoot
   appEnv <-
     if not commandMode.autoSelectsRepository || parsedAppEnv.repositoryExplicit
@@ -690,7 +698,7 @@ main = withCP65001 $ do
   (exitCode, ops) <-
     if appEnv.dryRun
       then do
-        ParsedApp _ _ _ cmd <-
+        ParsedApp _ _ _ _ cmd <-
           liftIO $
             customExecParser
               parserPrefs
@@ -698,7 +706,7 @@ main = withCP65001 $ do
             :: IO (ParsedApp DryRunIO)
         dryRunIO' $ run appEnv cmd
       else do
-        ParsedApp _ _ _ cmd <-
+        ParsedApp _ _ _ _ cmd <-
           liftIO $
             customExecParser
               parserPrefs

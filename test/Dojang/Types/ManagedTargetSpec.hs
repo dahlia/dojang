@@ -144,7 +144,7 @@ spec = do
               target.routeProvenance
               target.fingerprint
               target.updatedBy
-              target.updatedAt
+              target.updatedTime
       let route =
             CurrentRoute
               target.routeName
@@ -325,7 +325,7 @@ fixtureTarget definition destinationName = do
       , routeProvenance = Map.empty
       , fingerprint = FileFingerprint 3 "abc"
       , updatedBy = Applied
-      , updatedAt = timestamp
+      , updatedTime = timestamp
       }
 
 
