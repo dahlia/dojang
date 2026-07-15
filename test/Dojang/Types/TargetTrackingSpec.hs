@@ -19,6 +19,7 @@ import System.Info (os)
 
 
 #ifndef mingw32_HOST_OS
+import Dojang.Types.ManagedTarget (TargetFingerprint (FileFingerprint))
 import System.OsPath (decodeFS)
 import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
@@ -57,7 +58,7 @@ import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , OrphanStatus (..)
   , SynchronizationCommand (Applied)
-  , TargetFingerprint (DirectoryFingerprint, FileFingerprint)
+  , TargetFingerprint (DirectoryFingerprint)
   )
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
