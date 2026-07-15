@@ -1,4 +1,5 @@
 {-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -7,8 +8,9 @@
 module Dojang.Commands.TargetLifecycleSpec (spec) where
 
 import Control.Exception (bracket_)
-import Control.Monad (when)
-import Control.Monad.Except (catchError)
+import Control.Monad.Except (MonadError, catchError)
+import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.Reader (ReaderT (ReaderT), ask, runReaderT)
 import Data.HashMap.Strict (singleton)
 import Data.List (find)
 import Data.Map.Strict qualified as Map
@@ -17,7 +19,7 @@ import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, takeDirectory, takeFileName, (</>))
-import Test.Hspec (Spec, describe, it, pendingWith, runIO, sequential, xit)
+import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldContain
@@ -37,6 +39,7 @@ import Dojang.ExitCodes
   , machineStateError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
@@ -370,27 +373,27 @@ spec = do
 
       it "clears matching legacy first-apply history when forgetting" $
         withManagedTarget $ \fixture -> do
-          legacyHome <- System.Directory.OsPath.getHomeDirectory
-          let legacyRegistry = legacyHome </> registryFilename
-          preexisting <- exists legacyRegistry
-          when preexisting $
-            pendingWith "The real home already contains a legacy registry."
-          let cleanup = do
-                present <- exists legacyRegistry
-                when present $ removeFile legacyRegistry
-          bracket_
-            ( writeRegistry
-                legacyRegistry
-                (Registry fixture.appEnv.sourceDirectory)
-            )
-            cleanup
+          decoyName <- encodeFS "process-home"
+          let decoyHome =
+                takeDirectory fixture.appEnv.sourceDirectory </> decoyName
+          let legacyRegistry = fixture.home </> registryFilename
+          createDirectories decoyHome
+          writeRegistry
+            legacyRegistry
+            (Registry fixture.appEnv.sourceDirectory)
+          withEnvVars
+            [("HOME", decoyHome), ("USERPROFILE", decoyHome)]
             $ do
               before <- loadState fixture
               before.firstApplied `shouldBe` True
-              runAppWithoutLogging fixture.appEnv (forget False)
+              runIsolatedHomeIO
+                fixture.home
+                (runAppWithoutLogging fixture.appEnv $ forget False)
                 `shouldReturn` ExitSuccess
               exists legacyRegistry `shouldReturn` False
-              runAppWithoutLogging fixture.appEnv (status defaultStatusOptions)
+              runIsolatedHomeIO
+                fixture.home
+                (runAppWithoutLogging fixture.appEnv $ status defaultStatusOptions)
                 `shouldReturn` ExitSuccess
               after <- loadState fixture
               after.firstApplied `shouldBe` False
@@ -581,6 +584,7 @@ data Fixture = Fixture
   , intermediate :: OsPath
   , destination :: OsPath
   , manifestPath :: OsPath
+  , home :: OsPath
   , orphanManifest :: Manifest
   }
 
@@ -659,6 +663,7 @@ withManagedTargetDestination relativeDestination action =
             intermediate
             destination
             manifestPath
+            home
             baseManifest
 
 
@@ -689,3 +694,46 @@ withEnvVars variables action = do
  where
   restoreOne (name, _) Nothing = unsetEnv name
   restoreOne (name, _) (Just value) = setEnv name value
+
+
+newtype IsolatedHomeIO a = IsolatedHomeIO
+  { unIsolatedHomeIO :: ReaderT OsPath IO a
+  }
+  deriving (Functor, Applicative, Monad, MonadIO, MonadError IOError)
+
+
+runIsolatedHomeIO :: OsPath -> IsolatedHomeIO a -> IO a
+runIsolatedHomeIO home action = runReaderT action.unIsolatedHomeIO home
+
+
+instance MonadFileSystem IsolatedHomeIO where
+  encodePath = liftIO . FileSystem.encodePath
+  decodePath = liftIO . FileSystem.decodePath
+  getCurrentDirectory = liftIO FileSystem.getCurrentDirectory
+  getHomeDirectory = IsolatedHomeIO ask
+  exists = liftIO . FileSystem.exists
+  isFile = liftIO . FileSystem.isFile
+  isRegularFile = liftIO . FileSystem.isRegularFile
+  isDirectory = liftIO . FileSystem.isDirectory
+  isSymlink = liftIO . FileSystem.isSymlink
+  readFile = liftIO . FileSystem.readFile
+  writeFile path = liftIO . FileSystem.writeFile path
+  replaceFile source = liftIO . FileSystem.replaceFile source
+  writeTemporaryFile directory template =
+    liftIO . FileSystem.writeTemporaryFile directory template
+  withFileLock lockPath action = IsolatedHomeIO $ ReaderT $ \home ->
+    FileSystem.withFileLock
+      lockPath
+      (runReaderT action.unIsolatedHomeIO home)
+  canonicalizePath = liftIO . FileSystem.canonicalizePath
+  readSymlinkTarget = liftIO . FileSystem.readSymlinkTarget
+  copyFile source = liftIO . FileSystem.copyFile source
+  copyFileWithMetadata source =
+    liftIO . FileSystem.copyFileWithMetadata source
+  copyFilePermissions source =
+    liftIO . FileSystem.copyFilePermissions source
+  createDirectory = liftIO . FileSystem.createDirectory
+  removeFile = liftIO . FileSystem.removeFile
+  removeDirectory = liftIO . FileSystem.removeDirectory
+  listDirectory = liftIO . FileSystem.listDirectory
+  getFileSize = liftIO . FileSystem.getFileSize
