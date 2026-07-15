@@ -90,6 +90,7 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , SynchronizationCommand (Reflected)
+  , destinationPathIdentity
   , mergeConvergedTargets
   , unreachableSnapshots
   )
@@ -511,10 +512,10 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
       matchesSelection managed =
         any
           ( \file ->
-              normalise file.source.path
-                == normalise managed.correspondence.source.path
-                && normalise file.destination.path
-                  == normalise managed.correspondence.destination.path
+              destinationPathIdentity file.source.path
+                == destinationPathIdentity managed.correspondence.source.path
+                && destinationPathIdentity file.destination.path
+                  == destinationPathIdentity managed.correspondence.destination.path
           )
           selectedFiles
   let initialSelectedManaged = filter matchesSelection initialManaged

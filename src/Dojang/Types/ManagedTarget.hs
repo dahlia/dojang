@@ -26,7 +26,7 @@ module Dojang.Types.ManagedTarget
   ) where
 
 import Data.Char (ord, toLower)
-import Data.List (sortOn)
+import Data.List (isPrefixOf, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Ord (Down (Down))
@@ -335,16 +335,12 @@ unreachableSnapshots kept removed =
 
 isWithin :: OsPath -> OsPath -> Bool
 isWithin parent child =
-  parent' == child'
-    || ( not (isAbsolute relative)
-           && case splitDirectories relative of
-             [] -> False
-             first : _ -> first /= parentDirectory
-       )
+  parentComponents `isPrefixOf` childComponents
  where
-  parent' = normalise parent
-  child' = normalise child
-  relative = makeRelative parent' child'
+  parentComponents =
+    destinationPathIdentity <$> splitDirectories (normalise parent)
+  childComponents =
+    destinationPathIdentity <$> splitDirectories (normalise child)
 
 
 parentDirectory :: OsPath

@@ -213,6 +213,11 @@ spec = do
         selectOrphanRecords Map.empty Set.empty identifiers records === Nothing
 
   describe "unreachableSnapshots" $ do
+    it "does not treat unrelated relative paths as overlapping" $ do
+      first <- encodeFS "first"
+      second <- encodeFS "second"
+      unreachableSnapshots (Set.singleton first) [second] `shouldBe` [second]
+
     it "keeps a child snapshot covered by a retained directory record" $ do
       parent <- fixturePath "snapshot/config"
       child <- fixtureChild parent "app.toml"

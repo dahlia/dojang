@@ -161,6 +161,54 @@ spec = do
           managed{route = changedRoute}
       changedId `shouldNotBe` originalId
 
+    it "separates snapshot generations for different route types" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let intermediate = managed.correspondence.intermediate.path
+        let destination = managed.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        writeFile intermediate "managed"
+        writeFile destination "managed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        Just fileTarget <-
+          observeManagedTarget repository transaction Applied now managed
+        removeFile intermediate
+        removeFile destination
+        createDirectories intermediate
+        createDirectories destination
+        let route = managed.route
+        let directoryEntry path = FileEntry path Directory
+        let directoryManaged =
+              managed
+                { route =
+                    RouteResult
+                      route.sourcePath
+                      route.routeName
+                      route.destinationPath
+                      FileSystem.Directory
+                      route.routeDefinition
+                      route.routeProvenance
+                , correspondence =
+                    FileCorrespondence
+                      (directoryEntry managed.correspondence.source.path)
+                      Unchanged
+                      (directoryEntry intermediate)
+                      (directoryEntry destination)
+                      Unchanged
+                }
+        Just directoryTarget <-
+          observeManagedTarget
+            repository
+            transaction
+            Applied
+            now
+            directoryManaged
+        directoryTarget.snapshotPath `shouldNotBe` fileTarget.snapshotPath
+
     it "uses native destination identity when deriving target IDs" $ do
       upper <- fixtureManaged "C:/Users/Alice/App"
       lower <- fixtureManaged "c:\\users\\alice\\app"
