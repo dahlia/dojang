@@ -48,7 +48,6 @@ import Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
 import Data.Time (getCurrentTime)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import System.Directory.OsPath (getHomeDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (exitWith)
 import System.IO (stderr)
@@ -181,6 +180,7 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   encodePath = App . lift . lift . encodePath
   decodePath = App . lift . lift . decodePath
   getCurrentDirectory = App $ lift $ lift getCurrentDirectory
+  getHomeDirectory = App $ lift $ lift getHomeDirectory
   exists = App . lift . lift . exists
   isFile = App . lift . lift . isFile
   isRegularFile = App . lift . lift . isRegularFile
@@ -589,7 +589,7 @@ prepareMachineState' inheritLegacyHistory manifest beforeMigration =
 readValidatedLegacyRegistry
   :: (MonadFileSystem i, MonadIO i) => App i (Maybe Registry)
 readValidatedLegacyRegistry = do
-  homeDirectory <- liftIO getHomeDirectory
+  homeDirectory <- getHomeDirectory
   registryRead <-
     catchStateIOErrors $
       Right <$> readRegistryStrict (homeDirectory </> registryFilename)
@@ -623,7 +623,7 @@ clearLegacyFirstApplyHistory checkout = do
           then sameExistingPath registry.repositoryPath checkout
           else return False
       when matches $ do
-        homeDirectory <- liftIO getHomeDirectory
+        homeDirectory <- getHomeDirectory
         removed <- catchStateIOErrors $ do
           removeFile $ homeDirectory </> registryFilename
           return $ Right ()
