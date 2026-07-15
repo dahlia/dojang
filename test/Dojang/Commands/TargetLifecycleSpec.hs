@@ -7,6 +7,7 @@
 module Dojang.Commands.TargetLifecycleSpec (spec) where
 
 import Control.Exception (bracket_)
+import Control.Monad (when)
 import Control.Monad.Except (catchError)
 import Data.HashMap.Strict (singleton)
 import Data.List (find)
@@ -16,7 +17,7 @@ import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, takeDirectory, takeFileName, (</>))
-import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
+import Test.Hspec (Spec, describe, it, pendingWith, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldContain
@@ -370,18 +371,30 @@ spec = do
 
       it "clears matching legacy first-apply history when forgetting" $
         withManagedTarget $ \fixture -> do
-          before <- loadState fixture
-          before.firstApplied `shouldBe` True
-          writeRegistry
-            (fixture.home </> registryFilename)
-            (Registry fixture.appEnv.sourceDirectory)
-          runAppWithoutLogging fixture.appEnv (forget False)
-            `shouldReturn` ExitSuccess
-          exists (fixture.home </> registryFilename) `shouldReturn` False
-          runAppWithoutLogging fixture.appEnv (status defaultStatusOptions)
-            `shouldReturn` ExitSuccess
-          after <- loadState fixture
-          after.firstApplied `shouldBe` False
+          legacyHome <- System.Directory.OsPath.getHomeDirectory
+          let legacyRegistry = legacyHome </> registryFilename
+          preexisting <- exists legacyRegistry
+          when preexisting $
+            pendingWith "The real home already contains a legacy registry."
+          let cleanup = do
+                present <- exists legacyRegistry
+                when present $ removeFile legacyRegistry
+          bracket_
+            ( writeRegistry
+                legacyRegistry
+                (Registry fixture.appEnv.sourceDirectory)
+            )
+            cleanup
+            $ do
+              before <- loadState fixture
+              before.firstApplied `shouldBe` True
+              runAppWithoutLogging fixture.appEnv (forget False)
+                `shouldReturn` ExitSuccess
+              exists legacyRegistry `shouldReturn` False
+              runAppWithoutLogging fixture.appEnv (status defaultStatusOptions)
+                `shouldReturn` ExitSuccess
+              after <- loadState fixture
+              after.firstApplied `shouldBe` False
 
       it "rejects forget from a duplicate live checkout" $
         withManagedTarget $ \fixture -> do
@@ -569,7 +582,6 @@ data Fixture = Fixture
   , intermediate :: OsPath
   , destination :: OsPath
   , manifestPath :: OsPath
-  , home :: OsPath
   , orphanManifest :: Manifest
   }
 
@@ -636,7 +648,6 @@ withManagedTargetDestination relativeDestination action =
       $ withEnvVars
         [ ("DEST", configuredDestination)
         , ("HOME", home)
-        , ("USERPROFILE", home)
         ]
       $ do
         runAppWithoutLogging appEnv (apply False []) `shouldReturn` ExitSuccess
@@ -649,7 +660,6 @@ withManagedTargetDestination relativeDestination action =
             intermediate
             destination
             manifestPath
-            home
             baseManifest
 
 
