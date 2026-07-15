@@ -312,6 +312,14 @@ directory in the worktree.  Run `dojang migrate` to copy and verify that
 snapshot before the old directory is removed.  See [Machine state] for the
 platform paths, dry-run procedure, override behavior, and recovery steps.
 
+Successful apply and reflect operations also record their managed destinations.
+If a manifest change leaves an old destination orphaned, `dojang status` shows
+its reason and whether it is unchanged, modified, or missing.  Use
+`dojang unmanage` to discard selected orphan records without deleting their
+destinations, or `dojang forget` to remove this repository's machine-local
+state while preserving both source and destination files.  See [Machine state]
+for the safety rules and `--force` requirements.
+
 [Machine state]: machine-state.en.md
 
 

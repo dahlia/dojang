@@ -28,18 +28,19 @@ import Data.ByteString qualified as ByteString
 import Data.Char (chr)
 import Data.Either (isRight)
 import Data.List (isSuffixOf, nub)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time (UTCTime, defaultTimeLocale, parseTimeOrError)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
 import System.Directory.OsPath qualified
+import System.Timeout (timeout)
 
 
 #ifndef mingw32_HOST_OS
 import System.Posix.Files qualified as Posix
 import System.OsPath (decodeFS)
-import System.Timeout (timeout)
 #endif
 
 import System.OsPath
@@ -51,12 +52,13 @@ import System.OsPath
   , (</>)
   )
 import Test.Hspec (Spec, describe, it, runIO, shouldSatisfy, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.MonadFileSystem
-  ( MonadFileSystem (..)
+  ( FileType (Directory, File)
+  , MonadFileSystem (..)
   , dryRunIO
   )
 import Dojang.TestUtils (withTempDir)
@@ -73,8 +75,11 @@ import Dojang.Types.MachineState
   , defaultIntermediatePath
   , encodeMachineState
   , ensureMachineId
+  , forgetRepositoryStateWith
   , listRepositoryStates
+  , managedTargetSnapshotRoot
   , markFirstApplied
+  , markRepositoryForgetInProgress
   , migrationMarkerPath
   , parseMachineId
   , prepareRepositoryState
@@ -87,8 +92,15 @@ import Dojang.Types.MachineState
   , repositoryStatePath
   , resolveStateRoot
   , selectRepositoryState
+  , updateManagedTargets
+  , updateManagedTargetsWith
   , validateMachineStateStore
   , validateMigrationStateRoot
+  )
+import Dojang.Types.ManagedTarget
+  ( ManagedTarget (..)
+  , SynchronizationCommand (Applied)
+  , TargetFingerprint (FileFingerprint)
   )
 import Dojang.Types.RepositoryId
   ( RepositoryId
@@ -184,6 +196,71 @@ spec = do
       decodeMachineState state.repositoryId state.machineId (encodeMachineState state)
         `shouldBe` Right state
 
+    it "upgrades the schema-v1 state written before target tracking" $
+      withTempDir $ \root _ -> do
+        initial <- fixtureState
+        let expectedTargetRoot =
+              managedTargetSnapshotRoot root initial.repositoryId
+        let legacyState =
+              initial
+                { intermediatePath =
+                    defaultIntermediatePath root initial.repositoryId
+                , targetSnapshotRoot = expectedTargetRoot
+                }
+        let legacyDocument =
+              Text.replace "schema-version = 2" "schema-version = 1" $
+                Text.unlines
+                  [ line
+                  | line <- Text.lines $ encodeMachineState legacyState
+                  , not $ "target-snapshot-root = " `Text.isPrefixOf` line
+                  ]
+        createDirectories $
+          repositoryStateDirectory root initial.repositoryId
+        writeFile
+          (repositoryStatePath root initial.repositoryId)
+          (encodeUtf8 legacyDocument)
+        loaded <-
+          readRepositoryState root initial.repositoryId initial.machineId
+        case loaded of
+          Right (Just state) -> do
+            state.targetSnapshotRoot `shouldBe` expectedTargetRoot
+            state.targetRecords `shouldBe` Map.empty
+          result -> fail $ "Unexpected schema-v1 state: " <> show result
+
+    it "round-trips managed targets and preserves opaque hook state" $ do
+      state <- fixtureState
+      route <- encodeFS "config/app.toml"
+      source <- encodeFS "config/app.toml"
+      destination <-
+        System.Directory.OsPath.makeAbsolute =<< encodeFS "target/app.toml"
+      snapshotName <- encodeFS "config/app.toml"
+      let snapshot = state.targetSnapshotRoot </> snapshotName
+      let target =
+            ManagedTarget
+              "target-id"
+              route
+              source
+              Directory
+              destination
+              snapshot
+              "always => $HOME/.config/app.toml"
+              Map.empty
+              (FileFingerprint 7 "sha256")
+              Applied
+              fixtureTime
+      let populated =
+            state
+              { pendingCleanupPaths =
+                  [state.targetSnapshotRoot </> snapshotName]
+              , targetRecords = Map.singleton target.targetId target
+              , hookRecords = Map.singleton "future" "opaque"
+              }
+      decodeMachineState
+        populated.repositoryId
+        populated.machineId
+        (encodeMachineState populated)
+        `shouldBe` Right populated
+
     it "round-trips arbitrary checkout metadata" $ hedgehog $ do
       suffix <- forAll $ Gen.text (linear 1 30) Gen.alphaNum
       applied <- forAll Gen.bool
@@ -233,6 +310,8 @@ spec = do
       let relativeManifest = replacePathField "manifest-path" relative encoded
       let relativeIntermediate =
             replacePathField "intermediate-path" relative encoded
+      let relativeTargetSnapshots =
+            replacePathField "target-snapshot-root" relative encoded
       isMalformed
         (decodeMachineState state.repositoryId state.machineId relativeCheckout)
         === True
@@ -242,6 +321,101 @@ spec = do
       isMalformed
         (decodeMachineState state.repositoryId state.machineId relativeIntermediate)
         === True
+      isMalformed
+        (decodeMachineState state.repositoryId state.machineId relativeTargetSnapshots)
+        === True
+
+    it "rejects managed-target snapshots outside their private root" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "outside-target"
+      let outside = target{snapshotPath = state.intermediatePath}
+      let populated =
+            state{targetRecords = Map.singleton outside.targetId outside}
+      decodeMachineState
+        state.repositoryId
+        state.machineId
+        (encodeMachineState populated)
+        `shouldSatisfy` isMalformed
+
+    it "rejects arbitrary parent traversal in managed-target snapshot paths" $
+      hedgehog $ do
+        prefixes <-
+          forAll $ Gen.list (linear 1 6) $ Gen.text (linear 1 12) Gen.alphaNum
+        state <- liftIO fixtureState
+        target <- liftIO $ fixtureManagedTarget state "unsafe-snapshot"
+        parent <- liftIO $ encodeFS ".."
+        victim <- liftIO $ encodeFS "victim"
+        prefixPaths <- liftIO $ traverse (encodeFS . Text.unpack) prefixes
+        let components =
+              prefixPaths
+                <> replicate (length prefixPaths + 1) parent
+                <> [victim]
+        let traversing = foldl (</>) state.targetSnapshotRoot components
+        let unsafe = target{snapshotPath = traversing}
+        let populated =
+              state{targetRecords = Map.singleton unsafe.targetId unsafe}
+        isMalformed
+          ( decodeMachineState
+              state.repositoryId
+              state.machineId
+              (encodeMachineState populated)
+          )
+          === True
+
+    it "rejects arbitrary parent traversal in pending cleanup paths" $
+      hedgehog $ do
+        prefixes <-
+          forAll $ Gen.list (linear 1 6) $ Gen.text (linear 1 12) Gen.alphaNum
+        state <- liftIO fixtureState
+        parent <- liftIO $ encodeFS ".."
+        victim <- liftIO $ encodeFS "victim"
+        prefixPaths <- liftIO $ traverse (encodeFS . Text.unpack) prefixes
+        let components =
+              prefixPaths
+                <> replicate (length prefixPaths + 1) parent
+                <> [victim]
+        let traversing = foldl (</>) state.targetSnapshotRoot components
+        let unsafe = state{pendingCleanupPaths = [traversing]}
+        isMalformed
+          ( decodeMachineState
+              state.repositoryId
+              state.machineId
+              (encodeMachineState unsafe)
+          )
+          === True
+
+    it "rejects arbitrary parent traversal in managed source paths" $
+      hedgehog $ do
+        depth <- forAll $ Gen.int (linear 1 12)
+        prefixes <-
+          forAll $ Gen.list (linear 0 6) $ Gen.text (linear 1 12) Gen.alphaNum
+        state <- liftIO fixtureState
+        target <- liftIO $ fixtureManagedTarget state "unsafe-source"
+        parent <- liftIO $ encodeFS ".."
+        outside <- liftIO $ encodeFS "outside"
+        prefixPaths <- liftIO $ traverse (encodeFS . Text.unpack) prefixes
+        let traversing =
+              foldr (</>) outside $ prefixPaths <> replicate depth parent
+        let unsafe = target{sourcePath = traversing}
+        let populated =
+              state{targetRecords = Map.singleton unsafe.targetId unsafe}
+        isMalformed
+          ( decodeMachineState
+              state.repositoryId
+              state.machineId
+              (encodeMachineState populated)
+          )
+          === True
+
+    it "rejects a target snapshot root owned by another state store" $
+      withTempDir $ \root _ -> do
+        state <- fixtureState
+        createDirectories $ repositoryStateDirectory root state.repositoryId
+        writeFile
+          (repositoryStatePath root state.repositoryId)
+          (encodeUtf8 $ encodeMachineState state)
+        readRepositoryState root state.repositoryId state.machineId
+          >>= (`shouldSatisfy` isMalformed)
 
     it "rejects invalid UTF-8 in a repository state record" $ hedgehog $ do
       invalidByte <- forAll $ Gen.word8 (linear 0x80 0xbf)
@@ -271,14 +445,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 1" "schema-version = 2" encoded
+          Text.replace "schema-version = 2" "schema-version = 3" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 2)
+        `shouldBe` Left (UnsupportedSchemaVersion 3)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 2\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 2)
+        "schema-version = 3\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 3)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -329,6 +503,33 @@ spec = do
           repositoryDirectory
         result <- listRepositoryStates root state.machineId
         result `shouldSatisfy` isMalformed
+
+    it "rejects a target snapshot root owned by another store" $
+      withTempDir $ \root _ -> do
+        state <- fixtureState
+        createDirectories $ repositoryStateDirectory root state.repositoryId
+        writeFile
+          (repositoryStatePath root state.repositoryId)
+          (encodeUtf8 $ encodeMachineState state)
+        result <- listRepositoryStates root state.machineId
+        result `shouldSatisfy` isMalformed
+
+    symlinkIt "rejects a symlinked target-snapshot ancestor" $
+      withTempDir $ \root _ -> do
+        state <- fixtureState
+        externalName <- encodeFS "external-target-snapshots"
+        let targetRoot = managedTargetSnapshotRoot root state.repositoryId
+        let snapshots = takeDirectory targetRoot
+        let external = root </> externalName
+        let stored = state{targetSnapshotRoot = targetRoot}
+        createDirectories $ repositoryStateDirectory root state.repositoryId
+        writeFile
+          (repositoryStatePath root state.repositoryId)
+          (encodeUtf8 $ encodeMachineState stored)
+        createDirectories external
+        System.Directory.OsPath.createDirectoryLink external snapshots
+        listRepositoryStates root state.machineId
+          >>= (`shouldBe` Left (UnsupportedSnapshotSymlink snapshots))
 
     it "rejects noncanonical repository-ID directory names" $
       withTempDir $ \root _ -> do
@@ -760,6 +961,43 @@ spec = do
         result `shouldBe` Left (UnsupportedSnapshotSymlink snapshots)
         isSymlink snapshots >>= (`shouldBe` True)
         isDirectory (target </> currentName) >>= (`shouldBe` True)
+
+    symlinkIt
+      "rejects a symlinked target-snapshot ancestor with a custom snapshot"
+      $ withTempDir
+      $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        customName <- encodeFS "custom-snapshot"
+        snapshotsName <- encodeFS "snapshots"
+        targetName <- encodeFS "target-snapshot-store"
+        let custom = tmp </> customName
+        let stateDirectory =
+              repositoryStateDirectory paths.root paths.repositoryId
+        let snapshots = stateDirectory </> snapshotsName
+        let target = tmp </> targetName
+        createDirectories paths.checkout
+        first <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            (Just custom)
+            fixtureTime
+        first `shouldSatisfy` isRightState
+        createDirectories target
+        System.Directory.OsPath.createDirectoryLink target snapshots
+        reloaded <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        reloaded `shouldBe` Left (UnsupportedSnapshotSymlink snapshots)
+        isSymlink snapshots >>= (`shouldBe` True)
+        isDirectory target >>= (`shouldBe` True)
 
     symlinkIt "rejects matching snapshots that contain nested symlinks" $
       withTempDir $ \tmp _ -> do
@@ -1232,6 +1470,39 @@ spec = do
             _ -> False
       rejected === True
 
+    it "rejects snapshots that overlap managed-target baselines" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        childName <- encodeFS "custom-intermediate"
+        let targetRoot =
+              managedTargetSnapshotRoot paths.root paths.repositoryId
+        let candidates =
+              [ takeDirectory targetRoot
+              , targetRoot
+              , targetRoot </> childName
+              ]
+        mapM_
+          ( \candidate ->
+              withTempDir $ \checkoutRoot _ -> do
+                checkoutName <- encodeFS "checkout"
+                let checkout = checkoutRoot </> checkoutName
+                createDirectories checkout
+                result <-
+                  prepareRepositoryState
+                    paths.root
+                    paths.repositoryId
+                    paths.machineId
+                    checkout
+                    (Just candidate)
+                    fixtureTime
+                result
+                  `shouldBe` Left
+                    (ProtectedSnapshotLocation candidate targetRoot)
+          )
+          candidates
+        exists (repositoryStatePath paths.root paths.repositoryId)
+          `shouldReturn` False
+
     it "does not clean up a stored snapshot that contains the old checkout" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp
@@ -1241,15 +1512,19 @@ spec = do
         let newSnapshot = tmp </> newSnapshotName
         let unsafeState =
               MachineState
-                1
+                2
                 paths.repositoryId
                 paths.machineId
                 paths.checkout
                 (paths.checkout </> paths.file)
                 paths.checkout
+                (managedTargetSnapshotRoot paths.root paths.repositoryId)
                 fixtureTime
                 fixtureTime
                 False
+                []
+                Map.empty
+                Map.empty
         createDirectories paths.checkout
         createDirectories moved
         writeFile (paths.checkout </> paths.file) "repository data"
@@ -1404,7 +1679,7 @@ spec = do
             paths.checkout
             (Just nested)
             fixtureTime
-        result `shouldBe` Left (OverlappingSnapshots old nested)
+        result `shouldBe` Left (OverlappingSnapshots old $ old </> nestedName)
         readFile (old </> paths.file) >>= (`shouldBe` "ancestor")
         exists (old </> nestedName) >>= (`shouldBe` False)
 
@@ -1521,6 +1796,52 @@ spec = do
         exists old >>= (`shouldBe` False)
         exists (migrationMarkerPath paths.root paths.repositoryId)
           >>= (`shouldBe` False)
+
+    it "retries pending cleanup before changing the intermediate path" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        oldName <- encodeFS "old-snapshot"
+        newName <- encodeFS "new-snapshot"
+        pendingName <- encodeFS "pending-cleanup"
+        let old = tmp </> oldName
+        let new = tmp </> newName
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            (Just old)
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        let pending = old </> pendingName
+        writeFile (old </> paths.file) "preserve"
+        writeFile pending "remove"
+        writeFile
+          (repositoryStatePath paths.root paths.repositoryId)
+          ( encodeUtf8 $
+              encodeMachineState state{pendingCleanupPaths = [pending]}
+          )
+        migrated <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            (Just new)
+            fixtureTime
+        migrated `shouldSatisfy` isRightState
+        loaded <-
+          readRepositoryState paths.root paths.repositoryId paths.machineId
+        case loaded of
+          Right (Just current) -> do
+            current.intermediatePath `shouldBe` new
+            current.pendingCleanupPaths `shouldBe` []
+          _ -> fail $ "Unexpected state: " <> show loaded
+        readFile (new </> paths.file) `shouldReturn` "preserve"
+        exists pending `shouldReturn` False
 
     it "retries cleanup for a matching pre-existing override" $
       withTempDir $ \tmp _ -> do
@@ -1705,6 +2026,33 @@ spec = do
               Right (stored, ReusedRepositoryState) ->
                 stored.intermediatePath `shouldBe` state.intermediatePath
               _ -> fail $ "Unexpected reload: " <> show reloaded
+          _ -> fail $ "Unexpected result: " <> show result
+
+    symlinkIt "persists the canonical path behind an external ancestor alias" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        parentName <- encodeFS "snapshot-parent"
+        aliasName <- encodeFS "snapshot-parent-alias"
+        snapshotName <- encodeFS "custom-snapshot"
+        let parent = tmp </> parentName
+        let alias = tmp </> aliasName
+        let snapshot = parent </> snapshotName
+        createDirectories paths.checkout
+        createDirectories parent
+        System.Directory.OsPath.createDirectoryLink parent alias
+        result <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            (Just $ alias </> snapshotName)
+            fixtureTime
+        case result of
+          Right (state, CreatedRepositoryState) -> do
+            state.intermediatePath `shouldBe` snapshot
+            System.Directory.OsPath.removeDirectoryLink alias
+            exists state.intermediatePath `shouldReturn` True
           _ -> fail $ "Unexpected result: " <> show result
 
     symlinkIt "ignores an unused symlinked default for a stored custom snapshot" $
@@ -1924,6 +2272,185 @@ spec = do
         readFile (new </> paths.file) >>= (`shouldBe` "ancestor")
 
   describe "concurrent state persistence" $ do
+    it "rejects target updates while repository forget is pending" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        target <- fixtureManagedTarget state "blocked-target"
+        markRepositoryForgetInProgress paths.root paths.repositoryId
+          `shouldReturn` Right ()
+        updated <-
+          updateManagedTargets paths.root fixtureTime state $
+            Map.insert target.targetId target
+        updated
+          `shouldBe` Left (RepositoryForgetInProgress paths.repositoryId)
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
+    it "cleans update resources when state publication fails" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        localState <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        transactionName <- encodeFS "unpublished-transaction"
+        payloadName <- encodeFS "payload"
+        let transaction = localState.targetSnapshotRoot </> transactionName
+        failed <-
+          runFailingReplaceIO
+            (repositoryStatePath paths.root paths.repositoryId)
+            $ updateManagedTargetsWith
+              paths.root
+              fixtureTime
+              localState
+              ( \records -> do
+                  createDirectories transaction
+                  writeFile (transaction </> payloadName) "baseline"
+                  return (records, transaction)
+              )
+              (\_ _ -> [])
+              (\_ _ -> return ())
+              (\_ unpublished -> removeDirectoryRecursively unpublished)
+        failed `shouldSatisfy` isFailedStateUpdate
+        exists transaction `shouldReturn` False
+
+    it "reloads target records before applying a stale caller's update" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        stale <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        target <- fixtureManagedTarget stale "concurrent-target"
+        inserted <-
+          updateManagedTargets paths.root fixtureTime stale $
+            Map.insert target.targetId target
+        inserted `shouldSatisfy` isRight
+        observed <- newEmptyMVar
+        updated <-
+          updateManagedTargetsWith
+            paths.root
+            fixtureTime
+            stale
+            ( \current -> do
+                putMVar observed current
+                return (Map.delete target.targetId current, ())
+            )
+            (\_ _ -> [])
+            (\_ _ -> return ())
+            (\_ _ -> return ())
+        updated `shouldSatisfy` isRight
+        current <- takeMVar observed
+        Map.member target.targetId current `shouldBe` True
+
+    it "holds the repository lock through post-write snapshot cleanup" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        localState <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        cleanupStarted <- newEmptyMVar
+        allowCleanup <- newEmptyMVar
+        firstCompletion <- newEmptyMVar
+        _ <- forkIO $ do
+          result <-
+            updateManagedTargetsWith
+              paths.root
+              fixtureTime
+              localState
+              (\records -> return (records, ()))
+              (\_ _ -> [])
+              ( \_ _ -> do
+                  putMVar cleanupStarted ()
+                  takeMVar allowCleanup
+              )
+              (\_ _ -> return ())
+          putMVar firstCompletion result
+        takeMVar cleanupStarted
+        secondStarted <- newEmptyMVar
+        secondCompletion <- newEmptyMVar
+        _ <- forkIO $ do
+          putMVar secondStarted ()
+          result <- markFirstApplied paths.root fixtureTime localState
+          putMVar secondCompletion result
+        takeMVar secondStarted
+        timeout 100000 (takeMVar secondCompletion) `shouldReturn` Nothing
+        putMVar allowCleanup ()
+        takeMVar firstCompletion >>= (`shouldSatisfy` isRight)
+        takeMVar secondCompletion >>= (`shouldSatisfy` isRight)
+
+    it "holds the repository lock through forget validation and cleanup" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        localState <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        forgetStarted <- newEmptyMVar
+        allowForget <- newEmptyMVar
+        forgetCompletion <- newEmptyMVar
+        _ <- forkIO $ do
+          result <-
+            forgetRepositoryStateWith
+              paths.root
+              paths.repositoryId
+              paths.machineId
+              ( \_ -> do
+                  putMVar forgetStarted ()
+                  takeMVar allowForget
+              )
+          putMVar forgetCompletion result
+        takeMVar forgetStarted
+        updateCompletion <- newEmptyMVar
+        _ <- forkIO $ do
+          result <- markFirstApplied paths.root fixtureTime localState
+          putMVar updateCompletion result
+        timeout 100000 (takeMVar updateCompletion) `shouldReturn` Nothing
+        putMVar allowForget ()
+        takeMVar forgetCompletion `shouldReturn` Right (Just ())
+        takeMVar updateCompletion
+          `shouldReturn` Left (MissingRepositoryState paths.repositoryId)
+
     it "allocates a unique temporary path for every simultaneous writer" $
       withTempDir $ \tmp _ -> do
         results <-
@@ -2134,17 +2661,44 @@ fixtureState = do
   intermediate <-
     System.Directory.OsPath.makeAbsolute $
       stateName </> snapshotsName </> currentName
+  targetsName <- encodeFS "targets"
+  let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      1
+      2
       repositoryId'
       machineId'
       checkout
       (checkout </> manifestName)
       intermediate
+      targetSnapshots
       fixtureTime
       fixtureTime
       False
+      []
+      Map.empty
+      Map.empty
+
+
+fixtureManagedTarget :: MachineState -> Text.Text -> IO ManagedTarget
+fixtureManagedTarget state identifier = do
+  route <- encodeFS "config"
+  source <- encodeFS "config/app.toml"
+  destination <- encodeFS "destination/app.toml"
+  snapshotName <- encodeFS $ Text.unpack identifier
+  return $
+    ManagedTarget
+      identifier
+      route
+      source
+      File
+      (state.checkoutPath </> destination)
+      (state.targetSnapshotRoot </> snapshotName)
+      "definition"
+      Map.empty
+      (FileFingerprint 7 "digest")
+      Applied
+      fixtureTime
 
 
 replacePathField :: Text.Text -> Text.Text -> Text.Text -> Text.Text
@@ -2235,6 +2789,13 @@ isLeftIOError
   :: Either IOError (Either StateError (MachineState, MigrationResult)) -> Bool
 isLeftIOError (Left _) = True
 isLeftIOError _ = False
+
+
+isFailedStateUpdate
+  :: Either IOError (Either StateError (MachineState, OsPath))
+  -> Bool
+isFailedStateUpdate (Right (Left _)) = True
+isFailedStateUpdate _ = False
 
 
 newtype FailingReplaceIO a

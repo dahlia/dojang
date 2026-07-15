@@ -81,5 +81,9 @@ userCancelledError :: ExitCode
 userCancelledError = ExitFailure 36
 
 
+lifecycleSelectionError :: ExitCode
+lifecycleSelectionError = ExitFailure 37
+
+
 hookFailedError :: ExitCode
 hookFailedError = ExitFailure 40

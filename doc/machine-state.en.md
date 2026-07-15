@@ -46,14 +46,16 @@ repositories/
         state.lock
         snapshots/
             current/
+            targets/
+                <route-generation>/
 ~~~~
 
 *machine.toml* identifies the machine that owns the snapshots.  Each
 *state.toml* record has a schema version, repository and machine identities,
 the last known checkout path, the manifest path used by that checkout, the
-intermediate snapshot path, timestamps, and typed sections reserved for target,
-hook, and lifecycle records.  A successful first apply is recorded per
-repository, not in a global current-repository file.
+intermediate snapshot and managed-target baseline roots, timestamps, and typed
+sections reserved for target, hook, and lifecycle records.  A successful first
+apply is recorded per repository, not in a global current-repository file.
 
 These files are implementation details.  If a record is malformed, uses a
 newer schema version, names another repository, or belongs to another machine,
@@ -81,15 +83,22 @@ Repository records are replaced atomically, so an interrupted write leaves the
 previous complete record in place.  Locks serialize concurrent identity and
 state updates, and each update uses its own temporary file.  Lock entries must
 be regular files; symbolic links, directories, and special files are rejected
-before they are opened.  Every component of a private snapshot path must also
-be a real directory rather than a symbolic link.  When an existing checkout or
+before they are opened.  Every directory leading to a persisted snapshot must
+also be a real directory rather than a symbolic link, including directories
+outside the private state store.  The snapshot entry itself cannot be a link.
+An explicit custom snapshot alias is resolved before its canonical path is
+persisted.  Cleanup checks every component again, so retargeting an ancestor
+link cannot redirect recursive deletion.  When an existing checkout or
 snapshot is reached through a filesystem alias, Dojang retains the stable
 recorded paths instead of persisting the temporary alias.  Stored paths use an
 explicit encoding to preserve native path data that is not valid UTF-8.
 Checkout, manifest, and intermediate paths must be absolute; a relative value
-makes the record malformed.  Dojang reads the schema version before decoding
-version-specific fields.  A newer record therefore produces upgrade guidance
-even when its remaining layout differs from this release's layout.
+makes the record malformed.  Managed-target source paths must be relative and
+must not contain parent traversal.  Each managed-target baseline path must be a
+proper descendant of its recorded baseline root and must not contain parent
+traversal.  Dojang reads the schema version before decoding version-specific
+fields.  A newer record therefore produces upgrade guidance even when its
+remaining layout differs from this release's layout.
 
 Dojang stops if a recorded intermediate snapshot is missing or has been
 replaced by a regular file.  It does not treat a missing common ancestor as an
@@ -229,6 +238,122 @@ identity.  Only one UUID can be written, and every process reloads that identity
 before preparing repository state.
 
 
+Managed destinations and orphans
+--------------------------------
+
+After each successful `dojang apply` or `dojang reflect`, Dojang records every
+entry that actually converged.  A record contains the producing route, whether
+that route manages a file or directory, the source entry, the absolute expanded
+destination, an immutable baseline, its kind and SHA-256 fingerprint, the
+command and time that updated it, and the environment facts used for routing.
+Target identifiers preserve platform-native path identity even when a path is
+not valid Unicode.  Destination identity follows native filesystem
+equality.  Paths that differ only in casing share one identity on Windows, but
+remain distinct on POSIX systems.  The same rule is used when deciding whether
+a current destination has changed.  Values of referenced environment variables
+are never stored verbatim: the record distinguishes unset and empty values and
+otherwise stores a SHA-256 digest of the native value.  Distinct native values
+remain distinct even when they cannot be decoded as Unicode.  If a multi-entry
+operation stops partway through, records for entries that did not converge
+retain their preceding values.  Only completed entries receive new records.  A
+converged symbolic link is not treated as a deletion because symbolic-link
+synchronization is unsupported.  Only convergence on a missing destination
+removes its preceding record.  A forced reflection that admits a previously
+untracked ignored destination also records that entry.  An argument-free
+reflection records every converged routed entry, including unchanged entries
+when another entry needed synchronization.  A dry run changes neither these
+records nor first-apply history.
+
+Each state update builds its baselines under a new private transaction root.
+The records are published only after all required copies finish.  A failed copy
+therefore leaves the preceding records and baselines intact.  If publishing the
+state record fails after the copies finish, Dojang removes the unpublished
+transaction root.  Entries from the same route generation can share a baseline
+tree, but destination and route-definition changes use another tree.  A later
+synchronization cannot rewrite the evidence used to classify an older orphan.
+Before publishing changed records, Dojang journals every baseline and
+intermediate path that will become unreachable.  It accepts only paths inside
+the recorded snapshot roots.  If post-publication cleanup fails, the journal
+remains in *state.toml* and the next stateful command retries it under the same
+repository lock.  Once cleanup succeeds, Dojang removes the journal and any
+empty generation and transaction directories.
+
+A directory record describes the directory entry itself.  Its descendant
+records track the managed files and directories below it.  Status checks do not
+recursively compare a directory record's whole subtree, which may include
+ignored entries or children synchronized in a later operation.
+
+A record becomes an **orphan** when its route is removed or renamed, becomes
+inapplicable or null in the current environment, changes its selected
+definition or file/directory type, expands to another destination, or remains
+applicable but no longer produces the recorded directory entry.  The last case
+can occur after a source entry is removed and its destination becomes ignored.
+Ordinary `apply`, `reflect`, and `status` commands never delete an orphan
+destination.
+Current relative destinations are resolved to absolute paths before this
+comparison.  `dojang status` lists each orphan's former destination, source and
+route, fingerprint, reason, and whether the destination is unchanged, modified,
+or missing.  A named pipe, socket, device, or other special entry at either the
+destination or its baseline is classified as modified without reading it.
+
+To stop tracking orphans while keeping their destination files, select a route,
+one or more destinations, or both:
+
+~~~~ console
+$ dojang unmanage --route config
+$ dojang unmanage ~/.config/app/config.toml
+~~~~
+
+Selections are combined.  Every selected record must be an orphan; change the
+manifest first if a target is still active.  Unknown selections fail without
+changing state.  On Windows, destination selectors use native
+case-insensitive path comparison.  An unchanged or missing orphan can be
+unmanaged directly.  A modified orphan requires `--force`, because discarding
+its baseline also discards Dojang's local evidence of the divergence.
+`unmanage` removes only
+selected records, their unreferenced baselines, and unreferenced entries in the
+common intermediate snapshot.  A retained directory record protects its
+descendants.  Record publication and snapshot cleanup remain under the same
+repository lock, so concurrent synchronization cannot lose a record or make
+cleanup remove newly live data.  `unmanage` reloads the selected records and
+requires every selected ID to remain present after acquiring that lock.  It
+then checks their orphan and modification status again.  Before changing state,
+it lists every selected record and its current status.  It never removes source
+or destination files.
+
+To remove all machine-local state for one repository, use:
+
+~~~~ console
+$ dojang forget
+~~~~
+
+This removes that repository's target records, intermediate snapshot, managed
+target baselines, and first-apply history.  It preserves the machine identity,
+every other repository's state, the repository source, and all destinations.
+Modified destinations require `--force`.  Validation, snapshot removal, and
+state deletion run under one repository lock.  Before deleting the recorded
+intermediate snapshot, Dojang rejects symbolic links in the snapshot or any of
+its ancestors, along with paths that contain the checkout or machine-state
+store.  The private baseline root is removed before the intermediate snapshot.
+After validation succeeds, Dojang records the approved cleanup before deleting
+either root.  A retry can therefore finish without `--force` when a partial
+cleanup has already removed a baseline.  A
+fresh request still checks every destination.  While approved cleanup is
+pending, other stateful commands stop and ask the user to retry `dojang forget`;
+they cannot publish newer records that the earlier approval would discard.
+Forgetting an already absent record succeeds without creating machine state or
+migrating a legacy snapshot.  If cleanup deleted *state.toml* but left its
+approval marker, retrying `dojang forget` clears that marker under the
+repository lock without recreating state.
+A distinct live checkout with the same `repository-id` cannot forget the
+recorded checkout's state.  Successful cleanup removes the empty private
+snapshot parent, so automatic repository discovery treats the repository as
+forgotten.  Interrupted migration and forget markers are removed under the
+repository lock.  If the old *~/.dojang* registry names this checkout, `forget`
+also removes that legacy first-apply history.  The next successful apply is
+treated as the first apply for this repository.
+
+
 Choosing another intermediate directory
 ---------------------------------------
 
@@ -238,9 +363,11 @@ the repository checkout.  Later commands use the stored path until another
 explicit path replaces it.  The path cannot be a descendant of *.dojang*
 while that directory is the migration source.  A snapshot also cannot contain
 the checkout or the machine-state root, and a path inside the state root must
-stay within this repository's dedicated *snapshots/* directory.  These rules
-prevent later cleanup from removing repository files or machine-state
-metadata.
+stay within this repository's dedicated *snapshots/* directory.  The
+intermediate snapshot and the private managed-target baseline root cannot be
+equal or contain one another.  These rules prevent synchronization or later
+cleanup from treating baseline data as intermediate files, or from removing
+repository files or machine-state metadata.
 
 Dojang applies the same copy, comparison, and conflict rules when changing a
 persisted intermediate path.  The old and new paths cannot contain one another.

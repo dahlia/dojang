@@ -84,7 +84,7 @@ run = "hongdown --write"
 
 [tasks."doc:check"]
 description = "Check the documentation for issues"
-run = "python3 scripts/check-doc-contents.py doc"
+run = "python3 scripts/check-doc-contents.py doc 'GLOSSARY.*.md'"
 
 [tasks."doc:build"]
 description = "Build the documentation"

@@ -7,8 +7,13 @@
 module Dojang.Commands.Reflect (reflect) where
 
 import Control.Monad (filterM, forM, forM_, unless, void, when)
+import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, nub)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes)
+import Data.Set qualified as Set
+import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (hIsTerminalDevice, stderr, stdin)
 
@@ -26,7 +31,12 @@ import System.OsPath
   , (</>)
   )
 
-import Dojang.App (App, AppEnv (manifestFile), ensureContext)
+import Dojang.App
+  ( App
+  , AppEnv (manifestFile, stateDirectory)
+  , ensureContext
+  , prepareMachineState
+  )
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -47,6 +57,7 @@ import Dojang.ExitCodes
   , fileNotFoundError
   , fileNotRoutedError
   , ignoredFileError
+  , machineStateError
   , sourceCannotBeTargetError
   , userCancelledError
   )
@@ -59,6 +70,7 @@ import Dojang.Types.Context
   , FileEntry (..)
   , FileStat (Missing)
   , IgnoredFile (..)
+  , ManagedCorrespondence (..)
   , RouteMatch (..)
   , RouteState (..)
   , UnregisteredFile (..)
@@ -68,6 +80,18 @@ import Dojang.Types.Context
   , getUnregisteredFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeFiles
+  , makeManagedCorrespond
+  )
+import Dojang.Types.MachineState
+  ( MachineState (..)
+  , formatStateError
+  , updateManagedTargetsWith
+  )
+import Dojang.Types.ManagedTarget
+  ( ManagedTarget (..)
+  , SynchronizationCommand (Reflected)
+  , mergeConvergedTargets
+  , unreachableSnapshots
   )
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
@@ -85,6 +109,11 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.TargetTracking
+  ( discardTargetSnapshot
+  , newTargetSnapshotTransaction
+  , observeConvergedManagedTarget
+  )
 
 
 reflect
@@ -234,6 +263,9 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
   if null allChangedFiles
     then do
       printStderr "No changed files to reflect."
+      machineState <- prepareMachineState ctx.repository.manifest
+      (managed, _) <- makeManagedCorrespond ctx
+      persistConvergedTargets ctx machineState managed
       return ExitSuccess
     else do
       -- Display changed files
@@ -254,7 +286,7 @@ reflect force allFlag includeUnregistered _explicitSource [] = do
               else return True -- Non-interactive: proceed
       if proceed
         then do
-          reflectCorrespondences ctx force selectedCorrespondences
+          reflectCorrespondences ctx force True selectedCorrespondences
           return ExitSuccess
         else do
           printStderr "Cancelled."
@@ -418,6 +450,7 @@ reflect force allFlag _includeUnregistered explicitSource paths = do
   reflectCorrespondences
     ctx
     force
+    False
     [(True, correspondence) | correspondence <- allCorrespondences]
   printWarnings $ nub $ concat warningLists
   return ExitSuccess
@@ -464,11 +497,27 @@ reflectCorrespondences
   => Context (App i)
   -> Bool
   -- ^ Force flag.
+  -> Bool
+  -- ^ Whether every converged route should be persisted.
   -> [(Bool, FileCorrespondence)]
   -- ^ Selected correspondences and whether an ignored destination was
   -- explicitly admitted by command-level selection.
   -> App i ()
-reflectCorrespondences ctx force selectedCorrespondences = do
+reflectCorrespondences ctx force persistAll selectedCorrespondences = do
+  machineState <- prepareMachineState ctx.repository.manifest
+  (initialManaged, _) <- makeManagedCorrespond ctx
+  let selectedFiles = snd <$> selectedCorrespondences
+  let matchesSelection :: ManagedCorrespondence -> Bool
+      matchesSelection managed =
+        any
+          ( \file ->
+              normalise file.source.path
+                == normalise managed.correspondence.source.path
+                && normalise file.destination.path
+                  == normalise managed.correspondence.destination.path
+          )
+          selectedFiles
+  let initialSelectedManaged = filter matchesSelection initialManaged
   pathStyle <- pathStyleFor stderr
   inputs <-
     mapM
@@ -509,10 +558,74 @@ reflectCorrespondences ctx force selectedCorrespondences = do
             <> "..."
       ConflictDetected -> return ()
       Skipped reason -> printSkippedReconciliation pathStyle c reason
-  void $
-    executeReconciliationPlanWith
-      (logSyncOp . (.syncOp))
-      plan
+  let persist = do
+        (refreshedManaged, _) <- makeManagedCorrespond ctx
+        let selectedManaged =
+              nub $
+                (if persistAll then initialManaged else initialSelectedManaged)
+                  <> if persistAll
+                    then refreshedManaged
+                    else filter matchesSelection refreshedManaged
+        persistConvergedTargets ctx machineState selectedManaged
+  void
+    ( executeReconciliationPlanWith
+        (logSyncOp . (.syncOp))
+        plan
+        `catchError` \err -> persist >> throwError err
+    )
+  persist
+
+
+persistConvergedTargets
+  :: (MonadFileSystem i, MonadIO i)
+  => Context (App i)
+  -> MachineState
+  -> [ManagedCorrespondence]
+  -> App i ()
+persistConvergedTargets ctx machineState selected =
+  unless (null selected) $ do
+    now <- liftIO getCurrentTime
+    root <- asks (.stateDirectory)
+    result <-
+      updateManagedTargetsWith
+        root
+        now
+        machineState
+        ( \existing -> do
+            transaction <-
+              newTargetSnapshotTransaction machineState.targetSnapshotRoot
+            observations <-
+              ( catMaybes
+                  <$> mapM
+                    ( observeConvergedManagedTarget
+                        ctx.repository
+                        transaction
+                        Reflected
+                        now
+                    )
+                    selected
+              )
+                `catchError` \err -> do
+                  discardTargetSnapshot transaction
+                    `catchError` const (return ())
+                  throwError err
+            let (updated, superseded) =
+                  mergeConvergedTargets existing observations
+            return (updated, (transaction, superseded))
+        )
+        ( \updated (transaction, superseded) ->
+            let kept =
+                  Set.fromList $
+                    (.snapshotPath) <$> Map.elems updated.targetRecords
+            in unreachableSnapshots
+                 kept
+                 (transaction : ((.snapshotPath) <$> superseded))
+        )
+        (\_ _ -> return ())
+        (\_ (transaction, _) -> discardTargetSnapshot transaction)
+    case result of
+      Left err -> die' machineStateError $ formatStateError err
+      Right _ -> return ()
 
 
 -- | Observes a correspondence that the command has already selected.  Route

@@ -1,3 +1,4 @@
+{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -18,10 +19,16 @@ module Dojang.Types.MachineState
   , encodeMachineState
   , ensureMachineId
   , formatStateError
+  , forgetMarkerPath
+  , forgetRepositoryState
+  , forgetRepositoryStateWith
+  , isRepositoryForgetInProgress
   , listRepositoryStates
   , machineIdText
   , manifestIdentityLockPath
+  , managedTargetSnapshotRoot
   , markFirstApplied
+  , markRepositoryForgetInProgress
   , migrationMarkerPath
   , parseMachineId
   , prepareRepositoryState
@@ -33,10 +40,14 @@ module Dojang.Types.MachineState
   , repositoryStateDirectory
   , repositoryStatePath
   , resolveStateRoot
+  , retryManagedTargetCleanup
   , sameExistingPath
   , selectRepositoryState
   , validateMachineStateStore
   , validateMigrationStateRoot
+  , validateSelectedSnapshotLocation
+  , updateManagedTargets
+  , updateManagedTargetsWith
   , withStateFileLock
   ) where
 
@@ -48,9 +59,10 @@ import Control.Monad.Except
 import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString (ByteString)
 import Data.Char (chr, ord)
-import Data.List (find, isPrefixOf, sort)
+import Data.List (find, isPrefixOf, nub, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
@@ -73,11 +85,13 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
+  , takeDirectory
   , (</>)
   )
 import Toml (Result (..), decode, encode)
 import Toml.FromValue
   ( FromValue (fromValue)
+  , optKey
   , parseTableFromValue
   , reqKey
   )
@@ -95,6 +109,12 @@ import Dojang.MonadFileSystem
   , writeFileAtomically
   )
 import Dojang.Types.Environment (OperatingSystem (..))
+import Dojang.Types.ManagedTarget
+  ( ManagedTarget (..)
+  , SynchronizationCommand (..)
+  , TargetFingerprint (..)
+  , isSafeManagedRelativePath
+  )
 import Dojang.Types.RepositoryId
   ( RepositoryId
   , newRepositoryId
@@ -105,7 +125,7 @@ import Dojang.Types.RepositoryId
 
 -- | The on-disk schema version understood by this release.
 schemaVersion :: Integer
-schemaVersion = 1
+schemaVersion = 2
 
 
 -- | A stable identifier for the local machine-state store.
@@ -241,12 +261,20 @@ data MachineState = MachineState
   -- ^ Manifest path used to verify ownership of the recorded checkout.
   , intermediatePath :: OsPath
   -- ^ Persisted full intermediate snapshot path.
+  , targetSnapshotRoot :: OsPath
+  -- ^ Private root for immutable managed-target baselines.
   , createdAt :: UTCTime
   -- ^ Time at which the repository record was created.
   , updatedAt :: UTCTime
   -- ^ Time at which the repository record was last updated.
   , firstApplied :: Bool
   -- ^ Whether this repository has completed a successful apply on this machine.
+  , pendingCleanupPaths :: [OsPath]
+  -- ^ Published snapshot removals that still need to complete.
+  , targetRecords :: Map Text ManagedTarget
+  -- ^ Successfully synchronized destination entries, keyed by stable ID.
+  , hookRecords :: Map Text Text
+  -- ^ Opaque hook lifecycle data reserved for later schema extensions.
   }
   deriving (Eq, Show)
 
@@ -278,6 +306,8 @@ data StateError
     MachineProvenanceMismatch MachineId MachineId
   | -- | A lifecycle update cannot find its repository record.
     MissingRepositoryState RepositoryId
+  | -- | Only forget may proceed after repository cleanup was approved.
+    RepositoryForgetInProgress RepositoryId
   | -- | Two existing checkouts declare one repository identity.
     DuplicateRepositoryIdentity RepositoryId OsPath OsPath
   | -- | A recorded checkout no longer declares its repository identity.
@@ -373,6 +403,10 @@ formatStateError (MissingRepositoryState identifier) =
     <> repositoryIdText identifier
     <> " disappeared before its lifecycle update.  Run the command again after "
     <> "restoring the repository state."
+formatStateError (RepositoryForgetInProgress identifier) =
+  "Repository forget is still in progress for "
+    <> repositoryIdText identifier
+    <> ".  Run `dojang forget` again before using another stateful command."
 formatStateError (DuplicateRepositoryIdentity identifier oldPath newPath) =
   "Repository identity "
     <> repositoryIdText identifier
@@ -508,12 +542,88 @@ data StateDocument = StateDocument
   , documentCheckoutPath :: Text
   , documentManifestPath :: Text
   , documentIntermediatePath :: Text
+  , documentTargetSnapshotRoot :: Text
   , documentCreatedAt :: Text
   , documentUpdatedAt :: Text
   , documentLifecycle :: LifecycleDocument
-  , documentTargets :: Map Text Text
+  , documentTargets :: Map Text TargetDocument
   , documentHooks :: Map Text Text
   }
+
+
+-- | Schema version 1, before managed-target records were introduced.
+data LegacyStateDocument = LegacyStateDocument
+  { legacyDocumentSchemaVersion :: Integer
+  , legacyDocumentRepositoryId :: Text
+  , legacyDocumentMachineId :: Text
+  , legacyDocumentCheckoutPath :: Text
+  , legacyDocumentManifestPath :: Text
+  , legacyDocumentIntermediatePath :: Text
+  , legacyDocumentCreatedAt :: Text
+  , legacyDocumentUpdatedAt :: Text
+  , legacyDocumentLifecycle :: LifecycleDocument
+  , legacyDocumentTargets :: Map Text Text
+  , legacyDocumentHooks :: Map Text Text
+  }
+
+
+data TargetDocument = TargetDocument
+  { targetDocumentId :: Text
+  , targetDocumentRouteName :: Text
+  , targetDocumentSourcePath :: Text
+  , targetDocumentRouteType :: Text
+  , targetDocumentDestinationPath :: Text
+  , targetDocumentSnapshotPath :: Text
+  , targetDocumentRouteDefinition :: Text
+  , targetDocumentRouteProvenance :: Map Text Text
+  , targetDocumentFingerprintKind :: Text
+  , targetDocumentFingerprintSize :: Integer
+  , targetDocumentFingerprintDigest :: Text
+  , targetDocumentUpdatedBy :: Text
+  , targetDocumentUpdatedAt :: Text
+  }
+
+
+instance FromValue TargetDocument where
+  fromValue =
+    parseTableFromValue $
+      TargetDocument
+        <$> reqKey "id"
+        <*> reqKey "route-name"
+        <*> reqKey "source-path"
+        <*> reqKey "route-type"
+        <*> reqKey "destination-path"
+        <*> reqKey "snapshot-path"
+        <*> reqKey "route-definition"
+        <*> reqKey "route-provenance"
+        <*> reqKey "fingerprint-kind"
+        <*> reqKey "fingerprint-size"
+        <*> reqKey "fingerprint-digest"
+        <*> reqKey "updated-by"
+        <*> reqKey "updated-at"
+
+
+instance ToValue TargetDocument where
+  toValue = defaultTableToValue
+
+
+instance ToTable TargetDocument where
+  toTable target =
+    table
+      [ "id" .= target.targetDocumentId
+      , "route-name" .= target.targetDocumentRouteName
+      , "source-path" .= target.targetDocumentSourcePath
+      , "route-type" .= target.targetDocumentRouteType
+      , "destination-path" .= target.targetDocumentDestinationPath
+      , "snapshot-path" .= target.targetDocumentSnapshotPath
+      , "route-definition" .= target.targetDocumentRouteDefinition
+      , "route-provenance" .= target.targetDocumentRouteProvenance
+      , "fingerprint-kind" .= target.targetDocumentFingerprintKind
+      , "fingerprint-size" .= target.targetDocumentFingerprintSize
+      , "fingerprint-digest" .= target.targetDocumentFingerprintDigest
+      , "updated-by" .= target.targetDocumentUpdatedBy
+      , "updated-at" .= target.targetDocumentUpdatedAt
+      ]
 
 
 newtype SchemaDocument = SchemaDocument
@@ -525,13 +635,18 @@ instance FromValue SchemaDocument where
   fromValue = parseTableFromValue $ SchemaDocument <$> reqKey "schema-version"
 
 
-newtype LifecycleDocument = LifecycleDocument
+data LifecycleDocument = LifecycleDocument
   { lifecycleFirstApplied :: Bool
+  , lifecyclePendingCleanup :: [Text]
   }
 
 
 instance FromValue LifecycleDocument where
-  fromValue = parseTableFromValue $ LifecycleDocument <$> reqKey "first-applied"
+  fromValue =
+    parseTableFromValue $
+      LifecycleDocument
+        <$> reqKey "first-applied"
+        <*> (fromMaybe [] <$> optKey "pending-cleanup")
 
 
 instance ToValue LifecycleDocument where
@@ -539,13 +654,35 @@ instance ToValue LifecycleDocument where
 
 
 instance ToTable LifecycleDocument where
-  toTable lifecycle = table ["first-applied" .= lifecycle.lifecycleFirstApplied]
+  toTable lifecycle =
+    table
+      [ "first-applied" .= lifecycle.lifecycleFirstApplied
+      , "pending-cleanup" .= lifecycle.lifecyclePendingCleanup
+      ]
 
 
 instance FromValue StateDocument where
   fromValue =
     parseTableFromValue $
       StateDocument
+        <$> reqKey "schema-version"
+        <*> reqKey "repository-id"
+        <*> reqKey "machine-id"
+        <*> reqKey "checkout-path"
+        <*> reqKey "manifest-path"
+        <*> reqKey "intermediate-path"
+        <*> reqKey "target-snapshot-root"
+        <*> reqKey "created-at"
+        <*> reqKey "updated-at"
+        <*> reqKey "lifecycle"
+        <*> reqKey "targets"
+        <*> reqKey "hooks"
+
+
+instance FromValue LegacyStateDocument where
+  fromValue =
+    parseTableFromValue $
+      LegacyStateDocument
         <$> reqKey "schema-version"
         <*> reqKey "repository-id"
         <*> reqKey "machine-id"
@@ -572,6 +709,7 @@ instance ToTable StateDocument where
       , "checkout-path" .= document.documentCheckoutPath
       , "manifest-path" .= document.documentManifestPath
       , "intermediate-path" .= document.documentIntermediatePath
+      , "target-snapshot-root" .= document.documentTargetSnapshotRoot
       , "created-at" .= document.documentCreatedAt
       , "updated-at" .= document.documentUpdatedAt
       , "lifecycle" .= document.documentLifecycle
@@ -592,11 +730,15 @@ encodeMachineState state = showt $ FromStringShow $ encode document
       (osPathText state.checkoutPath)
       (osPathText state.manifestPath)
       (osPathText state.intermediatePath)
+      (osPathText state.targetSnapshotRoot)
       (timeText state.createdAt)
       (timeText state.updatedAt)
-      (LifecycleDocument state.firstApplied)
-      Map.empty
-      Map.empty
+      ( LifecycleDocument
+          state.firstApplied
+          (osPathText <$> state.pendingCleanupPaths)
+      )
+      (targetToDocument <$> state.targetRecords)
+      state.hookRecords
 
 
 -- | Decodes and validates a repository record for the expected owners.
@@ -605,52 +747,221 @@ decodeMachineState
   -> MachineId
   -> Text
   -> Either StateError MachineState
-decodeMachineState expectedRepository expectedMachine source = do
+decodeMachineState = decodeMachineStateWithTargetRoot Nothing
+
+
+decodeMachineStateWithTargetRoot
+  :: Maybe OsPath
+  -> RepositoryId
+  -> MachineId
+  -> Text
+  -> Either StateError MachineState
+decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedMachine source = do
   versionDocument <- case decodedVersion of
     Success _ value -> Right value
     Failure errors -> Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
-  whenEither (versionDocument.schemaDocumentVersion /= schemaVersion) $
-    UnsupportedSchemaVersion versionDocument.schemaDocumentVersion
-  document <- case decoded of
-    Success _ value -> Right value
-    Failure errors -> Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
-  actualRepository <-
-    mapLeft MalformedState $ parseRepositoryId document.documentRepositoryId
-  actualMachine <-
-    mapLeft MalformedState $ parseMachineId document.documentMachineId
-  whenEither (actualRepository /= expectedRepository) $
-    RepositoryIdentityMismatch expectedRepository actualRepository
-  whenEither (actualMachine /= expectedMachine) $
-    MachineProvenanceMismatch expectedMachine actualMachine
-  checkout <- mapLeft MalformedState $ textOsPath document.documentCheckoutPath
-  manifest <- mapLeft MalformedState $ textOsPath document.documentManifestPath
-  intermediate <-
-    mapLeft MalformedState $ textOsPath document.documentIntermediatePath
-  whenEither (not $ isAbsolute checkout) $
-    MalformedState "The checkout-path field must be absolute."
-  whenEither (not $ isAbsolute manifest) $
-    MalformedState "The manifest-path field must be absolute."
-  whenEither (not $ isAbsolute intermediate) $
-    MalformedState "The intermediate-path field must be absolute."
-  created <- parseTime "created-at" document.documentCreatedAt
-  updated <- parseTime "updated-at" document.documentUpdatedAt
-  return $
-    MachineState
-      document.documentSchemaVersion
-      actualRepository
-      actualMachine
-      checkout
-      manifest
-      intermediate
-      created
-      updated
-      document.documentLifecycle.lifecycleFirstApplied
+  document <- case versionDocument.schemaDocumentVersion of
+    1 -> upgradeLegacyDocument expectedTargetRoot source
+    version
+      | version == schemaVersion -> decodeCurrentDocument source
+      | otherwise -> Left $ UnsupportedSchemaVersion version
+  decodeDocument document
  where
   decodedVersion :: Result String SchemaDocument
   decodedVersion = decode $ Text.unpack source
 
-  decoded :: Result String StateDocument
+  decodeDocument :: StateDocument -> Either StateError MachineState
+  decodeDocument document = do
+    actualRepository <-
+      mapLeft MalformedState $ parseRepositoryId document.documentRepositoryId
+    actualMachine <-
+      mapLeft MalformedState $ parseMachineId document.documentMachineId
+    whenEither (actualRepository /= expectedRepository) $
+      RepositoryIdentityMismatch expectedRepository actualRepository
+    whenEither (actualMachine /= expectedMachine) $
+      MachineProvenanceMismatch expectedMachine actualMachine
+    checkout <- mapLeft MalformedState $ textOsPath document.documentCheckoutPath
+    manifest <- mapLeft MalformedState $ textOsPath document.documentManifestPath
+    intermediate <-
+      mapLeft MalformedState $ textOsPath document.documentIntermediatePath
+    targetSnapshots <-
+      mapLeft MalformedState $ textOsPath document.documentTargetSnapshotRoot
+    whenEither (not $ isAbsolute checkout) $
+      MalformedState "The checkout-path field must be absolute."
+    whenEither (not $ isAbsolute manifest) $
+      MalformedState "The manifest-path field must be absolute."
+    whenEither (not $ isAbsolute intermediate) $
+      MalformedState "The intermediate-path field must be absolute."
+    whenEither (not $ isAbsolute targetSnapshots) $
+      MalformedState "The target-snapshot-root field must be absolute."
+    created <- parseTime "created-at" document.documentCreatedAt
+    updated <- parseTime "updated-at" document.documentUpdatedAt
+    targets <- traverseWithKeyEither targetFromDocument document.documentTargets
+    pendingCleanup <-
+      traverse
+        (mapLeft MalformedState . textOsPath)
+        document.documentLifecycle.lifecyclePendingCleanup
+    whenEither
+      ( any (not . isProperDescendant targetSnapshots . (.snapshotPath)) $
+          Map.elems targets
+      )
+      ( MalformedState
+          "Every managed target snapshot-path must be inside target-snapshot-root."
+      )
+    whenEither
+      (any (not . isCleanupPathInside intermediate targetSnapshots) pendingCleanup)
+      ( MalformedState
+          "Every pending-cleanup path must be inside a managed snapshot root."
+      )
+    return $
+      MachineState
+        schemaVersion
+        actualRepository
+        actualMachine
+        checkout
+        manifest
+        intermediate
+        targetSnapshots
+        created
+        updated
+        document.documentLifecycle.lifecycleFirstApplied
+        pendingCleanup
+        targets
+        document.documentHooks
+
+
+decodeCurrentDocument :: Text -> Either StateError StateDocument
+decodeCurrentDocument source = case decode $ Text.unpack source of
+  Success _ value -> Right value
+  Failure errors -> Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
+
+
+upgradeLegacyDocument
+  :: Maybe OsPath
+  -> Text
+  -> Either StateError StateDocument
+upgradeLegacyDocument expectedTargetRoot source = do
+  legacy <- case decoded of
+    Success _ value -> Right value
+    Failure errors -> Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
+  whenEither (legacy.legacyDocumentSchemaVersion /= 1) $
+    UnsupportedSchemaVersion legacy.legacyDocumentSchemaVersion
+  whenEither (not $ Map.null legacy.legacyDocumentTargets) $
+    MalformedState "Schema-v1 target data cannot be upgraded safely."
+  intermediate <-
+    mapLeft MalformedState $ textOsPath legacy.legacyDocumentIntermediatePath
+  let targetRoot =
+        case expectedTargetRoot of
+          Just root -> root
+          Nothing -> takeDirectory intermediate </> path "targets"
+  return $
+    StateDocument
+      schemaVersion
+      legacy.legacyDocumentRepositoryId
+      legacy.legacyDocumentMachineId
+      legacy.legacyDocumentCheckoutPath
+      legacy.legacyDocumentManifestPath
+      legacy.legacyDocumentIntermediatePath
+      (osPathText targetRoot)
+      legacy.legacyDocumentCreatedAt
+      legacy.legacyDocumentUpdatedAt
+      legacy.legacyDocumentLifecycle
+      Map.empty
+      legacy.legacyDocumentHooks
+ where
+  decoded :: Result String LegacyStateDocument
   decoded = decode $ Text.unpack source
+
+
+targetToDocument :: ManagedTarget -> TargetDocument
+targetToDocument target =
+  TargetDocument
+    target.targetId
+    (osPathText target.routeName)
+    (osPathText target.sourcePath)
+    ( case target.routeType of
+        File -> "file"
+        Directory -> "directory"
+        Symlink -> "symlink"
+    )
+    (osPathText target.destinationPath)
+    (osPathText target.snapshotPath)
+    target.routeDefinition
+    target.routeProvenance
+    fingerprintKind
+    fingerprintSize
+    fingerprintDigest
+    (case target.updatedBy of Applied -> "apply"; Reflected -> "reflect")
+    (timeText target.updatedAt)
+ where
+  (fingerprintKind, fingerprintSize, fingerprintDigest) =
+    case target.fingerprint of
+      FileFingerprint size digest -> ("file", size, digest)
+      DirectoryFingerprint -> ("directory", 0, "")
+
+
+targetFromDocument :: Text -> TargetDocument -> Either StateError ManagedTarget
+targetFromDocument key target = do
+  whenEither (key /= target.targetDocumentId) $
+    MalformedState "A target table key does not match its id field."
+  route <- mapLeft MalformedState $ textOsPath target.targetDocumentRouteName
+  source <- mapLeft MalformedState $ textOsPath target.targetDocumentSourcePath
+  destination <-
+    mapLeft MalformedState $ textOsPath target.targetDocumentDestinationPath
+  snapshot <-
+    mapLeft MalformedState $ textOsPath target.targetDocumentSnapshotPath
+  whenEither (isAbsolute route) $
+    MalformedState "A managed target route-name must be relative."
+  whenEither (isAbsolute source) $
+    MalformedState "A managed target source-path must be relative."
+  whenEither (not $ isSafeManagedRelativePath source) $
+    MalformedState "A managed target source-path must not contain parent traversal."
+  routeType <- case target.targetDocumentRouteType of
+    "file" -> Right File
+    "directory" -> Right Directory
+    "symlink" -> Right Symlink
+    other -> Left $ MalformedState $ "Unknown target route type: " <> other
+  whenEither (not $ isAbsolute destination) $
+    MalformedState "A managed target destination-path must be absolute."
+  whenEither (not $ isAbsolute snapshot) $
+    MalformedState "A managed target snapshot-path must be absolute."
+  fingerprint <- case target.targetDocumentFingerprintKind of
+    "file" ->
+      Right $
+        FileFingerprint
+          target.targetDocumentFingerprintSize
+          target.targetDocumentFingerprintDigest
+    "directory" -> Right DirectoryFingerprint
+    other -> Left $ MalformedState $ "Unknown target fingerprint kind: " <> other
+  command <- case target.targetDocumentUpdatedBy of
+    "apply" -> Right Applied
+    "reflect" -> Right Reflected
+    other -> Left $ MalformedState $ "Unknown target update command: " <> other
+  updated <- parseTime "targets.updated-at" target.targetDocumentUpdatedAt
+  return $
+    ManagedTarget
+      key
+      route
+      source
+      routeType
+      destination
+      snapshot
+      target.targetDocumentRouteDefinition
+      target.targetDocumentRouteProvenance
+      fingerprint
+      command
+      updated
+
+
+traverseWithKeyEither
+  :: (Ord key)
+  => (key -> value -> Either error result)
+  -> Map key value
+  -> Either error (Map key result)
+traverseWithKeyEither f =
+  fmap Map.fromList
+    . traverse (\(key, value) -> fmap (\result -> (key, result)) $ f key value)
+    . Map.toList
 
 
 encodeMigrationMarker :: OsPath -> OsPath -> ByteString
@@ -720,10 +1031,55 @@ defaultIntermediatePath root identifier =
       </> path "current"
 
 
+-- | Private root containing immutable managed-target baselines.
+managedTargetSnapshotRoot :: OsPath -> RepositoryId -> OsPath
+managedTargetSnapshotRoot root identifier =
+  normalise $
+    repositoryStateDirectory root identifier
+      </> path "snapshots"
+      </> path "targets"
+
+
 -- | Marker used to make an interrupted legacy migration retryable.
 migrationMarkerPath :: OsPath -> RepositoryId -> OsPath
 migrationMarkerPath root identifier =
   repositoryStateDirectory root identifier </> path "migration-in-progress"
+
+
+-- | Marker that preserves approval across an interrupted repository forget.
+forgetMarkerPath :: OsPath -> RepositoryId -> OsPath
+forgetMarkerPath root identifier =
+  repositoryStateDirectory root identifier </> path "forget-in-progress"
+
+
+-- | Checks whether repository cleanup was approved before an interruption.
+--
+-- Callers that use this result to skip lifecycle validation must hold the
+-- repository state lock until cleanup completes.
+isRepositoryForgetInProgress
+  :: (MonadFileSystem m) => OsPath -> RepositoryId -> m (Either StateError Bool)
+isRepositoryForgetInProgress root identifier =
+  catchStateIOErrors $
+    validateStateDocument
+      "repository forget marker"
+      (forgetMarkerPath root identifier)
+
+
+-- | Atomically records approval for destructive repository-state cleanup.
+--
+-- Callers must validate the current state while holding the repository state
+-- lock before creating this marker.
+markRepositoryForgetInProgress
+  :: (MonadFileSystem m) => OsPath -> RepositoryId -> m (Either StateError ())
+markRepositoryForgetInProgress root identifier = catchStateIOErrors $ do
+  let marker = forgetMarkerPath root identifier
+  validated <- validateStateDocument "repository forget marker" marker
+  case validated of
+    Left err -> return $ Left err
+    Right True -> return $ Right ()
+    Right False -> do
+      writeFileAtomically marker "forget-in-progress.tmp" "approved"
+      return $ Right ()
 
 
 -- | Reads a repository state record, distinguishing absence from invalid state.
@@ -734,16 +1090,169 @@ readRepositoryState
   -> MachineId
   -> m (Either StateError (Maybe MachineState))
 readRepositoryState root repositoryId' machineId' = catchStateIOErrors $ do
-  let statePath = repositoryStatePath root repositoryId'
-  validated <- validateStateDocument "repository state entry" statePath
-  case validated of
-    Left err -> return $ Left err
-    Right False -> return $ Right Nothing
-    Right True -> do
-      contents <- readFile statePath
-      return $ do
-        source <- decodeStateUtf8 contents
-        Just <$> decodeMachineState repositoryId' machineId' source
+  let targetRoot = managedTargetSnapshotRoot root repositoryId'
+  targetSymlink <- findPrivateStateSymlink root repositoryId' targetRoot
+  case targetSymlink of
+    Just symlink -> return $ Left $ UnsupportedSnapshotSymlink symlink
+    Nothing -> do
+      let statePath = repositoryStatePath root repositoryId'
+      validated <- validateStateDocument "repository state entry" statePath
+      case validated of
+        Left err -> return $ Left err
+        Right False -> return $ Right Nothing
+        Right True -> do
+          contents <- readFile statePath
+          return $ do
+            source <- decodeStateUtf8 contents
+            state <-
+              decodeMachineStateWithTargetRoot
+                (Just targetRoot)
+                repositoryId'
+                machineId'
+                source
+            whenEither
+              (normalise state.targetSnapshotRoot /= targetRoot)
+              ( MalformedState
+                  "The target-snapshot-root field does not belong to this repository."
+              )
+            return $ Just state
+
+
+findPrivateStateSymlink
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> OsPath
+  -> m (Maybe OsPath)
+findPrivateStateSymlink root repositoryId' candidate = do
+  parentComponent <- encodePath ".."
+  let stateDirectory = repositoryStateDirectory root repositoryId'
+  let relative = makeRelative stateDirectory candidate
+  let components = splitDirectories relative
+  let insidePrivateState =
+        not (isAbsolute relative)
+          && case components of
+            [] -> True
+            first : _ -> first /= parentComponent
+  if not insidePrivateState
+    then return Nothing
+    else firstSymlink $ scanl (</>) stateDirectory components
+ where
+  firstSymlink [] = return Nothing
+  firstSymlink (path' : rest) = do
+    symlink <- isSymlink path'
+    if symlink then return (Just path') else firstSymlink rest
+
+
+-- | Validates a persisted intermediate snapshot before destructive use.
+--
+-- The snapshot must not be a symbolic link, contain a protected checkout or
+-- machine-state path, or pass through any symbolic-link ancestor.
+validateSelectedSnapshotLocation
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> [OsPath]
+  -> OsPath
+  -> m (Either StateError ())
+validateSelectedSnapshotLocation root repositoryId' protectedCheckouts snapshotPath =
+  catchStateIOErrors $ do
+    symlink <- findUnsupportedSnapshotSymlink root repositoryId' snapshotPath
+    case symlink of
+      Just symlinkPath ->
+        return $ Left $ UnsupportedSnapshotSymlink symlinkPath
+      Nothing ->
+        validateProtectedSnapshotLocation
+          root
+          repositoryId'
+          protectedCheckouts
+          snapshotPath
+
+
+findUnsupportedSnapshotSymlink
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> OsPath
+  -> m (Maybe OsPath)
+findUnsupportedSnapshotSymlink _ _ = findPathSymlink
+
+
+findDirectOrPrivateSnapshotSymlink
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> OsPath
+  -> m (Maybe OsPath)
+findDirectOrPrivateSnapshotSymlink root repositoryId' snapshotPath = do
+  directSymlink <- isSymlink snapshotPath
+  if directSymlink
+    then return $ Just snapshotPath
+    else findPrivateStateSymlink root repositoryId' snapshotPath
+
+
+findPathSymlink :: (MonadFileSystem m) => OsPath -> m (Maybe OsPath)
+findPathSymlink candidate =
+  firstSnapshotSymlink (pathRoot candidate') candidate'
+ where
+  candidate' = normalise candidate
+
+
+pathRoot :: OsPath -> OsPath
+pathRoot candidate
+  | parent == candidate' = candidate'
+  | otherwise = pathRoot parent
+ where
+  candidate' = normalise candidate
+  parent = normalise $ takeDirectory candidate'
+
+
+validateProtectedSnapshotLocation
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> [OsPath]
+  -> OsPath
+  -> m (Either StateError ())
+validateProtectedSnapshotLocation
+  root
+  repositoryId'
+  protectedCheckouts
+  snapshotPath = do
+    snapshotsName <- encodePath "snapshots"
+    resolvedSnapshot <- canonicalizePath snapshotPath
+    resolvedCheckouts <- mapM canonicalizePath protectedCheckouts
+    resolvedRoot <- canonicalizePath root
+    resolvedStateDirectory <-
+      canonicalizePath $ repositoryStateDirectory root repositoryId'
+    resolvedSnapshotStore <-
+      canonicalizePath $ resolvedStateDirectory </> snapshotsName
+    let targetSnapshotRoot = managedTargetSnapshotRoot root repositoryId'
+    resolvedTargetSnapshotRoot <- canonicalizePath targetSnapshotRoot
+    let contains protected =
+          resolvedSnapshot == protected
+            || isProperDescendant resolvedSnapshot protected
+    let inside directory =
+          resolvedSnapshot == directory
+            || isProperDescendant directory resolvedSnapshot
+    return $ case find (contains . snd) $ zip protectedCheckouts resolvedCheckouts of
+      Just (protectedCheckout, _) ->
+        Left $ ProtectedSnapshotLocation snapshotPath protectedCheckout
+      Nothing ->
+        if resolvedSnapshot == resolvedTargetSnapshotRoot
+          || pathsOverlap resolvedSnapshot resolvedTargetSnapshotRoot
+          then Left $ ProtectedSnapshotLocation snapshotPath targetSnapshotRoot
+          else
+            if contains resolvedRoot
+              then Left $ ProtectedSnapshotLocation snapshotPath root
+              else
+                if inside resolvedRoot && not (inside resolvedSnapshotStore)
+                  then
+                    Left $
+                      ProtectedSnapshotLocation
+                        snapshotPath
+                        (repositoryStateDirectory root repositoryId')
+                  else Right ()
 
 
 -- | Reads or creates the identity of the local machine-state store.
@@ -1011,26 +1520,32 @@ listRepositoryStates root machineId' = catchStateIOErrors $ do
                   Left err -> return $ Left err
                   Right False -> do
                     contents <- listDirectory repositoryDirectory
-                    let orphaned = filter (/= path "state.lock") contents
-                    retryable <-
-                      isRetryableInitialSnapshot root repositoryId' orphaned
-                    if null orphaned || retryable
-                      then return $ Right Nothing
-                      else do
-                        repositoryPath <- Text.pack <$> decodePath repositoryDirectory
-                        return $
-                          Left $
-                            MalformedState $
-                              "Repository state directory "
-                                <> repositoryPath
-                                <> " contains data but has no state.toml record."
+                    let unlocked = filter (/= path "state.lock") contents
+                    forgetting <-
+                      isRepositoryForgetInProgress root repositoryId'
+                    case forgetting of
+                      Left err -> return $ Left err
+                      Right inProgress -> do
+                        when inProgress $
+                          removeFile $
+                            forgetMarkerPath root repositoryId'
+                        let orphaned =
+                              filter (/= path "forget-in-progress") unlocked
+                        retryable <-
+                          isRetryableInitialSnapshot root repositoryId' orphaned
+                        if null orphaned || retryable
+                          then return $ Right Nothing
+                          else do
+                            repositoryPath <-
+                              Text.pack <$> decodePath repositoryDirectory
+                            return $
+                              Left $
+                                MalformedState $
+                                  "Repository state directory "
+                                    <> repositoryPath
+                                    <> " contains data but has no state.toml record."
                   Right True -> do
-                    contents <- readFile stateFile
-                    return $
-                      Just
-                        <$> ( decodeStateUtf8 contents
-                                >>= decodeMachineState repositoryId' machineId'
-                            )
+                    readRepositoryState root repositoryId' machineId'
             case loaded of
               Left err -> return $ Left err
               Right Nothing -> loadEntries repositories rest states
@@ -1219,27 +1734,48 @@ prepareRepositoryStateWithOwnershipBeforeMigration
   legacyFirstApplied
   now
   beforeMigration = do
-    validatedStore <- validateRepositoryStoreRoot root
-    case validatedStore of
+    resolvedExplicit <- resolveExplicitSnapshot checkout explicit
+    case resolvedExplicit of
       Left err -> return $ Left err
-      Right () -> do
-        validatedDirectory <- validateRepositoryStateDirectory root repositoryId'
-        case validatedDirectory of
+      Right explicit' -> do
+        validatedStore <- validateRepositoryStoreRoot root
+        case validatedStore of
           Left err -> return $ Left err
           Right () -> do
-            createDirectories $ repositoryStateDirectory root repositoryId'
-            withFileLock (repositoryStateLockPath root repositoryId') $
-              prepareRepositoryStateUnlocked
-                root
-                repositoryId'
-                machineId'
-                checkout
-                manifest
-                explicit
-                checkoutOwnsIdentity
-                legacyFirstApplied
-                now
-                beforeMigration
+            validatedDirectory <-
+              validateRepositoryStateDirectory root repositoryId'
+            case validatedDirectory of
+              Left err -> return $ Left err
+              Right () -> do
+                createDirectories $ repositoryStateDirectory root repositoryId'
+                withFileLock (repositoryStateLockPath root repositoryId') $
+                  prepareRepositoryStateUnlocked
+                    root
+                    repositoryId'
+                    machineId'
+                    checkout
+                    manifest
+                    explicit'
+                    checkoutOwnsIdentity
+                    legacyFirstApplied
+                    now
+                    beforeMigration
+
+
+resolveExplicitSnapshot
+  :: (MonadFileSystem m)
+  => OsPath
+  -> Maybe OsPath
+  -> m (Either StateError (Maybe OsPath))
+resolveExplicitSnapshot _ Nothing = return $ Right Nothing
+resolveExplicitSnapshot checkout (Just explicit) = catchStateIOErrors $ do
+  let candidate =
+        normalise $
+          if isAbsolute explicit then explicit else checkout </> explicit
+  directSymlink <- isSymlink candidate
+  if directSymlink
+    then return $ Left $ UnsupportedSnapshotSymlink candidate
+    else Right . Just <$> canonicalizePath candidate
 
 
 prepareRepositoryStateUnlocked
@@ -1266,11 +1802,16 @@ prepareRepositoryStateUnlocked
   legacyFirstApplied
   now
   beforeMigration = do
-    loaded <- readRepositoryState root repositoryId' machineId'
-    case loaded of
+    forgetting <- isRepositoryForgetInProgress root repositoryId'
+    case forgetting of
       Left err -> return $ Left err
-      Right (Just state) -> prepareExisting state
-      Right Nothing -> prepareNew
+      Right True -> return $ Left $ RepositoryForgetInProgress repositoryId'
+      Right False -> do
+        loaded <- readRepositoryState root repositoryId' machineId'
+        case loaded of
+          Left err -> return $ Left err
+          Right (Just state) -> prepareExisting state
+          Right Nothing -> prepareNew
    where
     checkout' = normalise checkout
     manifest' = normalise manifest
@@ -1310,20 +1851,29 @@ prepareRepositoryStateUnlocked
           let desired = maybe state.intermediatePath (const requested) explicit
           let protectedCheckouts = [state.checkoutPath, checkout']
           currentValidation <-
-            validateSelectedSnapshot protectedCheckouts state.intermediatePath
+            validateSelectedSnapshotLocation
+              root
+              repositoryId'
+              protectedCheckouts
+              state.intermediatePath
           case currentValidation of
             Left err -> return $ Left err
             Right () -> do
+              current <- retryManagedTargetCleanupUnlocked root state
               desiredValidation <-
-                validateSelectedSnapshot protectedCheckouts desired
+                validateSelectedSnapshotLocation
+                  root
+                  repositoryId'
+                  protectedCheckouts
+                  desired
               case desiredValidation of
                 Left err -> return $ Left err
                 Right () -> do
-                  recovered <- recoverMigration state.intermediatePath desired
+                  recovered <- recoverMigration current.intermediatePath desired
                   case recovered of
                     Left err -> return $ Left err
                     Right () -> do
-                      migration <- migrateIfNeeded state.intermediatePath desired
+                      migration <- migrateIfNeeded current.intermediatePath desired
                       case migration of
                         Left err -> return $ Left err
                         Right migrationResult -> do
@@ -1338,24 +1888,24 @@ prepareRepositoryStateUnlocked
                                 if sameCheckout && manifestInsideCheckout
                                   then
                                     normalise $
-                                      state.checkoutPath </> relativeManifest
+                                      current.checkoutPath </> relativeManifest
                                   else manifest'
                           let storedIntermediate =
                                 if migrationResult == ReusedRepositoryState
-                                  then state.intermediatePath
+                                  then current.intermediatePath
                                   else desired
                           let updated =
-                                state
+                                current
                                   { checkoutPath =
                                       if sameCheckout
-                                        then state.checkoutPath
+                                        then current.checkoutPath
                                         else checkout'
                                   , manifestPath = storedManifest
                                   , intermediatePath = storedIntermediate
                                   , updatedAt = now
                                   }
                           writeState root updated
-                          cleanup <- cleanupSnapshot state.intermediatePath desired
+                          cleanup <- cleanupSnapshot current.intermediatePath desired
                           case cleanup of
                             Left err -> return $ Left err
                             Right () -> do
@@ -1374,15 +1924,22 @@ prepareRepositoryStateUnlocked
                                   )
 
     prepareNew = do
-      legacySymlink <- findUnsupportedSnapshotSymlink legacy
-      requestedSymlink <- findUnsupportedSnapshotSymlink requested
+      legacySymlink <-
+        findDirectOrPrivateSnapshotSymlink root repositoryId' legacy
+      requestedSymlink <-
+        findUnsupportedSnapshotSymlink root repositoryId' requested
       case legacySymlink of
         Just symlink -> return $ Left $ UnsupportedSnapshotSymlink symlink
         Nothing ->
           case requestedSymlink of
             Just symlink -> return $ Left $ UnsupportedSnapshotSymlink symlink
             Nothing -> do
-              protected <- validateProtectedSnapshot [checkout'] requested
+              protected <-
+                validateProtectedSnapshotLocation
+                  root
+                  repositoryId'
+                  [checkout']
+                  requested
               case protected of
                 Left err -> return $ Left err
                 Right () -> do
@@ -1395,68 +1952,6 @@ prepareRepositoryStateUnlocked
                       case validateNewPaths plan of
                         Left err -> return $ Left err
                         Right () -> beforeMigration >> prepareNewPaths plan
-
-    findUnsupportedSnapshotSymlink snapshotPath = do
-      directSymlink <- isSymlink snapshotPath
-      if directSymlink
-        then return $ Just snapshotPath
-        else findPrivateSnapshotSymlink snapshotPath
-
-    findPrivateSnapshotSymlink snapshotPath = do
-      parentComponent <- encodePath ".."
-      let stateDirectory = repositoryStateDirectory root repositoryId'
-      let relative = makeRelative stateDirectory snapshotPath
-      let components = splitDirectories relative
-      let insidePrivateState =
-            not (isAbsolute relative)
-              && case components of
-                [] -> True
-                first : _ -> first /= parentComponent
-      if not insidePrivateState
-        then return Nothing
-        else firstSymlink $ drop 1 $ scanl (</>) stateDirectory components
-
-    firstSymlink [] = return Nothing
-    firstSymlink (candidate : rest) = do
-      symlink <- isSymlink candidate
-      if symlink then return (Just candidate) else firstSymlink rest
-
-    validateSelectedSnapshot protectedCheckouts snapshotPath = do
-      symlink <- findUnsupportedSnapshotSymlink snapshotPath
-      case symlink of
-        Just symlinkPath ->
-          return $ Left $ UnsupportedSnapshotSymlink symlinkPath
-        Nothing -> validateProtectedSnapshot protectedCheckouts snapshotPath
-
-    validateProtectedSnapshot protectedCheckouts snapshotPath = do
-      snapshotsName <- encodePath "snapshots"
-      resolvedSnapshot <- canonicalizePath snapshotPath
-      resolvedCheckouts <- mapM canonicalizePath protectedCheckouts
-      resolvedRoot <- canonicalizePath root
-      resolvedStateDirectory <-
-        canonicalizePath $ repositoryStateDirectory root repositoryId'
-      resolvedSnapshotStore <-
-        canonicalizePath $ resolvedStateDirectory </> snapshotsName
-      let contains protected =
-            resolvedSnapshot == protected
-              || isProperDescendant resolvedSnapshot protected
-      let inside directory =
-            resolvedSnapshot == directory
-              || isProperDescendant directory resolvedSnapshot
-      return $ case find (contains . snd) $ zip protectedCheckouts resolvedCheckouts of
-        Just (protectedCheckout, _) ->
-          Left $ ProtectedSnapshotLocation snapshotPath protectedCheckout
-        Nothing ->
-          if contains resolvedRoot
-            then Left $ ProtectedSnapshotLocation snapshotPath root
-            else
-              if inside resolvedRoot && not (inside resolvedSnapshotStore)
-                then
-                  Left $
-                    ProtectedSnapshotLocation
-                      snapshotPath
-                      (repositoryStateDirectory root repositoryId')
-                else Right ()
 
     planNewPaths resolvedLegacy resolvedRequested = do
       markerExists <- doesMigrationMarkerExist
@@ -1602,9 +2097,13 @@ prepareRepositoryStateUnlocked
                   checkout'
                   manifest'
                   requested
+                  (managedTargetSnapshotRoot root repositoryId')
                   now
                   now
                   legacyFirstApplied
+                  []
+                  Map.empty
+                  Map.empty
           legacyExists <- isDirectory legacy
           when (legacyExists && requested /= legacy) $ do
             markerExists <- doesMigrationMarkerExist
@@ -1858,14 +2357,288 @@ markFirstApplied
 markFirstApplied root now state = catchStateIOErrors $ do
   createDirectories $ repositoryStateDirectory root state.repositoryId
   withFileLock (repositoryStateLockPath root state.repositoryId) $ do
+    forgetting <- isRepositoryForgetInProgress root state.repositoryId
+    case forgetting of
+      Left err -> return $ Left err
+      Right True ->
+        return $ Left $ RepositoryForgetInProgress state.repositoryId
+      Right False -> do
+        loaded <- readRepositoryState root state.repositoryId state.machineId
+        case loaded of
+          Left err -> return $ Left err
+          Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
+          Right (Just current) -> do
+            let updated = current{firstApplied = True, updatedAt = now}
+            writeState root updated
+            return $ Right updated
+
+
+-- | Atomically replaces managed-target records after successful syncs.
+--
+-- The current record is reloaded under its repository lock so concurrent
+-- lifecycle updates and snapshot migrations are not overwritten.
+updateManagedTargets
+  :: (MonadFileSystem m)
+  => OsPath
+  -> UTCTime
+  -> MachineState
+  -> (Map Text ManagedTarget -> Map Text ManagedTarget)
+  -> m (Either StateError MachineState)
+updateManagedTargets root now state update = do
+  result <-
+    updateManagedTargetsWith
+      root
+      now
+      state
+      (\records -> return (update records, ()))
+      (\_ _ -> [])
+      (\_ _ -> return ())
+      (\_ _ -> return ())
+  return $ fst <$> result
+
+
+-- | Changes managed-target records and journals locked post-write cleanup.
+--
+-- The current record is reloaded before the update callback.  Any cleanup left
+-- by an earlier update is retried first.  New cleanup paths are published with
+-- the changed records, removed while the repository lock remains held, and
+-- cleared by a second atomic state write.  If cleanup or that final write
+-- fails, the published journal makes the work retryable.  If initial
+-- publication fails, the rollback callback removes resources created by the
+-- update callback.
+updateManagedTargetsWith
+  :: (MonadFileSystem m)
+  => OsPath
+  -> UTCTime
+  -> MachineState
+  -> (Map Text ManagedTarget -> m (Map Text ManagedTarget, result))
+  -> (MachineState -> result -> [OsPath])
+  -> (MachineState -> result -> m ())
+  -> (MachineState -> result -> m ())
+  -> m (Either StateError (MachineState, result))
+updateManagedTargetsWith root now state update cleanupPaths afterPublish rollback =
+  catchStateIOErrors $ do
+    createDirectories $ repositoryStateDirectory root state.repositoryId
+    withFileLock (repositoryStateLockPath root state.repositoryId) $ do
+      forgetting <- isRepositoryForgetInProgress root state.repositoryId
+      case forgetting of
+        Left err -> return $ Left err
+        Right True ->
+          return $ Left $ RepositoryForgetInProgress state.repositoryId
+        Right False -> do
+          loaded <- readRepositoryState root state.repositoryId state.machineId
+          case loaded of
+            Left err -> return $ Left err
+            Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
+            Right (Just current) -> do
+              current' <- retryManagedTargetCleanupUnlocked root current
+              (records, result) <- update current'.targetRecords
+              let updatedWithoutCleanup =
+                    current'
+                      { targetRecords = records
+                      , updatedAt = now
+                      }
+              let pending = nub $ cleanupPaths updatedWithoutCleanup result
+              if any (not . validCleanupPath updatedWithoutCleanup) pending
+                then do
+                  rollback current' result
+                  return $
+                    Left $
+                      MalformedState
+                        "A managed-target update tried to clean outside its snapshot roots."
+                else do
+                  let published =
+                        updatedWithoutCleanup{pendingCleanupPaths = pending}
+                  writeState root published `catchError` \err -> do
+                    rollback current' result
+                    throwError err
+                  afterPublish published result
+                  cleanupManagedTargetPaths published pending
+                  let completed = published{pendingCleanupPaths = []}
+                  unless (null pending) $ writeState root completed
+                  return $ Right (completed, result)
+
+
+-- | Retries cleanup recorded by a previously published managed-target update.
+--
+-- Cleanup and journal removal run under the repository lock.  Missing paths
+-- are accepted so a partially completed prior attempt remains idempotent.
+retryManagedTargetCleanup
+  :: (MonadFileSystem m)
+  => OsPath
+  -> MachineState
+  -> m (Either StateError MachineState)
+retryManagedTargetCleanup root state = catchStateIOErrors $ do
+  createDirectories $ repositoryStateDirectory root state.repositoryId
+  withFileLock (repositoryStateLockPath root state.repositoryId) $ do
     loaded <- readRepositoryState root state.repositoryId state.machineId
     case loaded of
       Left err -> return $ Left err
       Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
-      Right (Just current) -> do
-        let updated = current{firstApplied = True, updatedAt = now}
-        writeState root updated
-        return $ Right updated
+      Right (Just current) -> Right <$> retryManagedTargetCleanupUnlocked root current
+
+
+retryManagedTargetCleanupUnlocked
+  :: (MonadFileSystem m) => OsPath -> MachineState -> m MachineState
+retryManagedTargetCleanupUnlocked root state
+  | null state.pendingCleanupPaths = return state
+  | otherwise = do
+      cleanupManagedTargetPaths state state.pendingCleanupPaths
+      let completed = state{pendingCleanupPaths = []}
+      writeState root completed
+      return completed
+
+
+cleanupManagedTargetPaths
+  :: (MonadFileSystem m) => MachineState -> [OsPath] -> m ()
+cleanupManagedTargetPaths state = mapM_ $ cleanupManagedTargetPath state
+
+
+cleanupManagedTargetPath
+  :: (MonadFileSystem m) => MachineState -> OsPath -> m ()
+cleanupManagedTargetPath state candidate =
+  case cleanupRoot state candidate' of
+    Nothing -> refuse "outside its snapshot roots"
+    Just root -> do
+      symbolicLink <- findPathSymlink candidate'
+      case symbolicLink of
+        Just _ -> refuse "because it has a symbolic-link path component"
+        Nothing -> return ()
+      present <- exists candidate'
+      directory <- isDirectory candidate'
+      file <- isFile candidate'
+      if directory
+        then removeDirectoryRecursively candidate'
+        else
+          if file
+            then removeFile candidate'
+            else when present $ refuse "because it is not a regular entry"
+      pruneEmptyAncestors root $ normalise $ takeDirectory candidate'
+ where
+  candidate' = normalise candidate
+  refuse reason = do
+    rendered <- decodePath candidate'
+    throwError $
+      userError $
+        "Refusing to clean managed snapshot " <> rendered <> " " <> reason <> "."
+
+
+firstSnapshotSymlink
+  :: (MonadFileSystem m) => OsPath -> OsPath -> m (Maybe OsPath)
+firstSnapshotSymlink root candidate = firstSymlink paths
+ where
+  relative = makeRelative root candidate
+  paths = scanl (</>) root $ splitDirectories relative
+
+  firstSymlink [] = return Nothing
+  firstSymlink (path' : rest) = do
+    symbolicLink <- isSymlink path'
+    if symbolicLink then return $ Just path' else firstSymlink rest
+
+
+pruneEmptyAncestors
+  :: (MonadFileSystem m) => OsPath -> OsPath -> m ()
+pruneEmptyAncestors root directory
+  | directory == root' = return ()
+  | not $ isProperDescendant root' directory = return ()
+  | otherwise = do
+      symbolicLink <- isSymlink directory
+      when symbolicLink $ do
+        rendered <- decodePath directory
+        throwError $
+          userError $
+            "Refusing to prune symbolic-link snapshot directory "
+              <> rendered
+              <> "."
+      present <- isDirectory directory
+      when present $ do
+        entries <- listDirectory directory
+        when (null entries) $ do
+          removeDirectory directory
+          pruneEmptyAncestors root' $ normalise $ takeDirectory directory
+ where
+  root' = normalise root
+
+
+cleanupRoot :: MachineState -> OsPath -> Maybe OsPath
+cleanupRoot state candidate
+  | isProperDescendant state.targetSnapshotRoot candidate =
+      Just $ normalise state.targetSnapshotRoot
+  | isProperDescendant state.intermediatePath candidate =
+      Just $ normalise state.intermediatePath
+  | otherwise = Nothing
+
+
+validCleanupPath :: MachineState -> OsPath -> Bool
+validCleanupPath state = maybe False (const True) . cleanupRoot state
+
+
+-- | Removes one repository record while preserving the machine identity.
+--
+-- The repository directory and its lock may remain; state enumeration ignores
+-- directories that contain no @state.toml@ file.
+forgetRepositoryState
+  :: (MonadFileSystem m)
+  => OsPath
+  -> MachineState
+  -> m (Either StateError ())
+forgetRepositoryState root state = do
+  result <-
+    forgetRepositoryStateWith
+      root
+      state.repositoryId
+      state.machineId
+      (const $ return ())
+  return $ () <$ result
+
+
+-- | Reloads and forgets one repository while holding its state lock.
+--
+-- The callback can validate the freshly loaded record and remove its private
+-- snapshots.  The state document is deleted only after that callback succeeds,
+-- and the lock remains held throughout both operations.
+forgetRepositoryStateWith
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RepositoryId
+  -> MachineId
+  -> (MachineState -> m result)
+  -> m (Either StateError (Maybe result))
+forgetRepositoryStateWith root repositoryId' machineId' beforeForget =
+  catchStateIOErrors $ do
+    createDirectories $ repositoryStateDirectory root repositoryId'
+    withFileLock (repositoryStateLockPath root repositoryId') $ do
+      loaded <- readRepositoryState root repositoryId' machineId'
+      case loaded of
+        Left err -> return $ Left err
+        Right Nothing -> do
+          forgetting <- isRepositoryForgetInProgress root repositoryId'
+          case forgetting of
+            Left err -> return $ Left err
+            Right inProgress -> do
+              when inProgress $
+                removeFile $
+                  forgetMarkerPath root repositoryId'
+              return $ Right Nothing
+        Right (Just current) -> do
+          result <- beforeForget current
+          let migrationMarker = migrationMarkerPath root repositoryId'
+          migrationMarkerPresent <- exists migrationMarker
+          migrationMarkerSymbolicLink <- isSymlink migrationMarker
+          when (migrationMarkerPresent || migrationMarkerSymbolicLink) $
+            removeFile migrationMarker
+          forgetting <- isRepositoryForgetInProgress root repositoryId'
+          case forgetting of
+            Left err -> return $ Left err
+            Right inProgress -> do
+              let statePath = repositoryStatePath root repositoryId'
+              present <- exists statePath
+              symbolicLink <- isSymlink statePath
+              when (present || symbolicLink) $ removeFile statePath
+              when inProgress $
+                removeFile $
+                  forgetMarkerPath root repositoryId'
+              return $ Right $ Just result
 
 
 writeState :: (MonadFileSystem m) => OsPath -> MachineState -> m ()
@@ -1890,13 +2663,21 @@ writeMigrationMarker marker source destination =
 
 isProperDescendant :: OsPath -> OsPath -> Bool
 isProperDescendant parent candidate =
-  candidate /= parent
+  candidate' /= parent'
     && not (isAbsolute relative)
-    && case splitDirectories relative of
-      [] -> False
-      first : _ -> first /= path ".."
+    && not (null components)
+    && path ".." `notElem` components
  where
-  relative = makeRelative parent candidate
+  parent' = normalise parent
+  candidate' = normalise candidate
+  relative = makeRelative parent' candidate'
+  components = splitDirectories relative
+
+
+isCleanupPathInside :: OsPath -> OsPath -> OsPath -> Bool
+isCleanupPathInside intermediate targetSnapshots candidate =
+  isProperDescendant intermediate candidate
+    || isProperDescendant targetSnapshots candidate
 
 
 pathsOverlap :: OsPath -> OsPath -> Bool

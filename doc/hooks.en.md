@@ -22,7 +22,9 @@ There are four types of hooks, executed in the following order:
 | `post-first-apply` | Only on first apply, after file sync  |
 | `post-apply`       | After every apply, after file sync    |
 
-**First apply** is determined by the absence of the registry file (*~/.dojang*).
+**First apply** is recorded per repository in machine-local state.  A failed or
+dry-run apply does not consume it.  Moving a checkout does not reset it;
+`dojang forget` does.
 When you run `dojang apply` for the first time, all four hooks run in this
 order:
 

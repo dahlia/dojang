@@ -1,3 +1,4 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -6,9 +7,11 @@
 module Dojang.Commands.Apply (apply) where
 
 import Control.Monad (forM, forM_, unless, void, when)
+import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.Text (Text, pack)
+import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import Prelude hiding (readFile)
@@ -16,6 +19,9 @@ import Prelude hiding (readFile)
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Data.CaseInsensitive (original)
 import Data.Map.Strict (fromList, notMember, toList)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes)
+import Data.Set qualified as Set
 import System.OsPath
   ( OsPath
   , addTrailingPathSeparator
@@ -23,7 +29,7 @@ import System.OsPath
 
 import Dojang.App
   ( App
-  , AppEnv (debug, dryRun, manifestFile, sourceDirectory)
+  , AppEnv (debug, dryRun, manifestFile, sourceDirectory, stateDirectory)
   , ensureContext
   , markMachineStateApplied
   , prepareMachineState
@@ -42,18 +48,30 @@ import Dojang.ExitCodes
   ( accidentalDeletionWarning
   , conflictError
   , fileNotRoutedError
+  , machineStateError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
   , FileEntry (..)
+  , ManagedCorrespondence (..)
   , RouteState (..)
-  , makeCorrespond
+  , makeManagedCorrespond
   )
 import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Hook (HookType (..))
-import Dojang.Types.MachineState (MachineState (..))
+import Dojang.Types.MachineState
+  ( MachineState (..)
+  , formatStateError
+  , updateManagedTargetsWith
+  )
+import Dojang.Types.ManagedTarget
+  ( ManagedTarget (..)
+  , SynchronizationCommand (Applied)
+  , mergeConvergedTargets
+  , unreachableSnapshots
+  )
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
   , PlannedSyncOp (..)
@@ -72,6 +90,11 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.TargetTracking
+  ( discardTargetSnapshot
+  , newTargetSnapshotTransaction
+  , observeConvergedManagedTarget
+  )
 
 
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
@@ -100,10 +123,10 @@ apply force filePaths = do
     $(logDebug) "Running pre-first-apply hooks..."
     executeHooks hookEnv ctx PreFirstApply
 
-  (allFiles, ws) <- makeCorrespond ctx
-  fileMap <- fmap fromList $ forM allFiles $ \fc -> do
-    srcAbsPath <- makeAbsolute fc.source.path
-    return (srcAbsPath, fc)
+  (allManaged, ws) <- makeManagedCorrespond ctx
+  fileMap <- fmap fromList $ forM allManaged $ \managed -> do
+    srcAbsPath <- makeAbsolute managed.correspondence.source.path
+    return (srcAbsPath, managed)
   pathStyle <- pathStyleFor stderr
   filePaths' <- forM filePaths $ \fp -> do
     fp' <- makeAbsolute fp
@@ -113,14 +136,15 @@ apply force filePaths = do
           <> pathStyle fp
           <> " is not tracked by this repository."
     return fp'
-  let files =
+  let managed =
         if null filePaths'
-          then allFiles
+          then allManaged
           else
             [ f
             | (srcAbsPath, f) <- toList fileMap
             , srcAbsPath `elem` filePaths'
             ]
+  let files = (.correspondence) <$> managed
   $(logDebugSH) files
   inputs <- mapM (observeSelectedReconciliationInput ctx) files
   let conflictPolicy =
@@ -197,10 +221,14 @@ apply force filePaths = do
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ status defaultStatusOptions)
-  void $
-    executeReconciliationPlanWith
-      (printSyncOp . (.syncOp))
-      plan
+  let persist = persistConvergedTargets ctx machineState managed
+  void
+    ( executeReconciliationPlanWith
+        (printSyncOp . (.syncOp))
+        plan
+        `catchError` \err -> persist >> throwError err
+    )
+  persist
   when debug' (void $ status defaultStatusOptions)
   printWarnings ws
 
@@ -212,6 +240,58 @@ apply force filePaths = do
   executeHooks hookEnv ctx PostApply
   when isFirstApply $ markMachineStateApplied machineState
   return ExitSuccess
+
+
+persistConvergedTargets
+  :: (MonadFileSystem i, MonadIO i)
+  => Context (App i)
+  -> MachineState
+  -> [ManagedCorrespondence]
+  -> App i ()
+persistConvergedTargets ctx machineState selected =
+  unless (null selected) $ do
+    now <- liftIO getCurrentTime
+    root <- asks (.stateDirectory)
+    result <-
+      updateManagedTargetsWith
+        root
+        now
+        machineState
+        ( \existing -> do
+            transaction <-
+              newTargetSnapshotTransaction machineState.targetSnapshotRoot
+            observations <-
+              ( catMaybes
+                  <$> mapM
+                    ( observeConvergedManagedTarget
+                        ctx.repository
+                        transaction
+                        Applied
+                        now
+                    )
+                    selected
+              )
+                `catchError` \err -> do
+                  discardTargetSnapshot transaction
+                    `catchError` const (return ())
+                  throwError err
+            let (updated, superseded) =
+                  mergeConvergedTargets existing observations
+            return (updated, (transaction, superseded))
+        )
+        ( \updated (transaction, superseded) ->
+            let kept =
+                  Set.fromList $
+                    (.snapshotPath) <$> Map.elems updated.targetRecords
+            in unreachableSnapshots
+                 kept
+                 (transaction : ((.snapshotPath) <$> superseded))
+        )
+        (\_ _ -> return ())
+        (\_ (transaction, _) -> discardTargetSnapshot transaction)
+    case result of
+      Left err -> die' machineStateError $ formatStateError err
+      Right _ -> return ()
 
 
 -- | Observes a correspondence that the command has already selected.  A

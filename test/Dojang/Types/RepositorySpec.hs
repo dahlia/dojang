@@ -1,9 +1,13 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Types.RepositorySpec (spec) where
 
+import Control.Monad.IO.Class (liftIO)
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range (linear)
 import System.Info (os)
 
 import System.OsPath (encodeFS, (</>))
@@ -14,10 +18,12 @@ import Test.Hspec.Expectations.Pretty
   , shouldReturn
   , shouldSatisfy
   )
+import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment (Environment (..), Kernel (..))
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
+import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
 import Dojang.Types.FileRoute (fileRoute)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
@@ -87,6 +93,12 @@ spec = do
             , manifest = manifest
             }
     let env = Environment "linux" "x86_64" $ Kernel "Linux" "4.19.0-16-amd64"
+    let provenance =
+          [ ("operating-system", "linux")
+          , ("architecture", "x86_64")
+          , ("kernel-name", "Linux")
+          , ("kernel-release", "4.19.0-16-amd64")
+          ]
     routePaths repo env (const $ return Nothing)
       `shouldReturn` (
                        [ RouteResult
@@ -94,21 +106,29 @@ spec = do
                            bar
                            (root </> dst </> foo </> bar)
                            Directory
+                           "/dst/foo/bar"
+                           provenance
                        , RouteResult
                            (root </> src </> baz)
                            baz
                            (root </> dst </> foo </> bar </> baz)
                            Directory
+                           "/dst/foo/bar/baz"
+                           provenance
                        , RouteResult
                            (root </> src </> foo)
                            foo
                            (root </> dst </> foo)
                            Directory
+                           "/dst/foo"
+                           provenance
                        , RouteResult
                            (root </> src </> qux)
                            qux
                            (root </> dst </> foo </> qux)
                            Directory
+                           "/dst/foo/qux"
+                           provenance
                        ]
                      ,
                        [ OverlapDestinationPathsWarning
@@ -122,16 +142,61 @@ spec = do
                        ]
                      )
 
+  if win
+    then return ()
+    else specify "routePaths distinguishes native non-UTF-8 environment values" $
+      hedgehog $ do
+        firstByte <- forAll $ Gen.word8 (linear 0x80 0xfe)
+        secondByte <- forAll $ Gen.word8 (linear (firstByte + 1) 0xff)
+        firstValue <-
+          liftIO $ encodeFS [toEnum $ 0xdc00 + fromIntegral firstByte]
+        secondValue <-
+          liftIO $ encodeFS [toEnum $ 0xdc00 + fromIntegral secondByte]
+        let Right any' = parseMonikerName "any"
+        let monikers = [(any', Always)] :: MonikerMap
+        let route =
+              fileRoute monikers [(any', Just $ Substitution "VALUE")] File
+        let manifest =
+              Manifest
+                { repositoryId = Nothing
+                , monikers = monikers
+                , fileRoutes = [(foo, route)]
+                , ignorePatterns = mempty
+                , hooks = mempty
+                }
+        let repo = Repository (root </> src) (root </> inter) manifest
+        let env =
+              Environment "linux" "x86_64" $ Kernel "Linux" "6.1.0"
+        (firstRoutes, _) <-
+          liftIO $ routePaths repo env (const $ return $ Just firstValue)
+        (secondRoutes, _) <-
+          liftIO $ routePaths repo env (const $ return $ Just secondValue)
+        case (firstRoutes, secondRoutes) of
+          ( [RouteResult _ _ _ _ _ firstProvenance]
+            , [RouteResult _ _ _ _ _ secondProvenance]
+            ) ->
+              (firstProvenance == secondProvenance) === False
+          _ ->
+            fail "Expected exactly one route result for each environment value."
+
   specify "findOverlappingRouteResults" $ do
     findOverlappingRouteResults
-      [ RouteResult (root </> src </> foo) foo (root </> foo) Directory
-      , RouteResult (root </> src </> bar) bar (root </> bar) Directory
-      , RouteResult (root </> src </> baz) baz (root </> foo </> baz) Directory
+      [ RouteResult (root </> src </> foo) foo (root </> foo) Directory "" mempty
+      , RouteResult (root </> src </> bar) bar (root </> bar) Directory "" mempty
+      , RouteResult
+          (root </> src </> baz)
+          baz
+          (root </> foo </> baz)
+          Directory
+          ""
+          mempty
       , RouteResult
           (root </> src </> qux)
           qux
           (root </> foo </> baz </> qux)
           File
+          ""
+          mempty
       ]
       `shouldBe` [
                    ( (baz, root </> foo </> baz)

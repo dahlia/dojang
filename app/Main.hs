@@ -93,6 +93,7 @@ import Dojang.Commands.Migrate qualified (migrate)
 import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status (StatusOptions (..))
 import Dojang.Commands.Status qualified (status)
+import Dojang.Commands.TargetLifecycle qualified (forget, unmanage)
 import Dojang.ExitCodes (machineStateError, unhandledError)
 import Dojang.MonadFileSystem
   ( DryRunIO
@@ -441,6 +442,46 @@ cmdP stateRoot defaultRepoPath =
                   & repositoryCommandP
               )
               (progDesc "Apply changes to target tree")
+          )
+        <> command
+          "unmanage"
+          ( info
+              ( Dojang.Commands.TargetLifecycle.unmanage
+                  <$> optional
+                    ( pathOption
+                        ( long "route"
+                            <> metavar "ROUTE"
+                            <> action "file"
+                            <> help "Select orphan records produced by this route"
+                        )
+                    )
+                  <*> many
+                    (pathArgument $ metavar "DESTINATION" <> action "file")
+                  <*> switch
+                    ( long "force"
+                        <> short 'f'
+                        <> help
+                          "Discard records even when destinations have diverged"
+                    )
+                  <**> helper
+                  & repositoryCommandP
+              )
+              (progDesc "Stop managing orphan destinations without deleting them")
+          )
+        <> command
+          "forget"
+          ( info
+              ( Dojang.Commands.TargetLifecycle.forget
+                  <$> switch
+                    ( long "force"
+                        <> short 'f'
+                        <> help
+                          "Forget state even when destinations have diverged"
+                    )
+                  <**> helper
+                  & repositoryCommandP
+              )
+              (progDesc "Forget this repository's machine-local state")
           )
         <> command
           "edit"

@@ -43,7 +43,14 @@ os = "windows"
 ~~~~
 
 Here, the routing name, `app_config`, is also the name of a directory within
-the repository. If we say that the files in the repository are as follows:
+the repository.  Route names must be relative paths within the repository.
+Absolute paths and names containing a `..` component are rejected, because they
+could select a source outside the repository.  Drive-qualified names such as
+`C:config` and root-relative Windows names such as `\config` are also rejected
+on every platform.  This keeps a shared manifest safe when it is checked out on
+Windows.  Route names must also remain unique after path normalization, so a
+manifest cannot define both `config` and `./config`.  If we say that the files
+in the repository are as follows:
 
  -  *dojang.toml*
  -  *app\_config/*

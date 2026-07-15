@@ -14,20 +14,36 @@ module Dojang.Syntax.Manifest.Parser
 
 import Data.Bifunctor (Bifunctor (first))
 import Data.Either (lefts)
+import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty (toList)
 import Data.String (IsString (fromString))
 import Data.Void (Void)
+import qualified System.FilePath.Windows as Windows
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (readFile)
 
 import Data.CaseInsensitive (CI (original))
 import Data.HashMap.Strict as HashMap (fromList)
-import Data.Map.Strict as Map (Map, empty, fromList, toList)
+import Data.Map.Strict as Map
+  ( Map
+  , elems
+  , empty
+  , fromList
+  , fromListWith
+  , toList
+  )
 import Data.Text (Text, intercalate, pack, unpack)
 import Data.Text.Encoding (decodeUtf8')
 import System.FilePattern (FilePattern)
-import System.OsPath (OsPath, decodeFS, encodeFS)
+import System.OsPath
+  ( OsPath
+  , decodeFS
+  , encodeFS
+  , isAbsolute
+  , normalise
+  , splitDirectories
+  )
 import Toml (Result (..), decode)
 
 import qualified Data.HashMap.Strict as HashMap
@@ -83,6 +99,10 @@ data Error
     FilePathExpressionError (ParseErrorBundle Text Void)
   | -- | An invalid branch in a detailed file route.
     FileRouteBranchError FileType OsPath Int DetailedRouteError
+  | -- | A route name can escape the repository root.
+    InvalidRoutePathError FileType OsPath
+  | -- | Distinct route names normalize to one lifecycle identity.
+    DuplicateNormalizedRoutePathError OsPath OsPath
   | -- | The repository identity is not a UUID.
     RepositoryIdError Text
 
@@ -167,6 +187,23 @@ formatErrors (FileRouteBranchError fileType path index reason) =
     "refers to undefined moniker " <> original name.name <> "."
   formatReason (UnexpectedRouteFields fields) =
     "contains unexpected field(s): " <> intercalate ", " fields <> "."
+formatErrors (InvalidRoutePathError fileType routePath) =
+  [ routeKind fileType
+      <> " route name "
+      <> pack (decodePath routePath)
+      <> " must be relative and must not contain parent traversal."
+  ]
+ where
+  routeKind Directory = "Directory"
+  routeKind File = "File"
+  routeKind Symlink = "Symbolic-link"
+formatErrors (DuplicateNormalizedRoutePathError firstPath secondPath) =
+  [ "Route names "
+      <> pack (decodePath firstPath)
+      <> " and "
+      <> pack (decodePath secondPath)
+      <> " normalize to the same path.  Use one canonical route name."
+  ]
 formatErrors (RepositoryIdError message) = [message]
 
 
@@ -275,22 +312,62 @@ mapFileRouteMap
 mapFileRouteMap monikerMap dirs files =
   case errors of
     e : _ -> Left e
-    _ -> Right $ Map.fromList [(name, route) | (name, Right route) <- results]
+    [] -> case duplicateNormalizedRoute of
+      Just (firstPath, secondPath) ->
+        Left $ DuplicateNormalizedRoutePathError firstPath secondPath
+      Nothing ->
+        Right $ Map.fromList [(name, route) | (name, Right route) <- results]
  where
   results :: [(OsPath, Either Error FileRoute)]
   results =
     [ ( path
-      , mapFileRoute monikerMap path route Directory
+      , mapFileRouteEntry monikerMap path route Directory
       )
     | (name, route) <- toList dirs
     , let path = encodePath name
     ]
-      ++ [ (path, mapFileRoute monikerMap path route File)
+      ++ [ (path, mapFileRouteEntry monikerMap path route File)
          | (name, route) <- toList files
          , let path = encodePath name
          ]
   errors :: [Error]
   errors = lefts [r | (_, r) <- results]
+  duplicateNormalizedRoute :: Maybe (OsPath, OsPath)
+  duplicateNormalizedRoute = case [ distinctPaths
+                                  | paths <-
+                                      Map.elems $
+                                        Map.fromListWith
+                                          (<>)
+                                          [(normalise routePath, [routePath]) | (routePath, _) <- results]
+                                  , let distinctPaths = nub paths
+                                  , length distinctPaths > 1
+                                  ] of
+    (firstPath : secondPath : _) : _ -> Just (firstPath, secondPath)
+    _ -> Nothing
+
+
+mapFileRouteEntry
+  :: MonikerMap
+  -> OsPath
+  -> FileRoute'
+  -> FileType
+  -> Either Error FileRoute
+mapFileRouteEntry monikerMap routePath route fileType
+  | isAbsolute routePath
+      || isWindowsRootedOrDriveQualified (decodePath routePath)
+      || parentPath `elem` splitDirectories routePath =
+      Left $ InvalidRoutePathError fileType routePath
+  | otherwise = mapFileRoute monikerMap routePath route fileType
+ where
+  parentPath = encodePath ".."
+
+
+isWindowsRootedOrDriveQualified :: FilePath -> Bool
+isWindowsRootedOrDriveQualified route =
+  Windows.hasDrive route
+    || case route of
+      initial : _ -> Windows.isPathSeparator initial
+      [] -> False
 
 
 encodePath :: String -> OsPath

@@ -70,6 +70,8 @@ spec = do
               , routeName = foo
               , destinationPath = dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , routeDefinition = ""
+              , routeProvenance = mempty
               }
       let candidate = CandidateRoute route 1 foo True
       candidate.specificity `shouldBe` 1

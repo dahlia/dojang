@@ -1,26 +1,39 @@
+{-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Commands.ApplySpec (spec) where
 
 import Control.Exception (bracket_)
 import Data.HashMap.Strict (singleton)
-import qualified Data.Map.Strict as Map
+import Data.Map.Strict qualified as Map
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, sequential)
-import Test.Hspec.Expectations.Pretty (shouldBe)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Apply (apply)
+import Dojang.ExitCodes (manifestReadError)
 import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.MachineState
+  ( MachineState (..)
+  , readMachineId
+  , readRepositoryState
+  )
+import Dojang.Types.ManagedTarget (ManagedTarget (..))
 import Dojang.Types.Manifest (Manifest (..), manifest)
+import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
 
@@ -30,14 +43,26 @@ spec = sequential $ do
   describe "apply" $ do
     it "does not update destinations outside the selected paths" $
       withTwoManagedFiles $ \appEnv sourceA destinationA destinationB -> do
-        (result, destinationAContents, destinationBContents) <- dryRunIO $ do
+        (result, destinationAContents, destinationBContents, targets) <- dryRunIO $ do
           result <- runAppWithoutLogging appEnv (apply True [sourceA])
           destinationAContents <- readFile destinationA
           destinationBContents <- readFile destinationB
-          return (result, destinationAContents, destinationBContents)
+          Right (Just machineId) <- readMachineId appEnv.stateDirectory
+          let Right repositoryId' =
+                parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+          Right (Just state) <-
+            readRepositoryState appEnv.stateDirectory repositoryId' machineId
+          return
+            ( result
+            , destinationAContents
+            , destinationBContents
+            , Map.elems state.targetRecords
+            )
         result `shouldBe` ExitSuccess
         destinationAContents `shouldBe` "source a"
         destinationBContents `shouldBe` "destination b"
+        (.destinationPath) <$> targets `shouldBe` [destinationA]
+        exists appEnv.stateDirectory `shouldReturn` False
 
     it "keeps tracked files managed when they match an ignore pattern" $
       withTrackedIgnoredFile $ \appEnv intermediate destination -> do
@@ -49,6 +74,60 @@ spec = sequential $ do
         result `shouldBe` ExitSuccess
         intermediateContents `shouldBe` "source contents"
         destinationContents `shouldBe` "source contents"
+
+    it "reclaims superseded target-snapshot transaction roots" $
+      withTwoManagedFiles $ \appEnv _ _ _ -> do
+        runAppWithoutLogging appEnv (apply True []) `shouldReturn` ExitSuccess
+        runAppWithoutLogging appEnv (apply True []) `shouldReturn` ExitSuccess
+        Right (Just machineId) <- readMachineId appEnv.stateDirectory
+        let Right repositoryId' =
+              parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+        Right (Just state) <-
+          readRepositoryState appEnv.stateDirectory repositoryId' machineId
+        transactions <- listDirectory state.targetSnapshotRoot
+        length transactions `shouldBe` 1
+
+    it "rejects traversing route names before mutating destinations" $
+      withTempDir $ \tmpDir _ -> do
+        repositoryName <- encodeFS "repository"
+        manifestName <- encodeFS "dojang.toml"
+        envName <- encodeFS "dojang-env.toml"
+        stateName <- encodeFS "state"
+        outsideName <- encodeFS "outside"
+        destinationName <- encodeFS "destination"
+        homeName <- encodeFS "home"
+        let repository = tmpDir </> repositoryName
+        let manifestPath = repository </> manifestName
+        let outside = tmpDir </> outsideName
+        let destination = tmpDir </> destinationName
+        let home = tmpDir </> homeName
+        let stateRoot = tmpDir </> stateName
+        let appEnv =
+              AppEnv
+                repository
+                False
+                Nothing
+                stateRoot
+                manifestName
+                envName
+                False
+                False
+        createDirectories repository
+        createDirectories home
+        writeFile outside "outside source"
+        writeFile destination "original destination"
+        writeFile
+          manifestPath
+          "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n[dirs]\n[files]\n\"../outside\" = [{ when = \"always\", path = \"$DEST\" }]\n[ignores]\n[monikers]\n"
+        withEnvVars
+          [ ("DEST", Just destination)
+          , ("HOME", Just home)
+          , ("USERPROFILE", Just home)
+          ]
+          $ runAppWithoutLogging appEnv (apply True [])
+            `shouldThrow` (== manifestReadError)
+        readFile destination `shouldReturn` "original destination"
+        exists stateRoot `shouldReturn` False
 
 
 withTwoManagedFiles
@@ -77,18 +156,20 @@ withTwoManagedFiles action = withTempDir $ \tmpDir _ -> do
   let Right repositoryId' =
         parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
   let manifest' =
-        ( manifest
-            (singleton always Always)
-            ( Map.fromList
-                [ (routeA, [(always, Just $ Substitution "DEST_A")])
-                , (routeB, [(always, Just $ Substitution "DEST_B")])
-                ]
-            )
-            mempty
-            mempty
-            mempty
+        ( ( manifest
+              (singleton always Always)
+              ( Map.fromList
+                  [ (routeA, [(always, Just $ Substitution "DEST_A")])
+                  , (routeB, [(always, Just $ Substitution "DEST_B")])
+                  ]
+              )
+              mempty
+              mempty
+              mempty
+          )
+            :: Manifest
         )
-          { repositoryId = Just repositoryId'
+          { Manifest.repositoryId = Just repositoryId'
           }
   let appEnv =
         AppEnv
@@ -145,17 +226,19 @@ withTrackedIgnoredFile action = withTempDir $ \tmpDir _ -> do
   let Right repositoryId' =
         parseRepositoryId "223e4567-e89b-42d3-a456-426614174000"
   let manifest' =
-        ( manifest
-            (singleton always Always)
-            mempty
-            ( Map.singleton
-                routeName
-                [(always, Just $ Substitution "DEST_DIR")]
-            )
-            (Map.singleton routeName ["*"])
-            mempty
+        ( ( manifest
+              (singleton always Always)
+              mempty
+              ( Map.singleton
+                  routeName
+                  [(always, Just $ Substitution "DEST_DIR")]
+              )
+              (Map.singleton routeName ["*"])
+              mempty
+          )
+            :: Manifest
         )
-          { repositoryId = Just repositoryId'
+          { Manifest.repositoryId = Just repositoryId'
           }
   let appEnv =
         AppEnv

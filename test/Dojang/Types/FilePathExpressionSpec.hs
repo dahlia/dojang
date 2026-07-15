@@ -4,6 +4,7 @@
 module Dojang.Types.FilePathExpressionSpec (spec) where
 
 import Data.Hashable (hash)
+import Data.Set qualified as Set
 import Data.Text (unpack)
 import Test.Hspec (Spec, describe, it, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe)
@@ -13,7 +14,11 @@ import Dojang.Syntax.FilePathExpression.Parser
   ( errorBundlePretty
   , parseFilePathExpression
   )
-import Dojang.Types.FilePathExpression (FilePathExpression (Root), toPathText)
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (..)
+  , environmentVariables
+  , toPathText
+  )
 import Dojang.Types.Gen qualified as Gen
 
 
@@ -52,3 +57,15 @@ spec = do
         Right _ -> return ()
       let Right expr' = parseResult
       expr' === expr
+
+  describe "environmentVariables" $ do
+    it "collects variables from all substitution branches without duplicates" $ do
+      environmentVariables
+        ( PathSeparator
+            (Substitution "HOME")
+            ( SubstitutionWithDefault
+                "CONFIG"
+                (ConditionalSubstitution "HOME" $ Substitution "SUFFIX")
+            )
+        )
+        `shouldBe` Set.fromList ["HOME", "CONFIG", "SUFFIX"]

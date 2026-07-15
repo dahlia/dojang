@@ -1,3 +1,4 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -12,16 +13,18 @@ module Dojang.Commands.Status
 import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
+import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (..))
 import System.IO (Handle, stderr)
 
 import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
+import Data.Text qualified as Text
 import System.Console.Pretty (Color (..))
 import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
-import Dojang.App (App, ensureContext)
+import Dojang.App (App, ensureContext, prepareMachineState)
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -36,12 +39,28 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
-  , makeCorrespond
+  , ManagedCorrespondence (..)
+  , makeManagedCorrespond
+  , routePaths
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
+import Dojang.Types.MachineState (MachineState (..))
+import Dojang.Types.ManagedTarget
+  ( ManagedTarget (..)
+  , OrphanReason (..)
+  , OrphanStatus (..)
+  , TargetFingerprint (..)
+  , classifyOrphan
+  , makeCurrentEntries
+  , makeCurrentRoutes
+  )
 import Dojang.Types.MonikerName ()
-import Dojang.Types.Repository (Repository (..), RouteMapWarning (..))
+import Dojang.Types.Repository
+  ( Repository (..)
+  , RouteMapWarning (..)
+  )
+import Dojang.Types.TargetTracking (observeOrphanStatus)
 
 
 data StatusOptions = StatusOptions
@@ -64,7 +83,9 @@ defaultStatusOptions =
 status :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
 status options = do
   ctx <- ensureContext
-  (files, ws) <- makeCorrespond ctx
+  machineState <- prepareMachineState ctx.repository.manifest
+  (managed, ws) <- makeManagedCorrespond ctx
+  let files = (.correspondence) <$> managed
   let files' = if options.onlyChanges then filter isChanged files else files
   sourcePath <- makeAbsolute ctx.repository.sourcePath
   rows <- forM files' $ \file -> do
@@ -98,8 +119,78 @@ status options = do
     , if options.showDestinationPath then "Destination File" else "Source File"
     ]
     rows
+  printOrphans ctx managed machineState
   printWarnings ws
   return ExitSuccess
+
+
+printOrphans
+  :: (MonadFileSystem i, MonadIO i)
+  => Context (App i)
+  -> [ManagedCorrespondence]
+  -> MachineState
+  -> App i ()
+printOrphans ctx managed machineState = do
+  (routes, _) <- routePaths ctx
+  current <- makeCurrentRoutes routes
+  let entries = makeCurrentEntries managed
+  let orphans =
+        [ (target, reason)
+        | target <- Map.elems machineState.targetRecords
+        , Just reason <- [classifyOrphan current entries target]
+        ]
+  rows <- forM orphans $ \(target, reason) -> do
+    targetStatus <- observeOrphanStatus target
+    destination <- pack <$> decodePath target.destinationPath
+    source <- pack <$> decodePath target.sourcePath
+    route <- pack <$> decodePath target.routeName
+    return
+      [ (statusColor targetStatus, renderOrphanStatus targetStatus)
+      , renderFingerprintType target.fingerprint
+      , (Default, destination)
+      , (Default, source <> " (" <> route <> ")")
+      , (Default, renderFingerprint target.fingerprint)
+      , (Yellow, renderOrphanReason reason)
+      ]
+  unlessNull rows $
+    printTable
+      ["Orphan", "Type", "Destination", "Source (route)", "Fingerprint", "Reason"]
+      rows
+
+
+unlessNull :: (Applicative m) => [a] -> m () -> m ()
+unlessNull [] _ = pure ()
+unlessNull _ action = action
+
+
+statusColor :: OrphanStatus -> Color
+statusColor OrphanUnchanged = Default
+statusColor OrphanModified = Yellow
+statusColor OrphanMissing = Red
+
+
+renderOrphanStatus :: OrphanStatus -> Text
+renderOrphanStatus OrphanUnchanged = "unchanged"
+renderOrphanStatus OrphanModified = "modified"
+renderOrphanStatus OrphanMissing = "missing"
+
+
+renderOrphanReason :: OrphanReason -> Text
+renderOrphanReason RouteRemoved = "route removed or inapplicable"
+renderOrphanReason RouteChanged = "route definition changed"
+renderOrphanReason DestinationChanged = "destination expansion changed"
+renderOrphanReason EntryRemoved = "entry no longer managed"
+
+
+renderFingerprintType :: TargetFingerprint -> (Color, Text)
+renderFingerprintType (FileFingerprint _ _) = (Default, "F")
+renderFingerprintType DirectoryFingerprint = (Default, "D")
+
+
+renderFingerprint :: TargetFingerprint -> Text
+renderFingerprint (FileFingerprint size digest) =
+  showt size <> " B sha256:" <> Text.take 12 digest
+renderFingerprint DirectoryFingerprint = "directory"
 
 
 isChanged :: FileCorrespondence -> Bool

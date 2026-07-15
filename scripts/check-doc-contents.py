@@ -25,7 +25,7 @@ if not hasattr(builtins, "ExceptionGroup"):
             self.exceptions = tuple(excs)
 
 
-def check(dir: Path):
+def check(dir: Path, exclude_patterns: Iterable[str] = ()):
     if not dir.is_dir():
         raise ValueError(f"{dir} is not a directory")
     languages = extract_languages(dir.glob("README.*.md"))
@@ -38,6 +38,8 @@ def check(dir: Path):
         for doc in docs:
             if doc == readme_file:
                 continue
+            if any(doc.match(pattern) for pattern in exclude_patterns):
+                continue
             if doc.name not in hrefs:
                 errors.append(MissingHrefError(doc, readme_file))
         subdir_readmes = dir.glob(f"*/README.{lang}.md")
@@ -45,7 +47,7 @@ def check(dir: Path):
             if str(subdir_readme.relative_to(readme_file.parent)) not in hrefs:
                 errors.append(MissingHrefError(subdir_readme, readme_file))
             try:
-                check(subdir_readme.parent)
+                check(subdir_readme.parent, exclude_patterns)
             except ExceptionGroup as exs:
                 errors.extend(exs.exceptions)
             except Exception as ex:
@@ -80,10 +82,10 @@ def get_hrefs(md: str) -> AbstractSet[str]:
 
 def main():
     if len(argv) < 2:
-        print("Usage:", argv[0], "DIR")
+        print("Usage:", argv[0], "DIR [EXCLUDE_PATTERN ...]")
         exit(1)
     try:
-        check(Path(argv[1]))
+        check(Path(argv[1]), argv[2:])
     except ExceptionGroup as exs:
         for ex in exs.exceptions:
             print("Error:", ex, file=stderr)
