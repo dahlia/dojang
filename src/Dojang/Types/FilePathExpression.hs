@@ -72,6 +72,10 @@ instance Hashable FilePathExpression where
 
 
 -- | Collects every environment variable referenced by an expression.
+--
+-- The argument is the file-path expression to traverse.  The returned set
+-- contains every environment variable referenced directly or by a nested
+-- fallback or conditional expression.
 environmentVariables :: FilePathExpression -> Set EnvironmentVariable
 environmentVariables (BareComponent _) = Set.empty
 environmentVariables (Root _) = Set.empty

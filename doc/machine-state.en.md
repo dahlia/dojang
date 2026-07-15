@@ -310,16 +310,15 @@ changing state.  On Windows, destination selectors use native
 case-insensitive path comparison.  An unchanged or missing orphan can be
 unmanaged directly.  A modified orphan requires `--force`, because discarding
 its baseline also discards Dojang's local evidence of the divergence.
-`unmanage` removes only
-selected records, their unreferenced baselines, and unreferenced entries in the
-common intermediate snapshot.  A retained directory record protects its
-descendants.  Record publication and snapshot cleanup remain under the same
-repository lock, so concurrent synchronization cannot lose a record or make
-cleanup remove newly live data.  `unmanage` reloads the selected records and
-requires every selected ID to remain present after acquiring that lock.  It
-then checks their orphan and modification status again.  Before changing state,
-it lists every selected record and its current status.  It never removes source
-or destination files.
+`unmanage` removes only selected records, their unreferenced baselines, and
+unreferenced entries in the common intermediate snapshot.  A retained directory
+record protects its descendants.  Record publication and snapshot cleanup
+remain under the same repository lock, so concurrent synchronization cannot
+lose a record or make cleanup remove newly live data.  `unmanage` reloads the
+selected records and requires every selected ID to remain present after
+acquiring that lock.  It then checks their orphan and modification status
+again.  Before changing state, it lists every selected record and its current
+status.  It never removes source or destination files.
 
 To remove all machine-local state for one repository, use:
 
@@ -337,9 +336,9 @@ its ancestors, along with paths that contain the checkout or machine-state
 store.  The private baseline root is removed before the intermediate snapshot.
 After validation succeeds, Dojang records the approved cleanup before deleting
 either root.  A retry can therefore finish without `--force` when a partial
-cleanup has already removed a baseline.  A
-fresh request still checks every destination.  While approved cleanup is
-pending, other stateful commands stop and ask the user to retry `dojang forget`;
+cleanup has already removed a baseline.  A fresh request still checks every
+destination.  While approved cleanup is pending, other stateful commands stop
+and ask the user to retry `dojang forget`;
 they cannot publish newer records that the earlier approval would discard.
 Forgetting an already absent record succeeds without creating machine state or
 migrating a legacy snapshot.  If cleanup deleted *state.toml* but left its
