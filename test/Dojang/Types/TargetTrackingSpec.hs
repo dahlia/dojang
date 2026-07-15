@@ -21,6 +21,7 @@ import System.Info (os)
 #ifndef mingw32_HOST_OS
 import System.OsPath (decodeFS)
 import System.Posix.Files qualified as Posix
+import System.Timeout (timeout)
 #endif
 
 import System.OsPath
@@ -31,7 +32,6 @@ import System.OsPath
   , takeDirectory
   , (</>)
   )
-import System.Timeout (timeout)
 import Test.Hspec (Spec, describe, it)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -396,7 +396,7 @@ posixOrphanStatusSpec = do
         `shouldReturn` Just OrphanModified
 #endif
 
-
+#ifndef mingw32_HOST_OS
 fixtureOrphanTarget :: OsPath -> IO ManagedTarget
 fixtureOrphanTarget root = do
   destinationName <- encodeFS "destination"
@@ -416,6 +416,7 @@ fixtureOrphanTarget root = do
       (FileFingerprint 7 "digest")
       Applied
       now
+#endif
 
 
 fixtureManaged :: FilePath -> IO ManagedCorrespondence
