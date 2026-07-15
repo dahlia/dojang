@@ -289,8 +289,7 @@ spec = do
               `shouldReturn` ExitSuccess
             writeManifestFile ignoredManifest manifestPath
             removeFile source
-            removeFile intermediate
-            exists intermediate `shouldReturn` False
+            exists intermediate `shouldReturn` True
             readFile destination `shouldReturn` "managed"
             before <- loadRepositoryState appEnv repositoryId
             Map.size before.targetRecords `shouldBe` 1

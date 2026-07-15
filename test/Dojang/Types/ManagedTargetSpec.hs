@@ -22,6 +22,13 @@ import Test.Hspec.Expectations.Pretty (shouldBe)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem qualified as FileSystem
+import Dojang.Types.Context
+  ( FileCorrespondence (..)
+  , FileDeltaKind (Unchanged)
+  , FileEntry (..)
+  , FileStat (File, Missing)
+  , ManagedCorrespondence (..)
+  )
 import Dojang.Types.ManagedTarget
   ( CurrentEntry (..)
   , CurrentRoute (..)
@@ -31,6 +38,7 @@ import Dojang.Types.ManagedTarget
   , TargetFingerprint (..)
   , classifyOrphan
   , equalDestinationPath
+  , makeCurrentEntries
   , makeCurrentRoutes
   , mergeConvergedTargets
   , selectOrphanRecords
@@ -65,6 +73,38 @@ spec = do
       case Map.lookup normalizedRouteName routes of
         Just current -> current.routeName `shouldBe` normalizedRouteName
         Nothing -> fail "The normalized current route was not indexed."
+
+  describe "makeCurrentEntries" $ do
+    it "excludes intermediate-only directory entries but keeps file routes" $ do
+      routeName <- encodeFS "config"
+      entryName <- encodeFS "removed.toml"
+      sourceRoot <- fixturePath "repository/config"
+      intermediateRoot <- fixturePath "intermediate/config"
+      destinationRoot <- fixturePath "destination"
+      let correspondence relative =
+            FileCorrespondence
+              (FileEntry (sourceRoot </> relative) Missing)
+              Unchanged
+              (FileEntry (intermediateRoot </> relative) $ File 7)
+              (FileEntry (destinationRoot </> relative) $ File 7)
+              Unchanged
+      let managed fileType relative =
+            ManagedCorrespondence
+              ( Repository.RouteResult
+                  sourceRoot
+                  routeName
+                  destinationRoot
+                  fileType
+                  "route-definition"
+                  Map.empty
+              )
+              relative
+              (correspondence relative)
+      makeCurrentEntries
+        [ managed FileSystem.Directory entryName
+        , managed FileSystem.File mempty
+        ]
+        `shouldBe` Set.singleton (CurrentEntry routeName routeName)
 
   describe "classifyOrphan" $ do
     it "orphanizes an entry no longer produced by its active directory route" $ do

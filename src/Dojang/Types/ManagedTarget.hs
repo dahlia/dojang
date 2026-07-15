@@ -50,7 +50,12 @@ import System.OsPath
   )
 
 import Dojang.MonadFileSystem qualified as FileSystem
-import Dojang.Types.Context (ManagedCorrespondence (..))
+import Dojang.Types.Context
+  ( FileCorrespondence (..)
+  , FileEntry (..)
+  , FileStat (Missing)
+  , ManagedCorrespondence (..)
+  )
 import Dojang.Types.Repository (RouteResult (..))
 
 
@@ -184,9 +189,20 @@ classifyOrphan routes entries target = case Map.lookup target.routeName routes o
 
 
 -- | Builds the normalized entry index used for orphan detection.
+--
+-- File routes remain present while their route is applicable, including when
+-- they currently represent a deletion.  Directory routes contribute only
+-- entries that still exist in the source tree; intermediate-only paths are
+-- synchronization history rather than entries produced by the current route.
 makeCurrentEntries :: [ManagedCorrespondence] -> Set CurrentEntry
-makeCurrentEntries = Set.fromList . fmap fromCorrespondence
+makeCurrentEntries =
+  Set.fromList . fmap fromCorrespondence . filter isCurrentlyProduced
  where
+  isCurrentlyProduced :: ManagedCorrespondence -> Bool
+  isCurrentlyProduced managed =
+    managed.route.fileType /= FileSystem.Directory
+      || managed.correspondence.source.stat /= Missing
+
   fromCorrespondence :: ManagedCorrespondence -> CurrentEntry
   fromCorrespondence managed =
     CurrentEntry
