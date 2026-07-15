@@ -342,6 +342,7 @@ spec = do
               `shouldReturn` ExitSuccess
             after <- loadRepositoryState appEnv repositoryId
             after.targetRecords `shouldBe` Map.empty
+            exists intermediate `shouldReturn` False
             readFile destination `shouldReturn` "managed"
 
     describe "forget" $ do

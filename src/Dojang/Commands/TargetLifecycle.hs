@@ -57,7 +57,8 @@ import Dojang.Types.MachineState
   , validateSelectedSnapshotLocation
   )
 import Dojang.Types.ManagedTarget
-  ( ManagedTarget (..)
+  ( CurrentEntry (..)
+  , ManagedTarget (..)
   , OrphanStatus (..)
   , classifyOrphan
   , equalDestinationPath
@@ -67,7 +68,7 @@ import Dojang.Types.ManagedTarget
   , unreachableSnapshots
   )
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.Repository (Repository (..))
 import Dojang.Types.TargetTracking (observeOrphanStatus)
 
 
@@ -171,9 +172,11 @@ unmanage routeSelector destinations force = do
                 Map.filterWithKey
                   (\key _ -> key `Set.notMember` selectedIds)
                   currentRecords
-          return (kept, removed)
+          let currentEntrySources =
+                Set.map (\entry -> entry.sourcePath) lockedEntries
+          return (kept, (removed, currentEntrySources))
       )
-      ( \updated removed ->
+      ( \updated (removed, currentEntrySources) ->
           let keptSnapshots =
                 Set.fromList $ (.snapshotPath) <$> Map.elems updated.targetRecords
               baselineCandidates =
@@ -183,10 +186,9 @@ unmanage routeSelector destinations force = do
                   [ updated.intermediatePath </> target.sourcePath
                   | target <- Map.elems updated.targetRecords
                   ]
-                  <> Set.fromList
-                    [ updated.intermediatePath </> route.routeName
-                    | route <- routes
-                    ]
+                  <> Set.map
+                    (updated.intermediatePath </>)
+                    currentEntrySources
               intermediateCandidates =
                 unreachableSnapshots
                   keptIntermediate
