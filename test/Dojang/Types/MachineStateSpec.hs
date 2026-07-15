@@ -312,6 +312,9 @@ spec = do
             replacePathField "intermediate-path" relative encoded
       let relativeTargetSnapshots =
             replacePathField "target-snapshot-root" relative encoded
+      relativeCleanup <- liftIO $ encodeFS $ Text.unpack relative
+      let relativePendingCleanup =
+            state{pendingCleanupPaths = [relativeCleanup]}
       isMalformed
         (decodeMachineState state.repositoryId state.machineId relativeCheckout)
         === True
@@ -323,6 +326,13 @@ spec = do
         === True
       isMalformed
         (decodeMachineState state.repositoryId state.machineId relativeTargetSnapshots)
+        === True
+      isMalformed
+        ( decodeMachineState
+            state.repositoryId
+            state.machineId
+            (encodeMachineState relativePendingCleanup)
+        )
         === True
 
     it "rejects managed-target snapshots outside their private root" $ do

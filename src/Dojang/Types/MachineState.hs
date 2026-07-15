@@ -801,6 +801,8 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
       traverse
         (mapLeft MalformedState . textOsPath)
         document.documentLifecycle.lifecyclePendingCleanup
+    whenEither (any (not . isAbsolute) pendingCleanup) $
+      MalformedState "Every pending-cleanup path must be absolute."
     whenEither
       ( any (not . isProperDescendant targetSnapshots . (.snapshotPath)) $
           Map.elems targets
@@ -2562,6 +2564,7 @@ pruneEmptyAncestors root directory
 
 cleanupRoot :: MachineState -> OsPath -> Maybe OsPath
 cleanupRoot state candidate
+  | not $ isAbsolute candidate = Nothing
   | isProperDescendant state.targetSnapshotRoot candidate =
       Just $ normalise state.targetSnapshotRoot
   | isProperDescendant state.intermediatePath candidate =
@@ -2676,8 +2679,10 @@ isProperDescendant parent candidate =
 
 isCleanupPathInside :: OsPath -> OsPath -> OsPath -> Bool
 isCleanupPathInside intermediate targetSnapshots candidate =
-  isProperDescendant intermediate candidate
-    || isProperDescendant targetSnapshots candidate
+  isAbsolute candidate
+    && ( isProperDescendant intermediate candidate
+           || isProperDescendant targetSnapshots candidate
+       )
 
 
 pathsOverlap :: OsPath -> OsPath -> Bool
