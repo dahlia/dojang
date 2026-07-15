@@ -219,13 +219,14 @@ spec = do
                 fixture.repositoryId
             )
             (encodeUtf8 $ encodeMachineState corrupted)
-          removeFile alias
+          System.Directory.OsPath.removeDirectoryLink alias
           System.Directory.OsPath.createDirectoryLink retargeted alias
           runAppWithoutLogging
             fixture.appEnv
             (unmanage (Just fixture.routeName) [] True)
             `shouldThrow` (== machineStateError)
           readFile sentinel `shouldReturn` "unrelated data"
+          System.Directory.OsPath.removeDirectoryLink alias
 
       it "unmanages an entry no longer produced by an active directory route" $
         withTempDir $ \root _ -> do
@@ -436,11 +437,12 @@ spec = do
                 fixture.repositoryId
             )
             (encodeUtf8 $ encodeMachineState corrupted)
-          removeFile alias
+          System.Directory.OsPath.removeDirectoryLink alias
           System.Directory.OsPath.createDirectoryLink retargeted alias
           runAppWithoutLogging fixture.appEnv (forget True)
             `shouldThrow` (== machineStateError)
           readFile sentinel `shouldReturn` "unrelated data"
+          System.Directory.OsPath.removeDirectoryLink alias
 
       symlinkIt "retries published snapshot cleanup during the next command" $
         withManagedTarget $ \fixture -> do
@@ -467,7 +469,7 @@ spec = do
           afterFailure <- loadState fixture
           afterFailure.targetRecords `shouldBe` Map.empty
           afterFailure.pendingCleanupPaths `shouldContain` [target.snapshotPath]
-          removeFile snapshotAncestor
+          System.Directory.OsPath.removeDirectoryLink snapshotAncestor
           createDirectories target.snapshotPath
           runAppWithoutLogging fixture.appEnv (apply True [])
             `shouldReturn` ExitSuccess
@@ -486,7 +488,7 @@ spec = do
           runAppWithoutLogging fixture.appEnv (forget True)
             `shouldThrow` (== machineStateError)
           exists state.intermediatePath `shouldReturn` True
-          removeFile state.targetSnapshotRoot
+          System.Directory.OsPath.removeDirectoryLink state.targetSnapshotRoot
           createDirectories state.targetSnapshotRoot
           runAppWithoutLogging fixture.appEnv (forget True)
             `shouldReturn` ExitSuccess
@@ -630,8 +632,13 @@ withManagedTargetDestination relativeDestination action =
     writeFile source "managed"
     let configuredDestination =
           if relativeDestination then destinationName else destination
-    System.Directory.OsPath.withCurrentDirectory root $
-      withEnvVars [("DEST", configuredDestination), ("HOME", home)] $ do
+    System.Directory.OsPath.withCurrentDirectory root
+      $ withEnvVars
+        [ ("DEST", configuredDestination)
+        , ("HOME", home)
+        , ("USERPROFILE", home)
+        ]
+      $ do
         runAppWithoutLogging appEnv (apply False []) `shouldReturn` ExitSuccess
         action $
           Fixture

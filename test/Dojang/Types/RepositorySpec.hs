@@ -106,28 +106,31 @@ spec = do
                            bar
                            (root </> dst </> foo </> bar)
                            Directory
-                           "/dst/foo/bar"
+                           (if win then "C:\\dst\\foo\\bar" else "/dst/foo/bar")
                            provenance
                        , RouteResult
                            (root </> src </> baz)
                            baz
                            (root </> dst </> foo </> bar </> baz)
                            Directory
-                           "/dst/foo/bar/baz"
+                           ( if win
+                               then "C:\\dst\\foo\\bar\\baz"
+                               else "/dst/foo/bar/baz"
+                           )
                            provenance
                        , RouteResult
                            (root </> src </> foo)
                            foo
                            (root </> dst </> foo)
                            Directory
-                           "/dst/foo"
+                           (if win then "C:\\dst\\foo" else "/dst/foo")
                            provenance
                        , RouteResult
                            (root </> src </> qux)
                            qux
                            (root </> dst </> foo </> qux)
                            Directory
-                           "/dst/foo/qux"
+                           (if win then "C:\\dst\\foo\\qux" else "/dst/foo/qux")
                            provenance
                        ]
                      ,

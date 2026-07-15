@@ -11,6 +11,7 @@ import Data.List (permutations)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Time (UTCTime, defaultTimeLocale, parseTimeOrError)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
@@ -263,8 +264,8 @@ spec = do
 
 fixtureTarget :: Text -> Text -> IO ManagedTarget
 fixtureTarget definition destinationName = do
-  route <- fixturePath "config"
-  source <- fixturePath "repository/config"
+  route <- encodeFS "config"
+  source <- encodeFS "config"
   destination <- fixturePath destinationName
   snapshot <- fixturePath "snapshot/config"
   return $
@@ -285,7 +286,7 @@ fixtureTarget definition destinationName = do
 
 fixtureRoute :: Text -> Text -> IO CurrentRoute
 fixtureRoute definition destinationName = do
-  route <- fixturePath "config"
+  route <- encodeFS "config"
   destination <- fixturePath destinationName
   return $
     CurrentRoute
@@ -302,7 +303,14 @@ activeEntry target =
 
 
 fixturePath :: Text -> IO OsPath
-fixturePath value = encodeFS $ "/tmp/dojang-managed-target/" <> show value
+fixturePath value = do
+  root <-
+    encodeFS $
+      if os == "mingw32"
+        then "C:\\tmp\\dojang-managed-target"
+        else "/tmp/dojang-managed-target"
+  relative <- encodeFS $ Text.unpack value
+  return $ root </> relative
 
 
 fixtureChild
@@ -310,7 +318,7 @@ fixtureChild
   -> Text
   -> IO OsPath
 fixtureChild root name = do
-  child <- encodeFS $ show name
+  child <- encodeFS $ Text.unpack name
   return $ root </> child
 
 
