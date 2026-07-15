@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 -- | Hook execution for supported command lifecycle events.
 module Dojang.Commands.Hook
@@ -160,7 +161,13 @@ data HookScopePath
 
 
 -- | Builds hook scope for commands whose source option disambiguates targets.
-disambiguatedHookScopePaths :: Maybe OsPath -> [OsPath] -> [HookScopePath]
+disambiguatedHookScopePaths
+  :: Maybe OsPath
+  -- ^ Optional repository-relative source selector.
+  -> [OsPath]
+  -- ^ Caller-relative target paths.
+  -> [HookScopePath]
+  -- ^ Effective scope, excluding a source selector when no target uses it.
 disambiguatedHookScopePaths _ [] = []
 disambiguatedHookScopePaths explicitSource paths =
   maybe
@@ -175,10 +182,15 @@ disambiguatedHookScopePaths explicitSource paths =
 makeHookEnv
   :: (MonadFileSystem i, MonadIO i)
   => Text
+  -- ^ Command whose lifecycle event will run.
   -> [HookScopePath]
+  -- ^ Paths selected by that command, with their relative-path origins.
   -> Context (App i)
+  -- ^ Current repository and machine environment.
   -> MachineState
+  -- ^ Repository-scoped state captured for the command.
   -> App i HookEnv
+  -- ^ Complete normalized hook context.
 makeHookEnv command paths ctx state = do
   configuredManifest <- asks (.manifestFile)
   dryRun' <- asks (.dryRun)
@@ -243,7 +255,11 @@ normalizeHookScopePath repositoryRoot callerRoot scopePath = do
 
 
 -- | Returns the lifecycle hook pair for a supported command.
-commandHookTypes :: Text -> Maybe (HookType, HookType)
+commandHookTypes
+  :: Text
+  -- ^ Command name.
+  -> Maybe (HookType, HookType)
+  -- ^ Pre-hook and post-hook events, or 'Nothing' when hooks are unsupported.
 commandHookTypes "apply" = Just (PreApply, PostApply)
 commandHookTypes "reflect" = Just (PreReflect, PostReflect)
 commandHookTypes "diff" = Just (PreDiff, PostDiff)
@@ -257,9 +273,13 @@ commandHookTypes _ = Nothing
 withCommandHooks
   :: (MonadFileSystem i, MonadIO i)
   => Text
+  -- ^ Command name used to select lifecycle events.
   -> [HookScopePath]
+  -- ^ Paths selected by the command.
   -> App i ExitCode
+  -- ^ Command action to run between the lifecycle events.
   -> App i ExitCode
+  -- ^ Command result after any applicable hooks have run.
 withCommandHooks command paths action = case commandHookTypes command of
   Nothing -> action
   Just (preEvent, postEvent) -> do
@@ -276,8 +296,16 @@ withCommandHooks command paths action = case commandHookTypes command of
     return result
 
 
--- | Determine if a hook should run based on its condition.
-shouldRunHook :: MonikerMap -> Environment -> Hook -> Bool
+-- | Determines whether a hook's condition matches the current environment.
+shouldRunHook
+  :: MonikerMap
+  -- ^ Monikers available to the condition.
+  -> Environment
+  -- ^ Current machine environment.
+  -> Hook
+  -- ^ Hook whose condition is evaluated.
+  -> Bool
+  -- ^ Whether the condition matches.
 shouldRunHook monikers environment hook =
   let (result, _) = evaluate environment monikers hook.condition
   in result
@@ -339,13 +367,17 @@ managedHookContextNames =
   ]
 
 
--- | Execute all hooks of a given type.
+-- | Executes all matching hooks of a lifecycle event in manifest order.
 executeHooks
   :: (MonadFileSystem i, MonadIO i)
   => HookEnv
+  -- ^ Normalized command and machine-state context.
   -> Context (App i)
+  -- ^ Repository manifest and current machine environment.
   -> HookType
+  -- ^ Lifecycle event to execute.
   -> App i ()
+  -- ^ Completed hook execution, or an application exit on a fatal failure.
 executeHooks hookEnv ctx hookType = do
   let repo = ctx.repository :: Repository
   let manifest' = repo.manifest :: Manifest
@@ -366,17 +398,33 @@ executeHooks hookEnv ctx hookType = do
             then executeHook hookEnv hookType hook
             else
               $(logDebug) $
-                "Skipping hook (condition not met): " <> showt (FromStringShow hook)
+                "Skipping hook (condition not met): "
+                  <> showt (FromStringShow hook)
+                  <> "."
 
 
 -- | Determines whether hooks are suppressed at a nested invocation depth.
-hooksSuppressed :: Int -> Bool -> Bool
+hooksSuppressed
+  :: Int
+  -- ^ Current hook nesting depth.
+  -> Bool
+  -- ^ Whether one nested invocation was explicitly allowed.
+  -> Bool
+  -- ^ Whether hook execution is suppressed at this depth.
 hooksSuppressed depth allowRecursion =
   depth > 0 && (not allowRecursion || depth >= 2)
 
 
 -- | Builds a repository-scoped identity for recursion suppression.
-hookRecursionKey :: RepositoryId -> Text -> Text -> Text
+hookRecursionKey
+  :: RepositoryId
+  -- ^ Repository that owns the hook.
+  -> Text
+  -- ^ Lifecycle event spelling.
+  -> Text
+  -- ^ Stable or derived hook identifier.
+  -> Text
+  -- ^ Recursion-stack identity.
 hookRecursionKey repositoryId event identifier =
   repositoryIdText repositoryId <> "/" <> event <> "/" <> identifier
 
@@ -531,12 +579,28 @@ isHookDue state hook key fingerprint =
 
 
 -- | Determines whether a hook policy is due from its previous successful run.
-hookIsDue :: HookPolicy -> Maybe Text -> Maybe HookExecution -> Bool
+hookIsDue
+  :: HookPolicy
+  -- ^ Configured execution policy.
+  -> Maybe Text
+  -- ^ Current on-change fingerprint, when applicable.
+  -> Maybe HookExecution
+  -- ^ Previous successful execution, when present.
+  -> Bool
+  -- ^ Whether the hook is due.
 hookIsDue policy fingerprint = isJust . hookDueReason policy fingerprint
 
 
 -- | Explains why a hook policy is due, or returns 'Nothing' when it is not.
-hookDueReason :: HookPolicy -> Maybe Text -> Maybe HookExecution -> Maybe Text
+hookDueReason
+  :: HookPolicy
+  -- ^ Configured execution policy.
+  -> Maybe Text
+  -- ^ Current on-change fingerprint, when applicable.
+  -> Maybe HookExecution
+  -- ^ Previous successful execution, when present.
+  -> Maybe Text
+  -- ^ Human-readable reason when due.
 hookDueReason HookAlways _ _ = Just "always policy"
 hookDueReason HookOnce _ Nothing =
   Just "once policy has no successful execution"
@@ -550,7 +614,19 @@ hookDueReason HookOnChange fingerprint (Just previous)
 
 
 -- | Renders one dry-run hook report with its lifecycle and policy context.
-renderHookDryRun :: Text -> Text -> Text -> Text -> [Text] -> Text
+renderHookDryRun
+  :: Text
+  -- ^ Lifecycle event spelling.
+  -> Text
+  -- ^ Styled effective working directory.
+  -> Text
+  -- ^ Reason the policy is due.
+  -> Text
+  -- ^ Styled executable path.
+  -> [Text]
+  -- ^ Command arguments.
+  -> Text
+  -- ^ Complete dry-run report.
 renderHookDryRun event workingDirectory reason command args =
   "Would run hook (event: "
     <> event
@@ -711,18 +787,21 @@ runHookProcess hookEnv hookType recursionKey identifier hook start = do
     Right waitForExit -> liftIO waitForExit
   case result of
     Left err -> do
-      $(logError) $ "Hook could not be started: " <> pack (show err)
+      $(logError) $
+        "Hook could not be started: " <> showt (FromStringShow err) <> "."
       unless hook.ignoreFailure $
         die' hookFailedError $
           "Hook "
             <> pathStyle hook.command
             <> " could not be started: "
-            <> pack (show err)
+            <> showt (FromStringShow err)
             <> "."
       return False
     Right ExitSuccess -> do
       $(logInfo) $
-        "Hook completed successfully: " <> showt (FromStringShow hook.command)
+        "Hook completed successfully: "
+          <> showt (FromStringShow hook.command)
+          <> "."
       return True
     Right (ExitFailure code) -> do
       $(logError) $
@@ -730,6 +809,7 @@ runHookProcess hookEnv hookType recursionKey identifier hook start = do
           <> showt code
           <> ": "
           <> showt (FromStringShow hook.command)
+          <> "."
       unless hook.ignoreFailure $
         die' hookFailedError $
           "Hook "
@@ -740,11 +820,15 @@ runHookProcess hookEnv hookType recursionKey identifier hook start = do
       return False
 
 
+-- | Resolves the hook's effective working directory.
 effectiveHookWorkingDirectory
   :: (MonadFileSystem i, MonadIO i)
   => HookEnv
+  -- ^ Hook context whose repository is the relative-path base.
   -> Hook
+  -- ^ Hook with an optional configured working directory.
   -> App i OsPath
+  -- ^ Normalized absolute working directory.
 effectiveHookWorkingDirectory hookEnv hook =
   normalise <$> makeAbsolute candidate
  where
@@ -758,7 +842,9 @@ effectiveHookWorkingDirectory hookEnv hook =
 -- | Starts a hook process and returns an action that waits for its exit status.
 defaultHookProcessRunner
   :: CreateProcess
+  -- ^ Fully configured process specification.
   -> IO (Either IOException (IO (Either IOException ExitCode)))
+  -- ^ Start error or an action that waits for the process result.
 defaultHookProcessRunner createProc = do
   started <- try @IOException $ createProcess createProc
   return $ case started of

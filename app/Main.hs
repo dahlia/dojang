@@ -641,7 +641,7 @@ main :: IO ()
 main = withCP65001 $ do
   when (System.Info.os == "mingw32") $ setLocaleEncoding utf8
   unresolvedStateRoot <- nativeStateRoot
-  ParsedApp commandMode manifestExplicit allowHookRecursion unresolvedAppEnv _ <-
+  ParsedApp commandMode manifestExplicit allowRecursion unresolvedAppEnv _ <-
     liftIO $ customExecParser parserPrefs (parser unresolvedStateRoot period)
       :: IO (ParsedApp DryRunIO)
   stateRoot <-
@@ -649,7 +649,7 @@ main = withCP65001 $ do
       then canonicalizeStateRootOrExit unresolvedStateRoot
       else return unresolvedStateRoot
   let parsedAppEnv = unresolvedAppEnv{stateDirectory = stateRoot}
-  when allowHookRecursion $ setEnv "DOJANG_ALLOW_HOOK_RECURSION" "1"
+  when allowRecursion $ setEnv "DOJANG_ALLOW_HOOK_RECURSION" "1"
   when commandMode.readsMachineState $ validateMachineStateStoreOrExit stateRoot
   appEnv <-
     if not commandMode.autoSelectsRepository || parsedAppEnv.repositoryExplicit

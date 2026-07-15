@@ -179,12 +179,22 @@ data HookExecutionKey = HookExecutionKey HookType HookId
 
 
 -- | Builds a repository-state key from a lifecycle event and validated hook ID.
-hookExecutionKey :: HookType -> HookId -> HookExecutionKey
+hookExecutionKey
+  :: HookType
+  -- ^ Lifecycle event that owns the hook.
+  -> HookId
+  -- ^ Validated stable hook identifier.
+  -> HookExecutionKey
+  -- ^ Typed execution-history key.
 hookExecutionKey = HookExecutionKey
 
 
 -- | Renders a typed hook execution identity for the state document.
-renderHookExecutionKey :: HookExecutionKey -> Text
+renderHookExecutionKey
+  :: HookExecutionKey
+  -- ^ Typed execution-history key.
+  -> Text
+  -- ^ Canonical @event/id@ document key.
 renderHookExecutionKey (HookExecutionKey event identifier) =
   renderHookType event <> "/" <> renderHookId identifier
 
@@ -199,7 +209,11 @@ data HookExecutionPolicy
 
 
 -- | Returns the context fingerprint stored by an on-change execution.
-hookExecutionFingerprint :: HookExecution -> Maybe Text
+hookExecutionFingerprint
+  :: HookExecution
+  -- ^ Successful stateful execution.
+  -> Maybe Text
+  -- ^ On-change fingerprint, or 'Nothing' for a once execution.
 hookExecutionFingerprint execution = case execution.policy of
   HookOnceExecution -> Nothing
   HookOnChangeExecution fingerprint -> Just fingerprint
@@ -216,12 +230,20 @@ newStateGenerationId = StateGenerationId <$> newRepositoryId
 
 
 -- | Parses a repository-state generation identity from canonical UUID text.
-parseStateGenerationId :: Text -> Either Text StateGenerationId
+parseStateGenerationId
+  :: Text
+  -- ^ Canonical UUID text.
+  -> Either Text StateGenerationId
+  -- ^ Validated generation identity or a parse error.
 parseStateGenerationId = fmap StateGenerationId . parseRepositoryId
 
 
 -- | Renders a repository-state generation identity as canonical UUID text.
-stateGenerationIdText :: StateGenerationId -> Text
+stateGenerationIdText
+  :: StateGenerationId
+  -- ^ Opaque repository-state generation identity.
+  -> Text
+  -- ^ Canonical lowercase UUID text.
 stateGenerationIdText (StateGenerationId identifier) = repositoryIdText identifier
 
 
@@ -2674,17 +2696,23 @@ markFirstApplied root now state = catchStateIOErrors $ do
 
 -- | Records one successful stateful hook execution atomically.
 --
--- Validates the execution before writing.  The repository record is reloaded
--- while holding its lock so hook history cannot overwrite concurrent lifecycle
--- or managed-target updates.
+-- The typed key and execution data cannot contain invalid policy combinations.
+-- The repository record is reloaded while holding its lock so hook history
+-- cannot overwrite concurrent lifecycle or managed-target updates.
 recordHookExecution
   :: (MonadFileSystem m)
   => OsPath
+  -- ^ Platform-native machine-state root.
   -> UTCTime
+  -- ^ Time to store as the record's last update.
   -> MachineState
+  -- ^ Repository-state generation captured by the hook command.
   -> HookExecutionKey
+  -- ^ Typed event and hook identity.
   -> HookExecution
+  -- ^ Successful execution data to persist.
   -> m (Either StateError MachineState)
+  -- ^ Updated state, or a validation or persistence error.
 recordHookExecution root now state key execution =
   catchStateIOErrors $ do
     createDirectories $ repositoryStateDirectory root state.repositoryId
@@ -2722,7 +2750,12 @@ recordHookExecution root now state key execution =
 -- The first record is the generation captured by the caller; the second is
 -- the current record reloaded from storage.
 validateRepositoryStateGeneration
-  :: MachineState -> MachineState -> Either StateError ()
+  :: MachineState
+  -- ^ Repository-state generation captured by the caller.
+  -> MachineState
+  -- ^ Current repository-state record.
+  -> Either StateError ()
+  -- ^ Success when the generation IDs match, or a mismatch error.
 validateRepositoryStateGeneration expected actual
   | actual.generationId == expected.generationId = Right ()
   | otherwise =
@@ -2741,9 +2774,13 @@ validateRepositoryStateGeneration expected actual
 withRepositoryStateGeneration
   :: (MonadFileSystem m)
   => OsPath
+  -- ^ Platform-native machine-state root.
   -> MachineState
+  -- ^ Repository-state generation captured by the caller.
   -> m a
+  -- ^ Effect to start while the repository lock remains held.
   -> m (Either StateError a)
+  -- ^ Effect result, or an error when the captured generation is stale.
 withRepositoryStateGeneration root expected action = catchStateIOErrors $ do
   createDirectories $ repositoryStateDirectory root expected.repositoryId
   withFileLock (repositoryStateLockPath root expected.repositoryId) $ do

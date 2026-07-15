@@ -7,7 +7,7 @@ Version 0.3.0
 To be released.
 
  -  Extended hooks across the `apply`, `reflect`, `diff`, `status`, `edit`, and
-    `unmanage` command lifecycles.  Post hooks run only after successful
+    `unmanage` command lifecycles.  Post-hooks run only after successful
     commands.  Hooks can now use stable IDs with `once` and explicitly keyed
     `on-change` policies; successful executions are stored per repository and
     machine in schema-version 3 state.  Concurrent stateful runs are serialized.
@@ -16,7 +16,7 @@ To be released.
     eligible.  Hook processes receive command, event, repository, machine-state,
     platform, and selected-path context without retaining values omitted from
     the current event.  Commands that reload manifest and environment context
-    after pre hooks also reload it before selecting post hooks.  A stateful hook
+    after pre-hooks also reload it before selecting post-hooks.  A stateful hook
     waiting for its lock cannot start after its state generation is forgotten
     and recreated, even when the old and new records have identical timestamps,
     and a completed hook cannot restore history after that replacement.  State

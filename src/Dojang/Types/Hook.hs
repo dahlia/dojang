@@ -113,7 +113,7 @@ renderHookId (HookId value) = value
 data HookPolicy
   = -- | Runs whenever its lifecycle event occurs.
     HookAlways
-  | -- | Runs only until its first successful execution on this machine.
+  | -- | Runs until it succeeds once for each repository and machine.
     HookOnce
   | -- | Runs when its explicitly keyed configuration or context changes.
     HookOnChange

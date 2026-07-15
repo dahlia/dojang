@@ -10,7 +10,7 @@ machine.
 Lifecycle events
 ----------------
 
-Each supported command has a `pre-*` and `post-*` event.  Post hooks run only
+Each supported command has a `pre-*` and `post-*` event.  Post-hooks run only
 when the command succeeds.
 
 | Command    | Before event   | Successful-post event |
@@ -22,9 +22,9 @@ when the command succeeds.
 | `edit`     | `pre-edit`     | `post-edit`           |
 | `unmanage` | `pre-unmanage` | `post-unmanage`       |
 
-After their pre hooks, `reflect`, `diff`, `status`, `edit`, and `unmanage`
+After their pre-hooks, `reflect`, `diff`, `status`, `edit`, and `unmanage`
 reload *dojang.toml* and *dojang-env.toml* for the command action.  They reload
-the same context again before selecting successful-post hooks, so those hooks
+the same context again before selecting successful post-hooks, so those hooks
 cannot run from an older manifest or machine environment.
 
 `apply` also supports `pre-first-apply` and `post-first-apply`.  On the first
@@ -149,10 +149,10 @@ Route selectors passed through `reflect --source`, `edit --source`, and
 arguments use the caller's working directory.  Selecting a repository with
 `-r` therefore does not change the scope or fingerprint of a route selector.
 
-Post hooks also receive `DOJANG_COMMAND_OUTCOME=success` and
+Post-hooks also receive `DOJANG_COMMAND_OUTCOME=success` and
 `DOJANG_EXIT_CODE=0`.  Before adding the current context, Dojang removes
 inherited hook-context variables.  Values omitted for the current event, such
-as post-command results on a pre hook or path indexes beyond
+as post-command results on a pre-hook or path indexes beyond
 `DOJANG_PATH_COUNT`, therefore remain unset.
 
 

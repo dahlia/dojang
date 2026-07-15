@@ -8,7 +8,6 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text, isInfixOf, unpack)
 import qualified Hedgehog.Gen as Hedgehog
 import qualified Hedgehog.Range as Range
-import qualified System.Directory.OsPath as OsDirectory
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec
   ( Spec
@@ -29,6 +28,7 @@ import Test.Hspec.Hedgehog
   )
 
 import Dojang.MonadFileSystem (FileType (File))
+import qualified Dojang.MonadFileSystem as FileSystem
 import Dojang.Syntax.Manifest.Parser (formatErrors, readManifest)
 import Dojang.Syntax.Manifest.Writer
   ( WriteError (DuplicateStatefulHookId, InvalidHookConfiguration)
@@ -236,7 +236,7 @@ spec = do
               (Map.singleton PreApply [invalidHook])
           outputPath = tmpDir </> outputName
       writeManifestFile manifest' outputPath `shouldThrow` anyIOException
-      OsDirectory.doesPathExist outputPath `shouldReturn` False
+      FileSystem.exists outputPath `shouldReturn` False
 
   specify "preserves arbitrary manifest route semantics" $ hedgehog $ do
     manifest'@(Manifest repositoryId monikers routes ignores hooks) <-

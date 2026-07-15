@@ -16,7 +16,6 @@ import Data.Char (chr)
 import System.OsString qualified as OsString
 #endif
 
-import Data.ByteString qualified as ByteString
 import Data.HashMap.Strict (empty)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
@@ -24,7 +23,6 @@ import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import System.Directory.OsPath qualified as OsDirectory
 import System.Environment
   ( getArgs
   , getExecutablePath
@@ -33,8 +31,19 @@ import System.Environment
   , unsetEnv
   )
 import System.Exit (ExitCode (ExitSuccess))
-import System.FilePath qualified as FilePath
-import System.OsPath (OsPath, encodeFS, normalise, (</>))
+import System.OsPath
+  ( OsPath
+  , encodeFS
+  , joinPath
+  , normalise
+  , takeDirectory
+  , (</>)
+  )
+
+
+#ifdef mingw32_HOST_OS
+import System.OsPath (takeDrive)
+#endif
 import Test.Hspec
   ( Spec
   , describe
@@ -106,9 +115,12 @@ spec = sequential $ do
   scopeRepositoryName <- runIO $ encodeFS "hook-scope-repository"
   scopeFirstCallerName <- runIO $ encodeFS "hook-scope-caller-a"
   scopeSecondCallerName <- runIO $ encodeFS "hook-scope-caller-b"
-  scopeRepository <- runIO $ OsDirectory.makeAbsolute scopeRepositoryName
-  scopeFirstCaller <- runIO $ OsDirectory.makeAbsolute scopeFirstCallerName
-  scopeSecondCaller <- runIO $ OsDirectory.makeAbsolute scopeSecondCallerName
+  scopeRepository <-
+    runIO (FileSystem.makeAbsolute scopeRepositoryName :: IO OsPath)
+  scopeFirstCaller <-
+    runIO (FileSystem.makeAbsolute scopeFirstCallerName :: IO OsPath)
+  scopeSecondCaller <-
+    runIO (FileSystem.makeAbsolute scopeSecondCallerName :: IO OsPath)
 
   describe "mergeHookEnvironment" $ do
     let dojangEnv = [("DOJANG_OS", "linux")]
@@ -163,8 +175,19 @@ spec = sequential $ do
   describe "normalizeHookScopePath" $ do
     it "keeps repository selectors independent of the caller directory" $
       hedgehog $ do
-        suffix <- forAll $ Gen.text (Range.linear 1 40) Gen.alphaNum
-        selector <- liftIO $ encodeFS $ "route-" <> unpack suffix
+        componentTexts <-
+          forAll $
+            Gen.list (Range.linear 1 6) $
+              Gen.text (Range.linear 1 20) Gen.alphaNum
+        components <- liftIO $ mapM (encodeFS . unpack) componentTexts
+        selector <- pure $ joinPath components
+        parent <- liftIO $ encodeFS ".."
+        period <- liftIO $ encodeFS "."
+        outsideText <- forAll $ Gen.text (Range.linear 1 20) Gen.alphaNum
+        outsideName <- liftIO $ encodeFS $ "outside-" <> unpack outsideText
+        let outsidePath = normalise $ takeDirectory scopeRepository </> outsideName
+            traversalPath =
+              normalise $ scopeRepository </> parent </> outsideName
         firstRepositoryScope <-
           liftIO $
             normalizeHookScopePath
@@ -189,10 +212,40 @@ spec = sequential $ do
               scopeRepository
               scopeSecondCaller
               (CallerRelativePath selector)
+        repositoryRootScope <-
+          liftIO $
+            normalizeHookScopePath
+              scopeRepository
+              scopeFirstCaller
+              (RepositoryRelativePath period)
+        absoluteRepositoryScope <-
+          liftIO $
+            normalizeHookScopePath
+              scopeRepository
+              scopeFirstCaller
+              (RepositoryRelativePath $ scopeRepository </> selector)
+        traversalScope <-
+          liftIO $
+            normalizeHookScopePath
+              scopeRepository
+              scopeFirstCaller
+              (RepositoryRelativePath $ parent </> outsideName)
+        absoluteOutsideScope <-
+          liftIO $
+            normalizeHookScopePath
+              scopeRepository
+              scopeFirstCaller
+              (RepositoryRelativePath outsidePath)
         firstRepositoryScope === selector
         secondRepositoryScope === selector
         firstCallerScope === normalise (scopeFirstCaller </> selector)
         secondCallerScope === normalise (scopeSecondCaller </> selector)
+        repositoryRootScope === normalise period
+        absoluteRepositoryScope === selector
+        traversalScope === traversalPath
+        absoluteOutsideScope === outsidePath
+
+    windowsHookScopeSpec scopeRepository
 
   describe "disambiguatedHookScopePaths" $ do
     it "includes a source selector only when target paths use it" $ hedgehog $ do
@@ -403,7 +456,7 @@ spec = sequential $ do
           withCommandHooks "status" [] $ do
             writeManifestFile replacementManifest manifestFilePath
             pure ExitSuccess
-        OsDirectory.doesFileExist (tmpDir </> markerName) `shouldReturn` False
+        FileSystem.isFile (tmpDir </> markerName) `shouldReturn` False
 
   describe "executeHooks" $ do
     posixNonUtf8HookScopeSpec
@@ -685,10 +738,43 @@ spec = sequential $ do
         repository <- lookupEnv "DOJANG_REPOSITORY"
         case repository of
           Nothing -> fail "DOJANG_REPOSITORY is missing"
-          Just path ->
-            ByteString.writeFile
-              (path FilePath.</> "stale-post-hook-ran")
-              ""
+          Just path -> do
+            repositoryPath <- FileSystem.encodePath path
+            markerName <- FileSystem.encodePath "stale-post-hook-ran"
+            FileSystem.writeFile (repositoryPath </> markerName) ""
+
+#ifdef mingw32_HOST_OS
+windowsHookScopeSpec :: OsPath -> Spec
+windowsHookScopeSpec repository =
+  it "preserves native Windows roots across hook scope normalization" $
+    hedgehog $ do
+      suffix <- forAll $ Gen.text (Range.linear 1 20) Gen.alphaNum
+      selector <- liftIO $ encodeFS $ "scope-" <> unpack suffix
+      cRoot <- liftIO $ encodeFS "C:\\"
+      dRoot <- liftIO $ encodeFS "D:\\"
+      rootRelativeRoot <- liftIO $ encodeFS "\\"
+      let otherRoot =
+            if takeDrive repository == takeDrive cRoot then dRoot else cRoot
+          driveQualified = normalise $ otherRoot </> selector
+          rootRelative = normalise $ rootRelativeRoot </> selector
+      normalizedDriveQualified <-
+        liftIO $
+          normalizeHookScopePath
+            repository
+            repository
+            (RepositoryRelativePath driveQualified)
+      normalizedRootRelative <-
+        liftIO $
+          normalizeHookScopePath
+            repository
+            repository
+            (RepositoryRelativePath rootRelative)
+      normalizedDriveQualified === driveQualified
+      normalizedRootRelative === rootRelative
+#else
+windowsHookScopeSpec :: OsPath -> Spec
+windowsHookScopeSpec _ = pure ()
+#endif
 
 #ifdef mingw32_HOST_OS
 posixNonUtf8HookScopeSpec :: Spec
