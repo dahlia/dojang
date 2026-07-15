@@ -54,6 +54,7 @@ import Dojang.Commands.Hook
   , commandHookTypes
   , defaultHookProcessRunner
   , disambiguatedHookScopePaths
+  , effectiveHookWorkingDirectory
   , executeHooks
   , hookDueReason
   , hookIsDue
@@ -80,10 +81,12 @@ import Dojang.Types.Hook
   )
 import Dojang.Types.MachineState
   ( HookExecution (HookExecution)
+  , HookExecutionPolicy (..)
   , MachineState (..)
   , encodeMachineState
   , managedTargetSnapshotRoot
   , parseMachineId
+  , parseStateGenerationId
   , repositoryStateDirectory
   , repositoryStatePath
   )
@@ -318,10 +321,11 @@ spec = sequential $ do
   describe "hookIsDue" $ do
     let execution fingerprint =
           HookExecution
-            "pre-apply"
-            "cache"
-            "on-change"
-            fingerprint
+            ( maybe
+                HookOnceExecution
+                HookOnChangeExecution
+                fingerprint
+            )
             (read "2026-07-15 00:00:00 UTC")
 
     it "always runs and once runs only without a successful record" $ do
@@ -404,6 +408,79 @@ spec = sequential $ do
   describe "executeHooks" $ do
     posixNonUtf8HookScopeSpec
 
+    it "resolves a relative hook working directory from the repository" $
+      withTempDir $ \tmpDir _ -> do
+        manifestFilename <- encodeFS "dojang.toml"
+        intermediateDir <- encodeFS ".dojang"
+        envFilename <- encodeFS "dojang-env.toml"
+        stateDir <- encodeFS ".state"
+        command <- encodeFS "hook-command"
+        relativeWorkingDirectory <- encodeFS "tools/hooks"
+        let hook =
+              Hook
+                { hookId = Nothing
+                , policy = HookAlways
+                , changeKey = Nothing
+                , command = command
+                , args = []
+                , condition = Always
+                , workingDirectory = Just relativeWorkingDirectory
+                , ignoreFailure = False
+                }
+        let Right repositoryId =
+              parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+        let Right machineId =
+              parseMachineId "223e4567-e89b-42d3-a456-426614174000"
+        let Right generationId =
+              parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
+        let stateRootPath = tmpDir </> stateDir
+        let timestamp = read "2026-07-15 00:00:00 UTC"
+        let state =
+              MachineState
+                3
+                repositoryId
+                machineId
+                generationId
+                tmpDir
+                (tmpDir </> manifestFilename)
+                (tmpDir </> intermediateDir)
+                (managedTargetSnapshotRoot stateRootPath repositoryId)
+                timestamp
+                timestamp
+                False
+                []
+                Map.empty
+                Map.empty
+                Map.empty
+        let appEnv =
+              AppEnv
+                tmpDir
+                False
+                (Just intermediateDir)
+                stateRootPath
+                manifestFilename
+                envFilename
+                False
+                False
+        let hookEnv =
+              HookEnv
+                tmpDir
+                (tmpDir </> manifestFilename)
+                False
+                "linux"
+                "x86_64"
+                "Linux"
+                "6.0.0"
+                "apply"
+                []
+                state
+                stateRootPath
+                defaultHookProcessRunner
+        resolved <-
+          runAppWithoutLogging appEnv $
+            effectiveHookWorkingDirectory hookEnv hook
+        resolved `shouldBe` normalise (tmpDir </> relativeWorkingDirectory)
+
     it "inherits the parent environment and overrides Dojang variables" $
       withTempDir $ \tmpDir _ -> do
         command <- hookCommand
@@ -427,6 +504,8 @@ spec = sequential $ do
               parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
         let Right machineId =
               parseMachineId "223e4567-e89b-42d3-a456-426614174000"
+        let Right generationId =
+              parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
         let manifest' =
               Manifest (Just repositoryId) empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
@@ -458,6 +537,7 @@ spec = sequential $ do
                     3
                     repositoryId
                     machineId
+                    generationId
                     tmpDir
                     (tmpDir </> manifestFilename)
                     (tmpDir </> intermediateDir)
@@ -487,7 +567,7 @@ spec = sequential $ do
         let ignoredContext =
               Context ignoredRepository environment (const $ pure Nothing)
         let failingHookEnv =
-              hookEnv{processRunner = const $ pure $ Left $ userError "not found"}
+              hookEnv{processStarter = const $ pure $ Left $ userError "not found"}
         runAppWithoutLogging appEnv $
           executeHooks failingHookEnv ignoredContext PreApply
 
@@ -514,6 +594,10 @@ spec = sequential $ do
               parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
         let Right machineId =
               parseMachineId "223e4567-e89b-42d3-a456-426614174000"
+        let Right generationId =
+              parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
+        let Right recreatedGenerationId =
+              parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
         let manifest' =
               Manifest (Just repositoryId) empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
@@ -528,6 +612,7 @@ spec = sequential $ do
                 3
                 repositoryId
                 machineId
+                generationId
                 tmpDir
                 (tmpDir </> manifestFilename)
                 (tmpDir </> intermediateDir)
@@ -541,7 +626,8 @@ spec = sequential $ do
                 Map.empty
         let recreatedState =
               oldState
-                { createdTime = recreatedTime
+                { generationId = recreatedGenerationId
+                , createdTime = recreatedTime
                 , updatedTime = recreatedTime
                 }
         let appEnv =
@@ -576,7 +662,7 @@ spec = sequential $ do
                 stateRootPath
                 ( \_ -> do
                     modifyIORef' launches (+ 1)
-                    pure $ Right ExitSuccess
+                    pure $ Right $ pure $ Right ExitSuccess
                 )
         (runAppWithoutLogging appEnv $ executeHooks hookEnv context PreApply)
           `shouldThrow` (== machineStateError)
@@ -636,6 +722,8 @@ posixNonUtf8HookScopeSpec =
             parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
       let Right machineId =
             parseMachineId "223e4567-e89b-42d3-a456-426614174000"
+      let Right generationId =
+            parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
       let manifest' =
             Manifest (Just repositoryId) empty Map.empty Map.empty $
               Map.singleton PreApply [hook]
@@ -649,6 +737,7 @@ posixNonUtf8HookScopeSpec =
               3
               repositoryId
               machineId
+              generationId
               tmpDir
               (tmpDir </> manifestFilename)
               (tmpDir </> intermediateDir)
@@ -695,7 +784,7 @@ posixNonUtf8HookScopeSpec =
               stateRootPath
               ( \_ -> do
                   modifyIORef' launches (+ 1)
-                  pure $ Right ExitSuccess
+                  pure $ Right $ pure $ Right ExitSuccess
               )
       runAppWithoutLogging appEnv $
         executeHooks (hookEnv $ path firstByte) context PreApply

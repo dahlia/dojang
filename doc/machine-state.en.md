@@ -51,14 +51,17 @@ repositories/
 ~~~~
 
 *machine.toml* identifies the machine that owns the snapshots.  Each
-*state.toml* record has a schema version, repository and machine identities,
-the last known checkout path, the manifest path used by that checkout, the
-intermediate snapshot and managed-target baseline roots, timestamps, and typed
-sections for managed targets, hook execution history, and lifecycle records.
-Schema version 3 stores successful `once` and `on-change` hook executions by
-event and stable hook identity.  Schema versions 1 and 2 are upgraded in memory,
-and their opaque hook data is preserved.  A successful first apply is recorded
-per repository, not in a global current-repository file.
+*state.toml* record has a schema version, repository and machine identities, an
+opaque generation UUID, the last known checkout path, the manifest path used by
+that checkout, the intermediate snapshot and managed-target baseline roots,
+timestamps, and typed sections for managed targets, hook execution history, and
+lifecycle records.  A new generation UUID is issued whenever a forgotten
+repository record is recreated, even when its timestamps match an earlier
+record.  Schema version 3 stores successful `once` and `on-change` hook
+executions by event and stable hook identity.  Schema versions 1 and 2 are
+upgraded in memory, and their opaque hook data is preserved.  A successful
+first apply is recorded per repository, not in a global current-repository
+file.
 
 These files are implementation details.  If a record is malformed, uses a
 newer schema version, names another repository, or belongs to another machine,

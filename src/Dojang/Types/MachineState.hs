@@ -8,10 +8,13 @@
 module Dojang.Types.MachineState
   ( MachineId
   , HookExecution (..)
+  , HookExecutionKey
+  , HookExecutionPolicy (..)
   , MachineState (..)
   , MigrationResult (..)
   , RepositorySelection (..)
   , StateError (..)
+  , StateGenerationId
   , StateRootInputs (..)
   , canonicalizeStateRoot
   , catchStateIOErrors
@@ -24,6 +27,8 @@ module Dojang.Types.MachineState
   , forgetRepositoryState
   , forgetRepositoryStateWith
   , isRepositoryForgetInProgress
+  , hookExecutionFingerprint
+  , hookExecutionKey
   , listRepositoryStates
   , machineIdText
   , manifestIdentityLockPath
@@ -32,6 +37,7 @@ module Dojang.Types.MachineState
   , markRepositoryForgetInProgress
   , migrationMarkerPath
   , parseMachineId
+  , parseStateGenerationId
   , prepareRepositoryState
   , prepareRepositoryStateWithLegacyHistory
   , prepareRepositoryStateWithOwnership
@@ -41,16 +47,19 @@ module Dojang.Types.MachineState
   , recordHookExecution
   , repositoryStateDirectory
   , repositoryStatePath
+  , renderHookExecutionKey
   , resolveStateRoot
   , retryManagedTargetCleanup
   , sameExistingPath
   , selectRepositoryState
+  , stateGenerationIdText
   , validateMachineStateStore
   , validateMigrationStateRoot
   , validateRepositoryStateGeneration
   , validateSelectedSnapshotLocation
   , updateManagedTargets
   , updateManagedTargetsWith
+  , withRepositoryStateGeneration
   , withStateFileLock
   ) where
 
@@ -113,7 +122,9 @@ import Dojang.MonadFileSystem
   )
 import Dojang.Types.Environment (OperatingSystem (..))
 import Dojang.Types.Hook
-  ( allHookTypes
+  ( HookId
+  , HookType
+  , allHookTypes
   , parseHookId
   , renderHookId
   , renderHookType
@@ -154,18 +165,64 @@ machineIdText (MachineId identifier) = repositoryIdText identifier
 
 -- | A successful stateful hook execution recorded for this machine.
 data HookExecution = HookExecution
-  { event :: Text
-  -- ^ Lifecycle event spelling, such as @pre-apply@.
-  , hookId :: Text
-  -- ^ Stable hook identifier.
-  , policy :: Text
-  -- ^ Policy spelling used for the execution.
-  , fingerprint :: Maybe Text
-  -- ^ Context fingerprint for an on-change hook.
+  { policy :: HookExecutionPolicy
+  -- ^ Valid stateful policy and its policy-specific data.
   , succeededTime :: UTCTime
   -- ^ Time at which the hook most recently succeeded.
   }
   deriving (Eq, Show)
+
+
+-- | The typed identity of a stateful hook execution.
+data HookExecutionKey = HookExecutionKey HookType HookId
+  deriving (Eq, Ord, Show)
+
+
+-- | Builds a repository-state key from a lifecycle event and validated hook ID.
+hookExecutionKey :: HookType -> HookId -> HookExecutionKey
+hookExecutionKey = HookExecutionKey
+
+
+-- | Renders a typed hook execution identity for the state document.
+renderHookExecutionKey :: HookExecutionKey -> Text
+renderHookExecutionKey (HookExecutionKey event identifier) =
+  renderHookType event <> "/" <> renderHookId identifier
+
+
+-- | Stateful policy data recorded after a successful execution.
+data HookExecutionPolicy
+  = -- | A successful once-per-repository-and-machine execution.
+    HookOnceExecution
+  | -- | A successful on-change execution and its context fingerprint.
+    HookOnChangeExecution Text
+  deriving (Eq, Show)
+
+
+-- | Returns the context fingerprint stored by an on-change execution.
+hookExecutionFingerprint :: HookExecution -> Maybe Text
+hookExecutionFingerprint execution = case execution.policy of
+  HookOnceExecution -> Nothing
+  HookOnChangeExecution fingerprint -> Just fingerprint
+
+
+-- | An opaque identity for one creation of a repository-state record.
+newtype StateGenerationId = StateGenerationId RepositoryId
+  deriving (Eq, Ord, Show)
+
+
+-- | Generates a fresh repository-state generation identity.
+newStateGenerationId :: (MonadIO m) => m StateGenerationId
+newStateGenerationId = StateGenerationId <$> newRepositoryId
+
+
+-- | Parses a repository-state generation identity from canonical UUID text.
+parseStateGenerationId :: Text -> Either Text StateGenerationId
+parseStateGenerationId = fmap StateGenerationId . parseRepositoryId
+
+
+-- | Renders a repository-state generation identity as canonical UUID text.
+stateGenerationIdText :: StateGenerationId -> Text
+stateGenerationIdText (StateGenerationId identifier) = repositoryIdText identifier
 
 
 -- | Returns the cross-process lock that protects manifest identity creation.
@@ -280,6 +337,8 @@ data MachineState = MachineState
   -- ^ Stable identity declared by the repository manifest.
   , machineId :: MachineId
   -- ^ Identity of the machine that owns the state.
+  , generationId :: StateGenerationId
+  -- ^ Opaque identity of this repository-state generation.
   , checkoutPath :: OsPath
   -- ^ Last known checkout path.
   , manifestPath :: OsPath
@@ -300,7 +359,7 @@ data MachineState = MachineState
   -- ^ Successfully synchronized destination entries, keyed by stable ID.
   , hookRecords :: Map Text Text
   -- ^ Opaque hook lifecycle data preserved from earlier schema versions.
-  , hookExecutions :: Map Text HookExecution
+  , hookExecutions :: Map HookExecutionKey HookExecution
   -- ^ Successful stateful hook executions, keyed by event and hook identity.
   }
   deriving (Eq, Show)
@@ -334,7 +393,10 @@ data StateError
   | -- | A lifecycle update cannot find its repository record.
     MissingRepositoryState RepositoryId
   | -- | A lifecycle update belongs to a replaced repository record.
-    RepositoryStateGenerationMismatch RepositoryId UTCTime UTCTime
+    RepositoryStateGenerationMismatch
+      RepositoryId
+      StateGenerationId
+      StateGenerationId
   | -- | Only forget may proceed after repository cleanup was approved.
     RepositoryForgetInProgress RepositoryId
   | -- | Two existing checkouts declare one repository identity.
@@ -436,9 +498,9 @@ formatStateError (RepositoryStateGenerationMismatch identifier expected actual) 
   "The machine-state record for repository "
     <> repositoryIdText identifier
     <> " was replaced while a lifecycle action was running (expected generation "
-    <> timeText expected
+    <> stateGenerationIdText expected
     <> ", found "
-    <> timeText actual
+    <> stateGenerationIdText actual
     <> ").  Run the command again with the current repository state."
 formatStateError (RepositoryForgetInProgress identifier) =
   "Repository forget is still in progress for "
@@ -576,6 +638,7 @@ data StateDocument = StateDocument
   { documentSchemaVersion :: Integer
   , documentRepositoryId :: Text
   , documentMachineId :: Text
+  , documentGenerationId :: Text
   , documentCheckoutPath :: Text
   , documentManifestPath :: Text
   , documentIntermediatePath :: Text
@@ -761,6 +824,7 @@ instance FromValue StateDocument where
         <$> reqKey "schema-version"
         <*> reqKey "repository-id"
         <*> reqKey "machine-id"
+        <*> reqKey "generation-id"
         <*> reqKey "checkout-path"
         <*> reqKey "manifest-path"
         <*> reqKey "intermediate-path"
@@ -818,6 +882,7 @@ instance ToTable StateDocument where
       [ "schema-version" .= document.documentSchemaVersion
       , "repository-id" .= document.documentRepositoryId
       , "machine-id" .= document.documentMachineId
+      , "generation-id" .= document.documentGenerationId
       , "checkout-path" .= document.documentCheckoutPath
       , "manifest-path" .= document.documentManifestPath
       , "intermediate-path" .= document.documentIntermediatePath
@@ -840,6 +905,7 @@ encodeMachineState state = showt $ FromStringShow $ encode document
       state.schemaVersion
       (repositoryIdText state.repositoryId)
       (machineIdText state.machineId)
+      (stateGenerationIdText state.generationId)
       (osPathText state.checkoutPath)
       (osPathText state.manifestPath)
       (osPathText state.intermediatePath)
@@ -852,7 +918,11 @@ encodeMachineState state = showt $ FromStringShow $ encode document
       )
       (targetToDocument <$> state.targetRecords)
       state.hookRecords
-      (hookExecutionToDocument <$> state.hookExecutions)
+      ( Map.fromList
+          [ (renderHookExecutionKey key, hookExecutionToDocument key execution)
+          | (key, execution) <- Map.toList state.hookExecutions
+          ]
+      )
 
 
 -- | Decodes and validates a repository record for the expected owners.
@@ -891,6 +961,9 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
       mapLeft MalformedState $ parseRepositoryId document.documentRepositoryId
     actualMachine <-
       mapLeft MalformedState $ parseMachineId document.documentMachineId
+    generation <-
+      mapLeft MalformedState $
+        parseStateGenerationId document.documentGenerationId
     whenEither (actualRepository /= expectedRepository) $
       RepositoryIdentityMismatch expectedRepository actualRepository
     whenEither (actualMachine /= expectedMachine) $
@@ -912,10 +985,9 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
     created <- parseTime "created-at" document.documentCreatedTime
     updated <- parseTime "updated-at" document.documentUpdatedTime
     targets <- traverseWithKeyEither targetFromDocument document.documentTargets
-    hookExecutions <-
-      traverseWithKeyEither
-        hookExecutionFromDocument
-        document.documentHookExecutions
+    hookExecutionPairs <-
+      traverseWithKeyEither hookExecutionFromDocument document.documentHookExecutions
+    let hookExecutions = Map.fromList $ Map.elems hookExecutionPairs
     pendingCleanup <-
       traverse
         (mapLeft MalformedState . textOsPath)
@@ -939,6 +1011,7 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
         schemaVersion
         actualRepository
         actualMachine
+        generation
         checkout
         manifest
         intermediate
@@ -968,6 +1041,7 @@ upgradeV2Document source = case decoded of
         schemaVersion
         document.v2DocumentRepositoryId
         document.v2DocumentMachineId
+        document.v2DocumentRepositoryId
         document.v2DocumentCheckoutPath
         document.v2DocumentManifestPath
         document.v2DocumentIntermediatePath
@@ -1008,6 +1082,7 @@ upgradeLegacyDocument expectedTargetRoot source = do
       schemaVersion
       legacy.legacyDocumentRepositoryId
       legacy.legacyDocumentMachineId
+      legacy.legacyDocumentRepositoryId
       legacy.legacyDocumentCheckoutPath
       legacy.legacyDocumentManifestPath
       legacy.legacyDocumentIntermediatePath
@@ -1050,57 +1125,60 @@ targetToDocument target =
       DirectoryFingerprint -> ("directory", 0, "")
 
 
-hookExecutionToDocument :: HookExecution -> HookExecutionDocument
-hookExecutionToDocument execution =
+hookExecutionToDocument
+  :: HookExecutionKey -> HookExecution -> HookExecutionDocument
+hookExecutionToDocument (HookExecutionKey event identifier) execution =
   HookExecutionDocument
-    execution.event
-    execution.hookId
-    execution.policy
-    execution.fingerprint
+    (renderHookType event)
+    (renderHookId identifier)
+    policy
+    fingerprint
     (timeText execution.succeededTime)
+ where
+  (policy, fingerprint) = case execution.policy of
+    HookOnceExecution -> ("once", Nothing)
+    HookOnChangeExecution value -> ("on-change", Just value)
 
 
 hookExecutionFromDocument
   :: Text
   -> HookExecutionDocument
-  -> Either StateError HookExecution
+  -> Either StateError (HookExecutionKey, HookExecution)
 hookExecutionFromDocument key execution = do
-  whenEither
-    ( key
-        /= execution.hookExecutionDocumentEvent <> "/" <> execution.hookExecutionDocumentId
-    )
-    ( MalformedState
-        "A hook execution table key does not match its event and id fields."
-    )
-  whenEither
-    (execution.hookExecutionDocumentEvent `notElem` (renderHookType <$> allHookTypes))
-    (MalformedState "A hook execution has an unknown lifecycle event.")
+  event <-
+    maybe
+      (Left $ MalformedState "A hook execution has an unknown lifecycle event.")
+      Right
+      ( find
+          ((== execution.hookExecutionDocumentEvent) . renderHookType)
+          allHookTypes
+      )
   identifier <-
     mapLeft MalformedState $ parseHookId execution.hookExecutionDocumentId
   whenEither
     (renderHookId identifier /= execution.hookExecutionDocumentId)
     (MalformedState "A hook execution has a noncanonical hook id.")
-  case execution.hookExecutionDocumentPolicy of
+  let typedKey = HookExecutionKey event identifier
+  whenEither (key /= renderHookExecutionKey typedKey) $
+    MalformedState
+      "A hook execution table key does not match its event and id fields."
+  policy <- case execution.hookExecutionDocumentPolicy of
     "once" ->
-      whenEither
-        (execution.hookExecutionDocumentFingerprint /= Nothing)
-        (MalformedState "A once hook execution must not have a fingerprint.")
+      HookOnceExecution
+        <$ whenEither
+          (execution.hookExecutionDocumentFingerprint /= Nothing)
+          (MalformedState "A once hook execution must not have a fingerprint.")
     "on-change" ->
-      whenEither
-        (execution.hookExecutionDocumentFingerprint == Nothing)
-        (MalformedState "An on-change hook execution must have a fingerprint.")
+      maybe
+        (Left $ MalformedState "An on-change hook execution must have a fingerprint.")
+        (Right . HookOnChangeExecution)
+        execution.hookExecutionDocumentFingerprint
     _ -> Left $ MalformedState "A hook execution has an unknown stateful policy."
   succeeded <-
     parseTime
       "hook-executions.succeeded-at"
       execution.hookExecutionDocumentSucceededTime
-  return $
-    HookExecution
-      execution.hookExecutionDocumentEvent
-      execution.hookExecutionDocumentId
-      execution.hookExecutionDocumentPolicy
-      execution.hookExecutionDocumentFingerprint
-      succeeded
+  return (typedKey, HookExecution policy succeeded)
 
 
 targetFromDocument :: Text -> TargetDocument -> Either StateError ManagedTarget
@@ -1826,7 +1904,7 @@ selectRepositoryState _ = AmbiguousRepositoryStates
 -- An explicit intermediate path is persisted.  Relative paths are resolved
 -- against the checkout before they are stored.
 prepareRepositoryState
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadIO m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -1846,7 +1924,7 @@ prepareRepositoryState root repositoryId' machineId' checkout explicit =
 
 -- | Prepares state while preserving known legacy first-apply history.
 prepareRepositoryStateWithLegacyHistory
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadIO m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -1884,7 +1962,7 @@ prepareRepositoryStateWithLegacyHistory
 -- return 'True' only when the supplied checkout has a readable manifest that
 -- declares this repository identity.
 prepareRepositoryStateWithOwnership
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadIO m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -1928,7 +2006,7 @@ prepareRepositoryStateWithOwnership
 -- without publishing it for a snapshot layout that is already known to be
 -- invalid.  The action is not run when an existing repository state is reused.
 prepareRepositoryStateWithOwnershipBeforeMigration
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadIO m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -1997,7 +2075,7 @@ resolveExplicitSnapshot checkout (Just explicit) = catchStateIOErrors $ do
 
 
 prepareRepositoryStateUnlocked
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadIO m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -2301,6 +2379,7 @@ prepareRepositoryStateUnlocked
             Right True -> persistAndCleanup result
 
     persistAndCleanup result = do
+      generation <- newStateGenerationId
       requestedExists <- isDirectory requested
       unless requestedExists $ createDirectories requested
       snapshot <- snapshotEntries requested
@@ -2312,6 +2391,7 @@ prepareRepositoryStateUnlocked
                   schemaVersion
                   repositoryId'
                   machineId'
+                  generation
                   checkout'
                   manifest'
                   requested
@@ -2602,41 +2682,39 @@ recordHookExecution
   => OsPath
   -> UTCTime
   -> MachineState
-  -> Text
+  -> HookExecutionKey
   -> HookExecution
   -> m (Either StateError MachineState)
 recordHookExecution root now state key execution =
-  case hookExecutionFromDocument key $ hookExecutionToDocument execution of
-    Left err -> return $ Left err
-    Right validatedExecution -> catchStateIOErrors $ do
-      createDirectories $ repositoryStateDirectory root state.repositoryId
-      withFileLock (repositoryStateLockPath root state.repositoryId) $ do
-        forgetting <- isRepositoryForgetInProgress root state.repositoryId
-        case forgetting of
-          Left err -> return $ Left err
-          Right True ->
-            return $ Left $ RepositoryForgetInProgress state.repositoryId
-          Right False -> do
-            loaded <- readRepositoryState root state.repositoryId state.machineId
-            case loaded of
-              Left err -> return $ Left err
-              Right Nothing ->
-                return $ Left $ MissingRepositoryState state.repositoryId
-              Right (Just current) ->
-                case validateRepositoryStateGeneration state current of
-                  Left err -> return $ Left err
-                  Right () -> do
-                    let updated =
-                          current
-                            { hookExecutions =
-                                Map.insert
-                                  key
-                                  validatedExecution
-                                  current.hookExecutions
-                            , updatedTime = now
-                            }
-                    writeState root updated
-                    return $ Right updated
+  catchStateIOErrors $ do
+    createDirectories $ repositoryStateDirectory root state.repositoryId
+    withFileLock (repositoryStateLockPath root state.repositoryId) $ do
+      forgetting <- isRepositoryForgetInProgress root state.repositoryId
+      case forgetting of
+        Left err -> return $ Left err
+        Right True ->
+          return $ Left $ RepositoryForgetInProgress state.repositoryId
+        Right False -> do
+          loaded <- readRepositoryState root state.repositoryId state.machineId
+          case loaded of
+            Left err -> return $ Left err
+            Right Nothing ->
+              return $ Left $ MissingRepositoryState state.repositoryId
+            Right (Just current) ->
+              case validateRepositoryStateGeneration state current of
+                Left err -> return $ Left err
+                Right () -> do
+                  let updated =
+                        current
+                          { hookExecutions =
+                              Map.insert
+                                key
+                                execution
+                                current.hookExecutions
+                          , updatedTime = now
+                          }
+                  writeState root updated
+                  return $ Right updated
 
 
 -- | Validates that two records belong to the same repository-state generation.
@@ -2646,13 +2724,45 @@ recordHookExecution root now state key execution =
 validateRepositoryStateGeneration
   :: MachineState -> MachineState -> Either StateError ()
 validateRepositoryStateGeneration expected actual
-  | actual.createdTime == expected.createdTime = Right ()
+  | actual.generationId == expected.generationId = Right ()
   | otherwise =
       Left $
         RepositoryStateGenerationMismatch
           expected.repositoryId
-          expected.createdTime
-          actual.createdTime
+          expected.generationId
+          actual.generationId
+
+
+-- | Runs an action only while the captured state generation is still current.
+--
+-- The generation is checked under the repository lock, and the supplied action
+-- runs before that lock is released.  This gives callers a linearization point
+-- for effects that must not start after a concurrent repository forget.
+withRepositoryStateGeneration
+  :: (MonadFileSystem m)
+  => OsPath
+  -> MachineState
+  -> m a
+  -> m (Either StateError a)
+withRepositoryStateGeneration root expected action = catchStateIOErrors $ do
+  createDirectories $ repositoryStateDirectory root expected.repositoryId
+  withFileLock (repositoryStateLockPath root expected.repositoryId) $ do
+    forgetting <- isRepositoryForgetInProgress root expected.repositoryId
+    case forgetting of
+      Left err -> return $ Left err
+      Right True ->
+        return $ Left $ RepositoryForgetInProgress expected.repositoryId
+      Right False -> do
+        loaded <-
+          readRepositoryState root expected.repositoryId expected.machineId
+        case loaded of
+          Left err -> return $ Left err
+          Right Nothing ->
+            return $ Left $ MissingRepositoryState expected.repositoryId
+          Right (Just current) ->
+            case validateRepositoryStateGeneration expected current of
+              Left err -> return $ Left err
+              Right () -> Right <$> action
 
 
 -- | Atomically replaces managed-target records after successful syncs.

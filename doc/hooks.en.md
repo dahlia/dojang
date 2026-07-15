@@ -181,7 +181,7 @@ Stateful hooks with the same repository, event, and `id` are serialized across
 processes.  Eligibility is checked again while holding the hook lock, then a
 successful execution is saved through the repository's atomic state update.
 If the repository is forgotten and recreated while a hook is running, the old
-execution cannot enter the new state generation.  Hook IDs are validated again
-before history is written.
+execution cannot enter the new state generation.  Hook execution identities
+and policy data use validated types before they reach the state writer.
 
 <!-- cSpell:ignore systemctl -->

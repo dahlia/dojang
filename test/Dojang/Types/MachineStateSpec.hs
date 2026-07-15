@@ -27,7 +27,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.Char (chr)
 import Data.Either (isRight)
-import Data.List (isSuffixOf, nub)
+import Data.List (find, isSuffixOf, nub)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
@@ -71,8 +71,10 @@ import Dojang.MonadFileSystem
   )
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Environment (OperatingSystem (..))
+import Dojang.Types.Hook (HookType (PreApply, PreStatus), parseHookId)
 import Dojang.Types.MachineState
   ( HookExecution (..)
+  , HookExecutionPolicy (..)
   , MachineId
   , MachineState (..)
   , MigrationResult (..)
@@ -85,12 +87,14 @@ import Dojang.Types.MachineState
   , encodeMachineState
   , ensureMachineId
   , forgetRepositoryStateWith
+  , hookExecutionKey
   , listRepositoryStates
   , managedTargetSnapshotRoot
   , markFirstApplied
   , markRepositoryForgetInProgress
   , migrationMarkerPath
   , parseMachineId
+  , parseStateGenerationId
   , prepareRepositoryState
   , prepareRepositoryStateWithLegacyHistory
   , prepareRepositoryStateWithOwnership
@@ -106,6 +110,7 @@ import Dojang.Types.MachineState
   , updateManagedTargetsWith
   , validateMachineStateStore
   , validateMigrationStateRoot
+  , withRepositoryStateGeneration
   )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
@@ -217,13 +222,26 @@ spec = do
                     defaultIntermediatePath root initial.repositoryId
                 , targetSnapshotRoot = expectedTargetRoot
                 }
+        let currentDocument = encodeMachineState legacyState
         let legacyDocument =
-              Text.replace "schema-version = 3" "schema-version = 1" $
-                Text.unlines
-                  [ line
-                  | line <- Text.lines $ encodeMachineState legacyState
-                  , not $ "target-snapshot-root = " `Text.isPrefixOf` line
-                  ]
+              Text.unlines
+                [ "schema-version = 1"
+                , stateField "repository-id" currentDocument
+                , stateField "machine-id" currentDocument
+                , stateField "checkout-path" currentDocument
+                , stateField "manifest-path" currentDocument
+                , stateField "intermediate-path" currentDocument
+                , stateField "created-at" currentDocument
+                , stateField "updated-at" currentDocument
+                , ""
+                , "[hooks]"
+                , ""
+                , "[lifecycle]"
+                , "first-applied = false"
+                , "pending-cleanup = []"
+                , ""
+                , "[targets]"
+                ]
         createDirectories $
           repositoryStateDirectory root initial.repositoryId
         writeFile
@@ -239,17 +257,41 @@ spec = do
 
     it "upgrades schema-version 2 while preserving opaque hook data" $ do
       current <- fixtureState
-      let legacy =
+      let currentDocument = encodeMachineState current
+      let legacyDocument =
+            Text.unlines
+              [ "schema-version = 2"
+              , stateField "repository-id" currentDocument
+              , stateField "machine-id" currentDocument
+              , stateField "checkout-path" currentDocument
+              , stateField "manifest-path" currentDocument
+              , stateField "intermediate-path" currentDocument
+              , stateField "target-snapshot-root" currentDocument
+              , stateField "created-at" currentDocument
+              , stateField "updated-at" currentDocument
+              , ""
+              , "[hooks]"
+              , "future = \"opaque\""
+              , ""
+              , "[lifecycle]"
+              , "first-applied = false"
+              , "pending-cleanup = []"
+              , ""
+              , "[targets]"
+              ]
+      let Right legacyGeneration =
+            parseStateGenerationId $ repositoryIdText current.repositoryId
+      let expected =
             current
-              { schemaVersion = 2
+              { generationId = legacyGeneration
               , hookRecords = Map.singleton "future" "opaque"
               , hookExecutions = Map.empty
               }
       decodeMachineState
-        legacy.repositoryId
-        legacy.machineId
-        (encodeMachineState legacy)
-        `shouldBe` Right legacy{schemaVersion = 3}
+        current.repositoryId
+        current.machineId
+        legacyDocument
+        `shouldBe` Right expected
 
     it "round-trips managed targets and hook execution history" $ do
       state <- fixtureState
@@ -273,22 +315,20 @@ spec = do
               Applied
               fixtureTime
       let populated =
-            state
-              { pendingCleanupPaths =
-                  [state.targetSnapshotRoot </> snapshotName]
-              , targetRecords = Map.singleton target.targetId target
-              , hookRecords = Map.singleton "future" "opaque"
-              , hookExecutions =
-                  Map.singleton
-                    "pre-apply/build-cache"
-                    ( HookExecution
-                        "pre-apply"
-                        "build-cache"
-                        "on-change"
-                        (Just "fingerprint")
-                        fixtureTime
-                    )
-              }
+            let Right buildCacheId = parseHookId "build-cache"
+            in state
+                 { pendingCleanupPaths =
+                     [state.targetSnapshotRoot </> snapshotName]
+                 , targetRecords = Map.singleton target.targetId target
+                 , hookRecords = Map.singleton "future" "opaque"
+                 , hookExecutions =
+                     Map.singleton
+                       (hookExecutionKey PreApply buildCacheId)
+                       ( HookExecution
+                           (HookOnChangeExecution "fingerprint")
+                           fixtureTime
+                       )
+                 }
       decodeMachineState
         populated.repositoryId
         populated.machineId
@@ -312,57 +352,41 @@ spec = do
           (repositoryStatePath root state.repositoryId)
           (encodeUtf8 $ encodeMachineState local)
         let execution =
-              HookExecution
-                "pre-status"
-                "prepare"
-                "once"
-                Nothing
-                fixtureTime
+              HookExecution HookOnceExecution fixtureTime
+        let Right prepareId = parseHookId "prepare"
+        let executionKey = hookExecutionKey PreStatus prepareId
         result <-
           recordHookExecution
             root
             fixtureTime
             local
-            "pre-status/prepare"
+            executionKey
             execution
         case result of
           Left err -> expectationFailure $ show err
-          Right updated ->
+          Right updated -> do
             updated.hookExecutions
-              `shouldBe` Map.singleton "pre-status/prepare" execution
+              `shouldBe` Map.singleton executionKey execution
+            readRepositoryState root state.repositoryId state.machineId
+              `shouldReturn` Right (Just updated)
 
-    it "rejects an invalid hook execution before corrupting state" $
-      withTempDir $ \root _ -> do
-        state <- fixtureState
-        let local =
-              state
-                { intermediatePath =
-                    defaultIntermediatePath root state.repositoryId
-                , targetSnapshotRoot =
-                    managedTargetSnapshotRoot root state.repositoryId
-                }
-        createDirectories $ repositoryStateDirectory root state.repositoryId
-        createDirectories local.intermediatePath
-        createDirectories local.targetSnapshotRoot
-        writeFile
-          (repositoryStatePath root state.repositoryId)
-          (encodeUtf8 $ encodeMachineState local)
-        let execution =
-              HookExecution
-                "pre-status"
-                "../prepare"
-                "once"
-                Nothing
-                fixtureTime
-        recordHookExecution
-          root
-          fixtureTime
-          local
-          "pre-status/../prepare"
-          execution
-          >>= (`shouldSatisfy` isMalformed)
-        readRepositoryState root state.repositoryId state.machineId
-          `shouldReturn` Right (Just local)
+    it "rejects malformed hook execution identities at the document boundary" $ do
+      state <- fixtureState
+      let Right prepareId = parseHookId "prepare"
+      let populated =
+            state
+              { hookExecutions =
+                  Map.singleton
+                    (hookExecutionKey PreStatus prepareId)
+                    (HookExecution HookOnceExecution fixtureTime)
+              }
+      let malformed =
+            Text.replace
+              "id = \"prepare\""
+              "id = \"../prepare\""
+              (encodeMachineState populated)
+      decodeMachineState state.repositoryId state.machineId malformed
+        `shouldSatisfy` isMalformed
 
     it "rejects a hook execution from a different state generation" $
       withTempDir $ \tmp _ -> do
@@ -384,7 +408,7 @@ spec = do
           paths.machineId
           (removeDirectoryRecursively . takeDirectory . (.intermediatePath))
           >>= (`shouldBe` Right (Just ()))
-        let recreatedTime = read "2026-07-15 01:00:00 UTC"
+        let recreatedTime = fixtureTime
         recreatedResult <-
           prepareRepositoryState
             paths.root
@@ -397,23 +421,19 @@ spec = do
           Right (state, CreatedRepositoryState) -> return state
           _ -> fail $ "Unexpected state: " <> show recreatedResult
         let execution =
-              HookExecution
-                "pre-status"
-                "prepare"
-                "once"
-                Nothing
-                recreatedTime
+              HookExecution HookOnceExecution recreatedTime
+        let Right prepareId = parseHookId "prepare"
         recordHookExecution
           paths.root
           recreatedTime
           oldState
-          "pre-status/prepare"
+          (hookExecutionKey PreStatus prepareId)
           execution
           `shouldReturn` Left
             ( RepositoryStateGenerationMismatch
                 paths.repositoryId
-                oldState.createdTime
-                recreatedTime
+                oldState.generationId
+                recreated.generationId
             )
         readRepositoryState paths.root paths.repositoryId paths.machineId
           `shouldReturn` Right (Just recreated)
@@ -1711,11 +1731,14 @@ spec = do
         newSnapshotName <- encodeFS "new-snapshot"
         let moved = tmp </> movedName
         let newSnapshot = tmp </> newSnapshotName
+        let Right generation =
+              parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
         let unsafeState =
               MachineState
                 2
                 paths.repositoryId
                 paths.machineId
+                generation
                 paths.checkout
                 (paths.checkout </> paths.file)
                 paths.checkout
@@ -2653,6 +2676,44 @@ spec = do
         takeMVar updateCompletion
           `shouldReturn` Left (MissingRepositoryState paths.repositoryId)
 
+    it "holds the repository lock through a generation-guarded effect" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        localState <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        effectStarted <- newEmptyMVar
+        allowEffect <- newEmptyMVar
+        effectCompletion <- newEmptyMVar
+        _ <- forkIO $ do
+          result <-
+            withRepositoryStateGeneration paths.root localState $ do
+              putMVar effectStarted ()
+              takeMVar allowEffect
+          putMVar effectCompletion result
+        takeMVar effectStarted
+        forgetCompletion <- newEmptyMVar
+        _ <- forkIO $ do
+          result <-
+            forgetRepositoryStateWith
+              paths.root
+              paths.repositoryId
+              paths.machineId
+              (const $ return ())
+          putMVar forgetCompletion result
+        timeout 100000 (takeMVar forgetCompletion) `shouldReturn` Nothing
+        putMVar allowEffect ()
+        takeMVar effectCompletion `shouldReturn` Right ()
+        takeMVar forgetCompletion `shouldReturn` Right (Just ())
+
     it "allocates a unique temporary path for every simultaneous writer" $
       withTempDir $ \tmp _ -> do
         results <-
@@ -2854,6 +2915,8 @@ fixtureState :: IO MachineState
 fixtureState = do
   repositoryId' <- repositoryId "123e4567-e89b-42d3-a456-426614174000"
   machineId' <- machineId "323e4567-e89b-42d3-a456-426614174000"
+  let Right generationId =
+        parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
   checkoutName <- encodeFS "checkout"
   manifestName <- encodeFS "dojang.toml"
   stateName <- encodeFS "state"
@@ -2870,6 +2933,7 @@ fixtureState = do
       3
       repositoryId'
       machineId'
+      generationId
       checkout
       (checkout </> manifestName)
       intermediate
@@ -2999,6 +3063,13 @@ isFailedStateUpdate
   -> Bool
 isFailedStateUpdate (Right (Left _)) = True
 isFailedStateUpdate _ = False
+
+
+stateField :: Text.Text -> Text.Text -> Text.Text
+stateField name document =
+  case find (Text.isPrefixOf $ name <> " = ") $ Text.lines document of
+    Just line -> line
+    Nothing -> error $ "Missing state fixture field: " <> Text.unpack name
 
 
 newtype FailingReplaceIO a

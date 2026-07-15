@@ -18,14 +18,15 @@ To be released.
     the current event.  Commands that reload manifest and environment context
     after pre hooks also reload it before selecting post hooks.  A stateful hook
     waiting for its lock cannot start after its state generation is forgotten
-    and recreated, and a completed hook cannot restore history after that
-    replacement.  Persistent hook locks do not block automatic repository
-    selection after `forget`.  Nested Dojang commands
-    suppress hooks by default; `--allow-hook-recursion` permits one nested level
-    while preventing a hook from re-entering itself within the same repository.
-    Hooks in different repositories do not collide in the recursion stack.
-    Validated hook IDs remain abstract in the public API and execution history
-    is revalidated before it is stored.  Manifest serialization rejects
+    and recreated, even when the old and new records have identical timestamps,
+    and a completed hook cannot restore history after that replacement.  State
+    generations use opaque random UUIDs.  Persistent hook locks do not block
+    automatic repository selection after `forget`.  Nested Dojang commands
+    suppress hooks by default; `--allow-hook-recursion` permits one nested
+    level while preventing a hook from re-entering itself within the same
+    repository. Hooks in different repositories do not collide in the recursion
+    stack. Validated hook IDs remain abstract in the public API and execution
+    history is revalidated before it is stored.  Manifest serialization rejects
     programmatically constructed hook policy combinations and duplicate
     stateful IDs that the parser would reject.  Repository-relative route
     selectors also remain stable when `-r` selects a repository from another

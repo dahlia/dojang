@@ -11,6 +11,7 @@ module Dojang.Commands.Hook
   , HookScopePath (..)
   , commandHookTypes
   , disambiguatedHookScopePaths
+  , effectiveHookWorkingDirectory
   , executeHooks
   , defaultHookProcessRunner
   , hookDueReason
@@ -66,9 +67,9 @@ import System.OsPath
 import System.OsPath qualified as OsPath
 import System.Process
   ( CreateProcess (..)
+  , createProcess
   , proc
   , waitForProcess
-  , withCreateProcess
   )
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
@@ -95,13 +96,19 @@ import Dojang.Types.Hook
   )
 import Dojang.Types.MachineState
   ( HookExecution (..)
+  , HookExecutionKey
+  , HookExecutionPolicy (..)
   , MachineState (..)
   , formatStateError
+  , hookExecutionFingerprint
+  , hookExecutionKey
   , readRepositoryState
   , recordHookExecution
+  , renderHookExecutionKey
   , repositoryStateDirectory
   , repositoryStatePath
   , validateRepositoryStateGeneration
+  , withRepositoryStateGeneration
   , withStateFileLock
   )
 import Dojang.Types.Manifest (Manifest (..))
@@ -136,8 +143,10 @@ data HookEnv = HookEnv
   -- ^ Repository-scoped state used by stateful policies.
   , stateRoot :: OsPath
   -- ^ Platform-native machine-state root.
-  , processRunner :: CreateProcess -> IO (Either IOException ExitCode)
-  -- ^ Injectable process effect used by tests and the real command runner.
+  , processStarter
+      :: CreateProcess
+      -> IO (Either IOException (IO (Either IOException ExitCode)))
+  -- ^ Injectable process start effect used by tests and the real command runner.
   }
 
 
@@ -383,7 +392,9 @@ executeHook hookEnv hookType hook = do
   dryRun' <- asks (.dryRun)
   let event = renderHookType hookType
   let identifier = effectiveHookId hookType hook
-  let stateKey = event <> "/" <> identifier
+  let executionKey = hookExecutionKey hookType <$> hook.hookId
+  let stateKey =
+        maybe (event <> "/" <> identifier) renderHookExecutionKey executionKey
   let recursionKey =
         hookRecursionKey hookEnv.machineState.repositoryId event identifier
   let fingerprint = hookFingerprint hookEnv hookType hook
@@ -395,49 +406,62 @@ executeHook hookEnv hookType hook = do
         then case hookDueReason
           hook.policy
           fingerprint
-          (Map.lookup stateKey hookEnv.machineState.hookExecutions) of
+          (executionKey >>= (`Map.lookup` hookEnv.machineState.hookExecutions)) of
           Nothing -> return ()
           Just reason -> printDryRun event reason hook
         else case hook.policy of
-          HookAlways ->
-            runAndRecord stateKey recursionKey identifier fingerprint
-          _ -> do
-            lockName <-
-              encodePath $ "hook-" <> Text.unpack (digestText stateKey) <> ".lock"
-            let lockDirectory =
-                  repositoryStateDirectory
-                    hookEnv.stateRoot
-                    hookEnv.machineState.repositoryId
-            createDirectories lockDirectory
-            locked <-
-              withStateFileLock (lockDirectory </> lockName) $ do
-                loaded <-
-                  readRepositoryState
-                    hookEnv.stateRoot
-                    hookEnv.machineState.repositoryId
-                    hookEnv.machineState.machineId
-                case loaded of
-                  Left err -> die' machineStateError $ formatStateError err
-                  Right Nothing ->
-                    die'
-                      machineStateError
-                      "The repository machine-state record disappeared before hook execution."
-                  Right (Just state) -> do
-                    case validateRepositoryStateGeneration
-                      hookEnv.machineState
-                      state of
-                      Left err -> die' machineStateError $ formatStateError err
-                      Right () -> do
-                        due <- isHookDue state hook stateKey fingerprint
-                        when due $
-                          runAndRecord
-                            stateKey
-                            recursionKey
-                            identifier
-                            fingerprint
-            case locked of
-              Left err -> die' machineStateError $ formatStateError err
-              Right () -> return ()
+          HookAlways -> do
+            _ <-
+              runHookProcess
+                hookEnv
+                hookType
+                recursionKey
+                identifier
+                hook
+                (liftIO . hookEnv.processStarter)
+            return ()
+          _ -> case executionKey of
+            Nothing ->
+              die'
+                machineStateError
+                "A stateful hook has no validated execution identity."
+            Just typedKey -> do
+              lockName <-
+                encodePath $ "hook-" <> Text.unpack (digestText stateKey) <> ".lock"
+              let lockDirectory =
+                    repositoryStateDirectory
+                      hookEnv.stateRoot
+                      hookEnv.machineState.repositoryId
+              createDirectories lockDirectory
+              locked <-
+                withStateFileLock (lockDirectory </> lockName) $ do
+                  loaded <-
+                    readRepositoryState
+                      hookEnv.stateRoot
+                      hookEnv.machineState.repositoryId
+                      hookEnv.machineState.machineId
+                  case loaded of
+                    Left err -> die' machineStateError $ formatStateError err
+                    Right Nothing ->
+                      die'
+                        machineStateError
+                        "The repository machine-state record disappeared before hook execution."
+                    Right (Just state) -> do
+                      case validateRepositoryStateGeneration
+                        hookEnv.machineState
+                        state of
+                        Left err -> die' machineStateError $ formatStateError err
+                        Right () -> do
+                          due <- isHookDue state hook typedKey fingerprint
+                          when due $
+                            runAndRecord
+                              typedKey
+                              recursionKey
+                              identifier
+                              fingerprint
+              case locked of
+                Left err -> die' machineStateError $ formatStateError err
+                Right () -> return ()
  where
   printDryRun event reason hook' = do
     pathStyle <- pathStyleFor stderr
@@ -450,34 +474,56 @@ executeHook hookEnv hookType hook = do
         (pathStyle hook'.command)
         hook'.args
 
-  runAndRecord stateKey recursionKey identifier fingerprint = do
-    succeeded <- runHookProcess hookEnv hookType recursionKey identifier hook
+  runAndRecord executionKey recursionKey identifier fingerprint = do
+    succeeded <-
+      runHookProcess
+        hookEnv
+        hookType
+        recursionKey
+        identifier
+        hook
+        startCurrentGeneration
     when (succeeded && hook.policy /= HookAlways) $ do
       now <- liftIO getCurrentTime
-      let execution =
-            HookExecution
-              (renderHookType hookType)
-              identifier
-              (renderHookPolicy hook.policy)
-              fingerprint
+      case hookExecutionPolicy hook.policy fingerprint of
+        Nothing ->
+          die'
+            machineStateError
+            "A stateful hook has invalid execution policy data."
+        Just policy -> do
+          let execution = HookExecution policy now
+          result <-
+            recordHookExecution
+              hookEnv.stateRoot
               now
-      result <-
-        recordHookExecution
-          hookEnv.stateRoot
-          now
-          hookEnv.machineState
-          stateKey
-          execution
-      case result of
-        Left err -> die' machineStateError $ formatStateError err
-        Right _ -> return ()
+              hookEnv.machineState
+              executionKey
+              execution
+          case result of
+            Left err -> die' machineStateError $ formatStateError err
+            Right _ -> return ()
+
+  hookExecutionPolicy HookOnce _ = Just HookOnceExecution
+  hookExecutionPolicy HookOnChange (Just value) =
+    Just $ HookOnChangeExecution value
+  hookExecutionPolicy _ _ = Nothing
+
+  startCurrentGeneration createProc = do
+    guarded <-
+      withRepositoryStateGeneration
+        hookEnv.stateRoot
+        hookEnv.machineState
+        (liftIO $ hookEnv.processStarter createProc)
+    case guarded of
+      Left err -> die' machineStateError $ formatStateError err
+      Right started -> return started
 
 
 isHookDue
   :: (Applicative m)
   => MachineState
   -> Hook
-  -> Text
+  -> HookExecutionKey
   -> Maybe Text
   -> m Bool
 isHookDue state hook key fingerprint =
@@ -498,7 +544,8 @@ hookDueReason HookOnce _ (Just _) = Nothing
 hookDueReason HookOnChange _ Nothing =
   Just "on-change policy has no successful execution"
 hookDueReason HookOnChange fingerprint (Just previous)
-  | previous.fingerprint /= fingerprint = Just "on-change fingerprint changed"
+  | hookExecutionFingerprint previous /= fingerprint =
+      Just "on-change fingerprint changed"
   | otherwise = Nothing
 
 
@@ -593,8 +640,9 @@ runHookProcess
   -> Text
   -> Text
   -> Hook
+  -> (CreateProcess -> App i (Either IOException (IO (Either IOException ExitCode))))
   -> App i Bool
-runHookProcess hookEnv hookType recursionKey identifier hook = do
+runHookProcess hookEnv hookType recursionKey identifier hook start = do
   pathStyle <- pathStyleFor stderr
   cmdPath <- liftIO $ decodeFS hook.command
   let argsStr = unpack <$> hook.args
@@ -657,7 +705,10 @@ runHookProcess hookEnv hookType recursionKey identifier hook = do
           , env = Just $ mergeHookEnvironment os environment parentEnv
           , delegate_ctlc = True
           }
-  result <- liftIO $ hookEnv.processRunner createProc
+  started <- start createProc
+  result <- case started of
+    Left err -> return $ Left err
+    Right waitForExit -> liftIO waitForExit
   case result of
     Left err -> do
       $(logError) $ "Hook could not be started: " <> pack (show err)
@@ -695,11 +746,22 @@ effectiveHookWorkingDirectory
   -> Hook
   -> App i OsPath
 effectiveHookWorkingDirectory hookEnv hook =
-  normalise
-    <$> makeAbsolute (fromMaybe hookEnv.repositoryPath hook.workingDirectory)
+  normalise <$> makeAbsolute candidate
+ where
+  candidate = case hook.workingDirectory of
+    Nothing -> hookEnv.repositoryPath
+    Just configured
+      | isAbsolute configured -> configured
+      | otherwise -> hookEnv.repositoryPath </> configured
 
 
--- | Starts a hook process and waits for its exit status.
-defaultHookProcessRunner :: CreateProcess -> IO (Either IOException ExitCode)
-defaultHookProcessRunner createProc =
-  try @IOException $ withCreateProcess createProc $ \_ _ _ ph -> waitForProcess ph
+-- | Starts a hook process and returns an action that waits for its exit status.
+defaultHookProcessRunner
+  :: CreateProcess
+  -> IO (Either IOException (IO (Either IOException ExitCode)))
+defaultHookProcessRunner createProc = do
+  started <- try @IOException $ createProcess createProc
+  return $ case started of
+    Left err -> Left err
+    Right (_, _, _, processHandle) ->
+      Right $ try @IOException $ waitForProcess processHandle
