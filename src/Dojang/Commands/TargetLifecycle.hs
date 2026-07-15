@@ -105,8 +105,8 @@ unmanage routeSelector destinations force = do
           absoluteDestinations
   when (not routeKnown || not destinationsKnown) $
     die' lifecycleSelectionError "At least one lifecycle selector is unknown."
-  let selected = filter matches records
-  when (null selected) $ do
+  let matched = filter matches records
+  when (null matched) $ do
     codeStyle <- codeStyleFor stderr
     die' lifecycleSelectionError $
       "No managed target matches the selection.  Use `"
@@ -116,7 +116,9 @@ unmanage routeSelector destinations force = do
   current <- makeCurrentRoutes routes
   (managed, _) <- makeManagedCorrespond ctx
   let entries = makeCurrentEntries managed
-  when (any ((== Nothing) . classifyOrphan current entries) selected) $
+  let selected =
+        filter ((/= Nothing) . classifyOrphan current entries) matched
+  when (null selected) $
     die' lifecycleSelectionError $
       "The selection includes an active target.  Change the manifest first, "
         <> "then run `dojang unmanage' again."

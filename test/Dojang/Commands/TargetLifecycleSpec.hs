@@ -43,7 +43,9 @@ import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
-import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent, Substitution, SubstitutionWithDefault)
+  )
 import Dojang.Types.MachineState
   ( MachineState (..)
   , encodeMachineState
@@ -181,6 +183,46 @@ spec = do
             Just target -> return target
           old.snapshotPath `shouldNotBe` new.snapshotPath
           observeOrphanStatus old `shouldReturn` OrphanUnchanged
+
+      it "unmanages a stale generation beside its active replacement" $
+        withManagedTarget $ \fixture -> do
+          let Right always = parseMonikerName "always"
+          let changedManifest =
+                ( manifest
+                    (singleton always Always)
+                    ( Map.singleton
+                        fixture.routeName
+                        [
+                          ( always
+                          , Just $
+                              SubstitutionWithDefault
+                                "DEST"
+                                (BareComponent "fallback")
+                          )
+                        ]
+                    )
+                    mempty
+                    mempty
+                    mempty
+                )
+                  { Manifest.repositoryId = Just fixture.repositoryId
+                  }
+          writeManifestFile changedManifest fixture.manifestPath
+          runAppWithoutLogging fixture.appEnv (apply True [])
+            `shouldReturn` ExitSuccess
+          before <- loadState fixture
+          Map.size before.targetRecords `shouldBe` 2
+          runAppWithoutLogging
+            fixture.appEnv
+            (unmanage (Just fixture.routeName) [] False)
+            `shouldReturn` ExitSuccess
+          after <- loadState fixture
+          case Map.elems after.targetRecords of
+            [active] ->
+              active.routeDefinition
+                `shouldBe` "${DEST:-fallback}"
+            records -> fail $ "Unexpected managed targets: " <> show records
+          readFile fixture.destination `shouldReturn` "managed"
 
       it "preserves the intermediate entry used by a current route" $
         withManagedTarget $ \fixture -> do
