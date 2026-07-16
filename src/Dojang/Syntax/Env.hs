@@ -162,7 +162,21 @@ newtype FactsDocument = FactsDocument FactMap
 instance FromValue FactsDocument where
   fromValue =
     parseTableFromValue $
-      FactsDocument . fromMaybe Map.empty <$> optKey "facts"
+      makeFactsDocument
+        <$> optKey "os"
+        <*> optKey "arch"
+        <*> optKey "kernel"
+        <*> optKey "hostname"
+        <*> optKey "facts"
+   where
+    makeFactsDocument
+      :: Maybe OperatingSystem
+      -> Maybe Architecture
+      -> Maybe Kernel
+      -> Maybe FactValue
+      -> Maybe FactMap
+      -> FactsDocument
+    makeFactsDocument _ _ _ _ = FactsDocument . fromMaybe Map.empty
 
 
 -- | An error made during parsing.

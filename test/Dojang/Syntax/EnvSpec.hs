@@ -45,6 +45,14 @@ spec = do
     lookupFact "hostname" parsed `shouldBe` Just "atlas"
     lookupFact "class" parsed `shouldBe` Just "work"
     lookupFact "org.team" parsed `shouldBe` Just "platform"
+    readFacts toml
+      `shouldBe` Right
+        ( Map.fromList
+            [ ("class", "work")
+            , ("org.team", "platform")
+            ]
+        , []
+        )
 
   specify "reserved facts cannot be persisted" $
     case readFacts "[facts]\nos = \"windows\"\n" of
