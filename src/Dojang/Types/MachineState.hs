@@ -2824,35 +2824,53 @@ markFirstApplied root now state = catchStateIOErrors $ do
             return $ Right updated
 
 
--- | Atomically updates a repository's machine-fact sources.
+-- | Atomically applies machine-fact source changes to a repository record.
+--
+-- The fact map contains only additions or replacements requested by the
+-- caller.  The optional path replaces the associated facts file when present;
+-- 'Nothing' preserves the association reloaded under the repository lock.
 updateMachineFacts
   :: (MonadFileSystem m)
   => OsPath
+  -- ^ Platform-native machine-state root.
   -> UTCTime
+  -- ^ Time to store as the record's last update.
   -> MachineState
+  -- ^ Repository-state generation observed before enrollment began.
   -> Maybe OsPath
+  -- ^ Facts-file association to replace, or 'Nothing' to preserve it.
   -> FactMap
+  -- ^ Declared fact additions and replacements to merge into current state.
   -> m (Either StateError MachineState)
-updateMachineFacts root now state factsFile' declaredFacts' =
+  -- ^ Updated state, or a validation or persistence error.
+updateMachineFacts root now state requestedFactsFile declaredFactUpdates =
   catchStateIOErrors $ do
     createDirectories $ repositoryStateDirectory root state.repositoryId
     withFileLock (repositoryStateLockPath root state.repositoryId) $ do
-      loaded <- readRepositoryState root state.repositoryId state.machineId
-      case loaded of
+      forgetting <- isRepositoryForgetInProgress root state.repositoryId
+      case forgetting of
         Left err -> return $ Left err
-        Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
-        Right (Just current) ->
-          case validateRepositoryStateGeneration state current of
+        Right True ->
+          return $ Left $ RepositoryForgetInProgress state.repositoryId
+        Right False -> do
+          loaded <- readRepositoryState root state.repositoryId state.machineId
+          case loaded of
             Left err -> return $ Left err
-            Right () -> do
-              let updated =
-                    current
-                      { factsFile = factsFile'
-                      , declaredFacts = declaredFacts'
-                      , updatedTime = now
-                      }
-              writeState root updated
-              return $ Right updated
+            Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
+            Right (Just current) ->
+              case validateRepositoryStateGeneration state current of
+                Left err -> return $ Left err
+                Right () -> do
+                  let updated =
+                        current
+                          { factsFile =
+                              maybe current.factsFile Just requestedFactsFile
+                          , declaredFacts =
+                              Map.union declaredFactUpdates current.declaredFacts
+                          , updatedTime = now
+                          }
+                  writeState root updated
+                  return $ Right updated
 
 
 -- | Records one successful stateful hook execution atomically.

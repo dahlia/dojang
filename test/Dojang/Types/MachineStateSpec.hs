@@ -106,6 +106,7 @@ import Dojang.Types.MachineState
   , repositoryStatePath
   , resolveStateRoot
   , selectRepositoryState
+  , updateMachineFacts
   , updateManagedTargets
   , updateManagedTargetsWith
   , validateMachineStateStore
@@ -2527,6 +2528,88 @@ spec = do
         readFile (new </> paths.file) >>= (`shouldBe` "ancestor")
 
   describe "concurrent state persistence" $ do
+    it "merges machine facts with state reloaded under the lock" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        oldProfile <- encodeFS "old-facts.toml"
+        newProfile <- encodeFS "new-facts.toml"
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        initial <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        seeded <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            initial
+            (Just oldProfile)
+            (Map.singleton "class" "work")
+        stale <- case seeded of
+          Right state -> return state
+          _ -> fail $ "Unexpected state: " <> show seeded
+        concurrent <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            stale
+            (Just newProfile)
+            (Map.singleton "org.team" "platform")
+        concurrent `shouldSatisfy` isRight
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            stale
+            Nothing
+            (Map.singleton "location" "home")
+        case updated of
+          Right current -> do
+            current.factsFile `shouldBe` Just newProfile
+            current.declaredFacts
+              `shouldBe` Map.fromList
+                [ ("class", "work")
+                , ("location", "home")
+                , ("org.team", "platform")
+                ]
+            readRepositoryState paths.root paths.repositoryId paths.machineId
+              `shouldReturn` Right (Just current)
+          _ -> fail $ "Unexpected state: " <> show updated
+
+    it "rejects fact enrollment while repository forget is pending" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        markRepositoryForgetInProgress paths.root paths.repositoryId
+          `shouldReturn` Right ()
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            state
+            Nothing
+            (Map.singleton "class" "work")
+        updated
+          `shouldBe` Left (RepositoryForgetInProgress paths.repositoryId)
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
     it "rejects target updates while repository forget is pending" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp

@@ -514,15 +514,23 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
               value <- input $ "Value for fact." ++ Text.unpack (factKeyText key) ++ ":"
               return (key, fromString value)
             return $ Map.fromList pairs
-  let declared' = Map.union prompted declared
-  if factsFile' == state.factsFile && declared' == state.declaredFacts
+  let declaredFactUpdates = Map.union prompted supplied
+  let factsFileUpdate =
+        if factsFile' == state.factsFile then Nothing else factsFile'
+  if factsFileUpdate == Nothing && Map.null declaredFactUpdates
     then do
       $(logInfo) "Machine facts are already enrolled."
       return state
     else do
       stateRoot <- asks (.stateDirectory)
       now <- liftIO getCurrentTime
-      updated <- updateMachineFacts stateRoot now state factsFile' declared'
+      updated <-
+        updateMachineFacts
+          stateRoot
+          now
+          state
+          factsFileUpdate
+          declaredFactUpdates
       case updated of
         Left err -> die' machineStateError $ formatStateError err
         Right state' -> do
