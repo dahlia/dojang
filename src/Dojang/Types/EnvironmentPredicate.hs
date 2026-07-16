@@ -257,7 +257,7 @@ referencedFacts resolver = go Set.empty . normalizePredicate
       | otherwise ->
           maybe
             Set.empty
-            (go $ Set.insert name visited)
+            (go (Set.insert name visited) . normalizePredicate)
             (resolver name)
     Fact key _ -> Set.singleton key
     FactDefined key -> Set.singleton key

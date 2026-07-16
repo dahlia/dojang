@@ -160,10 +160,13 @@ spec = do
   describe "referencedFacts" $ do
     it "follows reachable monikers and normalized branches" $ do
       let Right workstation = parseMonikerName "workstation"
+      let Right everywhere = parseMonikerName "everywhere"
       let resolve name
             | name == workstation = Just $ Fact "class" "work"
+            | name == everywhere = Just $ Or [Always, Fact "unused" "value"]
             | otherwise = Nothing
       referencedFacts resolve (Moniker workstation) `shouldBe` ["class"]
+      referencedFacts resolve (Moniker everywhere) `shouldBe` []
       referencedFacts resolve (Or [Always, Fact "unused" "value"])
         `shouldBe` []
       referencedFacts resolve (FactDefined "class") `shouldBe` ["class"]
