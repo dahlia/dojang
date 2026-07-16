@@ -324,11 +324,14 @@ spec = do
 
     it "upgrades schema-version 3 with empty machine facts" $ do
       current <- fixtureState
+      let currentDocument = encodeMachineState current
+      Text.isInfixOf "schema-version = 4" currentDocument `shouldBe` True
       let legacyDocument =
             Text.replace
               "schema-version = 4"
               "schema-version = 3"
-              (encodeMachineState current)
+              currentDocument
+      Text.isInfixOf "schema-version = 3" legacyDocument `shouldBe` True
       decodeMachineState
         current.repositoryId
         current.machineId

@@ -197,8 +197,9 @@ environment = emptyEnvironment <$> operatingSystem <*> architecture <*> kernel
 factKey :: (MonadGen m) => m FactKey
 factKey = do
   key <- monikerNameText
-  let Right key' = parseFactKey key
-  return key'
+  case parseFactKey key of
+    Left _ -> factKey
+    Right key' -> return key'
 
 
 factValue :: (MonadGen m) => m FactValue

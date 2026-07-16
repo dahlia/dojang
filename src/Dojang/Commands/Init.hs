@@ -370,13 +370,23 @@ init :: (MonadFileSystem i, MonadIO i) => [InitPreset] -> Bool -> App i ExitCode
 init presets noInteractive = initWithFacts presets noInteractive Nothing []
 
 
+-- | Initializes a repository and enrolls its machine-specific facts.
+--
+-- Existing repositories validate and enroll the requested facts before
+-- returning.  New repositories validate fact inputs before publishing their
+-- manifest and state.
 initWithFacts
   :: (MonadFileSystem i, MonadIO i)
   => [InitPreset]
+  -- ^ Platform presets used when creating a new manifest.
   -> Bool
+  -- ^ Whether prompts are disabled and every required fact must be supplied.
   -> Maybe OsPath
+  -- ^ An optional facts file to associate with this repository.
   -> [Text]
+  -- ^ @key=value@ facts that override associated profile values.
   -> App i ExitCode
+  -- ^ 'ExitSuccess' after initialization and enrollment complete.
 initWithFacts presets noInteractive factsFile assignments = do
   manifestExists <- doesManifestExist
   if manifestExists
