@@ -245,7 +245,7 @@ currentEnvironmentUsing repositoryFacts = do
           detected <- liftIO currentEnvironment
           return $ Right (detected, [])
         else die' noEnvFile $ showt e
-  (env, warnings) <- case result of
+  (env, fallbackFacts, warnings) <- case result of
     Left errors -> do
       factsOnly <-
         readFactsOnlyFile filePath `catchError` \e ->
@@ -253,18 +253,21 @@ currentEnvironmentUsing repositoryFacts = do
       case factsOnly of
         Right (facts, factsWarnings) -> do
           detected <- liftIO currentEnvironment
-          return (withFacts facts detected, factsWarnings)
+          return (detected, facts, factsWarnings)
         Left _ -> do
           let formattedErrors =
                 Data.Text.concat
                   ["\n  " <> pack e | e <- toList errors]
           die' envFileReadError $
             "Syntax errors in environment file:" <> formattedErrors
-    Right value -> return value
+    Right (env', warnings') -> return (env', Map.empty, warnings')
   persistedFacts <- repositoryFacts
   let merged =
         withFacts
-          (Map.union env.additionalFacts persistedFacts)
+          ( Map.union
+              env.additionalFacts
+              (Map.union persistedFacts fallbackFacts)
+          )
           env
   $(logDebugSH) env
   forM_ warnings $ \w -> $(logWarn) $ fromString w
