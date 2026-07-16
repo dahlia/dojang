@@ -10,7 +10,7 @@ module Dojang.Types.EnvironmentSpec (spec) where
 
 import Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (Environment)
+  , Environment (Environment, architecture, kernel, operatingSystem)
   , Kernel (..)
   , OperatingSystem (..)
   , factKeyText
@@ -161,6 +161,24 @@ spec = do
       lookupFact "kernel" env `shouldBe` Just "Linux"
       lookupFact "kernel-release" env `shouldBe` Just "6.0"
       lookupFact "missing" env `shouldBe` Nothing
+
+    specify "record updates preserve additional facts" $ do
+      let env =
+            withFacts
+              (Map.fromList [("class", "work"), ("hostname", "atlas")])
+              $ Environment Linux X86_64 (Kernel "Linux" "6.0")
+      let updated =
+            env
+              { operatingSystem = Windows
+              , architecture = AArch64
+              , kernel = Kernel "Windows" "10.0"
+              }
+      lookupFact "class" updated `shouldBe` Just "work"
+      lookupFact "hostname" updated `shouldBe` Just "atlas"
+      lookupFact "os" updated `shouldBe` Just "windows"
+      lookupFact "arch" updated `shouldBe` Just "aarch64"
+      lookupFact "kernel" updated `shouldBe` Just "Windows"
+      lookupFact "kernel-release" updated `shouldBe` Just "10.0"
 
     specify "namespaced fact keys" $ do
       fmap factKeyText (parseFactKey "org.team") `shouldBe` Right "org.team"

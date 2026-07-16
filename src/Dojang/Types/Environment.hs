@@ -190,11 +190,11 @@ instance Hashable Kernel where
 
 -- | An environment.
 data Environment = Environment'
-  { operatingSystem' :: OperatingSystem
+  { operatingSystem :: OperatingSystem
   -- ^ The operating system (e.g. 'Linux', 'MacOS').
-  , architecture' :: Architecture
+  , architecture :: Architecture
   -- ^ The architecture (e.g. 'X86_64', 'AArch64').
-  , kernel' :: Kernel
+  , kernel :: Kernel
   -- ^ The kernel information.  Equivalent to @uname -sr@.
   , facts' :: FactMap
   -- ^ Additional named facts about the machine.
@@ -204,9 +204,11 @@ data Environment = Environment'
 
 -- | Builds an environment without any additional named facts.
 --
--- This pattern keeps the original three-argument constructor source-compatible.
+-- This pattern keeps the original three-argument positional constructor and
+-- pattern matching source-compatible.  The public fields belong to the
+-- underlying record so record updates preserve additional facts.
 pattern Environment :: OperatingSystem -> Architecture -> Kernel -> Environment
-pattern Environment{operatingSystem, architecture, kernel} <-
+pattern Environment operatingSystem architecture kernel <-
   Environment' operatingSystem architecture kernel _
  where
   Environment operatingSystem architecture kernel =
@@ -214,18 +216,6 @@ pattern Environment{operatingSystem, architecture, kernel} <-
 
 
 {-# COMPLETE Environment #-}
-
-
-instance HasField "operatingSystem" Environment OperatingSystem where
-  getField (Environment' os' _ _ _) = os'
-
-
-instance HasField "architecture" Environment Architecture where
-  getField (Environment' _ arch' _ _) = arch'
-
-
-instance HasField "kernel" Environment Kernel where
-  getField (Environment' _ _ kernel' _) = kernel'
 
 
 -- | A case-insensitive machine fact key.

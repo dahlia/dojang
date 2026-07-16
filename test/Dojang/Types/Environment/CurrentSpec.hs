@@ -5,6 +5,7 @@ module Dojang.Types.Environment.CurrentSpec (spec) where
 
 import Dojang.Types.Environment
   ( Architecture (..)
+  , Environment (architecture, kernel, operatingSystem)
   , Kernel (..)
   , OperatingSystem (..)
   , lookupFact
