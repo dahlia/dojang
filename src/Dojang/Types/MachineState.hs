@@ -1070,6 +1070,7 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
         (mapLeft MalformedState . textOsPath)
         document.documentFactsFile
     facts <- factsFromDocument document.documentFacts
+    validateMachineFacts factsFile' facts
     whenEither (not $ isAbsolute checkout) $
       MalformedState "The checkout-path field must be absolute."
     whenEither (not $ isAbsolute manifest) $
@@ -1078,14 +1079,6 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
       MalformedState "The intermediate-path field must be absolute."
     whenEither (not $ isAbsolute targetSnapshots) $
       MalformedState "The target-snapshot-root field must be absolute."
-    whenEither
-      ( maybe
-          False
-          ( \candidate -> not (isAbsolute candidate) && not (isSafeManagedRelativePath candidate)
-          )
-          factsFile'
-      )
-      (MalformedState "The facts-file field must be absolute or a safe relative path.")
     created <- parseTime "created-at" document.documentCreatedTime
     updated <- parseTime "updated-at" document.documentUpdatedTime
     targets <- traverseWithKeyEither targetFromDocument document.documentTargets
@@ -1142,9 +1135,23 @@ factsFromDocument = fmap Map.fromList . traverse parseFact . Map.toList
  where
   parseFact (keyText, value) = do
     key <- mapLeft MalformedState $ parseFactKey keyText
-    whenEither (isBuiltInFact key) $
-      MalformedState "The facts table must not override a built-in machine fact."
     return (key, fromString $ Text.unpack value)
+
+
+validateMachineFacts :: Maybe OsPath -> FactMap -> Either StateError ()
+validateMachineFacts factsFile' facts = do
+  whenEither
+    ( maybe
+        False
+        ( \candidate ->
+            not (isAbsolute candidate)
+              && not (isSafeManagedRelativePath candidate)
+        )
+        factsFile'
+    )
+    (MalformedState "The facts-file field must be absolute or a safe relative path.")
+  whenEither (any isBuiltInFact $ Map.keys facts) $
+    MalformedState "The facts table must not override a built-in machine fact."
 
 
 upgradeV3Document :: Text -> Either StateError StateDocument
@@ -2844,33 +2851,35 @@ updateMachineFacts
   -> m (Either StateError MachineState)
   -- ^ Updated state, or a validation or persistence error.
 updateMachineFacts root now state requestedFactsFile declaredFactUpdates =
-  catchStateIOErrors $ do
-    createDirectories $ repositoryStateDirectory root state.repositoryId
-    withFileLock (repositoryStateLockPath root state.repositoryId) $ do
-      forgetting <- isRepositoryForgetInProgress root state.repositoryId
-      case forgetting of
-        Left err -> return $ Left err
-        Right True ->
-          return $ Left $ RepositoryForgetInProgress state.repositoryId
-        Right False -> do
-          loaded <- readRepositoryState root state.repositoryId state.machineId
-          case loaded of
-            Left err -> return $ Left err
-            Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
-            Right (Just current) ->
-              case validateRepositoryStateGeneration state current of
-                Left err -> return $ Left err
-                Right () -> do
-                  let updated =
-                        current
-                          { factsFile =
-                              maybe current.factsFile Just requestedFactsFile
-                          , declaredFacts =
-                              Map.union declaredFactUpdates current.declaredFacts
-                          , updatedTime = now
-                          }
-                  writeState root updated
-                  return $ Right updated
+  case validateMachineFacts requestedFactsFile declaredFactUpdates of
+    Left err -> return $ Left err
+    Right () -> catchStateIOErrors $ do
+      createDirectories $ repositoryStateDirectory root state.repositoryId
+      withFileLock (repositoryStateLockPath root state.repositoryId) $ do
+        forgetting <- isRepositoryForgetInProgress root state.repositoryId
+        case forgetting of
+          Left err -> return $ Left err
+          Right True ->
+            return $ Left $ RepositoryForgetInProgress state.repositoryId
+          Right False -> do
+            loaded <- readRepositoryState root state.repositoryId state.machineId
+            case loaded of
+              Left err -> return $ Left err
+              Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
+              Right (Just current) ->
+                case validateRepositoryStateGeneration state current of
+                  Left err -> return $ Left err
+                  Right () -> do
+                    let updated =
+                          current
+                            { factsFile =
+                                maybe current.factsFile Just requestedFactsFile
+                            , declaredFacts =
+                                Map.union declaredFactUpdates current.declaredFacts
+                            , updatedTime = now
+                            }
+                    writeState root updated
+                    return $ Right updated
 
 
 -- | Records one successful stateful hook execution atomically.

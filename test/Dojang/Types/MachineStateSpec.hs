@@ -2528,6 +2528,59 @@ spec = do
         readFile (new </> paths.file) >>= (`shouldBe` "ancestor")
 
   describe "concurrent state persistence" $ do
+    it "rejects built-in facts before updating machine state" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            state
+            Nothing
+            (Map.singleton "os" "linux")
+        updated `shouldSatisfy` isMalformed
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
+    it "rejects unsafe facts-file paths before updating machine state" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        parent <- encodeFS ".."
+        factsName <- encodeFS "facts.toml"
+        let unsafeFactsFile = parent </> factsName
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            state
+            (Just unsafeFactsFile)
+            Map.empty
+        updated `shouldSatisfy` isMalformed
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
     it "merges machine facts with state reloaded under the lock" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp
