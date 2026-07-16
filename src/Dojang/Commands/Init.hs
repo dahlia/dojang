@@ -13,7 +13,7 @@ module Dojang.Commands.Init
   , initPresetName
   ) where
 
-import Control.Monad (foldM, forM, forM_, when)
+import Control.Monad (foldM, forM, forM_, void, when)
 import Control.Monad.Except (MonadError (catchError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Function ((&))
@@ -418,6 +418,7 @@ initializeNew presets noInteractive factsFile assignments = do
       then askPresets
       else pure presets
   $(logDebugSH) presets'
+  prevalidateNewMachineFacts factsFile assignments
   stateRoot <- asks (.stateDirectory)
   stateRootResult <- catchStateIOErrors $ do
     createDirectories stateRoot
@@ -456,6 +457,25 @@ initializeNew presets noInteractive factsFile assignments = do
   case initialized of
     Left err -> die' machineStateError $ formatStateError err
     Right exitCode -> return exitCode
+
+
+prevalidateNewMachineFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => Maybe OsPath
+  -> [Text]
+  -> App i ()
+prevalidateNewMachineFacts requestedFactsFile assignments = do
+  void $ parseFactAssignments assignments
+  checkout <- asks (.sourceDirectory)
+  case requestedFactsFile of
+    Just configured -> do
+      normalized <- normalizeFactsFile checkout configured
+      void $
+        readFactsSource $
+          if isAbsolute normalized
+            then normalized
+            else checkout </> normalized
+    Nothing -> void $ findDefaultFactsFile checkout
 
 
 enrollMachineFacts
@@ -613,16 +633,30 @@ requiredMachineFacts manifest =
     , predicate <- reachablePredicates route.predicates
     ]
   hookPredicates =
-    [ hook.condition
+    [ resolvePredicate Set.empty hook.condition
     | hooks <- Map.elems manifest.hooks
     , hook <- hooks
     ]
   reachablePredicates [] = []
   reachablePredicates ((predicate, _) : branches) =
-    predicate
-      : if normalizePredicate predicate == Always
-        then []
-        else reachablePredicates branches
+    let resolved = resolvePredicate Set.empty predicate
+    in resolved
+         : if resolved == Always
+           then []
+           else reachablePredicates branches
+  resolvePredicate visited predicate =
+    normalizePredicate $ case predicate of
+      Moniker name
+        | name `Set.member` visited -> predicate
+        | otherwise ->
+            maybe
+              predicate
+              (resolvePredicate $ Set.insert name visited)
+              (resolver name)
+      Not child -> Not $ resolvePredicate visited child
+      And children -> And $ resolvePredicate visited <$> children
+      Or children -> Or $ resolvePredicate visited <$> children
+      _ -> predicate
 
 
 posixHome :: FilePathExpression

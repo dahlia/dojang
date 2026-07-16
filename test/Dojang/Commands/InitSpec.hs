@@ -36,7 +36,9 @@ import Prelude hiding (init, readFile, writeFile)
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
-  ( machineStateError
+  ( cliError
+  , envFileReadError
+  , machineStateError
   , manifestAlreadyExists
   , missingMachineFactError
   )
@@ -137,6 +139,50 @@ spec = sequential $ do
         Left err -> fail $ "Unexpected repository state error: " <> show err
       fmap (.firstApplied) states `shouldBe` [False]
 
+  it "validates fact options before publishing a new repository" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [Init.Amd64Linux] True Nothing ["invalid"]
+        )
+        `shouldThrow` (== cliError)
+      exists (checkout </> manifestName) >>= (`shouldBe` False)
+      exists stateRoot >>= (`shouldBe` False)
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts
+              [Init.Amd64Linux]
+              True
+              (Just factsName)
+              []
+        )
+        `shouldThrow` (== envFileReadError)
+      exists (checkout </> manifestName) >>= (`shouldBe` False)
+      exists stateRoot >>= (`shouldBe` False)
+
   it "requires and enrolls facts in an existing repository" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
@@ -167,8 +213,10 @@ spec = sequential $ do
       writeFile
         (checkout </> manifestName)
         ( manifest
-            <> "\n[[files.unreachable]]\n"
+            <> "\n[monikers.everywhere]\n"
             <> "when = \"always\"\n"
+            <> "\n[[files.unreachable]]\n"
+            <> "when = \"moniker = everywhere || fact.branch = yes\"\n"
             <> "path = \"$HOME/unreachable\"\n"
             <> "\n[[files.unreachable]]\n"
             <> "when = \"fact.unreachable = yes\"\n"
