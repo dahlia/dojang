@@ -32,7 +32,13 @@ import Dojang.App
   )
 import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
-  ( MonadFileSystem (createDirectories, exists, readFile, writeFile)
+  ( MonadFileSystem
+      ( createDirectories
+      , exists
+      , readFile
+      , removeDirectory
+      , writeFile
+      )
   )
 import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.Environment (lookupFact)
@@ -194,6 +200,64 @@ spec = sequential $ do
       before <- readFile statePath
       environment <-
         withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+      readFile statePath `shouldReturn` before
+
+  it "resolves a relative facts file from a moved checkout" $
+    withTempDir $ \tmp _ -> do
+      oldCheckoutName <- encodeFS "old-checkout"
+      movedCheckoutName <- encodeFS "moved-checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let oldCheckout = tmp </> oldCheckoutName
+      let movedCheckout = tmp </> movedCheckoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories oldCheckout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      let oldAppEnv =
+            AppEnv
+              oldCheckout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $
+          runAppWithoutLogging oldAppEnv $
+            prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just factsName)
+          Map.empty
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      removeDirectory oldCheckout
+      createDirectories movedCheckout
+      writeFile
+        (movedCheckout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile
+        (movedCheckout </> factsName)
+        "[facts]\nclass = \"work\"\n"
+      let movedAppEnv = oldAppEnv{sourceDirectory = movedCheckout}
+      let statePath = repositoryStatePath stateRoot repositoryId
+      before <- readFile statePath
+      environment <-
+        withHome home $ runAppWithoutLogging movedAppEnv currentEnvironment'
       lookupFact "class" environment `shouldBe` Just "work"
       readFile statePath `shouldReturn` before
 

@@ -260,6 +260,11 @@ currentRepositoryFacts = do
       case state of
         Nothing -> return Map.empty
         Just current -> do
+          checkout <- asks (.sourceDirectory)
+          ownership <- validateRepositoryStateOwnership checkout current
+          case ownership of
+            Left err -> die' machineStateError $ formatStateError err
+            Right () -> return ()
           fileFacts <- case current.factsFile of
             Nothing -> return Map.empty
             Just configured -> do
@@ -267,7 +272,7 @@ currentRepositoryFacts = do
                     normalise $
                       if isAbsolute configured
                         then configured
-                        else current.checkoutPath </> configured
+                        else checkout </> configured
               result <-
                 readFactsFile factsPath `catchError` \e ->
                   die' envFileReadError $
