@@ -67,6 +67,7 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Dojang.App
   ( App
   , AppEnv (debug, dryRun, sourceDirectory, stateDirectory)
+  , currentEnvironment'
   , doesManifestExist
   , ensureManifest
   , ensureNoLegacySnapshotForInitialization
@@ -108,7 +109,6 @@ import Dojang.Types.Environment
   , isBuiltInFact
   , parseFactKey
   )
-import Dojang.Types.Environment.Current qualified as Current
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -539,7 +539,7 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
     if Set.null referenced
       then return Set.empty
       else do
-        environment <- liftIO Current.currentEnvironment
+        environment <- currentEnvironment'
         return $ requiredMachineFacts environment manifest
   let available = Map.keysSet $ Map.union declared fileFacts
   let missing = required `Set.difference` available

@@ -459,6 +459,59 @@ spec = sequential $ do
       fmap (Map.lookup "class" . (.declaredFacts)) statesAfterDryRun
         `shouldBe` [Just "work"]
 
+  it "requires facts for the simulated environment" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.init [Init.Amd64Linux] True
+      let simulatedOperatingSystem =
+            if os == "mingw32" then "linux" else "windows"
+      manifest <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"os = "
+            <> simulatedOperatingSystem
+            <> " && fact.class = work\"\n"
+        )
+      writeFile
+        (checkout </> envName)
+        ( "os = \""
+            <> simulatedOperatingSystem
+            <> "\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Simulated\"\n"
+            <> "release = \"1.0\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== missingMachineFactError)
+
   it "reports state-root creation failures as machine-state errors" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
