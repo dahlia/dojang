@@ -94,6 +94,8 @@ spec = do
       eval (FactDefined "class") `shouldBe` (True, [])
       eval (FactDefined "missing")
         `shouldBe` (False, [UndefinedFact "missing"])
+      eval (Not $ FactDefined "missing")
+        `shouldBe` (False, [UndefinedFact "missing"])
       eval
         ( normalizePredicate $
             Or [Fact "missing" "value", Not $ Fact "missing" "value"]

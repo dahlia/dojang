@@ -162,7 +162,7 @@ evaluateTruth environment _ (Fact key value) =
     Just actual -> (boolTruth $ actual == value, [])
 evaluateTruth environment _ (FactDefined key) =
   case lookupFact key environment of
-    Nothing -> (FalseTruth, [UndefinedFact key])
+    Nothing -> (UnknownTruth, [UndefinedFact key])
     Just _ -> (TrueTruth, [])
 
 
