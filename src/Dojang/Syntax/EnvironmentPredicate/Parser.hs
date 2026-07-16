@@ -30,6 +30,7 @@ module Dojang.Syntax.EnvironmentPredicate.Parser
 import Control.Applicative (optional, (<|>))
 import Control.Applicative.Combinators (choice, sepBy1, sepEndBy)
 import Control.Monad (void)
+import Dojang.Types.Environment (FactKey, parseFactKey)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.MonikerName (parseMonikerName)
 
@@ -153,6 +154,7 @@ fieldOp = do
   makePredicate KernelRelease' = KernelRelease . fromString . unpack
   makePredicate Moniker' =
     either (const $ Not Always) Moniker . parseMonikerName
+  makePredicate (FactField key) = Fact key . fromString . unpack
 
 
 equalOp :: Parser FieldOp
@@ -218,7 +220,14 @@ strings = do
   return members
 
 
-data Field = OS | Arch | Kernel | KernelRelease' | Moniker' deriving (Eq)
+data Field
+  = OS
+  | Arch
+  | Kernel
+  | KernelRelease'
+  | Moniker'
+  | FactField FactKey
+  deriving (Eq)
 
 
 field :: Parser Field
@@ -229,7 +238,14 @@ field =
     , KernelRelease' <$ string "kernel-release"
     , Kernel <$ string "kernel"
     , Moniker' <$ string "moniker"
+    , do
+        void $ string "fact."
+        key <- takeWhile1P (Just "machine fact key") isFactKeyCharacter
+        either (fail . unpack) (return . FactField) $ parseFactKey key
     ]
+ where
+  isFactKeyCharacter c =
+    isAlphaNum c || c == '.' || c == '-' || c == '_'
 
 
 stringLiteral :: Parser Text

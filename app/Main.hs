@@ -13,6 +13,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Function ((&))
 import Data.Maybe (catMaybes, fromMaybe, maybeToList)
 import Data.String (fromString)
+import Data.Text (pack)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import System.Environment (lookupEnv, setEnv)
 import System.Exit (ExitCode (..), exitWith)
@@ -88,7 +89,7 @@ import Dojang.Commands.Diff qualified (diff)
 import Dojang.Commands.Edit qualified (edit)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
-import Dojang.Commands.Init qualified (init)
+import Dojang.Commands.Init qualified (initWithFacts)
 import Dojang.Commands.Migrate qualified (migrate)
 import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status (StatusOptions (..))
@@ -263,12 +264,29 @@ cmdP stateRoot defaultRepoPath =
         <> command
           "init"
           ( info
-              ( Dojang.Commands.Init.init
+              ( Dojang.Commands.Init.initWithFacts
                   <$> initPresetP
                   <*> switch
                     ( long "no-interactive"
                         <> short 'I'
                         <> help "Do not prompt for anything"
+                    )
+                  <*> optional
+                    ( pathOption
+                        ( long "facts-file"
+                            <> metavar "PATH"
+                            <> action "file"
+                            <> help
+                              "Associate a TOML file containing a [facts] table"
+                        )
+                    )
+                  <*> many
+                    ( pack
+                        <$> strOption
+                          ( long "fact"
+                              <> metavar "KEY=VALUE"
+                              <> help "Persist a repository-specific machine fact"
+                          )
                     )
                   <**> helper
                   & initializationCommandP

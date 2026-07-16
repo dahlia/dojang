@@ -137,6 +137,7 @@ command = "/usr/local/bin/rebuild-cache"
 | `DOJANG_OS` / `DOJANG_ARCH` | 운영체제와 아키텍처           |
 | `DOJANG_KERNEL`             | 커널 이름                     |
 | `DOJANG_KERNEL_RELEASE`     | 커널 릴리스                   |
+| `DOJANG_HOSTNAME`           | 감지한 경우 호스트 이름       |
 | `DOJANG_PATH_COUNT`         | 선택 범위 경로 수             |
 | `DOJANG_PATH_0`, …          | 안정적인 순서의 범위 경로     |
 
@@ -145,10 +146,15 @@ command = "/usr/local/bin/rebuild-cache"
 기준으로 합니다.  따라서 `-r`로 저장소를 선택해도 라우트 선택자의 범위나 지문은
 달라지지 않습니다.
 
+사용자 정의 [머신 정보]는 `on-change` 지문에 영향을 주지만 개별 환경 변수로
+내보내지는 않습니다.
+
 사후 훅에는 `DOJANG_COMMAND_OUTCOME=success`와 `DOJANG_EXIT_CODE=0`도
 전달합니다.  Dojang은 현재 문맥을 추가하기 전에 상속받은 훅 문맥 변수를
 제거합니다.  따라서 사전 훅의 사후 명령 결과나 `DOJANG_PATH_COUNT`를 초과하는
 경로 인덱스처럼 현재 이벤트에서 생략한 값은 설정되지 않은 상태로 남습니다.
+
+[머신 정보]: machine-facts.ko.md
 
 
 모의 실행과 재귀

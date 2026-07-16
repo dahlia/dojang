@@ -12,6 +12,7 @@ import Test.Hspec.Hedgehog (forAll, hedgehog, (/==), (===))
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
+  , referencedFacts
   )
 import Dojang.Types.Gen qualified as Gen
 import Dojang.Types.MonikerName (parseMonikerName)
@@ -144,3 +145,13 @@ spec = do
       predicate <- forAll Gen.environmentPredicate
       normalizePredicate (normalizePredicate predicate)
         === normalizePredicate predicate
+
+  describe "referencedFacts" $ do
+    it "follows reachable monikers and normalized branches" $ do
+      let Right workstation = parseMonikerName "workstation"
+      let resolve name
+            | name == workstation = Just $ Fact "class" "work"
+            | otherwise = Nothing
+      referencedFacts resolve (Moniker workstation) `shouldBe` ["class"]
+      referencedFacts resolve (Or [Always, Fact "unused" "value"])
+        `shouldBe` []

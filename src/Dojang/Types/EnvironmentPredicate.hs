@@ -9,6 +9,7 @@
 module Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
+  , referencedFacts
   ) where
 
 import Data.List.NonEmpty (NonEmpty, filter, nonEmpty, nub, sortWith, toList)
@@ -16,10 +17,17 @@ import Prelude hiding (filter)
 
 import Data.CaseInsensitive (CI)
 import Data.Hashable (Hashable (hashWithSalt))
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 
 import Data.Ord (Down (..))
-import Dojang.Types.Environment (Architecture, OperatingSystem)
+import Dojang.Types.Environment
+  ( Architecture
+  , FactKey
+  , FactValue
+  , OperatingSystem
+  )
 import Dojang.Types.MonikerName (MonikerName)
 
 
@@ -53,6 +61,8 @@ data EnvironmentPredicate
   | -- | A predicate that matches to the given kernel release suffix
     -- (e.g. @amd64@ for @4.19.0-16-amd64@).
     KernelReleaseSuffix (CI Text)
+  | -- | A predicate that matches a named machine fact.
+    Fact FactKey FactValue
   deriving (Show)
 
 
@@ -79,6 +89,8 @@ instance Eq EnvironmentPredicate where
   KernelReleasePrefix _ == _ = False
   KernelReleaseSuffix suffix == KernelReleaseSuffix suffix' = suffix == suffix'
   KernelReleaseSuffix _ == _ = False
+  Fact key value == Fact key' value' = key == key' && value == value'
+  Fact _ _ == _ = False
 
 
 instance Hashable EnvironmentPredicate where
@@ -108,6 +120,11 @@ instance Hashable EnvironmentPredicate where
     salt `hashWithSalt` ("KernelReleasePrefix" :: Text) `hashWithSalt` prefix
   hashWithSalt salt (KernelReleaseSuffix suffix) =
     salt `hashWithSalt` ("KernelReleaseSuffix" :: Text) `hashWithSalt` suffix
+  hashWithSalt salt (Fact key value) =
+    salt
+      `hashWithSalt` ("Fact" :: Text)
+      `hashWithSalt` key
+      `hashWithSalt` value
 
 
 normalizePredicateList
@@ -195,3 +212,33 @@ normalizePredicate' (Or ps) =
 normalizePredicate' (Not (Not p)) = normalizePredicate' p
 normalizePredicate' (Not p) = Not $ normalizePredicate' p
 normalizePredicate' p = p
+
+
+-- | Finds named machine facts referenced by a reachable predicate branch.
+--
+-- Monikers are followed once, so recursive definitions cannot loop forever.
+referencedFacts
+  :: (MonikerName -> Maybe EnvironmentPredicate)
+  -> EnvironmentPredicate
+  -> Set FactKey
+referencedFacts resolver = go Set.empty . normalizePredicate
+ where
+  go visited predicate = case predicate of
+    Always -> Set.empty
+    Not child -> go visited child
+    And children -> foldMap (go visited) children
+    Or children -> foldMap (go visited) children
+    Moniker name
+      | name `Set.member` visited -> Set.empty
+      | otherwise ->
+          maybe
+            Set.empty
+            (go $ Set.insert name visited)
+            (resolver name)
+    Fact key _ -> Set.singleton key
+    OperatingSystem _ -> Set.empty
+    Architecture _ -> Set.empty
+    KernelName _ -> Set.empty
+    KernelRelease _ -> Set.empty
+    KernelReleasePrefix _ -> Set.empty
+    KernelReleaseSuffix _ -> Set.empty

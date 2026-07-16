@@ -45,6 +45,7 @@ module Dojang.App
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List.NonEmpty (toList)
+import qualified Data.Map.Strict as Map
 import Data.String (IsString (fromString))
 import Data.Time (getCurrentTime)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
@@ -99,11 +100,16 @@ import Dojang.ExitCodes
   , noEnvFile
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Syntax.Env (readEnvFile)
+import Dojang.Syntax.Env (readEnvFile, readFactsFile)
 import Dojang.Syntax.Manifest.Parser (Error, formatErrors, readManifestFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.Types.Context (Context (..))
-import Dojang.Types.Environment (Environment (..))
+import Dojang.Types.Environment
+  ( Environment (..)
+  , FactMap
+  , additionalFacts
+  , withFacts
+  )
 import Dojang.Types.Environment.Current
   ( MonadArchitecture (currentArchitecture)
   , MonadEnvironment (currentEnvironment)
@@ -209,6 +215,12 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
 currentEnvironment' = do
+  detected <- liftIO currentEnvironment
+  persistedFacts <- currentRepositoryFacts
+  let persisted =
+        withFacts
+          (Map.union persistedFacts $ additionalFacts detected)
+          detected
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
   let filePath = sourceDir </> envFile'
@@ -220,8 +232,7 @@ currentEnvironment' = do
           $(logWarn) $
             "Environment file not found: "
               <> showt (FromStringShow e)
-          env <- liftIO currentEnvironment
-          return $ Right (env, [])
+          return $ Right (persisted, [])
         else die' noEnvFile $ showt e
   case result of
     Left errors -> do
@@ -230,9 +241,43 @@ currentEnvironment' = do
               ["\n  " <> pack e | e <- toList errors]
       die' envFileReadError $ "Syntax errors in environment file:" <> formattedErrors
     Right (env, warnings) -> do
+      let merged =
+            withFacts
+              (Map.union (additionalFacts env) $ additionalFacts persisted)
+              env
       $(logDebugSH) env
       forM_ warnings $ \w -> $(logWarn) $ fromString w
-      return env
+      return merged
+
+
+currentRepositoryFacts :: (MonadFileSystem i, MonadIO i) => App i FactMap
+currentRepositoryFacts = do
+  manifestResult <- loadManifest
+  case manifestResult of
+    Right (Just manifest) -> do
+      state <- prepareMachineState manifest
+      fileFacts <- case state.factsFile of
+        Nothing -> return Map.empty
+        Just configured -> do
+          let factsPath =
+                normalise $
+                  if isAbsolute configured
+                    then configured
+                    else state.checkoutPath </> configured
+          result <-
+            readFactsFile factsPath `catchError` \e ->
+              die' envFileReadError $
+                "Could not read the associated machine-facts file: " <> showt e
+          case result of
+            Left errors ->
+              die' envFileReadError $
+                "Syntax errors in the associated machine-facts file:"
+                  <> Data.Text.concat ["\n  " <> pack e | e <- toList errors]
+            Right (facts, warnings) -> do
+              forM_ warnings $ \warning -> $(logWarn) $ fromString warning
+              return facts
+      return $ Map.union state.declaredFacts fileFacts
+    _ -> return Map.empty
 
 
 instance (MonadFileSystem i, MonadIO i) => MonadEnvironment (App i) where

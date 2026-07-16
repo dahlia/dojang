@@ -13,6 +13,8 @@ module Dojang.Types.Gen
   , environment
   , environmentPredicate
   , environmentVariable
+  , factKey
+  , factValue
   , filePathExpression
   , hook
   , hookMap
@@ -36,6 +38,7 @@ module Dojang.Types.Gen
 
 import Data.Char (isAlpha, isAlphaNum, isAscii, isControl, toUpper)
 import Data.List (nub)
+import Data.String (IsString (fromString))
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (lookup)
 
@@ -54,8 +57,11 @@ import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (Environment)
+  , FactKey
+  , FactValue
   , Kernel (..)
   , OperatingSystem (..)
+  , parseFactKey
   )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
@@ -187,6 +193,17 @@ environment :: (MonadGen m) => m Environment
 environment = Environment <$> operatingSystem <*> architecture <*> kernel
 
 
+factKey :: (MonadGen m) => m FactKey
+factKey = do
+  key <- monikerNameText
+  let Right key' = parseFactKey key
+  return key'
+
+
+factValue :: (MonadGen m) => m FactValue
+factValue = fromString . Text.unpack <$> Gen.text (constant 0 50) Gen.unicodeAll
+
+
 environmentPredicate :: (MonadGen m) => m EnvironmentPredicate
 environmentPredicate = environmentPredicate' 5
 
@@ -202,6 +219,7 @@ environmentPredicate' maxDepth =
     , KernelRelease <$> kernelRelease
     , KernelReleasePrefix <$> (ciText (constant 0 50) Gen.unicodeAll)
     , KernelReleaseSuffix <$> (ciText (constant 0 50) Gen.unicodeAll)
+    , Fact <$> factKey <*> factValue
     ]
       ++ if maxDepth < 1
         then []

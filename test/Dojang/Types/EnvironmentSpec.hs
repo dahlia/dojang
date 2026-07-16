@@ -10,12 +10,19 @@ module Dojang.Types.EnvironmentSpec (spec) where
 
 import Dojang.Types.Environment
   ( Architecture (..)
+  , Environment (Environment)
+  , Kernel (..)
   , OperatingSystem (..)
+  , factKeyText
+  , lookupFact
+  , parseFactKey
+  , withFacts
   )
 import Dojang.Types.Gen qualified as Gen
 
 import Data.CaseInsensitive (original)
 import Data.Hashable (Hashable (hash, hashWithSalt))
+import Data.Map.Strict qualified as Map
 import Data.String (IsString (fromString))
 import Data.Text (unpack)
 import Hedgehog.Gen (unicodeAll)
@@ -140,6 +147,26 @@ spec = do
       (hashWithSalt 0 kernel == hashWithSalt 0 kernel') === (kernel == kernel')
 
   describe "Environment" $ do
+    specify "open facts" $ do
+      let env =
+            withFacts
+              ( Map.fromList
+                  [("class", "work"), ("hostname", "atlas"), ("os", "windows")]
+              )
+              $ Environment Linux X86_64 (Kernel "Linux" "6.0")
+      lookupFact "class" env `shouldBe` Just "work"
+      lookupFact "hostname" env `shouldBe` Just "atlas"
+      lookupFact "os" env `shouldBe` Just "linux"
+      lookupFact "arch" env `shouldBe` Just "x86_64"
+      lookupFact "kernel" env `shouldBe` Just "Linux"
+      lookupFact "kernel-release" env `shouldBe` Just "6.0"
+      lookupFact "missing" env `shouldBe` Nothing
+
+    specify "namespaced fact keys" $ do
+      fmap factKeyText (parseFactKey "org.team") `shouldBe` Right "org.team"
+      parseFactKey "org..team" `shouldBe` Left "Invalid machine fact key: org..team."
+      parseFactKey "9team" `shouldBe` Left "Invalid machine fact key: 9team."
+
     specify "Eq" $ hedgehog $ do
       env <- forAll Gen.environment
       env' <- forAll Gen.environment

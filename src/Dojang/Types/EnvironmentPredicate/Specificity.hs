@@ -79,3 +79,4 @@ specificity _ (KernelName _) = Specificity 1 1
 specificity _ (KernelRelease _) = Specificity 1 1
 specificity _ (KernelReleasePrefix _) = Specificity 1 1
 specificity _ (KernelReleaseSuffix _) = Specificity 1 1
+specificity _ (Fact _ _) = Specificity 1 1

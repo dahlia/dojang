@@ -13,6 +13,8 @@ os = linux
 arch = "x86_64"
 os in (linux, freebsd, macos)
 arch not in (x86, "x86_64")
+fact.class = work
+fact.org.team in (platform, infrastructure)
 kernel-release ^= "4.1"
 !(os in (linux, freebsd, macos) && arch = "x86_64" || os = openbsd)
 ~~~~
@@ -21,13 +23,17 @@ kernel-release ^= "4.1"
 Left-hand side
 --------------
 
-There are three fields that are subject to predication:
+The following fields can be used in predicates:
 
  -  `os`: operating system
  -  `arch`: processor architecture
  -  `kernel`: kernel
  -  `kernel-release`: kernel version
+ -  `fact.KEY`: a named [machine fact], where `KEY` can contain dotted
+    namespaces such as `org.team`
  -  `moniker`: moniker
+
+[machine fact]: machine-facts.en.md
 
 
 Comparison operators
@@ -45,6 +51,7 @@ a predicate:
 
 Comparison operators are always preceded by fields, followed by string literals
 after `=`/`!=`/`^=`/`$=`, and lists after `in` and `not in`.
+Generic `fact.KEY` fields support `=`, `!=`, `in`, and `not in`.
 
 > **Note**
 >

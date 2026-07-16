@@ -19,6 +19,7 @@ it returns the following exit codes, depending on the situation.
     another machine.
  -  20: The env file is missing.
  -  21: The env file cannot be read due to invalid format or permissions.
+ -  22: Machine facts required for noninteractive enrollment are missing.
  -  30: The change cannot be applied because there are conflicting changes
     between the repository and the target.
  -  31: The file in the repository cannot be the target file.

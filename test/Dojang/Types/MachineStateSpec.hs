@@ -211,6 +211,21 @@ spec = do
       decodeMachineState state.repositoryId state.machineId (encodeMachineState state)
         `shouldBe` Right state
 
+    it "round-trips repository machine facts" $ do
+      state <- fixtureState
+      factsName <- encodeFS "facts.toml"
+      let populated =
+            state
+              { factsFile = Just factsName
+              , declaredFacts =
+                  Map.fromList [("class", "work"), ("org.team", "platform")]
+              }
+      decodeMachineState
+        state.repositoryId
+        state.machineId
+        (encodeMachineState populated)
+        `shouldBe` Right populated
+
     it "upgrades the schema-v1 state written before target tracking" $
       withTempDir $ \root _ -> do
         initial <- fixtureState
@@ -292,6 +307,19 @@ spec = do
         current.machineId
         legacyDocument
         `shouldBe` Right expected
+
+    it "upgrades schema-version 3 with empty machine facts" $ do
+      current <- fixtureState
+      let legacyDocument =
+            Text.replace
+              "schema-version = 4"
+              "schema-version = 3"
+              (encodeMachineState current)
+      decodeMachineState
+        current.repositoryId
+        current.machineId
+        legacyDocument
+        `shouldBe` Right current
 
     it "round-trips managed targets and hook execution history" $ do
       state <- fixtureState
@@ -632,14 +660,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 3" "schema-version = 4" encoded
+          Text.replace "schema-version = 4" "schema-version = 5" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 4)
+        `shouldBe` Left (UnsupportedSchemaVersion 5)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 4\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 4)
+        "schema-version = 5\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 5)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -1735,7 +1763,7 @@ spec = do
               parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
         let unsafeState =
               MachineState
-                2
+                4
                 paths.repositoryId
                 paths.machineId
                 generation
@@ -1743,6 +1771,8 @@ spec = do
                 (paths.checkout </> paths.file)
                 paths.checkout
                 (managedTargetSnapshotRoot paths.root paths.repositoryId)
+                Nothing
+                Map.empty
                 fixtureTime
                 fixtureTime
                 False
@@ -2932,7 +2962,7 @@ fixtureState = do
   let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      3
+      4
       repositoryId'
       machineId'
       generationId
@@ -2940,6 +2970,8 @@ fixtureState = do
       (checkout </> manifestName)
       intermediate
       targetSnapshots
+      Nothing
+      Map.empty
       fixtureTime
       fixtureTime
       False

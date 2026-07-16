@@ -53,6 +53,10 @@ envFileReadError :: ExitCode
 envFileReadError = ExitFailure 21
 
 
+missingMachineFactError :: ExitCode
+missingMachineFactError = ExitFailure 22
+
+
 conflictError :: ExitCode
 conflictError = ExitFailure 30
 

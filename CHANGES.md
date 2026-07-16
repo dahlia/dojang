@@ -6,6 +6,30 @@ Version 0.3.0
 
 To be released.
 
+ -  Added open, repository-scoped machine facts.  Dojang now detects a
+    `hostname` fact alongside the existing operating-system, architecture, and
+    kernel facts, and manifests can use arbitrary namespaced values with the
+    canonical `fact.KEY` predicate syntax.  Existing built-in predicate
+    spellings retain their behavior and specificity.  Fact keys and values are
+    case-insensitive, undefined facts produce a warning and do not match, and
+    persisted facts cannot replace detected built-ins.
+
+    Put reusable, nonsecret values in a `[facts]` table.  Running `dojang init`
+    in an existing repository now enrolls that machine, prompting for facts
+    referenced by reachable route and hook predicates.  Noninteractive users
+    can pass repeatable `--fact KEY=VALUE` assignments or associate a shared
+    TOML profile with `--facts-file PATH`; missing required values use exit code
+    22.  Repository-specific assignments override the associated profile, and
+    `-e`/`--env-file` remains a separate, highest-precedence simulation layer.
+    Relative profile paths follow a moved checkout, while `dojang forget`
+    removes the association and declared values.  Dry runs do not persist
+    enrollment.  Machine-state schema version 4 stores these values and the
+    optional profile association, while versions 1 through 3 remain readable.
+    Route provenance and `on-change` hook fingerprints include the effective
+    facts, and hooks receive a detected hostname through `DOJANG_HOSTNAME`.
+    Facts are configuration and may appear in diagnostics, state, or
+    fingerprints, so they must not contain credentials.  [[#33], [#41], [#67]]
+
  -  Extended hooks across the `apply`, `reflect`, `diff`, `status`, `edit`, and
     `unmanage` command lifecycles.  Post-hooks run only after successful
     commands.  Hooks can now use stable IDs with `once` and explicitly keyed
@@ -255,10 +279,12 @@ To be released.
 [#30]: https://github.com/dahlia/dojang/issues/30
 [#31]: https://github.com/dahlia/dojang/issues/31
 [#32]: https://github.com/dahlia/dojang/issues/32
+[#33]: https://github.com/dahlia/dojang/issues/33
 [#34]: https://github.com/dahlia/dojang/issues/34
 [#37]: https://github.com/dahlia/dojang/issues/37
 [#38]: https://github.com/dahlia/dojang/issues/38
 [#39]: https://github.com/dahlia/dojang/issues/39
+[#41]: https://github.com/dahlia/dojang/issues/41
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#61]: https://github.com/dahlia/dojang/pull/61
 [#62]: https://github.com/dahlia/dojang/pull/62
@@ -266,6 +292,7 @@ To be released.
 [#64]: https://github.com/dahlia/dojang/pull/64
 [#65]: https://github.com/dahlia/dojang/pull/65
 [#66]: https://github.com/dahlia/dojang/pull/66
+[#67]: https://github.com/dahlia/dojang/pull/67
 
 
 Version 0.2.1

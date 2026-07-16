@@ -17,6 +17,12 @@ detecting duplicate live checkouts, but automatic selection requires explicit
 not copy an identity into an unrelated repository.  Two existing checkouts with
 the same identity on one machine are treated as an error.  Paths that resolve
 to the same checkout, including symbolic-link aliases, are not duplicates.
+Running `dojang init` again in an existing repository enrolls the current
+machine's [declared facts] instead of rejecting the existing manifest.  The
+facts and any associated facts-file path remain attached to the repository
+identity when the checkout moves.  `dojang forget` removes that association.
+
+[declared facts]: machine-facts.en.md
 
 
 Storage layout
@@ -54,12 +60,14 @@ repositories/
 *state.toml* record has a schema version, repository and machine identities, an
 opaque generation UUID, the last known checkout path, the manifest path used by
 that checkout, the intermediate snapshot and managed-target baseline roots,
-timestamps, and typed sections for managed targets, hook execution history, and
-lifecycle records.  A new generation UUID is issued whenever a forgotten
+timestamps, an optional facts-file association, declared machine facts, and
+typed sections for managed targets, hook execution history, and lifecycle
+records.  A new generation UUID is issued whenever a forgotten
 repository record is recreated, even when its timestamps match an earlier
-record.  Schema version 3 stores successful `once` and `on-change` hook
-executions by event and stable hook identity.  Schema versions 1 and 2 are
-upgraded in memory, and their opaque hook data is preserved.  A successful
+record.  Schema version 4 stores machine facts and their file association;
+schema version 3 introduced successful `once` and `on-change` hook executions
+by event and stable hook identity.  Schema versions 1 through 3 are upgraded in
+memory, and their opaque hook data is preserved.  A successful
 first apply is recorded per repository, not in a global current-repository
 file.
 

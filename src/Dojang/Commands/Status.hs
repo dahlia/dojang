@@ -45,6 +45,7 @@ import Dojang.Types.Context
   , makeManagedCorrespond
   , routePaths
   )
+import Dojang.Types.Environment (factKeyText)
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
 import Dojang.Types.MachineState (MachineState (..))
@@ -239,6 +240,11 @@ formatWarning handle (EnvironmentPredicateWarning w) = do
       return $
         "Unrecognized architecture: "
           <> codeStyle (showt $ FromStringShow arch)
+          <> "."
+    (UndefinedFact key) ->
+      return $
+        "Reference to an undefined machine fact: "
+          <> codeStyle (factKeyText key)
           <> "."
 formatWarning handle (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
   codeStyle <- codeStyleFor handle

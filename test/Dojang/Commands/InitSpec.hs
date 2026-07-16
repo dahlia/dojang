@@ -23,6 +23,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadReader (ask), ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
 import System.Info (os)
@@ -34,13 +35,18 @@ import Prelude hiding (init, readFile, writeFile)
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Init qualified as Init
-import Dojang.ExitCodes (machineStateError, manifestAlreadyExists)
+import Dojang.ExitCodes
+  ( machineStateError
+  , manifestAlreadyExists
+  , missingMachineFactError
+  )
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
+  , dryRunIO
   )
 import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.MachineState
-  ( MachineState (firstApplied)
+  ( MachineState (declaredFacts, firstApplied)
   , listRepositoryStates
   , readMachineId
   )
@@ -130,6 +136,85 @@ spec = sequential $ do
         Right values -> return values
         Left err -> fail $ "Unexpected repository state error: " <> show err
       fmap (.firstApplied) states `shouldBe` [False]
+
+  it "requires and enrolls facts in an existing repository" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.init [Init.Amd64Linux] True
+      manifest <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[files.unreachable]]\n"
+            <> "when = \"always\"\n"
+            <> "path = \"$HOME/unreachable\"\n"
+            <> "\n[[files.unreachable]]\n"
+            <> "when = \"fact.unreachable = yes\"\n"
+            <> "path = \"$HOME/also-unreachable\"\n"
+        )
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing []
+      manifestWithUnreachable <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifestWithUnreachable
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"fact.class = work\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== missingMachineFactError)
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=work"]
+      machineResult <- readMachineId stateRoot
+      machineId' <- case machineResult of
+        Right (Just identifier) -> return identifier
+        unexpected -> fail $ "Unexpected machine identity: " <> show unexpected
+      statesResult <- listRepositoryStates stateRoot machineId'
+      states <- case statesResult of
+        Right values -> return values
+        Left err -> fail $ "Unexpected repository state error: " <> show err
+      fmap (Map.lookup "class" . (.declaredFacts)) states
+        `shouldBe` [Just "work"]
+      _ <-
+        withHome home $
+          dryRunIO $
+            runAppWithoutLogging appEnv{dryRun = True} $
+              Init.initWithFacts [] True Nothing ["class=personal"]
+      statesAfterDryRunResult <- listRepositoryStates stateRoot machineId'
+      statesAfterDryRun <- case statesAfterDryRunResult of
+        Right values -> return values
+        Left err -> fail $ "Unexpected repository state error: " <> show err
+      fmap (Map.lookup "class" . (.declaredFacts)) statesAfterDryRun
+        `shouldBe` [Just "work"]
 
   it "reports state-root creation failures as machine-state errors" $
     withTempDir $ \tmp _ -> do

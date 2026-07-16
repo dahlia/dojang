@@ -9,16 +9,19 @@
 module Dojang.Commands.Init
   ( InitPreset (..)
   , init
+  , initWithFacts
   , initPresetName
   ) where
 
-import Control.Monad (forM_, when)
+import Control.Monad (foldM, forM, forM_, when)
+import Control.Monad.Except (MonadError (catchError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Function ((&))
 import Data.List (maximumBy, sortOn)
 import Data.List.NonEmpty as NonEmpty (NonEmpty ((:|)), toList)
 import Data.Ord (comparing)
-import Data.String (IsString)
+import Data.String (IsString, fromString)
+import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import System.IO.Unsafe (unsafePerformIO)
@@ -43,19 +46,31 @@ import Data.Map.Strict
   , toAscList
   , (!)
   )
-import Data.Map.Strict qualified as Map (toList)
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
-import Data.Set qualified as Set (member, null, toAscList)
+import Data.Set qualified as Set
 import Data.Text (Text, lines, unlines)
+import Data.Text qualified as Text
+import FortyTwo.Prompts.Input (input)
 import FortyTwo.Prompts.Multiselect (multiselect)
 import System.FilePattern (FilePattern)
-import System.OsPath (OsPath, encodeFS, (</>))
+import System.OsPath
+  ( OsPath
+  , encodeFS
+  , isAbsolute
+  , makeRelative
+  , normalise
+  , (</>)
+  )
+import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App
   ( App
   , AppEnv (debug, dryRun, sourceDirectory, stateDirectory)
   , doesManifestExist
+  , ensureManifest
   , ensureNoLegacySnapshotForInitialization
+  , prepareMachineState
   , prepareNewMachineStateBeforeMigration
   , readValidatedLegacyRegistry
   , saveManifest
@@ -69,31 +84,48 @@ import Dojang.Commands
   , printStderr'
   )
 import Dojang.ExitCodes
-  ( fileWriteError
+  ( cliError
+  , envFileReadError
+  , fileWriteError
   , machineStateError
   , manifestAlreadyExists
+  , missingMachineFactError
   , unsupportedOnEnvError
   )
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
+import Dojang.Syntax.Env (readFactsFile)
 import Dojang.Syntax.Manifest.Writer (formatWriteError, writeManifest)
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (..)
+  , FactKey
+  , FactMap
   , Kernel (..)
   , OperatingSystem (..)
+  , factKeyText
+  , isBuiltInFact
+  , parseFactKey
   )
-import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate
+  ( EnvironmentPredicate (..)
+  , normalizePredicate
+  , referencedFacts
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate (evaluate)
 import Dojang.Types.EnvironmentPredicate.Specificity (specificity)
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
-import Dojang.Types.FileRoute (FileRoute (fileType), fileRoute)
+import Dojang.Types.FileRoute (FileRoute (fileType, predicates), fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
+import Dojang.Types.Hook (Hook (condition))
 import Dojang.Types.MachineState
-  ( catchStateIOErrors
+  ( MachineState (..)
+  , catchStateIOErrors
   , formatStateError
   , manifestIdentityLockPath
+  , updateMachineFacts
   , withStateFileLock
   )
+import Dojang.Types.ManagedTarget (isSafeManagedRelativePath)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -331,7 +363,35 @@ makeManifest repositoryId presets =
 
 
 init :: (MonadFileSystem i, MonadIO i) => [InitPreset] -> Bool -> App i ExitCode
-init presets noInteractive = do
+init presets noInteractive = initWithFacts presets noInteractive Nothing []
+
+
+initWithFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => [InitPreset]
+  -> Bool
+  -> Maybe OsPath
+  -> [Text]
+  -> App i ExitCode
+initWithFacts presets noInteractive factsFile assignments = do
+  manifestExists <- doesManifestExist
+  if manifestExists
+    then do
+      manifest <- ensureManifest
+      state <- prepareMachineState manifest
+      _ <- enrollMachineFacts state manifest noInteractive factsFile assignments
+      return ExitSuccess
+    else initializeNew presets noInteractive factsFile assignments
+
+
+initializeNew
+  :: (MonadFileSystem i, MonadIO i)
+  => [InitPreset]
+  -> Bool
+  -> Maybe OsPath
+  -> [Text]
+  -> App i ExitCode
+initializeNew presets noInteractive factsFile assignments = do
   manifestExists <- doesManifestExist
   when manifestExists $ do
     die' manifestAlreadyExists "Manifest already exists."
@@ -371,7 +431,7 @@ init presets noInteractive = do
       die' manifestAlreadyExists "Manifest already exists."
     repositoryId <- newRepositoryId
     let manifest = makeManifest repositoryId presets'
-    _ <- prepareNewMachineStateBeforeMigration manifest $ do
+    state <- prepareNewMachineStateBeforeMigration manifest $ do
       repoDir <- asks (.sourceDirectory)
       pathStyle <- pathStyleFor stderr
       forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
@@ -381,6 +441,7 @@ init presets noInteractive = do
           printStderr $ "Directory created: " <> pathStyle dirPath <> "."
       filename <- saveManifest manifest
       printStderr $ "Manifest created: " <> pathStyle filename <> "."
+    _ <- enrollMachineFacts state manifest noInteractive factsFile assignments
     debug' <- asks (.debug)
     dryRun' <- asks (.dryRun)
     when (debug' || dryRun') $ do
@@ -395,6 +456,173 @@ init presets noInteractive = do
   case initialized of
     Left err -> die' machineStateError $ formatStateError err
     Right exitCode -> return exitCode
+
+
+enrollMachineFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => MachineState
+  -> Manifest
+  -> Bool
+  -> Maybe OsPath
+  -> [Text]
+  -> App i MachineState
+enrollMachineFacts state manifest noInteractive requestedFactsFile assignments = do
+  supplied <- parseFactAssignments assignments
+  (factsFile', fileFacts) <-
+    resolveFactsSource state requestedFactsFile
+  let declared = Map.union supplied state.declaredFacts
+  let required = requiredMachineFacts manifest
+  let available = Map.keysSet $ Map.union declared fileFacts
+  let missing = required `Set.difference` available
+  prompted <-
+    if Set.null missing
+      then return Map.empty
+      else
+        if noInteractive || System.Info.os == "mingw32"
+          then do
+            codeStyle <- codeStyleFor stderr
+            let rendered =
+                  Text.intercalate
+                    ", "
+                    [codeStyle $ factKeyText key | key <- Set.toAscList missing]
+            die' missingMachineFactError $
+              "Machine facts required by this repository are missing: "
+                <> rendered
+                <> ".  Supply them with `--facts-file` or `--fact`."
+          else do
+            pairs <- forM (Set.toAscList missing) $ \key -> do
+              value <- input $ "Value for fact." ++ Text.unpack (factKeyText key) ++ ":"
+              return (key, fromString value)
+            return $ Map.fromList pairs
+  let declared' = Map.union prompted declared
+  if factsFile' == state.factsFile && declared' == state.declaredFacts
+    then do
+      $(logInfo) "Machine facts are already enrolled."
+      return state
+    else do
+      stateRoot <- asks (.stateDirectory)
+      now <- liftIO getCurrentTime
+      updated <- updateMachineFacts stateRoot now state factsFile' declared'
+      case updated of
+        Left err -> die' machineStateError $ formatStateError err
+        Right state' -> do
+          $(logInfo) "Machine facts enrolled."
+          return state'
+
+
+parseFactAssignments
+  :: (MonadIO i) => [Text] -> App i FactMap
+parseFactAssignments = foldM insertAssignment Map.empty
+ where
+  insertAssignment facts assignment = do
+    let (keyText, separatorAndValue) = Text.breakOn "=" assignment
+    when (Text.null separatorAndValue) $
+      die' cliError $
+        "Invalid machine fact assignment: " <> assignment <> "."
+    key <- case parseFactKey keyText of
+      Left message -> die' cliError message
+      Right value -> return value
+    when (isBuiltInFact key) $
+      die' cliError $
+        "Built-in machine facts cannot be persisted with `--fact`: "
+          <> factKeyText key
+          <> "."
+    let value = fromString $ Text.unpack $ Text.drop 1 separatorAndValue
+    return $ Map.insert key value facts
+
+
+resolveFactsSource
+  :: (MonadFileSystem i, MonadIO i)
+  => MachineState
+  -> Maybe OsPath
+  -> App i (Maybe OsPath, FactMap)
+resolveFactsSource state requested = do
+  configured <- case requested of
+    Just factsFile -> Just <$> normalizeFactsFile state.checkoutPath factsFile
+    Nothing -> case state.factsFile of
+      Just factsFile -> return $ Just factsFile
+      Nothing -> findDefaultFactsFile state.checkoutPath
+  facts <- case configured of
+    Nothing -> return Map.empty
+    Just factsFile ->
+      readFactsSource $
+        if isAbsolute factsFile
+          then factsFile
+          else state.checkoutPath </> factsFile
+  return (configured, facts)
+
+
+normalizeFactsFile
+  :: (MonadFileSystem i, MonadIO i) => OsPath -> OsPath -> App i OsPath
+normalizeFactsFile checkout configured =
+  ( do
+      checkout' <- canonicalizePath checkout
+      resolved <-
+        canonicalizePath $
+          if isAbsolute configured then configured else checkout' </> configured
+      let relative = normalise $ makeRelative checkout' resolved
+      return $
+        if not (isAbsolute relative) && isSafeManagedRelativePath relative
+          then relative
+          else normalise resolved
+  )
+    `catchError` \err ->
+      die' envFileReadError $
+        "Could not resolve the machine-facts file: " <> showt (FromStringShow err)
+
+
+findDefaultFactsFile
+  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i (Maybe OsPath)
+findDefaultFactsFile checkout = do
+  filename <- encodePath "dojang-env.toml"
+  regular <- isRegularFile $ checkout </> filename
+  if not regular
+    then return Nothing
+    else do
+      facts <- readFactsSource $ checkout </> filename
+      return $ if Map.null facts then Nothing else Just filename
+
+
+readFactsSource
+  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i FactMap
+readFactsSource factsPath = do
+  result <-
+    readFactsFile factsPath `catchError` \err ->
+      die' envFileReadError $
+        "Could not read the machine-facts file: " <> showt (FromStringShow err)
+  case result of
+    Left errors ->
+      die' envFileReadError $
+        "Syntax errors in the machine-facts file:"
+          <> Text.concat ["\n  " <> Text.pack error' | error' <- NonEmpty.toList errors]
+    Right (facts, warnings) -> do
+      $(logDebugSH) warnings
+      return facts
+
+
+requiredMachineFacts :: Manifest -> Set FactKey
+requiredMachineFacts manifest =
+  Set.filter (not . isBuiltInFact) $
+    Set.unions $
+      referencedFacts resolver <$> routePredicates <> hookPredicates
+ where
+  resolver = (`HashMap.lookup` manifest.monikers)
+  routePredicates =
+    [ predicate
+    | route <- Map.elems manifest.fileRoutes
+    , predicate <- reachablePredicates route.predicates
+    ]
+  hookPredicates =
+    [ hook.condition
+    | hooks <- Map.elems manifest.hooks
+    , hook <- hooks
+    ]
+  reachablePredicates [] = []
+  reachablePredicates ((predicate, _) : branches) =
+    predicate
+      : if normalizePredicate predicate == Always
+        then []
+        else reachablePredicates branches
 
 
 posixHome :: FilePathExpression

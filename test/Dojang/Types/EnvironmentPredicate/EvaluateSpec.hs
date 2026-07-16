@@ -15,6 +15,7 @@ import Dojang.Types.Environment
   , Environment (Environment)
   , Kernel (..)
   , OperatingSystem (..)
+  , withFacts
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.EnvironmentPredicate.Evaluate
@@ -52,7 +53,8 @@ spec = do
           ]
             :: HashMap MonikerName EnvironmentPredicate
     let kernel = Kernel "Linux" "5.10.0-8"
-    let environment = Environment Linux X86_64 kernel
+    let environment =
+          withFacts [("class", "work")] $ Environment Linux X86_64 kernel
     let eval = evaluate environment monikerMap
 
     specify "Always" $
@@ -74,6 +76,13 @@ spec = do
         `shouldBe` ( False
                    , [UnrecognizedArchitecture $ Etc "etc"]
                    )
+
+    specify "Fact" $ do
+      eval (Fact "class" "work") `shouldBe` (True, [])
+      eval (Fact "class" "personal") `shouldBe` (False, [])
+      eval (Fact "os" "linux") `shouldBe` (True, [])
+      eval (Fact "missing" "value")
+        `shouldBe` (False, [UndefinedFact "missing"])
 
     specify "Moniker" $ do
       eval (Moniker linuxAmd64) `shouldBe` (True, [])

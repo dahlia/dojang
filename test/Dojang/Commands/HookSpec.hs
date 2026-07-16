@@ -490,7 +490,7 @@ spec = sequential $ do
         let timestamp = read "2026-07-15 00:00:00 UTC"
         let state =
               MachineState
-                3
+                4
                 repositoryId
                 machineId
                 generationId
@@ -498,6 +498,8 @@ spec = sequential $ do
                 (tmpDir </> manifestFilename)
                 (tmpDir </> intermediateDir)
                 (managedTargetSnapshotRoot stateRootPath repositoryId)
+                Nothing
+                Map.empty
                 timestamp
                 timestamp
                 False
@@ -524,6 +526,7 @@ spec = sequential $ do
                 "x86_64"
                 "Linux"
                 "6.0.0"
+                Map.empty
                 "apply"
                 []
                 state
@@ -584,10 +587,11 @@ spec = sequential $ do
                 "x86_64"
                 "Linux"
                 "6.0.0"
+                Map.empty
                 "apply"
                 []
                 ( MachineState
-                    3
+                    4
                     repositoryId
                     machineId
                     generationId
@@ -595,6 +599,8 @@ spec = sequential $ do
                     (tmpDir </> manifestFilename)
                     (tmpDir </> intermediateDir)
                     (tmpDir </> stateDir)
+                    Nothing
+                    Map.empty
                     (read "2026-07-15 00:00:00 UTC")
                     (read "2026-07-15 00:00:00 UTC")
                     False
@@ -662,7 +668,7 @@ spec = sequential $ do
         let recreatedTime = read "2026-07-15 01:00:00 UTC"
         let oldState =
               MachineState
-                3
+                4
                 repositoryId
                 machineId
                 generationId
@@ -670,6 +676,8 @@ spec = sequential $ do
                 (tmpDir </> manifestFilename)
                 (tmpDir </> intermediateDir)
                 (managedTargetSnapshotRoot stateRootPath repositoryId)
+                Nothing
+                Map.empty
                 createdTime
                 createdTime
                 False
@@ -709,6 +717,7 @@ spec = sequential $ do
                 "x86_64"
                 "Linux"
                 "6.0.0"
+                Map.empty
                 "apply"
                 []
                 oldState
@@ -820,7 +829,7 @@ posixNonUtf8HookScopeSpec =
       let timestamp = read "2026-07-15 00:00:00 UTC"
       let state =
             MachineState
-              3
+              4
               repositoryId
               machineId
               generationId
@@ -828,6 +837,8 @@ posixNonUtf8HookScopeSpec =
               (tmpDir </> manifestFilename)
               (tmpDir </> intermediateDir)
               (managedTargetSnapshotRoot stateRootPath repositoryId)
+              Nothing
+              Map.empty
               timestamp
               timestamp
               False
@@ -864,6 +875,7 @@ posixNonUtf8HookScopeSpec =
               "x86_64"
               "Linux"
               "6.0.0"
+              Map.empty
               "apply"
               [selectedPath]
               state

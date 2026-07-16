@@ -15,8 +15,10 @@ import Data.Text (Text, length, take, takeEnd)
 import Dojang.Types.Environment
   ( Architecture (Etc)
   , Environment (..)
+  , FactKey
   , Kernel (..)
   , OperatingSystem (OtherOS)
+  , lookupFact
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
@@ -36,6 +38,8 @@ data EvaluationWarning
     UnrecognizedOperatingSystem OperatingSystem
   | -- | The architecture was not recognized.
     UnrecognizedArchitecture Architecture
+  | -- | A named machine fact was not defined.
+    UndefinedFact FactKey
   deriving (Eq, Show)
 
 
@@ -136,3 +140,7 @@ evaluate' environment _ (KernelReleaseSuffix suffix) =
   rel = original environment.kernel.release
   suffixLen :: Int
   suffixLen = length $ original suffix
+evaluate' environment _ (Fact key value) =
+  case lookupFact key environment of
+    Nothing -> (False, [UndefinedFact key])
+    Just actual -> (actual == value, [])
