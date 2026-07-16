@@ -38,10 +38,15 @@ import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import System.Timeout (timeout)
 import Test.Hspec (Spec, it, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (init, readFile, writeFile)
 
-import Dojang.App (AppEnv (..), runAppWithLogging, runAppWithoutLogging)
+import Dojang.App
+  ( AppEnv (..)
+  , prepareMachineState
+  , runAppWithLogging
+  , runAppWithoutLogging
+  )
 import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
   ( cliError
@@ -56,15 +61,19 @@ import Dojang.MonadFileSystem
   )
 import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.MachineState
-  ( MachineState (declaredFacts, firstApplied)
+  ( MachineState (declaredFacts, firstApplied, updatedTime)
   , listRepositoryStates
   , readMachineId
+  , repositoryStatePath
+  , updateMachineFacts
   )
+import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.Registry
   ( Registry (Registry)
   , registryFilename
   , writeRegistry
   )
+import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
 spec :: Spec
@@ -280,6 +289,64 @@ spec = sequential $ do
       result `shouldBe` ExitSuccess
       messages <- readIORef warnings
       any (ByteString.isInfixOf "unexpected key") messages `shouldBe` True
+
+  it "validates a stored facts file before moving existing state" $
+    withTempDir $ \tmp _ -> do
+      oldCheckoutName <- encodeFS "old-checkout"
+      movedCheckoutName <- encodeFS "moved-checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let oldCheckout = tmp </> oldCheckoutName
+      let movedCheckout = tmp </> movedCheckoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories oldCheckout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      let manifestSource =
+            "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (oldCheckout </> manifestName) manifestSource
+      let oldAppEnv =
+            AppEnv
+              oldCheckout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $
+          runAppWithoutLogging oldAppEnv $
+            prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just factsName)
+          Map.empty
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      let statePath = repositoryStatePath stateRoot repositoryId
+      before <- readFile statePath
+      removeFile $ oldCheckout </> manifestName
+      removeDirectory oldCheckout
+      createDirectories movedCheckout
+      writeFile (movedCheckout </> manifestName) manifestSource
+      let movedAppEnv = oldAppEnv{sourceDirectory = movedCheckout}
+      withHome
+        home
+        (runAppWithoutLogging movedAppEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== envFileReadError)
+      readFile statePath `shouldReturn` before
 
   it "requires and enrolls facts in an existing repository" $
     withTempDir $ \tmp _ -> do

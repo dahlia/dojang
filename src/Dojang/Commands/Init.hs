@@ -492,12 +492,18 @@ prevalidateExistingMachineFacts manifest requestedFactsFile assignments = do
   case requestedFactsFile of
     Just _ -> return ()
     Nothing -> do
+      checkout <- asks (.sourceDirectory)
       state <- readExistingMachineState manifest
       case state of
-        Just _ -> return ()
-        Nothing -> do
-          checkout <- asks (.sourceDirectory)
-          void $ findDefaultFactsFile checkout
+        Just current -> case current.factsFile of
+          Just factsFile ->
+            void $
+              readFactsSource $
+                if isAbsolute factsFile
+                  then factsFile
+                  else checkout </> factsFile
+          Nothing -> void $ findDefaultFactsFile checkout
+        Nothing -> void $ findDefaultFactsFile checkout
 
 
 prevalidateNewMachineFacts
