@@ -228,14 +228,7 @@ currentEnvironment' = do
             "Environment file not found: "
               <> showt (FromStringShow e)
           detected <- liftIO currentEnvironment
-          persistedFacts <- currentRepositoryFacts
-          return $
-            Right
-              ( withFacts
-                  (Map.union persistedFacts detected.additionalFacts)
-                  detected
-              , []
-              )
+          return $ Right (detected, [])
         else die' noEnvFile $ showt e
   case result of
     Left errors -> do

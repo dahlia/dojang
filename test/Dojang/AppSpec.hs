@@ -7,6 +7,9 @@
 module Dojang.AppSpec (spec) where
 
 import Control.Exception qualified
+import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
+import Data.ByteString.Char8 qualified as ByteString
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 
 
@@ -28,6 +31,7 @@ import Dojang.App
   , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
   , prepareMachineState
+  , runAppWithLogging
   , runAppWithoutLogging
   , validateRepositoryCheckout
   )
@@ -234,6 +238,61 @@ spec = sequential $ do
         withHome home $ runAppWithoutLogging appEnv currentEnvironment'
       lookupFact "class" environment `shouldBe` Just "work"
       readFile statePath `shouldReturn` before
+
+  it "loads associated facts once during detected-host fallback" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (checkout </> factsName) "[fact]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just factsName)
+          Map.empty
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      warnings <- newIORef []
+      _ <-
+        withHome home $
+          runAppWithLogging appEnv currentEnvironment' $
+            \_ _ level message ->
+              if level == LevelWarn
+                then modifyIORef' warnings (fromLogStr message :)
+                else return ()
+      messages <- readIORef warnings
+      length
+        (filter (ByteString.isInfixOf "unexpected key") messages)
+        `shouldBe` 1
 
   it "resolves a relative facts file from a moved checkout" $
     withTempDir $ \tmp _ -> do
