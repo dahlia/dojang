@@ -144,7 +144,9 @@ fieldOp = do
     SuffixOp suffix -> KernelReleaseSuffix $ mk suffix
     InOp [] -> Not Always
     InOp (x : xs) -> Or $ makePredicate field' <$> (x :| xs)
-    NotInOp [] -> Always
+    NotInOp [] -> case field' of
+      FactField key -> FactDefined key
+      _ -> Always
     NotInOp (x : xs) -> And $ Not . makePredicate field' <$> (x :| xs)
  where
   makePredicate :: Field -> Text -> EnvironmentPredicate

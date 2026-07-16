@@ -109,6 +109,13 @@ spec = do
 
     let Right foo = parseMonikerName "foo"
 
+    it "preserves complements that can depend on defined machine facts" $ do
+      normalizePredicate
+        (Or [Fact "class" "work", Not $ Fact "class" "work"])
+        `shouldBe` Or [Fact "class" "work", Not $ Fact "class" "work"]
+      normalizePredicate (Or [Moniker foo, Not $ Moniker foo])
+        `shouldBe` Or [Moniker foo, Not $ Moniker foo]
+
     it "flattens nested Ands" $ do
       normalizePredicate
         ( And
@@ -155,3 +162,4 @@ spec = do
       referencedFacts resolve (Moniker workstation) `shouldBe` ["class"]
       referencedFacts resolve (Or [Always, Fact "unused" "value"])
         `shouldBe` []
+      referencedFacts resolve (FactDefined "class") `shouldBe` ["class"]

@@ -129,6 +129,7 @@ spec = do
         , Not $ OperatingSystem MacOS
         ]
     parse p "" " arch not in () " `shouldParse` Always
+    parse p "" "fact.class not in ()" `shouldParse` FactDefined "class"
     parse p "" "moniker not in ('foo-bar', baz,)"
       `shouldParse` And [Not $ Moniker fooBar, Not $ Moniker baz]
     parse p "" "fact.class in (work, personal)"

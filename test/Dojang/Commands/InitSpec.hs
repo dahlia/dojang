@@ -233,15 +233,28 @@ spec = sequential $ do
             <> "\n[[hooks.pre-status]]\n"
             <> "command = \"true\"\n"
             <> "when = \"fact.class = work\"\n"
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"fact.location not in ()\"\n"
         )
       withHome
         home
         (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
         `shouldThrow` (== missingMachineFactError)
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=work"]
+        )
+        `shouldThrow` (== missingMachineFactError)
       _ <-
         withHome home $
           runAppWithoutLogging appEnv $
-            Init.initWithFacts [] True Nothing ["class=work"]
+            Init.initWithFacts
+              []
+              True
+              Nothing
+              ["class=work", "location=home"]
       machineResult <- readMachineId stateRoot
       machineId' <- case machineResult of
         Right (Just identifier) -> return identifier
@@ -252,6 +265,8 @@ spec = sequential $ do
         Left err -> fail $ "Unexpected repository state error: " <> show err
       fmap (Map.lookup "class" . (.declaredFacts)) states
         `shouldBe` [Just "work"]
+      fmap (Map.lookup "location" . (.declaredFacts)) states
+        `shouldBe` [Just "home"]
       _ <-
         withHome home $
           dryRunIO $

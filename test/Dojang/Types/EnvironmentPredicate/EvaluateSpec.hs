@@ -17,7 +17,10 @@ import Dojang.Types.Environment
   , OperatingSystem (..)
   , withFacts
   )
-import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate
+  ( EnvironmentPredicate (..)
+  , normalizePredicate
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate
   ( EvaluationWarning (..)
   , evaluate
@@ -87,6 +90,16 @@ spec = do
         `shouldBe` (False, [UndefinedFact "missing"])
       eval (And [Not $ Fact "missing" "a", Not $ Fact "missing" "b"])
         `shouldBe` (False, [UndefinedFact "missing", UndefinedFact "missing"])
+      eval (FactDefined "class") `shouldBe` (True, [])
+      eval (FactDefined "missing")
+        `shouldBe` (False, [UndefinedFact "missing"])
+      eval
+        ( normalizePredicate $
+            Or [Fact "missing" "value", Not $ Fact "missing" "value"]
+        )
+        `shouldBe` ( False
+                   , [UndefinedFact "missing", UndefinedFact "missing"]
+                   )
 
     specify "Moniker" $ do
       eval (Moniker linuxAmd64) `shouldBe` (True, [])

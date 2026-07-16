@@ -144,6 +144,10 @@ evaluate' environment _ (Fact key value) =
   case lookupFact key environment of
     Nothing -> (False, [UndefinedFact key])
     Just actual -> (actual == value, [])
+evaluate' environment _ (FactDefined key) =
+  case lookupFact key environment of
+    Nothing -> (False, [UndefinedFact key])
+    Just _ -> (True, [])
 
 
 isUndefinedFact :: EvaluationWarning -> Bool

@@ -220,6 +220,7 @@ environmentPredicate' maxDepth =
     , KernelReleasePrefix <$> (ciText (constant 0 50) Gen.unicodeAll)
     , KernelReleaseSuffix <$> (ciText (constant 0 50) Gen.unicodeAll)
     , Fact <$> factKey <*> factValue
+    , FactDefined <$> factKey
     ]
       ++ if maxDepth < 1
         then []

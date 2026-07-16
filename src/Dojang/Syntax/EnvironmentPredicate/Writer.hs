@@ -63,6 +63,8 @@ write (Fact key value) =
   ( "fact." <> factKeyText key <> " = " <> stringLiteral (factValueText value)
   , False
   )
+write (FactDefined key) =
+  ("fact." <> factKeyText key <> " not in ()", False)
 write (Moniker moniker) =
   ("moniker = " <> stringLiteral (original moniker.name), False)
 write (And predicates) =

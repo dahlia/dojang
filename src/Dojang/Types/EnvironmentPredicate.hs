@@ -63,6 +63,8 @@ data EnvironmentPredicate
     KernelReleaseSuffix (CI Text)
   | -- | A predicate that matches a named machine fact.
     Fact FactKey FactValue
+  | -- | A predicate that matches when a named machine fact is defined.
+    FactDefined FactKey
   deriving (Show)
 
 
@@ -91,6 +93,8 @@ instance Eq EnvironmentPredicate where
   KernelReleaseSuffix _ == _ = False
   Fact key value == Fact key' value' = key == key' && value == value'
   Fact _ _ == _ = False
+  FactDefined key == FactDefined key' = key == key'
+  FactDefined _ == _ = False
 
 
 instance Hashable EnvironmentPredicate where
@@ -125,6 +129,10 @@ instance Hashable EnvironmentPredicate where
       `hashWithSalt` ("Fact" :: Text)
       `hashWithSalt` key
       `hashWithSalt` value
+  hashWithSalt salt (FactDefined key) =
+    salt
+      `hashWithSalt` ("FactDefined" :: Text)
+      `hashWithSalt` key
 
 
 normalizePredicateList
@@ -143,7 +151,7 @@ normalizePredicateList = nub . sortWith (Down . hashWithSalt 1)
 -- >>> normalizePredicate $ And [Moniker foo, Not $ Moniker foo]
 -- Not Always
 -- >>> normalizePredicate $ Or [Moniker foo, Not $ Moniker foo]
--- Always
+-- Or (Moniker (MonikerName "foo") :| [Not (Moniker (MonikerName "foo"))])
 -- >>> let Right a = parseMonikerName "a"
 -- >>> let Right b = parseMonikerName "b"
 -- >>> let Right c = parseMonikerName "c"
@@ -191,7 +199,9 @@ normalizePredicate' (Or ps) =
     then Always
     else
       let filtered = filter (/= Not Always) ps'
-      in if (`any` filtered) $ \case Not p' -> p' `elem` filtered; _ -> False
+      in if (`any` filtered) $ \case
+           Not p' -> p' `elem` filtered && not (mayBeUndefined p')
+           _ -> False
            then Always
            else
              let reduced =
@@ -212,6 +222,18 @@ normalizePredicate' (Or ps) =
 normalizePredicate' (Not (Not p)) = normalizePredicate' p
 normalizePredicate' (Not p) = Not $ normalizePredicate' p
 normalizePredicate' p = p
+
+
+-- Fact-backed monikers cannot be distinguished from total monikers until
+-- evaluation, so complements containing either form must remain explicit.
+mayBeUndefined :: EnvironmentPredicate -> Bool
+mayBeUndefined (Not predicate) = mayBeUndefined predicate
+mayBeUndefined (And predicates) = any mayBeUndefined predicates
+mayBeUndefined (Or predicates) = any mayBeUndefined predicates
+mayBeUndefined (Moniker _) = True
+mayBeUndefined (Fact _ _) = True
+mayBeUndefined (FactDefined _) = True
+mayBeUndefined _ = False
 
 
 -- | Finds named machine facts referenced by a reachable predicate branch.
@@ -236,6 +258,7 @@ referencedFacts resolver = go Set.empty . normalizePredicate
             (go $ Set.insert name visited)
             (resolver name)
     Fact key _ -> Set.singleton key
+    FactDefined key -> Set.singleton key
     OperatingSystem _ -> Set.empty
     Architecture _ -> Set.empty
     KernelName _ -> Set.empty

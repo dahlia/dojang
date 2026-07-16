@@ -76,6 +76,7 @@ instance Eq FileRoute where
         KernelReleasePrefix _ -> mempty
         KernelReleaseSuffix _ -> mempty
         Fact _ _ -> mempty
+        FactDefined _ -> mempty
     allMonikerRefs :: HashSet MonikerName
     allMonikerRefs =
       unions (monikerRefs . fst <$> a.predicates)

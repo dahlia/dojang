@@ -36,6 +36,7 @@ spec = do
       write (Architecture "x86_64")
         `shouldBe` "arch = \"x86_64\""
       write (Fact "class" "work") `shouldBe` "fact.class = work"
+      write (FactDefined "class") `shouldBe` "fact.class not in ()"
       let Right fooBar = parseMonikerName "foo-bar"
       write (Moniker fooBar) `shouldBe` "moniker = \"foo-bar\""
 
