@@ -108,6 +108,7 @@ import Dojang.Types.Environment
   , isBuiltInFact
   , parseFactKey
   )
+import Dojang.Types.Environment.Current qualified as Current
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -533,7 +534,13 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
   (factsFile', fileFacts) <-
     resolveFactsSource state requestedFactsFile
   let declared = Map.union supplied state.declaredFacts
-  let required = requiredMachineFacts manifest
+  let referenced = referencedMachineFacts manifest
+  required <-
+    if Set.null referenced
+      then return Set.empty
+      else do
+        environment <- liftIO Current.currentEnvironment
+        return $ requiredMachineFacts environment manifest
   let available = Map.keysSet $ Map.union declared fileFacts
   let missing = required `Set.difference` available
   prompted <-
@@ -670,8 +677,20 @@ readFactsSource factsPath = do
       return facts
 
 
-requiredMachineFacts :: Manifest -> Set FactKey
-requiredMachineFacts manifest =
+referencedMachineFacts :: Manifest -> Set FactKey
+referencedMachineFacts = machineFactsRequiredBy id
+
+
+requiredMachineFacts :: Environment -> Manifest -> Set FactKey
+requiredMachineFacts environment =
+  machineFactsRequiredBy $ specializePredicate environment
+
+
+machineFactsRequiredBy
+  :: (EnvironmentPredicate -> EnvironmentPredicate)
+  -> Manifest
+  -> Set FactKey
+machineFactsRequiredBy specialize manifest =
   Set.filter (not . isBuiltInFact) $
     Set.unions $
       referencedFacts resolver <$> routePredicates <> hookPredicates
@@ -683,13 +702,13 @@ requiredMachineFacts manifest =
     , predicate <- reachablePredicates route.predicates
     ]
   hookPredicates =
-    [ resolvePredicate Set.empty hook.condition
+    [ specialize $ resolvePredicate Set.empty hook.condition
     | hooks <- Map.elems manifest.hooks
     , hook <- hooks
     ]
   reachablePredicates [] = []
   reachablePredicates ((predicate, _) : branches) =
-    let resolved = resolvePredicate Set.empty predicate
+    let resolved = specialize $ resolvePredicate Set.empty predicate
     in resolved
          : if resolved == Always
            then []
@@ -707,6 +726,24 @@ requiredMachineFacts manifest =
       And children -> And $ resolvePredicate visited <$> children
       Or children -> Or $ resolvePredicate visited <$> children
       _ -> predicate
+
+
+specializePredicate
+  :: Environment -> EnvironmentPredicate -> EnvironmentPredicate
+specializePredicate environment predicate =
+  normalizePredicate $ case predicate of
+    Not child -> Not $ specializePredicate environment child
+    And children -> And $ specializePredicate environment <$> children
+    Or children -> Or $ specializePredicate environment <$> children
+    Moniker _ -> predicate
+    Fact key _
+      | not $ isBuiltInFact key -> predicate
+    FactDefined key
+      | not $ isBuiltInFact key -> predicate
+    _ ->
+      if fst $ evaluate environment mempty predicate
+        then Always
+        else Not Always
 
 
 posixHome :: FilePathExpression

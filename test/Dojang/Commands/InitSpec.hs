@@ -377,6 +377,8 @@ spec = sequential $ do
         withHome home $
           runAppWithoutLogging appEnv $
             Init.init [Init.Amd64Linux] True
+      let otherOperatingSystem =
+            if os == "mingw32" then "linux" else "windows"
       manifest <- readFile $ checkout </> manifestName
       writeFile
         (checkout </> manifestName)
@@ -389,6 +391,16 @@ spec = sequential $ do
             <> "\n[[files.unreachable]]\n"
             <> "when = \"fact.unreachable = yes\"\n"
             <> "path = \"$HOME/also-unreachable\"\n"
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"os = "
+            <> otherOperatingSystem
+            <> " && fact.platform = work\"\n"
+            <> "\n[[files.platform-specific]]\n"
+            <> "when = \"os = "
+            <> otherOperatingSystem
+            <> " && fact.route-platform = work\"\n"
+            <> "path = \"$HOME/platform-specific\"\n"
         )
       _ <-
         withHome home $
