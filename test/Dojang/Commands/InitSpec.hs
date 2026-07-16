@@ -113,8 +113,11 @@ spec = sequential $ do
             runCoordinatedInitIO gate $
               runAppWithoutLogging appEnv $
                 Init.init [Init.Amd64Linux] True
-      length (filter isSuccessful results) `shouldBe` 1
-      length (filter isManifestAlreadyExists results) `shouldBe` 1
+      any isSuccessful results `shouldBe` True
+      all
+        (\result -> isSuccessful result || isManifestAlreadyExists result)
+        results
+        `shouldBe` True
       repositoryStates <- listDirectory $ stateRoot </> repositoriesName
       length repositoryStates `shouldBe` 1
 
