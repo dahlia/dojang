@@ -234,7 +234,13 @@ type IgnoreMap' = Map FilePath [FilePattern]
 
 -- | A single hook configuration in detailed form.
 data Hook' = Hook'
-  { command :: Text
+  { hookId :: Maybe Text
+  -- ^ Stable identity for stateful execution policies.
+  , policy :: Maybe Text
+  -- ^ Execution policy (default: always).
+  , changeKey :: Maybe Text
+  -- ^ Explicit revision key for the on-change policy.
+  , command :: Text
   -- ^ The executable path (required).
   , args :: Maybe [Text]
   -- ^ Command arguments (default: []).
@@ -254,7 +260,10 @@ instance FromValue Hook' where
   fromValue =
     parseTableFromValue $
       Hook'
-        <$> reqKey "command"
+        <$> optKey "id"
+        <*> optKey "policy"
+        <*> optKey "change-key"
+        <*> reqKey "command"
         <*> optKey "args"
         <*> optKey "moniker"
         <*> optKey "when"
@@ -275,6 +284,9 @@ instance ToTable Hook' where
   toTable hook =
     table $
       [("command", toValue hook.command)]
+        ++ maybeField "id" hook.hookId
+        ++ maybeField "policy" hook.policy
+        ++ maybeField "change-key" hook.changeKey
         ++ maybeField "args" hook.args
         ++ maybeField "moniker" hook.moniker
         ++ maybeField "when" hook.condition
@@ -292,6 +304,16 @@ data Hooks' = Hooks'
   , preFirstApply :: Maybe [Hook']
   , postFirstApply :: Maybe [Hook']
   , postApply :: Maybe [Hook']
+  , preReflect :: Maybe [Hook']
+  , postReflect :: Maybe [Hook']
+  , preDiff :: Maybe [Hook']
+  , postDiff :: Maybe [Hook']
+  , preStatus :: Maybe [Hook']
+  , postStatus :: Maybe [Hook']
+  , preEdit :: Maybe [Hook']
+  , postEdit :: Maybe [Hook']
+  , preUnmanage :: Maybe [Hook']
+  , postUnmanage :: Maybe [Hook']
   }
   deriving (Eq, Show)
 
@@ -304,6 +326,16 @@ emptyHooks =
     , preFirstApply = Nothing
     , postFirstApply = Nothing
     , postApply = Nothing
+    , preReflect = Nothing
+    , postReflect = Nothing
+    , preDiff = Nothing
+    , postDiff = Nothing
+    , preStatus = Nothing
+    , postStatus = Nothing
+    , preEdit = Nothing
+    , postEdit = Nothing
+    , preUnmanage = Nothing
+    , postUnmanage = Nothing
     }
 
 
@@ -315,6 +347,16 @@ instance FromValue Hooks' where
         <*> optKey "pre-first-apply"
         <*> optKey "post-first-apply"
         <*> optKey "post-apply"
+        <*> optKey "pre-reflect"
+        <*> optKey "post-reflect"
+        <*> optKey "pre-diff"
+        <*> optKey "post-diff"
+        <*> optKey "pre-status"
+        <*> optKey "post-status"
+        <*> optKey "pre-edit"
+        <*> optKey "post-edit"
+        <*> optKey "pre-unmanage"
+        <*> optKey "post-unmanage"
 
 
 instance ToValue Hooks' where
@@ -328,6 +370,16 @@ instance ToTable Hooks' where
         ++ maybeField "pre-first-apply" hooks.preFirstApply
         ++ maybeField "post-first-apply" hooks.postFirstApply
         ++ maybeField "post-apply" hooks.postApply
+        ++ maybeField "pre-reflect" hooks.preReflect
+        ++ maybeField "post-reflect" hooks.postReflect
+        ++ maybeField "pre-diff" hooks.preDiff
+        ++ maybeField "post-diff" hooks.postDiff
+        ++ maybeField "pre-status" hooks.preStatus
+        ++ maybeField "post-status" hooks.postStatus
+        ++ maybeField "pre-edit" hooks.preEdit
+        ++ maybeField "post-edit" hooks.postEdit
+        ++ maybeField "pre-unmanage" hooks.preUnmanage
+        ++ maybeField "post-unmanage" hooks.postUnmanage
    where
     maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
     maybeField key (Just v) = [(key, toValue v)]

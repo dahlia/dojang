@@ -202,9 +202,28 @@
     },
     "hook": {
       "title": "Hook definition",
-      "description": "A hook that runs a custom script before or after the apply command.",
+      "description": "A hook that runs a custom script at a command lifecycle event.",
       "type": "object",
       "properties": {
+        "id": {
+          "title": "Hook identity",
+          "description": "A stable identity required by stateful execution policies.",
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9._-]*$"
+        },
+        "policy": {
+          "title": "Execution policy",
+          "description": "Whether the hook runs always, once per repository and machine, or when its keyed context changes.",
+          "type": "string",
+          "enum": ["always", "once", "on-change"],
+          "default": "always"
+        },
+        "change-key": {
+          "title": "Change key",
+          "description": "An explicit non-empty revision key required by the on-change policy.",
+          "type": "string",
+          "minLength": 1
+        },
         "command": {
           "title": "Command path",
           "description": "The path to the executable to run.",
@@ -237,6 +256,29 @@
         }
       },
       "required": ["command"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {"policy": {"enum": ["once", "on-change"]}},
+            "required": ["policy"]
+          },
+          "then": {"required": ["id"]}
+        },
+        {
+          "if": {
+            "properties": {"policy": {"const": "on-change"}},
+            "required": ["policy"]
+          },
+          "then": {"required": ["change-key"]}
+        },
+        {
+          "if": {"required": ["change-key"]},
+          "then": {
+            "properties": {"policy": {"const": "on-change"}},
+            "required": ["policy"]
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "hookList": {
@@ -290,7 +332,7 @@
     },
     "hooks": {
       "title": "Hook definitions",
-      "description": "Hooks that run custom scripts before and after the apply command.",
+      "description": "Hooks that run custom scripts around supported command lifecycles.",
       "type": "object",
       "properties": {
         "pre-apply": {
@@ -312,7 +354,17 @@
           "title": "Post-apply hooks",
           "description": "Hooks that run after every apply, after file sync.",
           "$ref": "#/$defs/hookList"
-        }
+        },
+        "pre-reflect": {"$ref": "#/$defs/hookList"},
+        "post-reflect": {"$ref": "#/$defs/hookList"},
+        "pre-diff": {"$ref": "#/$defs/hookList"},
+        "post-diff": {"$ref": "#/$defs/hookList"},
+        "pre-status": {"$ref": "#/$defs/hookList"},
+        "post-status": {"$ref": "#/$defs/hookList"},
+        "pre-edit": {"$ref": "#/$defs/hookList"},
+        "post-edit": {"$ref": "#/$defs/hookList"},
+        "pre-unmanage": {"$ref": "#/$defs/hookList"},
+        "post-unmanage": {"$ref": "#/$defs/hookList"}
       },
       "additionalProperties": false
     }

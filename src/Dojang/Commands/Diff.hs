@@ -39,6 +39,10 @@ import Dojang.Commands
   , pathStyleFor'
   , printStderr'
   )
+import Dojang.Commands.Hook
+  ( HookScopePath (CallerRelativePath)
+  , withCommandHooks
+  )
 import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes (externalProgramNonZeroExit, fileNotRoutedError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
@@ -60,7 +64,18 @@ diff
   -> Maybe OsPath
   -> [OsPath]
   -> App i ExitCode
-diff mode diffProgram files = do
+diff mode diffProgram files =
+  withCommandHooks "diff" (CallerRelativePath <$> files) $
+    diffCore mode diffProgram files
+
+
+diffCore
+  :: (MonadFileSystem i, MonadIO i)
+  => DiffMode
+  -> Maybe OsPath
+  -> [OsPath]
+  -> App i ExitCode
+diffCore mode diffProgram files = do
   ctx <- ensureContext
   (corresponds, ws) <- makeCorrespond ctx
   routedFiles <- forM corresponds $ \c -> do

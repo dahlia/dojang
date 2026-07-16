@@ -3,12 +3,15 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Syntax.Manifest.Writer
-  ( insertRepositoryId
+  ( WriteError (..)
+  , formatWriteError
+  , insertRepositoryId
   , writeManifest
   , writeManifestFile
   ) where
 
-import Data.Bifunctor (Bifunctor (second))
+import Control.Monad.Except (MonadError (throwError))
+import Data.Bifunctor (Bifunctor (first, second))
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Maybe (fromMaybe, isJust)
@@ -55,7 +58,18 @@ import Dojang.Types.FilePathExpression (FilePathExpression, toPathText)
 import Dojang.Types.FileRoute (FileRoute (..))
 import qualified Dojang.Types.FileRoute as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
-import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
+import Dojang.Types.Hook
+  ( Hook (..)
+  , HookId
+  , HookMap
+  , HookPolicy (HookAlways)
+  , HookType (..)
+  , duplicateStatefulHookIds
+  , renderHookId
+  , renderHookPolicy
+  , renderHookType
+  , validateHookConfiguration
+  )
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
@@ -64,6 +78,32 @@ import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
 
 schema :: Text
 schema = "https://schema.dojang.dev/2026-07/manifest.schema.json"
+
+
+-- | A reason a manifest cannot be encoded without producing invalid TOML.
+data WriteError
+  = -- | A hook violates the policy field invariants accepted by the parser.
+    InvalidHookConfiguration HookType Int Text
+  | -- | Stateful hooks repeat one stable ID in a lifecycle event.
+    DuplicateStatefulHookId HookType HookId
+  deriving (Eq, Show)
+
+
+-- | Formats a manifest encoding error for display to a user.
+formatWriteError :: WriteError -> Text
+formatWriteError (InvalidHookConfiguration hookType index reason) =
+  "Invalid "
+    <> renderHookType hookType
+    <> " hook at position "
+    <> Text.pack (show index)
+    <> ": "
+    <> reason
+formatWriteError (DuplicateStatefulHookId hookType identifier) =
+  "Duplicate stateful hook id in "
+    <> renderHookType hookType
+    <> ": "
+    <> renderHookId identifier
+    <> "."
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -94,13 +134,15 @@ insertRepositoryId repositoryId source
 writeManifest
   :: Manifest
   -- ^ The 'Manifest' to encode.
-  -> Text
-  -- ^ The encoded TOML document.
-writeManifest manifest =
-  "#:schema "
-    <> schema
-    <> "\n\n"
-    <> (showt $ FromStringShow $ prettyTomlOrdered order tbl)
+  -> Either WriteError Text
+  -- ^ The encoded TOML document, or an invalid hook configuration.
+writeManifest manifest = do
+  validateHooks manifest.hooks
+  pure $
+    "#:schema "
+      <> schema
+      <> "\n\n"
+      <> (showt $ FromStringShow $ prettyTomlOrdered order tbl)
  where
   tbl = toTable $ mapManifest' manifest
   order :: [String] -> String -> Either Int String
@@ -112,6 +154,17 @@ writeManifest manifest =
     "monikers" -> Left 4
     _ -> Right field
   order _ field = Right field
+  validateHooks hookMap =
+    mapM_ (uncurry validateEvent) $ Data.Map.Strict.toAscList hookMap
+  validateEvent hookType hooks' = do
+    sequence_
+      [ first (InvalidHookConfiguration hookType index) $
+          validateHookConfiguration hook
+      | (index, hook) <- zip [1 ..] hooks'
+      ]
+    case duplicateStatefulHookIds hooks' of
+      identifier : _ -> Left $ DuplicateStatefulHookId hookType identifier
+      [] -> Right ()
 
 
 -- | Writes a 'Manifest' file to the given path.  Throws an 'IOError' if the
@@ -124,7 +177,9 @@ writeManifestFile
   -- ^ The path to write the 'Manifest' to.
   -> m ()
 writeManifestFile manifest filePath =
-  writeFile filePath $ encodeUtf8 $ writeManifest manifest
+  case writeManifest manifest of
+    Left err -> throwError $ userError $ Text.unpack $ formatWriteError err
+    Right source -> writeFile filePath $ encodeUtf8 source
 
 
 mapManifest' :: Manifest -> Manifest'
@@ -325,6 +380,16 @@ mapHooks' hookMap =
     , preFirstApply = mapHookList PreFirstApply
     , postFirstApply = mapHookList PostFirstApply
     , postApply = mapHookList PostApply
+    , preReflect = mapHookList PreReflect
+    , postReflect = mapHookList PostReflect
+    , preDiff = mapHookList PreDiff
+    , postDiff = mapHookList PostDiff
+    , preStatus = mapHookList PreStatus
+    , postStatus = mapHookList PostStatus
+    , preEdit = mapHookList PreEdit
+    , postEdit = mapHookList PostEdit
+    , preUnmanage = mapHookList PreUnmanage
+    , postUnmanage = mapHookList PostUnmanage
     }
  where
   mapHookList :: HookType -> Maybe [Internal.Hook']
@@ -336,7 +401,13 @@ mapHooks' hookMap =
   mapHook :: Hook -> Internal.Hook'
   mapHook hook =
     Internal.Hook'
-      { Internal.command = decodePath' hook.command
+      { Internal.hookId = renderHookId <$> hook.hookId
+      , Internal.policy =
+          if hook.policy == HookAlways
+            then Nothing
+            else Just $ renderHookPolicy hook.policy
+      , Internal.changeKey = hook.changeKey
+      , Internal.command = decodePath' hook.command
       , Internal.args = if null hook.args then Nothing else Just hook.args
       , Internal.moniker = Nothing -- moniker is already resolved into condition
       , Internal.condition =

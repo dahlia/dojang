@@ -86,6 +86,25 @@ spec = do
   let symlinkIt = if symlinkAvailable then it else xit
   sequential $ do
     describe "unmanage" $ do
+      it "rejects an empty selection before preparing hook context" $
+        withTempDir $ \root _ -> do
+          repositoryName <- encodeFS "repository"
+          stateName <- encodeFS "state"
+          manifestName <- encodeFS "missing.toml"
+          envName <- encodeFS "dojang-env.toml"
+          let appEnv =
+                AppEnv
+                  (root </> repositoryName)
+                  False
+                  Nothing
+                  (root </> stateName)
+                  manifestName
+                  envName
+                  False
+                  False
+          runAppWithoutLogging appEnv (unmanage Nothing [] False)
+            `shouldThrow` (== lifecycleSelectionError)
+
       it "rejects active records and leaves all state untouched" $
         withManagedTarget $ \fixture -> do
           runAppWithoutLogging

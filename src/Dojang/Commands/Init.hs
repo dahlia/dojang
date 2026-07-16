@@ -69,12 +69,13 @@ import Dojang.Commands
   , printStderr'
   )
 import Dojang.ExitCodes
-  ( machineStateError
+  ( fileWriteError
+  , machineStateError
   , manifestAlreadyExists
   , unsupportedOnEnvError
   )
 import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
-import Dojang.Syntax.Manifest.Writer (writeManifest)
+import Dojang.Syntax.Manifest.Writer (formatWriteError, writeManifest)
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment (..)
@@ -383,7 +384,9 @@ init presets noInteractive = do
     debug' <- asks (.debug)
     dryRun' <- asks (.dryRun)
     when (debug' || dryRun') $ do
-      let manifestText = indent $ writeManifest manifest
+      manifestText <- case writeManifest manifest of
+        Left err -> die' fileWriteError $ formatWriteError err
+        Right source -> pure $ indent source
       printStderr' Note $
         "The manifest file looks like below:\n\n"
           <> manifestText

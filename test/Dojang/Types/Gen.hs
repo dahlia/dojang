@@ -68,7 +68,14 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FileRoute qualified as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
-import Dojang.Types.Hook (Hook (..), HookMap, HookType (..))
+import Dojang.Types.Hook
+  ( Hook (..)
+  , HookMap
+  , HookPolicy (..)
+  , allHookTypes
+  , parseHookId
+  , renderHookId
+  )
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName
@@ -480,6 +487,10 @@ repositoryIdGen = do
 
 hook :: (MonadGen m) => m Hook
 hook = do
+  policy' <- Gen.element [HookAlways, HookOnce, HookOnChange]
+  identifierText <- Gen.text (constant 1 16) Gen.alphaNum
+  let Right identifier = parseHookId $ cons 'h' identifierText
+      stateful = policy' /= HookAlways
   cmd <- osPath (constant 1 3)
   argsCount <- Gen.integral (constant 0 5)
   args' <- Gen.list (singleton argsCount) $ Gen.text (constant 1 20) Gen.alphaNum
@@ -488,7 +499,11 @@ hook = do
   ignoreFail <- Gen.bool
   return
     Hook
-      { command = cmd
+      { hookId = if stateful then Just identifier else Nothing
+      , policy = policy'
+      , changeKey =
+          if policy' == HookOnChange then Just identifierText else Nothing
+      , command = cmd
       , args = args'
       , condition = cond
       , workingDirectory = workDir
@@ -498,8 +513,28 @@ hook = do
 
 hookMap :: (MonadGen m) => Range Int -> m HookMap
 hookMap range = do
-  -- Generate a list of hook types to include (0 to 4 types)
-  hookTypes <-
-    Gen.subsequence [PreApply, PreFirstApply, PostFirstApply, PostApply]
-  pairs <- mapM (\ht -> (,) ht <$> Gen.list range hook) hookTypes
+  hookTypes <- Gen.subsequence allHookTypes
+  pairs <- mapM generateHooks hookTypes
   return $ Map.fromList [(ht, hs) | (ht, hs) <- pairs, not (null hs)]
+ where
+  generateHooks hookType = do
+    hooks <- Gen.list range hook
+    return (hookType, uniqueStatefulIds hooks)
+  uniqueStatefulIds = zipWith assignIdentifier [0 :: Int ..]
+  assignIdentifier
+    index
+    hook'@(Hook currentIdentifier policy' key cmd args' cond workDir ignoreFail)
+      | policy' == HookAlways = hook'
+      | otherwise =
+          let base = maybe (pack "hook") renderHookId currentIdentifier
+              Right identifier =
+                parseHookId $ base <> Text.singleton '-' <> pack (show index)
+          in Hook
+               (Just identifier)
+               policy'
+               key
+               cmd
+               args'
+               cond
+               workDir
+               ignoreFail

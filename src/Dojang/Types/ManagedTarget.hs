@@ -95,7 +95,7 @@ data ManagedTarget = ManagedTarget
   -- ^ Destination identity after the synchronization.
   , updatedBy :: SynchronizationCommand
   -- ^ Command that most recently updated this record.
-  , updatedAt :: UTCTime
+  , updatedTime :: UTCTime
   -- ^ Time at which this record was updated.
   }
   deriving (Eq, Ord, Show)

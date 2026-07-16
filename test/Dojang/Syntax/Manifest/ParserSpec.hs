@@ -61,6 +61,11 @@ expectDetailedRouteError path expected toml = case readManifest toml of
   Right _ -> expectationFailure "Expected the detailed route to be rejected."
 
 
+isHookConfigurationError :: Error -> Bool
+isHookConfigurationError (HookConfigurationError _) = True
+isHookConfigurationError _ = False
+
+
 spec :: Spec
 spec = do
   home <- runIO $ encodeFS "home"
@@ -83,6 +88,67 @@ spec = do
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
       Right (manifest, _) -> manifest.repositoryId `shouldBe` Just expected
+
+  specify "accepts hooks across command lifecycles" $ do
+    let toml =
+          Text.unlines
+            [ "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers]"
+            , "[[hooks.pre-reflect]]"
+            , "id = \"refresh-cache\""
+            , "policy = \"on-change\""
+            , "change-key = \"v2\""
+            , "command = \"refresh\""
+            , "[[hooks.post-unmanage]]"
+            , "id = \"notify\""
+            , "policy = \"once\""
+            , "command = \"notify\""
+            ]
+    case readManifest toml of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right _ -> return ()
+
+  specify "rejects invalid stateful hook configurations" $ do
+    let prefix =
+          Text.unlines
+            [ "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers]"
+            , "[[hooks.pre-apply]]"
+            ]
+        invalidHooks =
+          [ "policy = \"once\"\ncommand = \"run\""
+          , "id = \"2bad\"\npolicy = \"once\"\ncommand = \"run\""
+          , "id = \"changed\"\npolicy = \"on-change\"\ncommand = \"run\""
+          , "change-key = \"v2\"\ncommand = \"run\""
+          ]
+    forM_ invalidHooks $ \hookSource ->
+      case readManifest (prefix <> hookSource) of
+        Left err -> isHookConfigurationError err `shouldBe` True
+        Right _ -> expectationFailure "Expected an invalid hook to be rejected."
+
+  specify "rejects duplicate stateful hook identities within one event" $ do
+    let toml =
+          Text.unlines
+            [ "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers]"
+            , "[[hooks.pre-status]]"
+            , "id = \"prepare\""
+            , "policy = \"once\""
+            , "command = \"first\""
+            , "[[hooks.pre-status]]"
+            , "id = \"prepare\""
+            , "policy = \"once\""
+            , "command = \"second\""
+            ]
+    case readManifest toml of
+      Left err -> isHookConfigurationError err `shouldBe` True
+      Right _ -> expectationFailure "Expected duplicate hook IDs to be rejected."
 
   specify "rejects route names containing parent traversal" $ do
     let toml =

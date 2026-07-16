@@ -6,6 +6,33 @@ Version 0.3.0
 
 To be released.
 
+ -  Extended hooks across the `apply`, `reflect`, `diff`, `status`, `edit`, and
+    `unmanage` command lifecycles.  Post-hooks run only after successful
+    commands.  Hooks can now use stable IDs with `once` and explicitly keyed
+    `on-change` policies; successful executions are stored per repository and
+    machine in schema-version 3 state.  Concurrent stateful runs are serialized.
+    Dry runs report the event, working directory, and policy reason without
+    starting processes or updating history, and failed ignored hooks remain
+    eligible.  Hook processes receive command, event, repository, machine-state,
+    platform, and selected-path context without retaining values omitted from
+    the current event.  Commands that reload manifest and environment context
+    after pre-hooks also reload it before selecting post-hooks.  A stateful hook
+    waiting for its lock cannot start after its state generation is forgotten
+    and recreated, even when the old and new records have identical timestamps,
+    and a completed hook cannot restore history after that replacement.  State
+    generations use opaque random UUIDs.  Persistent hook locks do not block
+    automatic repository selection after `forget`.  Nested Dojang commands
+    suppress hooks by default; `--allow-hook-recursion` permits one nested
+    level while preventing a hook from re-entering itself within the same
+    repository. Hooks in different repositories do not collide in the recursion
+    stack. Validated hook IDs remain abstract in the public API and execution
+    history is revalidated before it is stored.  Manifest serialization rejects
+    programmatically constructed hook policy combinations and duplicate
+    stateful IDs that the parser would reject.  Repository-relative route
+    selectors also remain stable when `-r` selects a repository from another
+    working directory.  Existing schema-version 1 and 2 state remains readable.
+    [[#34], [#39], [#66]]
+
  -  Added machine-local managed-target records for successful `dojang apply`
     and `dojang reflect` operations.  Each record identifies its source route,
     expanded destination, intermediate snapshot, SHA-256 fingerprint,
@@ -231,12 +258,14 @@ To be released.
 [#34]: https://github.com/dahlia/dojang/issues/34
 [#37]: https://github.com/dahlia/dojang/issues/37
 [#38]: https://github.com/dahlia/dojang/issues/38
+[#39]: https://github.com/dahlia/dojang/issues/39
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#61]: https://github.com/dahlia/dojang/pull/61
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
 [#64]: https://github.com/dahlia/dojang/pull/64
 [#65]: https://github.com/dahlia/dojang/pull/65
+[#66]: https://github.com/dahlia/dojang/pull/66
 
 
 Version 0.2.1

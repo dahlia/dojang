@@ -255,13 +255,11 @@ while ignoring everything else (`*`).
 Hooks
 -----
 
-**[Hooks](hooks.en.md)** allow you to run custom scripts before and after
-the `dojang apply` command.  There are four types of hooks:
-
- -  `pre-apply`: Runs before every apply
- -  `pre-first-apply`: Runs only on first apply
- -  `post-first-apply`: Runs only on first apply, after file sync
- -  `post-apply`: Runs after every apply
+**[Hooks](hooks.en.md)** run custom scripts before and after `apply`, `reflect`,
+`diff`, `status`, `edit`, and `unmanage`.  Each command has a `pre-*` and
+successful `post-*` event.  `apply` also retains its first-apply events.  Hooks
+can run `always`, `once` per repository and machine, or `on-change` with an
+explicit revision key.
 
 ~~~~ toml
 [[hooks.pre-apply]]
@@ -269,6 +267,9 @@ command = "/bin/echo"
 args = ["Applying config files..."]
 
 [[hooks.post-apply]]
+id = "reload-service"
+policy = "on-change"
+change-key = "service-config-v2"
 command = "/usr/bin/systemctl"
 args = ["--user", "restart", "my-service"]
 when = "os = linux"

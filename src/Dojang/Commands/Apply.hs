@@ -17,7 +17,6 @@ import System.IO (stderr)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
-import Data.CaseInsensitive (original)
 import Data.Map.Strict (fromList, notMember, toList)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
@@ -29,7 +28,7 @@ import System.OsPath
 
 import Dojang.App
   ( App
-  , AppEnv (debug, dryRun, manifestFile, sourceDirectory, stateDirectory)
+  , AppEnv (debug, manifestFile, stateDirectory)
   , ensureContext
   , markMachineStateApplied
   , prepareMachineState
@@ -42,8 +41,12 @@ import Dojang.Commands
   , printStderr
   , printStderr'
   )
-import Dojang.Commands.Hook (HookEnv (HookEnv), executeHooks)
-import Dojang.Commands.Status (defaultStatusOptions, printWarnings, status)
+import Dojang.Commands.Hook
+  ( HookScopePath (CallerRelativePath)
+  , executeHooks
+  , makeHookEnv
+  )
+import Dojang.Commands.Status (defaultStatusOptions, printWarnings, statusCore)
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
   , conflictError
@@ -59,7 +62,6 @@ import Dojang.Types.Context
   , RouteState (..)
   , makeManagedCorrespond
   )
-import Dojang.Types.Environment (Environment (..))
 import Dojang.Types.Hook (HookType (..))
 import Dojang.Types.MachineState
   ( MachineState (..)
@@ -103,18 +105,9 @@ apply force filePaths = do
   machineState <- prepareMachineState ctx.repository.manifest
   let isFirstApply = not machineState.firstApplied
 
-  -- Build hook environment
-  sourceDir <- asks (.sourceDirectory)
   manifestFile' <- asks (.manifestFile)
-  dryRun' <- asks (.dryRun)
-  let environment = ctx.environment
-  let hookEnv =
-        HookEnv
-          sourceDir
-          manifestFile'
-          dryRun'
-          (original environment.operatingSystem.identifier)
-          (original environment.architecture.identifier)
+  hookEnv <-
+    makeHookEnv "apply" (CallerRelativePath <$> filePaths) ctx machineState
 
   -- Run pre-apply hooks
   $(logDebug) "Running pre-apply hooks..."
@@ -220,7 +213,7 @@ apply force filePaths = do
             else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
-  when debug' (void $ status defaultStatusOptions)
+  when debug' (void $ statusCore defaultStatusOptions)
   let persist = persistConvergedTargets ctx machineState managed
   void
     ( executeReconciliationPlanWith
@@ -229,7 +222,7 @@ apply force filePaths = do
         `catchError` \err -> persist >> throwError err
     )
   persist
-  when debug' (void $ status defaultStatusOptions)
+  when debug' (void $ statusCore defaultStatusOptions)
   printWarnings ws
 
   -- Run post-apply hooks
