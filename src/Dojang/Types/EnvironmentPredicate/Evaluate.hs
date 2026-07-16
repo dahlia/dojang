@@ -95,61 +95,97 @@ evaluate'
   -- ^ The result of the evaluation. The 'snd' of the result is a list of
   -- warnings that occurred during evaluation.  Note that warnings can be
   -- present even if the result is 'True'.
-evaluate' _ _ Always =
-  (True, [])
-evaluate' environment resolver (Not predicate) =
-  let (result, warnings) = evaluate' environment resolver predicate
-  in (not (any isUndefinedFact warnings) && not result, warnings)
-evaluate' environment resolver (And predicates) =
-  let results = fmap (evaluate' environment resolver) predicates
-  in (all fst results, concatMap snd results)
-evaluate' environment resolver (Or predicates) =
-  let results = fmap (evaluate' environment resolver) predicates
-  in (any fst results, concatMap snd results)
-evaluate' environment resolver (Moniker monikerName) =
+evaluate' environment resolver predicate =
+  let (truth, warnings) = evaluateTruth environment resolver predicate
+  in (truth == TrueTruth, warnings)
+
+
+data Truth = FalseTruth | UnknownTruth | TrueTruth
+  deriving (Eq)
+
+
+evaluateTruth
+  :: Environment
+  -> MonikerResolver
+  -> EnvironmentPredicate
+  -> (Truth, [EvaluationWarning])
+evaluateTruth _ _ Always =
+  (TrueTruth, [])
+evaluateTruth environment resolver (Not predicate) =
+  let (truth, warnings) = evaluateTruth environment resolver predicate
+  in (negateTruth truth, warnings)
+evaluateTruth environment resolver (And predicates) =
+  let results = fmap (evaluateTruth environment resolver) predicates
+  in (andTruth $ fmap fst results, concatMap snd results)
+evaluateTruth environment resolver (Or predicates) =
+  let results = fmap (evaluateTruth environment resolver) predicates
+  in (orTruth $ fmap fst results, concatMap snd results)
+evaluateTruth environment resolver (Moniker monikerName) =
   case resolver monikerName of
-    Nothing -> (False, [UndefinedMoniker monikerName])
-    Just predicate -> evaluate' environment resolver predicate
-evaluate' environment _ (OperatingSystem os) =
-  ( os == environment.operatingSystem
+    Nothing -> (FalseTruth, [UndefinedMoniker monikerName])
+    Just predicate -> evaluateTruth environment resolver predicate
+evaluateTruth environment _ (OperatingSystem os) =
+  ( boolTruth $ os == environment.operatingSystem
   , case os of
       OtherOS _ -> [UnrecognizedOperatingSystem os]
       _ -> []
   )
-evaluate' environment _ (Architecture arch) =
-  ( arch == environment.architecture
+evaluateTruth environment _ (Architecture arch) =
+  ( boolTruth $ arch == environment.architecture
   , case arch of
       Etc _ -> [UnrecognizedArchitecture arch]
       _ -> []
   )
-evaluate' environment _ (KernelName kernel) =
-  (kernel == environment.kernel.name, [])
-evaluate' environment _ (KernelRelease ver) =
-  (ver == environment.kernel.release, [])
-evaluate' environment _ (KernelReleasePrefix prefix) =
-  (length rel >= prefixLen && mk (take prefixLen rel) == prefix, [])
+evaluateTruth environment _ (KernelName kernel) =
+  (boolTruth $ kernel == environment.kernel.name, [])
+evaluateTruth environment _ (KernelRelease ver) =
+  (boolTruth $ ver == environment.kernel.release, [])
+evaluateTruth environment _ (KernelReleasePrefix prefix) =
+  (boolTruth $ length rel >= prefixLen && mk (take prefixLen rel) == prefix, [])
  where
   rel :: Text
   rel = original environment.kernel.release
   prefixLen :: Int
   prefixLen = length $ original prefix
-evaluate' environment _ (KernelReleaseSuffix suffix) =
-  (length rel >= suffixLen && mk (takeEnd suffixLen rel) == suffix, [])
+evaluateTruth environment _ (KernelReleaseSuffix suffix) =
+  ( boolTruth $ length rel >= suffixLen && mk (takeEnd suffixLen rel) == suffix
+  , []
+  )
  where
   rel :: Text
   rel = original environment.kernel.release
   suffixLen :: Int
   suffixLen = length $ original suffix
-evaluate' environment _ (Fact key value) =
+evaluateTruth environment _ (Fact key value) =
   case lookupFact key environment of
-    Nothing -> (False, [UndefinedFact key])
-    Just actual -> (actual == value, [])
-evaluate' environment _ (FactDefined key) =
+    Nothing -> (UnknownTruth, [UndefinedFact key])
+    Just actual -> (boolTruth $ actual == value, [])
+evaluateTruth environment _ (FactDefined key) =
   case lookupFact key environment of
-    Nothing -> (False, [UndefinedFact key])
-    Just _ -> (True, [])
+    Nothing -> (FalseTruth, [UndefinedFact key])
+    Just _ -> (TrueTruth, [])
 
 
-isUndefinedFact :: EvaluationWarning -> Bool
-isUndefinedFact (UndefinedFact _) = True
-isUndefinedFact _ = False
+boolTruth :: Bool -> Truth
+boolTruth True = TrueTruth
+boolTruth False = FalseTruth
+
+
+negateTruth :: Truth -> Truth
+negateTruth TrueTruth = FalseTruth
+negateTruth FalseTruth = TrueTruth
+negateTruth UnknownTruth = UnknownTruth
+
+
+andTruth :: (Foldable f) => f Truth -> Truth
+andTruth values
+  | FalseTruth `elem` values = FalseTruth
+  | UnknownTruth `elem` values = UnknownTruth
+  | otherwise = TrueTruth
+
+
+orTruth :: (Foldable f) => f Truth -> Truth
+orTruth values
+  | TrueTruth `elem` values = TrueTruth
+  | UnknownTruth `elem` values = UnknownTruth
+  | otherwise = FalseTruth

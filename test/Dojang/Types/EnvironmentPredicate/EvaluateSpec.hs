@@ -115,6 +115,12 @@ spec = do
       eval (Not $ Moniker linuxAmd64) `shouldBe` (False, [])
       eval (Not $ Moniker linuxArm64) `shouldBe` (True, [])
       eval (Not $ Moniker linuxAmd64') `shouldBe` (False, [])
+      eval
+        (Not $ And [Fact "missing" "value", OperatingSystem Windows])
+        `shouldBe` (True, [UndefinedFact "missing"])
+      eval
+        (Or [Not $ Fact "missing" "value", Not $ OperatingSystem Windows])
+        `shouldBe` (True, [UndefinedFact "missing"])
 
     specify "And" $ do
       eval (And [OperatingSystem Linux]) `shouldBe` (True, [])
