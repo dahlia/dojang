@@ -471,6 +471,61 @@ spec = sequential $ do
       fmap (Map.lookup "class" . (.declaredFacts)) statesAfterDryRun
         `shouldBe` [Just "work"]
 
+  it "uses known fact values to limit enrollment requirements" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.init [Init.Amd64Linux] True
+      manifest <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[files.conditional]]\n"
+            <> "when = \"fact.class = work && fact.location = office\"\n"
+            <> "path = \"$HOME/conditional\"\n"
+        )
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=personal"]
+        )
+        `shouldReturn` ExitSuccess
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[files.selected]]\n"
+            <> "when = \"fact.class = personal\"\n"
+            <> "path = \"$HOME/personal\"\n"
+            <> "\n[[files.selected]]\n"
+            <> "when = \"fact.location = office\"\n"
+            <> "path = \"$HOME/office\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldReturn` ExitSuccess
+
   it "requires facts for the simulated environment" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"

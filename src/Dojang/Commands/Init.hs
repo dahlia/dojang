@@ -107,7 +107,9 @@ import Dojang.Types.Environment
   , emptyEnvironment
   , factKeyText
   , isBuiltInFact
+  , lookupFact
   , parseFactKey
+  , withFacts
   )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
@@ -525,9 +527,7 @@ prevalidateExistingMachineFacts
           maybe supplied (Map.union supplied . (.declaredFacts)) state
     when (noInteractive || System.Info.os == "mingw32") $ do
       missing <-
-        missingMachineFacts manifest $
-          Map.keysSet $
-            Map.union declared fileFacts
+        missingMachineFacts manifest $ Map.union declared fileFacts
       reportMissingMachineFacts missing
 
 
@@ -548,17 +548,21 @@ prevalidateNewMachineFacts requestedFactsFile assignments = do
 missingMachineFacts
   :: (MonadFileSystem i, MonadIO i)
   => Manifest
-  -> Set FactKey
+  -> FactMap
   -> App i (Set FactKey)
-missingMachineFacts manifest available = do
+missingMachineFacts manifest known = do
   let referenced = referencedMachineFacts manifest
   required <-
     if Set.null referenced
       then return Set.empty
       else do
         environment <- currentEnvironment'
-        return $ requiredMachineFacts environment manifest
-  return $ required `Set.difference` available
+        let environment' =
+              withFacts
+                (Map.union known environment.additionalFacts)
+                environment
+        return $ requiredMachineFacts environment' manifest
+  return $ required `Set.difference` Map.keysSet known
 
 
 reportMissingMachineFacts :: (MonadIO i) => Set FactKey -> App i ()
@@ -588,8 +592,8 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
   (factsFile', fileFacts) <-
     resolveFactsSource state requestedFactsFile
   let declared = Map.union supplied state.declaredFacts
-  let available = Map.keysSet $ Map.union declared fileFacts
-  missing <- missingMachineFacts manifest available
+  let known = Map.union declared fileFacts
+  missing <- missingMachineFacts manifest known
   prompted <-
     if Set.null missing
       then return Map.empty
@@ -784,9 +788,11 @@ specializePredicate environment predicate =
     Or children -> Or $ specializePredicate environment <$> children
     Moniker _ -> predicate
     Fact key _
-      | not $ isBuiltInFact key -> predicate
+      | not (isBuiltInFact key) && lookupFact key environment == Nothing ->
+          predicate
     FactDefined key
-      | not $ isBuiltInFact key -> predicate
+      | not (isBuiltInFact key) && lookupFact key environment == Nothing ->
+          predicate
     _ ->
       if fst $ evaluate environment mempty predicate
         then Always
