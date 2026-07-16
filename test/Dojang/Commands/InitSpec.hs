@@ -203,7 +203,7 @@ spec = sequential $ do
       exists (checkout </> manifestName) >>= (`shouldBe` False)
       exists stateRoot >>= (`shouldBe` False)
 
-  it "validates fact options before preparing existing repository state" $
+  it "validates fact inputs before preparing existing repository state" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
       stateName <- encodeFS "state"
@@ -242,6 +242,18 @@ spec = sequential $ do
             Init.initWithFacts [] True (Just factsName) []
         )
         `shouldThrow` (== envFileReadError)
+      exists stateRoot >>= (`shouldBe` False)
+      writeFile
+        (checkout </> manifestName)
+        ( "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+            <> "[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"fact.class = work\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== missingMachineFactError)
       exists stateRoot >>= (`shouldBe` False)
       writeFile (checkout </> envName) "[facts\n"
       withHome

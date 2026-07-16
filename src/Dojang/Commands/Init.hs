@@ -381,7 +381,11 @@ initWithFacts presets noInteractive factsFile assignments = do
   if manifestExists
     then do
       manifest <- ensureManifest
-      prevalidateExistingMachineFacts manifest factsFile assignments
+      prevalidateExistingMachineFacts
+        manifest
+        noInteractive
+        factsFile
+        assignments
       state <- prepareMachineState manifest
       _ <- enrollMachineFacts state manifest noInteractive factsFile assignments
       return ExitSuccess
@@ -467,44 +471,64 @@ prevalidateMachineFactInputs
   :: (MonadFileSystem i, MonadIO i)
   => Maybe OsPath
   -> [Text]
-  -> App i ()
+  -> App i (FactMap, Maybe FactMap)
 prevalidateMachineFactInputs requestedFactsFile assignments = do
-  void $ parseFactAssignments assignments
+  supplied <- parseFactAssignments assignments
   checkout <- asks (.sourceDirectory)
-  case requestedFactsFile of
+  fileFacts <- case requestedFactsFile of
     Just configured -> do
       normalized <- normalizeFactsFile checkout configured
-      void $
-        readFactsSource $
-          if isAbsolute normalized
-            then normalized
-            else checkout </> normalized
-    Nothing -> return ()
+      Just
+        <$> readFactsSource
+          ( if isAbsolute normalized
+              then normalized
+              else checkout </> normalized
+          )
+    Nothing -> return Nothing
+  return (supplied, fileFacts)
+
+
+readSelectedFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -> Maybe MachineState
+  -> App i FactMap
+readSelectedFacts checkout state =
+  case state >>= (.factsFile) of
+    Just factsFile ->
+      readFactsSource $
+        if isAbsolute factsFile
+          then factsFile
+          else checkout </> factsFile
+    Nothing -> snd <$> findDefaultFactsSource checkout
 
 
 prevalidateExistingMachineFacts
   :: (MonadFileSystem i, MonadIO i)
   => Manifest
+  -> Bool
   -> Maybe OsPath
   -> [Text]
   -> App i ()
-prevalidateExistingMachineFacts manifest requestedFactsFile assignments = do
-  prevalidateMachineFactInputs requestedFactsFile assignments
-  case requestedFactsFile of
-    Just _ -> return ()
-    Nothing -> do
-      checkout <- asks (.sourceDirectory)
-      state <- readExistingMachineState manifest
-      case state of
-        Just current -> case current.factsFile of
-          Just factsFile ->
-            void $
-              readFactsSource $
-                if isAbsolute factsFile
-                  then factsFile
-                  else checkout </> factsFile
-          Nothing -> void $ findDefaultFactsFile checkout
-        Nothing -> void $ findDefaultFactsFile checkout
+prevalidateExistingMachineFacts
+  manifest
+  noInteractive
+  requestedFactsFile
+  assignments = do
+    (supplied, requestedFacts) <-
+      prevalidateMachineFactInputs requestedFactsFile assignments
+    checkout <- asks (.sourceDirectory)
+    state <- readExistingMachineState manifest
+    fileFacts <-
+      maybe (readSelectedFacts checkout state) return requestedFacts
+    let declared =
+          maybe supplied (Map.union supplied . (.declaredFacts)) state
+    when (noInteractive || System.Info.os == "mingw32") $ do
+      missing <-
+        missingMachineFacts manifest $
+          Map.keysSet $
+            Map.union declared fileFacts
+      reportMissingMachineFacts missing
 
 
 prevalidateNewMachineFacts
@@ -513,12 +537,42 @@ prevalidateNewMachineFacts
   -> [Text]
   -> App i ()
 prevalidateNewMachineFacts requestedFactsFile assignments = do
-  prevalidateMachineFactInputs requestedFactsFile assignments
+  void $ prevalidateMachineFactInputs requestedFactsFile assignments
   case requestedFactsFile of
     Just _ -> return ()
     Nothing -> do
       checkout <- asks (.sourceDirectory)
-      void $ findDefaultFactsFile checkout
+      void $ findDefaultFactsSource checkout
+
+
+missingMachineFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest
+  -> Set FactKey
+  -> App i (Set FactKey)
+missingMachineFacts manifest available = do
+  let referenced = referencedMachineFacts manifest
+  required <-
+    if Set.null referenced
+      then return Set.empty
+      else do
+        environment <- currentEnvironment'
+        return $ requiredMachineFacts environment manifest
+  return $ required `Set.difference` available
+
+
+reportMissingMachineFacts :: (MonadIO i) => Set FactKey -> App i ()
+reportMissingMachineFacts missing =
+  when (not $ Set.null missing) $ do
+    codeStyle <- codeStyleFor stderr
+    let rendered =
+          Text.intercalate
+            ", "
+            [codeStyle $ factKeyText key | key <- Set.toAscList missing]
+    die' missingMachineFactError $
+      "Machine facts required by this repository are missing: "
+        <> rendered
+        <> ".  Supply them with `--facts-file` or `--fact`."
 
 
 enrollMachineFacts
@@ -534,30 +588,16 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
   (factsFile', fileFacts) <-
     resolveFactsSource state requestedFactsFile
   let declared = Map.union supplied state.declaredFacts
-  let referenced = referencedMachineFacts manifest
-  required <-
-    if Set.null referenced
-      then return Set.empty
-      else do
-        environment <- currentEnvironment'
-        return $ requiredMachineFacts environment manifest
   let available = Map.keysSet $ Map.union declared fileFacts
-  let missing = required `Set.difference` available
+  missing <- missingMachineFacts manifest available
   prompted <-
     if Set.null missing
       then return Map.empty
       else
         if noInteractive || System.Info.os == "mingw32"
           then do
-            codeStyle <- codeStyleFor stderr
-            let rendered =
-                  Text.intercalate
-                    ", "
-                    [codeStyle $ factKeyText key | key <- Set.toAscList missing]
-            die' missingMachineFactError $
-              "Machine facts required by this repository are missing: "
-                <> rendered
-                <> ".  Supply them with `--facts-file` or `--fact`."
+            reportMissingMachineFacts missing
+            return Map.empty
           else do
             pairs <- forM (Set.toAscList missing) $ \key -> do
               value <- input $ "Value for fact." ++ Text.unpack (factKeyText key) ++ ":"
@@ -614,19 +654,24 @@ resolveFactsSource
   -> Maybe OsPath
   -> App i (Maybe OsPath, FactMap)
 resolveFactsSource state requested = do
-  configured <- case requested of
-    Just factsFile -> Just <$> normalizeFactsFile state.checkoutPath factsFile
+  case requested of
+    Just factsFile -> do
+      configured <- normalizeFactsFile state.checkoutPath factsFile
+      facts <-
+        readFactsSource $
+          if isAbsolute configured
+            then configured
+            else state.checkoutPath </> configured
+      return (Just configured, facts)
     Nothing -> case state.factsFile of
-      Just factsFile -> return $ Just factsFile
-      Nothing -> findDefaultFactsFile state.checkoutPath
-  facts <- case configured of
-    Nothing -> return Map.empty
-    Just factsFile ->
-      readFactsSource $
-        if isAbsolute factsFile
-          then factsFile
-          else state.checkoutPath </> factsFile
-  return (configured, facts)
+      Just factsFile -> do
+        facts <-
+          readFactsSource $
+            if isAbsolute factsFile
+              then factsFile
+              else state.checkoutPath </> factsFile
+        return (Just factsFile, facts)
+      Nothing -> findDefaultFactsSource state.checkoutPath
 
 
 normalizeFactsFile
@@ -648,16 +693,18 @@ normalizeFactsFile checkout configured =
         "Could not resolve the machine-facts file: " <> showt (FromStringShow err)
 
 
-findDefaultFactsFile
-  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i (Maybe OsPath)
-findDefaultFactsFile checkout = do
+findDefaultFactsSource
+  :: (MonadFileSystem i, MonadIO i)
+  => OsPath
+  -> App i (Maybe OsPath, FactMap)
+findDefaultFactsSource checkout = do
   filename <- encodePath "dojang-env.toml"
   regular <- isRegularFile $ checkout </> filename
   if not regular
-    then return Nothing
+    then return (Nothing, Map.empty)
     else do
       facts <- readFactsSource $ checkout </> filename
-      return $ if Map.null facts then Nothing else Just filename
+      return (if Map.null facts then Nothing else Just filename, facts)
 
 
 readFactsSource
