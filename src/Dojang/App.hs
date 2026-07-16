@@ -19,6 +19,7 @@ module Dojang.App
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
+  , currentEnvironmentWithFacts
   , clearLegacyFirstApplyHistory
   , doesManifestExist
   , ensureContext
@@ -215,7 +216,21 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
 
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
-currentEnvironment' = do
+currentEnvironment' = currentEnvironmentUsing currentRepositoryFacts
+
+
+-- | Gets the current environment with the supplied repository fact layer.
+--
+-- Facts read from the environment file retain precedence over the supplied
+-- facts, matching normal runtime environment evaluation.
+currentEnvironmentWithFacts
+  :: (MonadFileSystem i, MonadIO i) => FactMap -> App i Environment
+currentEnvironmentWithFacts facts = currentEnvironmentUsing $ return facts
+
+
+currentEnvironmentUsing
+  :: (MonadFileSystem i, MonadIO i) => App i FactMap -> App i Environment
+currentEnvironmentUsing repositoryFacts = do
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
   let filePath = sourceDir </> envFile'
@@ -246,7 +261,7 @@ currentEnvironment' = do
           die' envFileReadError $
             "Syntax errors in environment file:" <> formattedErrors
     Right value -> return value
-  persistedFacts <- currentRepositoryFacts
+  persistedFacts <- repositoryFacts
   let merged =
         withFacts
           (Map.union env.additionalFacts persistedFacts)

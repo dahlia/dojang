@@ -67,7 +67,7 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Dojang.App
   ( App
   , AppEnv (debug, dryRun, sourceDirectory, stateDirectory)
-  , currentEnvironment'
+  , currentEnvironmentWithFacts
   , doesManifestExist
   , ensureManifest
   , ensureNoLegacySnapshotForInitialization
@@ -109,7 +109,6 @@ import Dojang.Types.Environment
   , isBuiltInFact
   , lookupFact
   , parseFactKey
-  , withFacts
   )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
@@ -556,12 +555,8 @@ missingMachineFacts manifest known = do
     if Set.null referenced
       then return Set.empty
       else do
-        environment <- currentEnvironment'
-        let environment' =
-              withFacts
-                (Map.union known environment.additionalFacts)
-                environment
-        return $ requiredMachineFacts environment' manifest
+        environment <- currentEnvironmentWithFacts known
+        return $ requiredMachineFacts environment manifest
   return $ required `Set.difference` Map.keysSet known
 
 

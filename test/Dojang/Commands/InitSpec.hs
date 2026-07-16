@@ -562,7 +562,7 @@ spec = sequential $ do
             <> "command = \"true\"\n"
             <> "when = \"os = "
             <> simulatedOperatingSystem
-            <> " && fact.class = work\"\n"
+            <> " && fact.class = work && fact.location = office\"\n"
         )
       writeFile
         (checkout </> envName)
@@ -578,6 +578,24 @@ spec = sequential $ do
         home
         (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
         `shouldThrow` (== missingMachineFactError)
+      writeFile
+        (checkout </> envName)
+        ( "os = \""
+            <> simulatedOperatingSystem
+            <> "\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Simulated\"\n"
+            <> "release = \"1.0\"\n"
+            <> "[facts]\n"
+            <> "class = \"personal\"\n"
+        )
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=work"]
+        )
+        `shouldReturn` ExitSuccess
 
   it "reports state-root creation failures as machine-state errors" $
     withTempDir $ \tmp _ -> do
