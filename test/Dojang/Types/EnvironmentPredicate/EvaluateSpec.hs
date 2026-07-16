@@ -83,6 +83,10 @@ spec = do
       eval (Fact "os" "linux") `shouldBe` (True, [])
       eval (Fact "missing" "value")
         `shouldBe` (False, [UndefinedFact "missing"])
+      eval (Not $ Fact "missing" "value")
+        `shouldBe` (False, [UndefinedFact "missing"])
+      eval (And [Not $ Fact "missing" "a", Not $ Fact "missing" "b"])
+        `shouldBe` (False, [UndefinedFact "missing", UndefinedFact "missing"])
 
     specify "Moniker" $ do
       eval (Moniker linuxAmd64) `shouldBe` (True, [])

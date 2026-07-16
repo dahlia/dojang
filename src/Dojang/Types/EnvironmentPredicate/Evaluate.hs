@@ -99,7 +99,7 @@ evaluate' _ _ Always =
   (True, [])
 evaluate' environment resolver (Not predicate) =
   let (result, warnings) = evaluate' environment resolver predicate
-  in (not result, warnings)
+  in (not (any isUndefinedFact warnings) && not result, warnings)
 evaluate' environment resolver (And predicates) =
   let results = fmap (evaluate' environment resolver) predicates
   in (all fst results, concatMap snd results)
@@ -144,3 +144,8 @@ evaluate' environment _ (Fact key value) =
   case lookupFact key environment of
     Nothing -> (False, [UndefinedFact key])
     Just actual -> (actual == value, [])
+
+
+isUndefinedFact :: EvaluationWarning -> Bool
+isUndefinedFact (UndefinedFact _) = True
+isUndefinedFact _ = False
