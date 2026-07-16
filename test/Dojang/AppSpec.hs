@@ -308,6 +308,51 @@ spec = sequential $ do
         withHome home $ runAppWithoutLogging appEnv currentEnvironment'
       lookupFact "class" environment `shouldBe` Just "personal"
 
+  it "lets an explicit facts-only environment override repository facts" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      simulationName <- encodeFS "simulation.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (checkout </> simulationName) "[facts]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              simulationName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          Nothing
+          (Map.singleton "class" "personal")
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+
   it "loads associated facts once during detected-host fallback" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"

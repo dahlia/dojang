@@ -233,6 +233,7 @@ currentEnvironmentUsing
 currentEnvironmentUsing repositoryFacts = do
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
+  defaultEnvFile <- encodePath "dojang-env.toml"
   let filePath = sourceDir </> envFile'
   $(logDebug) $ "Environment file path: " <> showt (FromStringShow filePath)
   result <-
@@ -253,7 +254,16 @@ currentEnvironmentUsing repositoryFacts = do
       case factsOnly of
         Right (facts, factsWarnings) -> do
           detected <- liftIO currentEnvironment
-          return (detected, facts, factsWarnings)
+          if envFile' == defaultEnvFile
+            then return (detected, facts, factsWarnings)
+            else
+              return
+                ( withFacts
+                    (Map.union facts detected.additionalFacts)
+                    detected
+                , Map.empty
+                , factsWarnings
+                )
         Left _ -> do
           let formattedErrors =
                 Data.Text.concat
