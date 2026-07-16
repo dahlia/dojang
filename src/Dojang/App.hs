@@ -123,6 +123,7 @@ import Dojang.Types.MachineState
   , formatStateError
   , markFirstApplied
   , prepareRepositoryStateWithOwnershipBeforeMigration
+  , readMachineId
   , readRepositoryState
   , retryManagedTargetCleanup
   , sameExistingPath
@@ -255,29 +256,49 @@ currentRepositoryFacts = do
   manifestResult <- loadManifest
   case manifestResult of
     Right (Just manifest) -> do
-      state <- prepareMachineState manifest
-      fileFacts <- case state.factsFile of
+      state <- readExistingMachineState manifest
+      case state of
         Nothing -> return Map.empty
-        Just configured -> do
-          let factsPath =
-                normalise $
-                  if isAbsolute configured
-                    then configured
-                    else state.checkoutPath </> configured
-          result <-
-            readFactsFile factsPath `catchError` \e ->
-              die' envFileReadError $
-                "Could not read the associated machine-facts file: " <> showt e
-          case result of
-            Left errors ->
-              die' envFileReadError $
-                "Syntax errors in the associated machine-facts file:"
-                  <> Data.Text.concat ["\n  " <> pack e | e <- toList errors]
-            Right (facts, warnings) -> do
-              forM_ warnings $ \warning -> $(logWarn) $ fromString warning
-              return facts
-      return $ Map.union state.declaredFacts fileFacts
+        Just current -> do
+          fileFacts <- case current.factsFile of
+            Nothing -> return Map.empty
+            Just configured -> do
+              let factsPath =
+                    normalise $
+                      if isAbsolute configured
+                        then configured
+                        else current.checkoutPath </> configured
+              result <-
+                readFactsFile factsPath `catchError` \e ->
+                  die' envFileReadError $
+                    "Could not read the associated machine-facts file: " <> showt e
+              case result of
+                Left errors ->
+                  die' envFileReadError $
+                    "Syntax errors in the associated machine-facts file:"
+                      <> Data.Text.concat ["\n  " <> pack e | e <- toList errors]
+                Right (facts, warnings) -> do
+                  forM_ warnings $ \warning -> $(logWarn) $ fromString warning
+                  return facts
+          return $ Map.union current.declaredFacts fileFacts
     _ -> return Map.empty
+
+
+readExistingMachineState
+  :: (MonadFileSystem i, MonadIO i) => Manifest -> App i (Maybe MachineState)
+readExistingMachineState manifest = case manifest.repositoryId of
+  Nothing -> return Nothing
+  Just repositoryId -> do
+    stateRoot <- asks (.stateDirectory)
+    machineResult <- readMachineId stateRoot
+    case machineResult of
+      Left err -> die' machineStateError $ formatStateError err
+      Right Nothing -> return Nothing
+      Right (Just identifier) -> do
+        stateResult <- readRepositoryState stateRoot repositoryId identifier
+        case stateResult of
+          Left err -> die' machineStateError $ formatStateError err
+          Right state -> return state
 
 
 instance (MonadFileSystem i, MonadIO i) => MonadEnvironment (App i) where

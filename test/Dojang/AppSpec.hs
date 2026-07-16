@@ -7,6 +7,7 @@
 module Dojang.AppSpec (spec) where
 
 import Control.Exception qualified
+import Data.Map.Strict qualified as Map
 
 
 #ifndef mingw32_HOST_OS
@@ -17,23 +18,30 @@ import System.Directory.OsPath qualified
 import System.Info (os)
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, it, runIO, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
-import Prelude hiding (writeFile)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Prelude hiding (readFile, writeFile)
 
 import Dojang.App
   ( AppEnv (..)
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
+  , currentEnvironment'
   , prepareMachineState
   , runAppWithoutLogging
   , validateRepositoryCheckout
   )
 import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
-  ( MonadFileSystem (createDirectories, writeFile)
+  ( MonadFileSystem (createDirectories, exists, readFile, writeFile)
   )
 import Dojang.TestUtils (withHome, withTempDir)
-import Dojang.Types.MachineState (MachineState (..), StateError (..))
+import Dojang.Types.Environment (lookupFact)
+import Dojang.Types.MachineState
+  ( MachineState (..)
+  , StateError (..)
+  , repositoryStatePath
+  , updateMachineFacts
+  )
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.Registry
   ( Registry (Registry)
@@ -57,6 +65,137 @@ spec = sequential $ do
   let redirectedHomeIt = if os == "mingw32" then xit else it
   let redirectedHomeSymlinkIt =
         if symlinkAvailable then redirectedHomeIt else xit
+
+  it "inspects a repository environment without creating machine state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+            <> "[facts]\n"
+            <> "class = \"work\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+      exists stateRoot `shouldReturn` False
+
+  it "inspects a legacy repository environment without machine state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile (checkout </> manifestName) ""
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "os" environment `shouldBe` Just "linux"
+      exists stateRoot `shouldReturn` False
+
+  it "loads persisted facts without rewriting machine state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          Nothing
+          (Map.singleton "class" "work")
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      let statePath = repositoryStatePath stateRoot repositoryId
+      before <- readFile statePath
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+      readFile statePath `shouldReturn` before
 
   redirectedHomeSymlinkIt "preserves first-apply history across checkout aliases" $
     withTempDir $ \tmp _ -> do
