@@ -223,6 +223,12 @@ spec = sequential $ do
         )
         `shouldThrow` (== envFileReadError)
       exists stateRoot >>= (`shouldBe` False)
+      writeFile (checkout </> envName) "[facts\n"
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== envFileReadError)
+      exists stateRoot >>= (`shouldBe` False)
 
   it "requires and enrolls facts in an existing repository" $
     withTempDir $ \tmp _ -> do

@@ -32,6 +32,7 @@ module Dojang.App
   , prepareMachineStateBeforeMigration
   , prepareNewMachineState
   , prepareNewMachineStateBeforeMigration
+  , readExistingMachineState
   , readValidatedLegacyRegistry
   , lookupEnv'
   , runAppWithLogging
@@ -289,6 +290,10 @@ currentRepositoryFacts = do
     _ -> return Map.empty
 
 
+-- | Reads repository machine state without creating or updating it.
+--
+-- Returns 'Nothing' when the manifest has no repository identity, the machine
+-- has no identity yet, or this repository has no record on the machine.
 readExistingMachineState
   :: (MonadFileSystem i, MonadIO i) => Manifest -> App i (Maybe MachineState)
 readExistingMachineState manifest = case manifest.repositoryId of

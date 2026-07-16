@@ -72,6 +72,7 @@ import Dojang.App
   , ensureNoLegacySnapshotForInitialization
   , prepareMachineState
   , prepareNewMachineStateBeforeMigration
+  , readExistingMachineState
   , readValidatedLegacyRegistry
   , saveManifest
   )
@@ -378,7 +379,7 @@ initWithFacts presets noInteractive factsFile assignments = do
   if manifestExists
     then do
       manifest <- ensureManifest
-      prevalidateMachineFactInputs factsFile assignments
+      prevalidateExistingMachineFacts manifest factsFile assignments
       state <- prepareMachineState manifest
       _ <- enrollMachineFacts state manifest noInteractive factsFile assignments
       return ExitSuccess
@@ -477,6 +478,25 @@ prevalidateMachineFactInputs requestedFactsFile assignments = do
             then normalized
             else checkout </> normalized
     Nothing -> return ()
+
+
+prevalidateExistingMachineFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest
+  -> Maybe OsPath
+  -> [Text]
+  -> App i ()
+prevalidateExistingMachineFacts manifest requestedFactsFile assignments = do
+  prevalidateMachineFactInputs requestedFactsFile assignments
+  case requestedFactsFile of
+    Just _ -> return ()
+    Nothing -> do
+      state <- readExistingMachineState manifest
+      case state of
+        Just _ -> return ()
+        Nothing -> do
+          checkout <- asks (.sourceDirectory)
+          void $ findDefaultFactsFile checkout
 
 
 prevalidateNewMachineFacts
