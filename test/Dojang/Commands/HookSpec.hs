@@ -143,6 +143,7 @@ spec = sequential $ do
       let inherited =
             [ ("DOJANG_COMMAND_OUTCOME", "success")
             , ("DOJANG_EXIT_CODE", "0")
+            , ("DOJANG_HOSTNAME", "stale.example")
             , (pathVariable, "stale")
             , ("DOJANG_ALLOW_HOOK_RECURSION", "1")
             , ("DOJANG_TEST_PARENT", "inherited")
@@ -150,6 +151,7 @@ spec = sequential $ do
       let merged = mergeHookEnvironment "linux" dojangEnv inherited
       lookup "DOJANG_COMMAND_OUTCOME" merged === Nothing
       lookup "DOJANG_EXIT_CODE" merged === Nothing
+      lookup "DOJANG_HOSTNAME" merged === Nothing
       lookup pathVariable merged === Nothing
       lookup "DOJANG_ALLOW_HOOK_RECURSION" merged === Just "1"
       lookup "DOJANG_TEST_PARENT" merged === Just "inherited"
@@ -159,6 +161,7 @@ spec = sequential $ do
         "mingw32"
         dojangEnv
         [ ("Dojang_Command_Outcome", "success")
+        , ("Dojang_Hostname", "stale.example")
         , ("dojang_path_7", "stale")
         , ("PATH", "C:\\Windows")
         ]
