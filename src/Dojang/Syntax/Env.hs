@@ -53,6 +53,7 @@ import Dojang.Types.Environment
   , FactValue
   , Kernel (..)
   , OperatingSystem
+  , emptyEnvironment
   , environmentFacts
   , factKeyText
   , factValueText
@@ -126,7 +127,7 @@ instance FromValue Environment where
     hostname <- optKey "hostname"
     facts <- fromMaybe Map.empty <$> optKey "facts"
     let facts' = insertHostname hostname facts
-    return $ withFacts facts' $ Environment os' arch' kernel'
+    return $ withFacts facts' $ emptyEnvironment os' arch' kernel'
    where
     insertHostname :: Maybe FactValue -> FactMap -> FactMap
     insertHostname Nothing = id

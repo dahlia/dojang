@@ -103,6 +103,7 @@ import Dojang.Types.Environment
   , FactMap
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
   , factKeyText
   , isBuiltInFact
   , parseFactKey
@@ -157,14 +158,14 @@ initPresetName = \case
 
 toEnvironment :: InitPreset -> Environment
 toEnvironment = \case
-  Amd64Linux -> Environment Linux X86_64 (Kernel "Linux" "0.0.0.0")
-  Arm64Linux -> Environment Linux AArch64 (Kernel "Linux" "0.0.0.0")
-  AppleSiliconMac -> Environment MacOS AArch64 (Kernel "Darwin" "0.0.0")
-  IntelMac -> Environment MacOS X86_64 (Kernel "Darwin" "0.0.0")
-  Win64 -> Environment Windows X86_64 (Kernel "Windows" "0.0.0.0")
-  WinArm64 -> Environment Windows AArch64 (Kernel "Windows" "0.0.0.0")
+  Amd64Linux -> emptyEnvironment Linux X86_64 (Kernel "Linux" "0.0.0.0")
+  Arm64Linux -> emptyEnvironment Linux AArch64 (Kernel "Linux" "0.0.0.0")
+  AppleSiliconMac -> emptyEnvironment MacOS AArch64 (Kernel "Darwin" "0.0.0")
+  IntelMac -> emptyEnvironment MacOS X86_64 (Kernel "Darwin" "0.0.0")
+  Win64 -> emptyEnvironment Windows X86_64 (Kernel "Windows" "0.0.0.0")
+  WinArm64 -> emptyEnvironment Windows AArch64 (Kernel "Windows" "0.0.0.0")
   Wsl2 ->
-    Environment
+    emptyEnvironment
       Linux
       X86_64
       (Kernel "Linux" "0.0.0.0-microsoft-standard-WSL2")

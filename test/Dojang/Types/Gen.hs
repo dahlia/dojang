@@ -56,11 +56,12 @@ import Data.Map.Strict qualified as Map
 import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (Environment)
+  , Environment
   , FactKey
   , FactValue
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
   , parseFactKey
   )
 import Dojang.Types.EnvironmentPredicate
@@ -190,7 +191,7 @@ kernel = Kernel <$> kernelName <*> kernelRelease
 
 
 environment :: (MonadGen m) => m Environment
-environment = Environment <$> operatingSystem <*> architecture <*> kernel
+environment = emptyEnvironment <$> operatingSystem <*> architecture <*> kernel
 
 
 factKey :: (MonadGen m) => m FactKey

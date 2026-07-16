@@ -29,6 +29,7 @@ import Dojang.Types.Environment
   , Environment (..)
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
   , withFacts
   )
 
@@ -127,4 +128,4 @@ instance
     return
       $ withFacts
         (Map.singleton (fromString "hostname") $ fromString $ unpack hostname)
-      $ Environment os' arch' kernel'
+      $ emptyEnvironment os' arch' kernel'

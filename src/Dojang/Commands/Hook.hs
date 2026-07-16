@@ -88,7 +88,6 @@ import Dojang.Types.Environment
   ( Environment (..)
   , FactMap
   , Kernel (..)
-  , additionalFacts
   , factKeyText
   , factValueText
   )
@@ -224,7 +223,7 @@ makeHookEnv command paths ctx state = do
       (original environment.architecture.identifier)
       (original environment.kernel.name)
       (original environment.kernel.release)
-      (additionalFacts environment)
+      environment.additionalFacts
       command
       (sort $ nub normalizedPaths)
       state

@@ -80,7 +80,10 @@ import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Context (Context (..))
-import Dojang.Types.Environment (Environment (..), Kernel (..))
+import Dojang.Types.Environment
+  ( Kernel (..)
+  , emptyEnvironment
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.Hook
   ( Hook (..)
@@ -290,7 +293,7 @@ spec = sequential $ do
         === False
 
   describe "shouldRunHook" $ do
-    let env = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+    let env = emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
 
     it "returns True for Always condition" $ do
       let hook =
@@ -566,7 +569,8 @@ spec = sequential $ do
               Manifest (Just repositoryId) empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
-        let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+        let environment =
+              emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
         let context = Context repository environment (const $ pure Nothing)
         let appEnv =
               AppEnv
@@ -661,7 +665,8 @@ spec = sequential $ do
               Manifest (Just repositoryId) empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
-        let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+        let environment =
+              emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
         let context = Context repository environment (const $ pure Nothing)
         let stateRootPath = tmpDir </> stateDir
         let createdTime = read "2026-07-15 00:00:00 UTC"
@@ -823,7 +828,8 @@ posixNonUtf8HookScopeSpec =
             Manifest (Just repositoryId) empty Map.empty Map.empty $
               Map.singleton PreApply [hook]
       let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
-      let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+      let environment =
+            emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
       let context = Context repository environment (const $ pure Nothing)
       let stateRootPath = tmpDir </> stateDir
       let timestamp = read "2026-07-15 00:00:00 UTC"

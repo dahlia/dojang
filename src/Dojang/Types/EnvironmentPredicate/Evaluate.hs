@@ -45,7 +45,7 @@ data EvaluationWarning
 
 -- | Evaluates the given predicate against the given environment.
 --
--- >>> import Dojang.Types.Environment (Environment (..))
+-- >>> import Dojang.Types.Environment (Kernel (..), emptyEnvironment)
 -- >>> import Dojang.Types.MonikerMap (MonikerMap)
 -- >>> import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 -- >>> let (Right linuxAmd64) = parseMonikerName "linux-amd64"
@@ -55,7 +55,7 @@ data EvaluationWarning
 --       ] :: MonikerMap
 -- :}
 --
--- >>> let environment = Environment "linux" "x86_64"
+-- >>> let environment = emptyEnvironment "linux" "x86_64" (Kernel "Linux" "6.0")
 -- >>> evaluate environment monikerMap (OperatingSystem "linux")
 -- (True,[])
 -- >>> evaluate environment monikerMap (Architecture "aarch64")

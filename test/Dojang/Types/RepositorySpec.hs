@@ -21,7 +21,10 @@ import Test.Hspec.Expectations.Pretty
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (..))
-import Dojang.Types.Environment (Environment (..), Kernel (..))
+import Dojang.Types.Environment
+  ( Kernel (..)
+  , emptyEnvironment
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
 import Dojang.Types.FileRoute (fileRoute)
@@ -92,7 +95,8 @@ spec = do
             , intermediatePath = root </> src </> inter
             , manifest = manifest
             }
-    let env = Environment "linux" "x86_64" $ Kernel "Linux" "4.19.0-16-amd64"
+    let env =
+          emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "4.19.0-16-amd64"
     let provenance =
           [ ("operating-system", "linux")
           , ("architecture", "x86_64")
@@ -169,7 +173,7 @@ spec = do
                 }
         let repo = Repository (root </> src) (root </> inter) manifest
         let env =
-              Environment "linux" "x86_64" $ Kernel "Linux" "6.1.0"
+              emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.1.0"
         (firstRoutes, _) <-
           liftIO $ routePaths repo env (const $ return $ Just firstValue)
         (secondRoutes, _) <-

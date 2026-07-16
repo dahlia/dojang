@@ -10,8 +10,8 @@ import Test.Hspec.Hedgehog (annotateShow, forAll, hedgehog, (===))
 
 import Dojang.Syntax.Env (readEnvironment, readFacts, writeEnvironment)
 import Dojang.Types.Environment
-  ( Environment (Environment)
-  , Kernel (Kernel)
+  ( Kernel (Kernel)
+  , emptyEnvironment
   , lookupFact
   , withFacts
   )
@@ -37,7 +37,7 @@ spec = do
                 , ("org.team", "platform")
                 ]
             )
-            (Environment "linux" "x86_64" $ Kernel "Linux" "6.0")
+            (emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0")
     let toml = writeEnvironment env
     unpack toml `shouldContain` "hostname = \"atlas\""
     unpack toml `shouldContain` "[facts]"

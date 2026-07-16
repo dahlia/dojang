@@ -54,7 +54,6 @@ import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
 import Dojang.Types.Environment
   ( Environment (..)
   , Kernel (..)
-  , additionalFacts
   , factKeyText
   , factValueText
   )
@@ -189,7 +188,7 @@ routePaths repo env lookupEnvVar = do
         ]
           ++ inputs
           ++ [ ("fact." <> factKeyText key, factValueText value)
-             | (key, value) <- Map.toAscList $ additionalFacts env
+             | (key, value) <- Map.toAscList env.additionalFacts
              ]
   filterIgnoredPathsFromOverlaps
     :: OsPath

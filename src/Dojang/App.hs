@@ -108,7 +108,6 @@ import Dojang.Types.Context (Context (..))
 import Dojang.Types.Environment
   ( Environment (..)
   , FactMap
-  , additionalFacts
   , withFacts
   )
 import Dojang.Types.Environment.Current
@@ -221,7 +220,7 @@ currentEnvironment' = do
   persistedFacts <- currentRepositoryFacts
   let persisted =
         withFacts
-          (Map.union persistedFacts $ additionalFacts detected)
+          (Map.union persistedFacts detected.additionalFacts)
           detected
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
@@ -245,7 +244,7 @@ currentEnvironment' = do
     Right (env, warnings) -> do
       let merged =
             withFacts
-              (Map.union (additionalFacts env) $ additionalFacts persisted)
+              (Map.union env.additionalFacts persisted.additionalFacts)
               env
       $(logDebugSH) env
       forM_ warnings $ \w -> $(logWarn) $ fromString w

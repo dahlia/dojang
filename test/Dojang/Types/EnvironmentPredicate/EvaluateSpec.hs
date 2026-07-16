@@ -12,9 +12,9 @@ import Test.Hspec.Hedgehog (forAll, hedgehog, (/==), (===))
 import Dojang.Gen qualified as Gen
 import Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (Environment)
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
   , withFacts
   )
 import Dojang.Types.EnvironmentPredicate
@@ -57,7 +57,8 @@ spec = do
             :: HashMap MonikerName EnvironmentPredicate
     let kernel = Kernel "Linux" "5.10.0-8"
     let environment =
-          withFacts [("class", "work")] $ Environment Linux X86_64 kernel
+          withFacts [("class", "work")] $
+            emptyEnvironment Linux X86_64 kernel
     let eval = evaluate environment monikerMap
 
     specify "Always" $

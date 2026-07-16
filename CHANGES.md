@@ -30,6 +30,13 @@ To be released.
     Facts are configuration and may appear in diagnostics, state, or
     fingerprints, so they must not contain credentials.  [[#33], [#41], [#67]]
 
+    The pre-1.0 Haskell API now represents additional facts directly in the
+    `Environment` record.  Code that previously used the three-argument
+    `Environment` constructor should call `emptyEnvironment`, or construct the
+    four-field record with `additionalFacts`.  Record updates preserve that
+    field.  This source-incompatible API change does not alter the CLI,
+    manifest, environment-file, or machine-state formats.
+
  -  Extended hooks across the `apply`, `reflect`, `diff`, `status`, `edit`, and
     `unmanage` command lifecycles.  Post-hooks run only after successful
     commands.  Hooks can now use stable IDs with `once` and explicitly keyed

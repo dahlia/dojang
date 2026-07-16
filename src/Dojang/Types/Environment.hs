@@ -2,19 +2,18 @@
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (Environment, architecture, kernel, operatingSystem)
+  , Environment (..)
   , FactKey
   , FactMap
   , FactValue
   , Kernel (..)
   , OperatingSystem (..)
   , environmentFacts
-  , additionalFacts
+  , emptyEnvironment
   , factKeyText
   , factValueText
   , isBuiltInFact
@@ -188,34 +187,24 @@ instance Hashable Kernel where
     salt `hashWithSalt` name' `hashWithSalt` release'
 
 
--- | An environment.
-data Environment = Environment'
+-- | An environment and its additional named machine facts.
+data Environment = Environment
   { operatingSystem :: OperatingSystem
   -- ^ The operating system (e.g. 'Linux', 'MacOS').
   , architecture :: Architecture
   -- ^ The architecture (e.g. 'X86_64', 'AArch64').
   , kernel :: Kernel
   -- ^ The kernel information.  Equivalent to @uname -sr@.
-  , facts' :: FactMap
+  , additionalFacts :: FactMap
   -- ^ Additional named facts about the machine.
   }
   deriving (Eq, Ord, Read, Show)
 
 
--- | Builds an environment without any additional named facts.
---
--- This pattern keeps the original three-argument positional constructor and
--- pattern matching source-compatible.  The public fields belong to the
--- underlying record so record updates preserve additional facts.
-pattern Environment :: OperatingSystem -> Architecture -> Kernel -> Environment
-pattern Environment operatingSystem architecture kernel <-
-  Environment' operatingSystem architecture kernel _
- where
-  Environment operatingSystem architecture kernel =
-    Environment' operatingSystem architecture kernel Map.empty
-
-
-{-# COMPLETE Environment #-}
+-- | Builds an environment without any additional named machine facts.
+emptyEnvironment
+  :: OperatingSystem -> Architecture -> Kernel -> Environment
+emptyEnvironment os' arch' kernel' = Environment os' arch' kernel' Map.empty
 
 
 -- | A case-insensitive machine fact key.
@@ -298,27 +287,22 @@ builtInFactKeys = ["os", "arch", "kernel", "kernel-release", "hostname"]
 -- Typed built-in keys in the supplied map are ignored.  The hostname remains
 -- replaceable so an environment file can simulate another machine.
 withFacts :: FactMap -> Environment -> Environment
-withFacts facts' (Environment' os' arch' kernel' _) =
-  Environment' os' arch' kernel' $ Map.filterWithKey keep facts'
+withFacts facts' env =
+  env{additionalFacts = Map.filterWithKey keep facts'}
  where
   keep key _ = not $ isBuiltInFact key && key /= "hostname"
 
 
 -- | Gets all built-in and additional facts in an environment.
 environmentFacts :: Environment -> FactMap
-environmentFacts (Environment' os' arch' kernel' facts') =
+environmentFacts env =
   Map.fromList
-    [ ("os", FactValue os'.identifier)
-    , ("arch", FactValue arch'.identifier)
-    , ("kernel", FactValue kernel'.name)
-    , ("kernel-release", FactValue kernel'.release)
+    [ ("os", FactValue env.operatingSystem.identifier)
+    , ("arch", FactValue env.architecture.identifier)
+    , ("kernel", FactValue env.kernel.name)
+    , ("kernel-release", FactValue env.kernel.release)
     ]
-    <> facts'
-
-
--- | Gets hostname and user-defined facts without the typed built-ins.
-additionalFacts :: Environment -> FactMap
-additionalFacts (Environment' _ _ _ facts') = facts'
+    <> env.additionalFacts
 
 
 -- | Looks up a named machine fact.
@@ -327,10 +311,14 @@ lookupFact key = Map.lookup key . environmentFacts
 
 
 instance Hashable Environment where
-  hashWithSalt salt (Environment' os' arch' kernel' facts') =
+  hashWithSalt salt env =
     foldl
       hashFact
-      (salt `hashWithSalt` os' `hashWithSalt` arch' `hashWithSalt` kernel')
-      (sortOn fst $ Map.toList facts')
+      ( salt
+          `hashWithSalt` env.operatingSystem
+          `hashWithSalt` env.architecture
+          `hashWithSalt` env.kernel
+      )
+      (sortOn fst $ Map.toList env.additionalFacts)
    where
     hashFact hash' (key, value) = hash' `hashWithSalt` key `hashWithSalt` value

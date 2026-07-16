@@ -10,9 +10,10 @@ module Dojang.Types.EnvironmentSpec (spec) where
 
 import Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (Environment, architecture, kernel, operatingSystem)
+  , Environment (..)
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
   , factKeyText
   , lookupFact
   , parseFactKey
@@ -147,13 +148,32 @@ spec = do
       (hashWithSalt 0 kernel == hashWithSalt 0 kernel') === (kernel == kernel')
 
   describe "Environment" $ do
+    specify "constructs and matches every fact as a record field" $ do
+      let facts' = Map.fromList [("class", "work"), ("hostname", "atlas")]
+      let env =
+            Environment
+              { operatingSystem = Linux
+              , architecture = X86_64
+              , kernel = Kernel "Linux" "6.0"
+              , additionalFacts = facts'
+              }
+      case env of
+        Environment
+          { operatingSystem = os'
+          , architecture = arch'
+          , kernel = kernel'
+          , additionalFacts = additionalFacts'
+          } ->
+            (os', arch', kernel', additionalFacts')
+              `shouldBe` (Linux, X86_64, Kernel "Linux" "6.0", facts')
+
     specify "open facts" $ do
       let env =
             withFacts
               ( Map.fromList
                   [("class", "work"), ("hostname", "atlas"), ("os", "windows")]
               )
-              $ Environment Linux X86_64 (Kernel "Linux" "6.0")
+              $ emptyEnvironment Linux X86_64 (Kernel "Linux" "6.0")
       lookupFact "class" env `shouldBe` Just "work"
       lookupFact "hostname" env `shouldBe` Just "atlas"
       lookupFact "os" env `shouldBe` Just "linux"
@@ -166,7 +186,7 @@ spec = do
       let env =
             withFacts
               (Map.fromList [("class", "work"), ("hostname", "atlas")])
-              $ Environment Linux X86_64 (Kernel "Linux" "6.0")
+              $ emptyEnvironment Linux X86_64 (Kernel "Linux" "6.0")
       let updated =
             env
               { operatingSystem = Windows

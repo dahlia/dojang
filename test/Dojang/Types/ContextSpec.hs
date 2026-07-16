@@ -60,6 +60,7 @@ import Dojang.Types.Environment
   , Environment (..)
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
@@ -283,7 +284,7 @@ spec = do
         repo <- repositoryFixture $ tmpDir </> src
         let ctx = Context
               repo
-              (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
               $ \e ->
                 return $ case e of
                   "FOO" -> Just $ tmpDir </> foo
@@ -1190,7 +1191,7 @@ spec = do
       let ctx =
             Context
               repo
-              (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
               $ \e -> return $ case e of
                 "DST" -> Just $ tmpDir </> dst
                 "DST_FOO" -> Just $ tmpDir </> dst </> foo
@@ -1229,7 +1230,7 @@ spec = do
       let ctx =
             Context
               repo
-              (Environment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
               $ \e -> return $ case e of
                 "DST" -> Just $ tmpDir </> dst
                 _ -> Nothing
