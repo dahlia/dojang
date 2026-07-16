@@ -15,6 +15,7 @@ import Control.Exception (bracket_)
 #endif
 
 import System.Directory.OsPath qualified
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Info (os)
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, it, runIO, sequential, xit)
@@ -69,8 +70,39 @@ spec = sequential $ do
       )
       `catchIO` const (return False)
   let redirectedHomeIt = if os == "mingw32" then xit else it
+  let posixIt = if os == "mingw32" then xit else it
   let redirectedHomeSymlinkIt =
         if symlinkAvailable then redirectedHomeIt else xit
+
+  posixIt "reads a complete environment file without detecting the host" $
+    withTempDir $ \tmp tmpPath -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      createDirectories checkout
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              (tmp </> stateName)
+              manifestName
+              envName
+              False
+              False
+      environment <-
+        withPath tmpPath $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "os" environment `shouldBe` Just "linux"
 
   it "inspects a repository environment without creating machine state" $
     withTempDir $ \tmp _ -> do
@@ -800,3 +832,13 @@ posixUnreadableRegistrySpec =
 
 catchIO :: IO a -> (IOError -> IO a) -> IO a
 catchIO = Control.Exception.catch
+
+
+withPath :: String -> IO a -> IO a
+withPath path action =
+  Control.Exception.bracket (lookupEnv "PATH") restore $ \_ -> do
+    setEnv "PATH" path
+    action
+ where
+  restore Nothing = unsetEnv "PATH"
+  restore (Just previous) = setEnv "PATH" previous

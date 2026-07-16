@@ -216,12 +216,6 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
 currentEnvironment' = do
-  detected <- liftIO currentEnvironment
-  persistedFacts <- currentRepositoryFacts
-  let persisted =
-        withFacts
-          (Map.union persistedFacts detected.additionalFacts)
-          detected
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
   let filePath = sourceDir </> envFile'
@@ -233,7 +227,15 @@ currentEnvironment' = do
           $(logWarn) $
             "Environment file not found: "
               <> showt (FromStringShow e)
-          return $ Right (persisted, [])
+          detected <- liftIO currentEnvironment
+          persistedFacts <- currentRepositoryFacts
+          return $
+            Right
+              ( withFacts
+                  (Map.union persistedFacts detected.additionalFacts)
+                  detected
+              , []
+              )
         else die' noEnvFile $ showt e
   case result of
     Left errors -> do
@@ -242,9 +244,10 @@ currentEnvironment' = do
               ["\n  " <> pack e | e <- toList errors]
       die' envFileReadError $ "Syntax errors in environment file:" <> formattedErrors
     Right (env, warnings) -> do
+      persistedFacts <- currentRepositoryFacts
       let merged =
             withFacts
-              (Map.union env.additionalFacts persisted.additionalFacts)
+              (Map.union env.additionalFacts persistedFacts)
               env
       $(logDebugSH) env
       forM_ warnings $ \w -> $(logWarn) $ fromString w
