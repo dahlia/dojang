@@ -227,6 +227,19 @@ spec = do
         (encodeMachineState populated)
         `shouldBe` Right populated
 
+    it "rejects case-insensitive duplicate machine facts" $ do
+      state <- fixtureState
+      let populated = state{declaredFacts = Map.singleton "class" "work"}
+      let document = encodeMachineState populated
+      Text.isInfixOf "class = \"work\"" document `shouldBe` True
+      let duplicated =
+            Text.replace
+              "class = \"work\""
+              "class = \"work\"\nCLASS = \"personal\""
+              document
+      decodeMachineState state.repositoryId state.machineId duplicated
+        `shouldSatisfy` isMalformed
+
     it "upgrades the schema-v1 state written before target tracking" $
       withTempDir $ \root _ -> do
         initial <- fixtureState

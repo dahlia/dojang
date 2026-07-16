@@ -64,7 +64,7 @@ module Dojang.Types.MachineState
   , withStateFileLock
   ) where
 
-import Control.Monad (filterM, forM, unless, when)
+import Control.Monad (filterM, foldM, forM, unless, when)
 import Control.Monad.Except
   ( MonadError (catchError, throwError)
   , tryError
@@ -1131,11 +1131,16 @@ decodeCurrentDocument source = case decode $ Text.unpack source of
 
 
 factsFromDocument :: Map Text Text -> Either StateError FactMap
-factsFromDocument = fmap Map.fromList . traverse parseFact . Map.toList
+factsFromDocument = foldM insertFact Map.empty . Map.toList
  where
-  parseFact (keyText, value) = do
+  insertFact facts (keyText, value) = do
     key <- mapLeft MalformedState $ parseFactKey keyText
-    return (key, fromString $ Text.unpack value)
+    whenEither (Map.member key facts) $
+      MalformedState $
+        "The facts table contains a duplicate case-insensitive key: "
+          <> keyText
+          <> "."
+    return $ Map.insert key (fromString $ Text.unpack value) facts
 
 
 validateMachineFacts :: Maybe OsPath -> FactMap -> Either StateError ()
