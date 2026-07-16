@@ -378,6 +378,7 @@ initWithFacts presets noInteractive factsFile assignments = do
   if manifestExists
     then do
       manifest <- ensureManifest
+      prevalidateMachineFactInputs factsFile assignments
       state <- prepareMachineState manifest
       _ <- enrollMachineFacts state manifest noInteractive factsFile assignments
       return ExitSuccess
@@ -459,12 +460,12 @@ initializeNew presets noInteractive factsFile assignments = do
     Right exitCode -> return exitCode
 
 
-prevalidateNewMachineFacts
+prevalidateMachineFactInputs
   :: (MonadFileSystem i, MonadIO i)
   => Maybe OsPath
   -> [Text]
   -> App i ()
-prevalidateNewMachineFacts requestedFactsFile assignments = do
+prevalidateMachineFactInputs requestedFactsFile assignments = do
   void $ parseFactAssignments assignments
   checkout <- asks (.sourceDirectory)
   case requestedFactsFile of
@@ -475,7 +476,21 @@ prevalidateNewMachineFacts requestedFactsFile assignments = do
           if isAbsolute normalized
             then normalized
             else checkout </> normalized
-    Nothing -> void $ findDefaultFactsFile checkout
+    Nothing -> return ()
+
+
+prevalidateNewMachineFacts
+  :: (MonadFileSystem i, MonadIO i)
+  => Maybe OsPath
+  -> [Text]
+  -> App i ()
+prevalidateNewMachineFacts requestedFactsFile assignments = do
+  prevalidateMachineFactInputs requestedFactsFile assignments
+  case requestedFactsFile of
+    Just _ -> return ()
+    Nothing -> do
+      checkout <- asks (.sourceDirectory)
+      void $ findDefaultFactsFile checkout
 
 
 enrollMachineFacts

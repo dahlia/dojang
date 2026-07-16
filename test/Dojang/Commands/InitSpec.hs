@@ -183,6 +183,47 @@ spec = sequential $ do
       exists (checkout </> manifestName) >>= (`shouldBe` False)
       exists stateRoot >>= (`shouldBe` False)
 
+  it "validates fact options before preparing existing repository state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["invalid"]
+        )
+        `shouldThrow` (== cliError)
+      exists stateRoot >>= (`shouldBe` False)
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True (Just factsName) []
+        )
+        `shouldThrow` (== envFileReadError)
+      exists stateRoot >>= (`shouldBe` False)
+
   it "requires and enrolls facts in an existing repository" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"
