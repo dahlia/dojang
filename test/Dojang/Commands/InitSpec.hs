@@ -20,9 +20,17 @@ import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
 import Control.Monad.Reader (MonadReader (ask), ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.ByteString.Char8 qualified as ByteString
+import Data.IORef
+  ( IORef
+  , atomicModifyIORef'
+  , modifyIORef'
+  , newIORef
+  , readIORef
+  )
 import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
@@ -33,7 +41,7 @@ import Test.Hspec (Spec, it, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
 import Prelude hiding (init, readFile, writeFile)
 
-import Dojang.App (AppEnv (..), runAppWithoutLogging)
+import Dojang.App (AppEnv (..), runAppWithLogging, runAppWithoutLogging)
 import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
   ( cliError
@@ -229,6 +237,49 @@ spec = sequential $ do
         (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
         `shouldThrow` (== envFileReadError)
       exists stateRoot >>= (`shouldBe` False)
+
+  it "reports parser warnings from a facts file" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile (checkout </> factsName) "[fact]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      warnings <- newIORef []
+      result <-
+        withHome home $
+          runAppWithLogging
+            appEnv
+            ( Init.initWithFacts
+                [Init.Amd64Linux]
+                True
+                (Just factsName)
+                []
+            )
+            ( \_ _ level message ->
+                when (level == LevelWarn) $
+                  modifyIORef' warnings (fromLogStr message :)
+            )
+      result `shouldBe` ExitSuccess
+      messages <- readIORef warnings
+      any (ByteString.isInfixOf "unexpected key") messages `shouldBe` True
 
   it "requires and enrolls facts in an existing repository" $
     withTempDir $ \tmp _ -> do

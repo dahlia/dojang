@@ -28,7 +28,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Info qualified (os)
 import Prelude hiding (init)
 
-import Control.Monad.Logger (logDebugSH, logInfo)
+import Control.Monad.Logger (logDebugSH, logInfo, logWarn)
 import Control.Monad.Reader (asks)
 import Data.HashMap.Strict qualified as HashMap
   ( filterWithKey
@@ -660,7 +660,7 @@ readFactsSource factsPath = do
         "Syntax errors in the machine-facts file:"
           <> Text.concat ["\n  " <> Text.pack error' | error' <- NonEmpty.toList errors]
     Right (facts, warnings) -> do
-      $(logDebugSH) warnings
+      forM_ warnings $ \warning -> $(logWarn) $ fromString warning
       return facts
 
 
