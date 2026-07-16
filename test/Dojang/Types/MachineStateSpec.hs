@@ -2711,8 +2711,10 @@ spec = do
           putMVar forgetCompletion result
         timeout 100000 (takeMVar forgetCompletion) `shouldReturn` Nothing
         putMVar allowEffect ()
-        takeMVar effectCompletion `shouldReturn` Right ()
-        takeMVar forgetCompletion `shouldReturn` Right (Just ())
+        timeout 5000000 (takeMVar effectCompletion)
+          `shouldReturn` Just (Right ())
+        timeout 5000000 (takeMVar forgetCompletion)
+          `shouldReturn` Just (Right (Just ()))
 
     it "allocates a unique temporary path for every simultaneous writer" $
       withTempDir $ \tmp _ -> do
