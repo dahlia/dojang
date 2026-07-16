@@ -108,6 +108,30 @@ spec = sequential $ do
         withPath tmpPath $ runAppWithoutLogging appEnv currentEnvironment'
       lookupFact "os" environment `shouldBe` Just "linux"
 
+  it "combines a facts-only environment file with the detected host" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      createDirectories checkout
+      writeFile
+        (checkout </> envName)
+        "[facts]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              (tmp </> stateName)
+              manifestName
+              envName
+              False
+              False
+      environment <- runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+
   it "inspects a repository environment without creating machine state" $
     withTempDir $ \tmp _ -> do
       checkoutName <- encodeFS "checkout"

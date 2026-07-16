@@ -8,7 +8,12 @@ import Test.Hspec (Spec, expectationFailure, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldContain)
 import Test.Hspec.Hedgehog (annotateShow, forAll, hedgehog, (===))
 
-import Dojang.Syntax.Env (readEnvironment, readFacts, writeEnvironment)
+import Dojang.Syntax.Env
+  ( readEnvironment
+  , readFacts
+  , readFactsOnly
+  , writeEnvironment
+  )
 import Dojang.Types.Environment
   ( Kernel (Kernel)
   , emptyEnvironment
@@ -56,5 +61,12 @@ spec = do
 
   specify "reserved facts cannot be persisted" $
     case readFacts "[facts]\nos = \"windows\"\n" of
+      Left _ -> return ()
+      Right result -> expectationFailure $ "Unexpected facts: " <> show result
+
+  specify "facts-only documents exclude environment fields" $ do
+    readFactsOnly "[facts]\nclass = \"work\"\n"
+      `shouldBe` Right (Map.singleton "class" "work", [])
+    case readFactsOnly "os = \"linux\"\n[facts]\nclass = \"work\"\n" of
       Left _ -> return ()
       Right result -> expectationFailure $ "Unexpected facts: " <> show result

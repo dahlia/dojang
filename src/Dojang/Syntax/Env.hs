@@ -10,12 +10,14 @@ module Dojang.Syntax.Env
   , readEnvironment
   , readFacts
   , readFactsFile
+  , readFactsOnly
+  , readFactsOnlyFile
   , writeEnvFile
   , writeEnvironment
   ) where
 
 import Data.List.NonEmpty (NonEmpty ((:|)))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.String (IsString (fromString))
 import Prelude hiding (readFile, writeFile)
 
@@ -157,7 +159,7 @@ instance ToTable Environment where
         environmentFacts env
 
 
-newtype FactsDocument = FactsDocument FactMap
+data FactsDocument = FactsDocument Bool FactMap
 
 
 instance FromValue FactsDocument where
@@ -177,7 +179,10 @@ instance FromValue FactsDocument where
       -> Maybe FactValue
       -> Maybe FactMap
       -> FactsDocument
-    makeFactsDocument _ _ _ _ = FactsDocument . fromMaybe Map.empty
+    makeFactsDocument os arch kernel hostname facts =
+      FactsDocument
+        (isJust os || isJust arch || isJust kernel || isJust hostname)
+        (fromMaybe Map.empty facts)
 
 
 -- | An error made during parsing.
@@ -204,23 +209,51 @@ readEnvironment toml = case decode $ unpack toml of
 readFacts
   :: Text
   -> Either (NonEmpty TomlError) (FactMap, [TomlWarning])
-readFacts toml = case decode $ unpack toml of
-  Success warnings (FactsDocument facts) ->
-    case filter isBuiltInFact $ Map.keys facts of
-      [] -> Right (facts, warnings)
-      key : keys ->
-        Left $
-          ( "The facts table must not override built-in machine fact: "
-              ++ unpack (factKeyText key)
-              ++ "."
-          )
-            :| [ "The facts table must not override built-in machine fact: "
-                   ++ unpack (factKeyText reserved)
-                   ++ "."
-               | reserved <- keys
-               ]
+readFacts toml = do
+  (FactsDocument _ facts, warnings) <- decodeFactsDocument toml
+  validateFacts facts warnings
+
+
+-- | Decodes a non-empty @[facts]@ document that contains no built-in
+-- environment fields.
+readFactsOnly
+  :: Text
+  -> Either (NonEmpty TomlError) (FactMap, [TomlWarning])
+readFactsOnly toml = do
+  (FactsDocument hasEnvironmentFields facts, warnings) <-
+    decodeFactsDocument toml
+  if hasEnvironmentFields || Map.null facts
+    then Left $ "expected only a non-empty [facts] table" :| []
+    else validateFacts facts warnings
+
+
+decodeFactsDocument
+  :: Text
+  -> Either (NonEmpty TomlError) (FactsDocument, [TomlWarning])
+decodeFactsDocument toml = case decode $ unpack toml of
+  Success warnings document -> Right (document, warnings)
   Failure (e : es) -> Left $ e :| es
   Failure [] -> Left $ "unknown error" :| []
+
+
+validateFacts
+  :: FactMap
+  -> [TomlWarning]
+  -> Either (NonEmpty TomlError) (FactMap, [TomlWarning])
+validateFacts facts warnings =
+  case filter isBuiltInFact $ Map.keys facts of
+    [] -> Right (facts, warnings)
+    key : keys ->
+      Left $
+        ( "The facts table must not override built-in machine fact: "
+            ++ unpack (factKeyText key)
+            ++ "."
+        )
+          :| [ "The facts table must not override built-in machine fact: "
+                 ++ unpack (factKeyText reserved)
+                 ++ "."
+             | reserved <- keys
+             ]
 
 
 -- | Reads a TOML-encoded 'Environment' from the given file path.  It assumes
@@ -247,6 +280,19 @@ readFactsFile filePath = do
   content <- readFile filePath
   let decoded = decodeUtf8Lenient content
   return $ readFacts $ force decoded
+
+
+-- | Reads a non-empty facts-only environment file.  Environment fields such
+-- as @os@, @arch@, @kernel@, and @hostname@ make the document invalid for this
+-- parser.  Throws an 'IOError' if the file cannot be read.
+readFactsOnlyFile
+  :: (MonadFileSystem m)
+  => OsPath
+  -> m (Either (NonEmpty TomlError) (FactMap, [TomlWarning]))
+readFactsOnlyFile filePath = do
+  content <- readFile filePath
+  let decoded = decodeUtf8Lenient content
+  return $ readFactsOnly $ force decoded
 
 
 -- | Encodes an 'Environment' into a TOML document.

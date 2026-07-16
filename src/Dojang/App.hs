@@ -101,7 +101,7 @@ import Dojang.ExitCodes
   , noEnvFile
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
-import Dojang.Syntax.Env (readEnvFile, readFactsFile)
+import Dojang.Syntax.Env (readEnvFile, readFactsFile, readFactsOnlyFile)
 import Dojang.Syntax.Manifest.Parser (Error, formatErrors, readManifestFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.Types.Context (Context (..))
@@ -230,21 +230,30 @@ currentEnvironment' = do
           detected <- liftIO currentEnvironment
           return $ Right (detected, [])
         else die' noEnvFile $ showt e
-  case result of
+  (env, warnings) <- case result of
     Left errors -> do
-      let formattedErrors =
-            Data.Text.concat
-              ["\n  " <> pack e | e <- toList errors]
-      die' envFileReadError $ "Syntax errors in environment file:" <> formattedErrors
-    Right (env, warnings) -> do
-      persistedFacts <- currentRepositoryFacts
-      let merged =
-            withFacts
-              (Map.union env.additionalFacts persistedFacts)
-              env
-      $(logDebugSH) env
-      forM_ warnings $ \w -> $(logWarn) $ fromString w
-      return merged
+      factsOnly <-
+        readFactsOnlyFile filePath `catchError` \e ->
+          die' noEnvFile $ showt e
+      case factsOnly of
+        Right (facts, factsWarnings) -> do
+          detected <- liftIO currentEnvironment
+          return (withFacts facts detected, factsWarnings)
+        Left _ -> do
+          let formattedErrors =
+                Data.Text.concat
+                  ["\n  " <> pack e | e <- toList errors]
+          die' envFileReadError $
+            "Syntax errors in environment file:" <> formattedErrors
+    Right value -> return value
+  persistedFacts <- currentRepositoryFacts
+  let merged =
+        withFacts
+          (Map.union env.additionalFacts persistedFacts)
+          env
+  $(logDebugSH) env
+  forM_ warnings $ \w -> $(logWarn) $ fromString w
+  return merged
 
 
 currentRepositoryFacts :: (MonadFileSystem i, MonadIO i) => App i FactMap
