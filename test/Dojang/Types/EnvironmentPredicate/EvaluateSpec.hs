@@ -100,6 +100,14 @@ spec = do
         `shouldBe` ( False
                    , [UndefinedFact "missing", UndefinedFact "missing"]
                    )
+      eval
+        ( normalizePredicate $
+            Not $
+              And [Fact "missing" "value", Not $ Fact "missing" "value"]
+        )
+        `shouldBe` ( False
+                   , [UndefinedFact "missing", UndefinedFact "missing"]
+                   )
 
     specify "Moniker" $ do
       eval (Moniker linuxAmd64) `shouldBe` (True, [])

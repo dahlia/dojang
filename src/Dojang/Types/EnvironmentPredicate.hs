@@ -175,7 +175,9 @@ normalizePredicate' (And ps) =
     then Not Always
     else
       let filtered = filter (/= Always) ps'
-      in if (`any` filtered) $ \case Not p' -> p' `elem` filtered; _ -> False
+      in if (`any` filtered) $ \case
+           Not p' -> p' `elem` filtered && not (mayBeUndefined p')
+           _ -> False
            then Not Always
            else
              let reduced =

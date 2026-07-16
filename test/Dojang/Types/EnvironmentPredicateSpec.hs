@@ -111,6 +111,10 @@ spec = do
 
     it "preserves complements that can depend on defined machine facts" $ do
       normalizePredicate
+        (Not $ And [Fact "class" "work", Not $ Fact "class" "work"])
+        `shouldBe` Not
+          (And [Fact "class" "work", Not $ Fact "class" "work"])
+      normalizePredicate
         (Or [Fact "class" "work", Not $ Fact "class" "work"])
         `shouldBe` Or [Fact "class" "work", Not $ Fact "class" "work"]
       normalizePredicate (Or [Moniker foo, Not $ Moniker foo])
