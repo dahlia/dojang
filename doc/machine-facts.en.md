@@ -121,12 +121,12 @@ Using facts in predicates
 
 The canonical spelling is `fact.` followed by the fact key:
 
-~~~~~ text
+~~~~ text
 fact.class = work
 fact.org.team != personal
 fact.hardware.gpu in (integrated, discrete)
 fact.location not in (home, travel)
-~~~~ text
+~~~~
 
 Generic facts support `=`, `!=`, `in`, and `not in`.  Prefix and suffix
 comparisons remain limited to `kernel-release`.  A predicate that refers to an
@@ -136,4 +136,3 @@ See [environment predicates] for composition with `&&`, `||`, `!`, and
 monikers.
 
 [environment predicates]: environment-predicate.en.md
-~~~~~

@@ -112,12 +112,12 @@ class = "test"
 
 표준 표기는 `fact.` 뒤에 머신 정보 키를 붙이는 방식입니다:
 
-~~~~~ text
+~~~~ text
 fact.class = work
 fact.org.team != personal
 fact.hardware.gpu in (integrated, discrete)
 fact.location not in (home, travel)
-~~~~ text
+~~~~
 
 일반 머신 정보에는 `=`, `!=`, `in`, `not in`을 쓸 수 있습니다.  접두·접미 비교는
 계속 `kernel-release`에만 쓸 수 있습니다.  정의되지 않은 머신 정보를 참조한
@@ -126,4 +126,3 @@ fact.location not in (home, travel)
 `&&`, `||`, `!`, 모니커와 조합하는 방법은 [환경 서술어]를 참고하세요.
 
 [환경 서술어]: environment-predicate.ko.md
-~~~~~
