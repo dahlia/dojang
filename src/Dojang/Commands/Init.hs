@@ -737,13 +737,23 @@ readFactsSource factsPath = do
 
 
 -- | Collects custom machine facts referenced by reachable manifest branches.
-referencedMachineFacts :: Manifest -> Set FactKey
+referencedMachineFacts
+  :: Manifest
+  -- ^ Manifest whose reachable predicates are inspected.
+  -> Set FactKey
+  -- ^ Custom fact keys referenced by reachable branches.
 referencedMachineFacts = machineFactsRequiredBy id
 
 
 -- | Collects custom machine facts still required after specializing a
 -- manifest for the known environment.
-requiredMachineFacts :: Environment -> Manifest -> Set FactKey
+requiredMachineFacts
+  :: Environment
+  -- ^ Known environment used to specialize predicates.
+  -> Manifest
+  -- ^ Manifest whose reachable predicates are inspected.
+  -> Set FactKey
+  -- ^ Custom fact keys whose values are still required.
 requiredMachineFacts environment =
   machineFactsRequiredBy $ specializePredicate environment
 

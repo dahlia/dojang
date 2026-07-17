@@ -204,9 +204,14 @@ routePath route env lookupEnvVar = do
 routePathWithVariables
   :: (MonadFileSystem m)
   => FileRoute
+  -- ^ Route to dispatch and expand.
   -> Environment
+  -- ^ Environment used to select a route branch.
   -> VariableGetter m
+  -- ^ Warning- and provenance-aware variable lookup.
   -> m (Maybe OsPath, [RouteWarning], Map Text Text)
+  -- ^ Routed path, if any, plus evaluation and expansion warnings and the
+  -- provenance of inputs used during expansion.
 routePathWithVariables route env lookupVariable = do
   let (matched, warnings) = dispatch env route
   let predWarnings = map EnvironmentPredicateWarning warnings

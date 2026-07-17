@@ -159,9 +159,13 @@ routePathsWithVariables
   :: forall m
    . (MonadFileSystem m)
   => Repository
+  -- ^ Repository whose file routes are expanded.
   -> Environment
+  -- ^ Environment used to select route branches.
   -> VariableGetter m
+  -- ^ Warning- and provenance-aware variable lookup.
   -> m ([RouteResult], [RouteMapWarning])
+  -- ^ Expanded non-null routes and any routing warnings.
 routePathsWithVariables repo env lookupVariable = do
   paths <- forM fileRoutes $ \(src, route) -> do
     (dstPath, warnings, expansionProvenance) <-

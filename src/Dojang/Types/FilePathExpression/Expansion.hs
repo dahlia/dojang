@@ -58,7 +58,9 @@ type VariableGetter m = EnvironmentVariable -> m VariableLookup
 simpleVariableGetter
   :: (Monad m)
   => (EnvironmentVariable -> m (Maybe OsString))
+  -- ^ Value-only variable lookup to adapt.
   -> VariableGetter m
+  -- ^ Lookup that returns no nested warnings or provenance.
 simpleVariableGetter getter variable = do
   value <- getter variable
   return $ VariableLookup value [] Map.empty

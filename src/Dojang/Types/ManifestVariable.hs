@@ -137,7 +137,13 @@ instance Show ManifestVariable where
 
 
 -- | Creates an unconditional manifest variable.
-manifestVariable :: MonikerMap -> FilePathExpression -> ManifestVariable
+manifestVariable
+  :: MonikerMap
+  -- ^ Monikers available to the variable's condition resolver.
+  -> FilePathExpression
+  -- ^ Unconditional value expression.
+  -> ManifestVariable
+  -- ^ Manifest variable containing one unconditional branch.
 manifestVariable monikers value =
   ManifestVariable (`HashMap.lookup` monikers) $ (Always, value) NonEmpty.:| []
 
@@ -286,14 +292,21 @@ lookupVariable environment variable =
 variableValueGetter
   :: (Monad m)
   => VariableEnvironment m
+  -- ^ Resolved manifest-variable environment.
   -> EnvironmentVariable
+  -- ^ Variable name to look up.
   -> m (Maybe OsString)
+  -- ^ Resolved value, or 'Nothing' when neither layer defines the name.
 variableValueGetter environment variable =
   (.value) <$> lookupVariable environment variable
 
 
 -- | Formats a manifest-variable resolution failure for a CLI diagnostic.
-formatVariableResolutionError :: VariableResolutionError -> Text
+formatVariableResolutionError
+  :: VariableResolutionError
+  -- ^ Resolution failure to describe.
+  -> Text
+  -- ^ Human-readable diagnostic ending with a period.
 formatVariableResolutionError (VariableCycle chain) =
   "Manifest variable cycle: "
     <> Text.intercalate
