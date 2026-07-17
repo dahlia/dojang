@@ -477,7 +477,7 @@ spec = sequential $ do
   describe "executeHooks" $ do
     posixNonUtf8HookScopeSpec
 
-    it "resolves a relative hook working directory from the repository" $
+    it "resolves configured and default hook working directories" $
       withTempDir $ \tmpDir _ -> do
         manifestFilename <- encodeFS "dojang.toml"
         intermediateDir <- encodeFS ".dojang"
@@ -565,6 +565,17 @@ spec = sequential $ do
               hookEnv
               hook
         resolved `shouldBe` normalise (tmpDir </> relativeWorkingDirectory)
+        relativeRepository <- encodeFS "relative-repository"
+        expectedDefault <-
+          normalise
+            <$> (FileSystem.makeAbsolute relativeRepository :: IO OsPath)
+        defaultResolved <-
+          runAppWithoutLogging appEnv $
+            effectiveHookWorkingDirectoryWithVariables
+              (simpleVariableGetter $ const $ pure Nothing)
+              hookEnv{repositoryPath = relativeRepository}
+              hook{workingDirectory = Nothing}
+        defaultResolved `shouldBe` expectedDefault
 
     it "inherits the parent environment and overrides Dojang variables" $
       withTempDir $ \tmpDir _ -> do

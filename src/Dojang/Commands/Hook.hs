@@ -911,19 +911,22 @@ resolveHookWorkingDirectory
   -> Hook
   -> App i (OsPath, [ExpansionWarning], Map.Map Text Text)
 resolveHookWorkingDirectory variableGetter hookEnv hook = do
-  (configured, warnings, provenance) <- case hook.workingDirectory of
-    Nothing -> return (hookEnv.repositoryPath, [], Map.empty)
-    Just expression ->
-      expandFilePathWithVariables
-        expression
-        variableGetter
-        (encodePath . Text.unpack)
-  absolute <-
-    makeAbsolute $
-      if isAbsolute configured
-        then configured
-        else hookEnv.repositoryPath </> configured
-  return (normalise absolute, warnings, provenance)
+  case hook.workingDirectory of
+    Nothing -> do
+      absolute <- makeAbsolute hookEnv.repositoryPath
+      return (normalise absolute, [], Map.empty)
+    Just expression -> do
+      (configured, warnings, provenance) <-
+        expandFilePathWithVariables
+          expression
+          variableGetter
+          (encodePath . Text.unpack)
+      absolute <-
+        makeAbsolute $
+          if isAbsolute configured
+            then configured
+            else hookEnv.repositoryPath </> configured
+      return (normalise absolute, warnings, provenance)
 
 
 printExpansionWarning
