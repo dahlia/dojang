@@ -71,7 +71,7 @@
     },
     "environmentPredicate": {
       "title": "Environment predicate",
-      "description": "An environment predicate which describes criteria for environments.",
+      "description": "An environment predicate which describes criteria for environments. In addition to os, arch, kernel, kernel-release, and moniker fields, generic machine facts use fact.KEY (for example, fact.class = work or fact.org.team in (platform, infrastructure)). Fact keys may contain dot-separated namespaces.",
       "type": "object",
       "properties": {
         "os": {

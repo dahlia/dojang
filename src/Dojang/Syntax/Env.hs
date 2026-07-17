@@ -1,5 +1,6 @@
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Dojang.Syntax.Env
@@ -7,29 +8,38 @@ module Dojang.Syntax.Env
   , TomlWarning
   , readEnvFile
   , readEnvironment
+  , readFacts
+  , readFactsFile
+  , readFactsOnly
+  , readFactsOnlyFile
   , writeEnvFile
   , writeEnvironment
   ) where
 
 import Data.List.NonEmpty (NonEmpty ((:|)))
+import Data.Maybe (fromMaybe, isJust)
 import Data.String (IsString (fromString))
 import Prelude hiding (readFile, writeFile)
 
 import Control.DeepSeq (force)
 import Data.CaseInsensitive (CI (original))
-import Data.Text (Text, unpack)
+import qualified Data.Map.Strict as Map
+import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
 import System.OsPath (OsPath)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 import Toml (decode, encode)
 import Toml.FromValue
-  ( FromValue (fromValue)
+  ( FromKey (fromKey)
+  , FromValue (fromValue)
   , Result (Failure, Success)
+  , optKey
   , parseTableFromValue
   , reqKey
   )
 import Toml.ToValue
-  ( ToTable (toTable)
+  ( ToKey (toKey)
+  , ToTable (toTable)
   , ToValue (toValue)
   , defaultTableToValue
   , table
@@ -40,9 +50,21 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Environment
   ( Architecture
   , Environment (..)
+  , FactKey
+  , FactMap
+  , FactValue
   , Kernel (..)
   , OperatingSystem
+  , emptyEnvironment
+  , environmentFacts
+  , factKeyText
+  , factValueText
+  , isBuiltInFact
+  , lookupFact
+  , parseFactKey
+  , withFacts
   )
+import Toml.FromValue.Matcher (Matcher)
 
 
 instance FromValue OperatingSystem where
@@ -59,6 +81,24 @@ instance FromValue Architecture where
 
 instance ToValue Architecture where
   toValue = toValue . original . (.identifier)
+
+
+instance FromKey FactKey where
+  fromKey key = case parseFactKey $ pack key of
+    Left message -> fail $ unpack message
+    Right factKey -> return factKey
+
+
+instance ToKey FactKey where
+  toKey = unpack . factKeyText
+
+
+instance FromValue FactValue where
+  fromValue value = fromString <$> (fromValue value :: Matcher String)
+
+
+instance ToValue FactValue where
+  toValue = toValue . factValueText
 
 
 instance FromValue Kernel where
@@ -82,12 +122,18 @@ instance ToTable Kernel where
 
 
 instance FromValue Environment where
-  fromValue =
-    parseTableFromValue $
-      Environment
-        <$> reqKey "os"
-        <*> reqKey "arch"
-        <*> reqKey "kernel"
+  fromValue = parseTableFromValue $ do
+    os' <- reqKey "os"
+    arch' <- reqKey "arch"
+    kernel' <- reqKey "kernel"
+    hostname <- optKey "hostname"
+    facts <- fromMaybe Map.empty <$> optKey "facts"
+    let facts' = insertHostname hostname facts
+    return $ withFacts facts' $ emptyEnvironment os' arch' kernel'
+   where
+    insertHostname :: Maybe FactValue -> FactMap -> FactMap
+    insertHostname Nothing = id
+    insertHostname (Just value) = Map.insert "hostname" value
 
 
 instance ToValue Environment where
@@ -96,11 +142,47 @@ instance ToValue Environment where
 
 instance ToTable Environment where
   toTable env =
-    table
+    table $
       [ "os" .= env.operatingSystem
       , "arch" .= env.architecture
       , "kernel" .= env.kernel
       ]
+        ++ maybe
+          []
+          (\hostname -> ["hostname" .= hostname])
+          (lookupFact "hostname" env)
+        ++ if Map.null customFacts then [] else ["facts" .= customFacts]
+   where
+    customFacts :: FactMap
+    customFacts =
+      Map.filterWithKey (\key _ -> not $ isBuiltInFact key) $
+        environmentFacts env
+
+
+data FactsDocument = FactsDocument Bool FactMap
+
+
+instance FromValue FactsDocument where
+  fromValue =
+    parseTableFromValue $
+      makeFactsDocument
+        <$> optKey "os"
+        <*> optKey "arch"
+        <*> optKey "kernel"
+        <*> optKey "hostname"
+        <*> optKey "facts"
+   where
+    makeFactsDocument
+      :: Maybe OperatingSystem
+      -> Maybe Architecture
+      -> Maybe Kernel
+      -> Maybe FactValue
+      -> Maybe FactMap
+      -> FactsDocument
+    makeFactsDocument os arch kernel hostname facts =
+      FactsDocument
+        (isJust os || isJust arch || isJust kernel || isJust hostname)
+        (fromMaybe Map.empty facts)
 
 
 -- | An error made during parsing.
@@ -123,6 +205,57 @@ readEnvironment toml = case decode $ unpack toml of
   Failure [] -> Left $ "unknown error" :| []
 
 
+-- | Decodes the user-defined @[facts]@ table from an environment document.
+readFacts
+  :: Text
+  -> Either (NonEmpty TomlError) (FactMap, [TomlWarning])
+readFacts toml = do
+  (FactsDocument _ facts, warnings) <- decodeFactsDocument toml
+  validateFacts facts warnings
+
+
+-- | Decodes a non-empty @[facts]@ document that contains no built-in
+-- environment fields.
+readFactsOnly
+  :: Text
+  -> Either (NonEmpty TomlError) (FactMap, [TomlWarning])
+readFactsOnly toml = do
+  (FactsDocument hasEnvironmentFields facts, warnings) <-
+    decodeFactsDocument toml
+  if hasEnvironmentFields || Map.null facts
+    then Left $ "expected only a non-empty [facts] table" :| []
+    else validateFacts facts warnings
+
+
+decodeFactsDocument
+  :: Text
+  -> Either (NonEmpty TomlError) (FactsDocument, [TomlWarning])
+decodeFactsDocument toml = case decode $ unpack toml of
+  Success warnings document -> Right (document, warnings)
+  Failure (e : es) -> Left $ e :| es
+  Failure [] -> Left $ "unknown error" :| []
+
+
+validateFacts
+  :: FactMap
+  -> [TomlWarning]
+  -> Either (NonEmpty TomlError) (FactMap, [TomlWarning])
+validateFacts facts warnings =
+  case filter isBuiltInFact $ Map.keys facts of
+    [] -> Right (facts, warnings)
+    key : keys ->
+      Left $
+        ( "The facts table must not override built-in machine fact: "
+            ++ unpack (factKeyText key)
+            ++ "."
+        )
+          :| [ "The facts table must not override built-in machine fact: "
+                 ++ unpack (factKeyText reserved)
+                 ++ "."
+             | reserved <- keys
+             ]
+
+
 -- | Reads a TOML-encoded 'Environment' from the given file path.  It assumes
 -- that the file is encoded in UTF-8.  Throws an 'IOError' if the file cannot
 -- be read.
@@ -136,6 +269,30 @@ readEnvFile filePath = do
   content <- readFile filePath
   let decoded = decodeUtf8Lenient content
   return $ readEnvironment $ force decoded
+
+
+-- | Reads the user-defined @[facts]@ table from an environment file.
+readFactsFile
+  :: (MonadFileSystem m)
+  => OsPath
+  -> m (Either (NonEmpty TomlError) (FactMap, [TomlWarning]))
+readFactsFile filePath = do
+  content <- readFile filePath
+  let decoded = decodeUtf8Lenient content
+  return $ readFacts $ force decoded
+
+
+-- | Reads a non-empty facts-only environment file.  Environment fields such
+-- as @os@, @arch@, @kernel@, and @hostname@ make the document invalid for this
+-- parser.  Throws an 'IOError' if the file cannot be read.
+readFactsOnlyFile
+  :: (MonadFileSystem m)
+  => OsPath
+  -> m (Either (NonEmpty TomlError) (FactMap, [TomlWarning]))
+readFactsOnlyFile filePath = do
+  content <- readFile filePath
+  let decoded = decodeUtf8Lenient content
+  return $ readFactsOnly $ force decoded
 
 
 -- | Encodes an 'Environment' into a TOML document.

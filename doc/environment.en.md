@@ -5,10 +5,11 @@ Environment
 >
 > An **environment** is not the same thing as an **environment variable**.
 
-An **environment** is a set of basic attributes to distinguish between
-different devices to which config files will be applied,
-currently consisting of three things: **operating system** (`os`), **processor
-architecture** (`arch`), and **kernel** (`kernel`).[^1]  For example,
+An **environment** is a set of [machine facts] used to distinguish devices to
+which config files will be applied.  Dojang detects the **operating system**
+(`os`), **processor architecture** (`arch`), **kernel** (`kernel` and
+`kernel-release`), and **hostname** (`hostname`).[^1]  A repository can also
+declare its own facts.  For example,
 a typical Windows PC probably has the following environment:
 
 ~~~~ toml
@@ -35,6 +36,8 @@ release = "23.1.0"  # macOS 14.1
 [^1]: More may be added in the future. For example, it could contain the version
       of the operating system.
 
+[machine facts]: machine-facts.en.md
+
 
 Check your current environment
 ------------------------------
@@ -46,6 +49,7 @@ your device as by running the `dojang env` command.
 $ dojang env
 os = "linux"
 arch = "x86_64"
+hostname = "workstation"
 
 [kernel]
 name = "Linux"
@@ -107,7 +111,14 @@ arch = "aarch64"
 [kernel]
 name = "Linux"
 release = "6.5.9-300.fc35.aarch64"
+
+[facts]
+class = "test"
 ~~~~
+
+This is an environment simulation and takes precedence over enrolled machine
+facts.  To persist repository-specific identity instead, use `dojang init`
+with `--fact` or `--facts-file`; see [machine facts].
 
 For your information, you can also use command `dojang env -o dojang-env.toml`
 to create a sample of *dojang-env.toml* file, and then work from there.

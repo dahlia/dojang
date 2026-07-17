@@ -51,7 +51,12 @@ import System.OsPath
   )
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
-import Dojang.Types.Environment (Environment (..), Kernel (..))
+import Dojang.Types.Environment
+  ( Environment (..)
+  , Kernel (..)
+  , factKeyText
+  , factValueText
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression
   ( EnvironmentVariable
@@ -182,6 +187,9 @@ routePaths repo env lookupEnvVar = do
         , ("kernel-release", original env.kernel.release)
         ]
           ++ inputs
+          ++ [ ("fact." <> factKeyText key, factValueText value)
+             | (key, value) <- Map.toAscList env.additionalFacts
+             ]
   filterIgnoredPathsFromOverlaps
     :: OsPath
     -> [FilePattern]

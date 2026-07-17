@@ -12,6 +12,7 @@ import Test.Hspec.Hedgehog (forAll, hedgehog, (/==), (===))
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
+  , referencedFacts
   )
 import Dojang.Types.Gen qualified as Gen
 import Dojang.Types.MonikerName (parseMonikerName)
@@ -108,6 +109,17 @@ spec = do
 
     let Right foo = parseMonikerName "foo"
 
+    it "preserves complements that can depend on defined machine facts" $ do
+      normalizePredicate
+        (Not $ And [Fact "class" "work", Not $ Fact "class" "work"])
+        `shouldBe` Not
+          (And [Fact "class" "work", Not $ Fact "class" "work"])
+      normalizePredicate
+        (Or [Fact "class" "work", Not $ Fact "class" "work"])
+        `shouldBe` Or [Fact "class" "work", Not $ Fact "class" "work"]
+      normalizePredicate (Or [Moniker foo, Not $ Moniker foo])
+        `shouldBe` Or [Moniker foo, Not $ Moniker foo]
+
     it "flattens nested Ands" $ do
       normalizePredicate
         ( And
@@ -144,3 +156,17 @@ spec = do
       predicate <- forAll Gen.environmentPredicate
       normalizePredicate (normalizePredicate predicate)
         === normalizePredicate predicate
+
+  describe "referencedFacts" $ do
+    it "follows reachable monikers and normalized branches" $ do
+      let Right workstation = parseMonikerName "workstation"
+      let Right everywhere = parseMonikerName "everywhere"
+      let resolve name
+            | name == workstation = Just $ Fact "class" "work"
+            | name == everywhere = Just $ Or [Always, Fact "unused" "value"]
+            | otherwise = Nothing
+      referencedFacts resolve (Moniker workstation) `shouldBe` ["class"]
+      referencedFacts resolve (Moniker everywhere) `shouldBe` []
+      referencedFacts resolve (Or [Always, Fact "unused" "value"])
+        `shouldBe` []
+      referencedFacts resolve (FactDefined "class") `shouldBe` ["class"]

@@ -141,6 +141,7 @@ Hooks inherit the parent process environment.  Dojang overlays these values:
 | `DOJANG_OS` / `DOJANG_ARCH` | Operating system and architecture |
 | `DOJANG_KERNEL`             | Kernel name                       |
 | `DOJANG_KERNEL_RELEASE`     | Kernel release                    |
+| `DOJANG_HOSTNAME`           | Hostname, when detected           |
 | `DOJANG_PATH_COUNT`         | Number of selected scope paths    |
 | `DOJANG_PATH_0`, …          | Scope paths in stable order       |
 
@@ -148,12 +149,16 @@ Route selectors passed through `reflect --source`, `edit --source`, and
 `unmanage --route` remain relative to the repository.  Other relative path
 arguments use the caller's working directory.  Selecting a repository with
 `-r` therefore does not change the scope or fingerprint of a route selector.
+Custom [machine facts] affect `on-change` fingerprints but are not exported as
+individual environment variables.
 
 Post-hooks also receive `DOJANG_COMMAND_OUTCOME=success` and
 `DOJANG_EXIT_CODE=0`.  Before adding the current context, Dojang removes
 inherited hook-context variables.  Values omitted for the current event, such
 as post-command results on a pre-hook or path indexes beyond
 `DOJANG_PATH_COUNT`, therefore remain unset.
+
+[machine facts]: machine-facts.en.md
 
 
 Dry-run and recursion

@@ -9,6 +9,7 @@
 module Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
+  , referencedFacts
   ) where
 
 import Data.List.NonEmpty (NonEmpty, filter, nonEmpty, nub, sortWith, toList)
@@ -16,10 +17,17 @@ import Prelude hiding (filter)
 
 import Data.CaseInsensitive (CI)
 import Data.Hashable (Hashable (hashWithSalt))
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 
 import Data.Ord (Down (..))
-import Dojang.Types.Environment (Architecture, OperatingSystem)
+import Dojang.Types.Environment
+  ( Architecture
+  , FactKey
+  , FactValue
+  , OperatingSystem
+  )
 import Dojang.Types.MonikerName (MonikerName)
 
 
@@ -53,6 +61,10 @@ data EnvironmentPredicate
   | -- | A predicate that matches to the given kernel release suffix
     -- (e.g. @amd64@ for @4.19.0-16-amd64@).
     KernelReleaseSuffix (CI Text)
+  | -- | A predicate that matches a named machine fact.
+    Fact FactKey FactValue
+  | -- | A predicate that matches when a named machine fact is defined.
+    FactDefined FactKey
   deriving (Show)
 
 
@@ -79,6 +91,10 @@ instance Eq EnvironmentPredicate where
   KernelReleasePrefix _ == _ = False
   KernelReleaseSuffix suffix == KernelReleaseSuffix suffix' = suffix == suffix'
   KernelReleaseSuffix _ == _ = False
+  Fact key value == Fact key' value' = key == key' && value == value'
+  Fact _ _ == _ = False
+  FactDefined key == FactDefined key' = key == key'
+  FactDefined _ == _ = False
 
 
 instance Hashable EnvironmentPredicate where
@@ -108,6 +124,15 @@ instance Hashable EnvironmentPredicate where
     salt `hashWithSalt` ("KernelReleasePrefix" :: Text) `hashWithSalt` prefix
   hashWithSalt salt (KernelReleaseSuffix suffix) =
     salt `hashWithSalt` ("KernelReleaseSuffix" :: Text) `hashWithSalt` suffix
+  hashWithSalt salt (Fact key value) =
+    salt
+      `hashWithSalt` ("Fact" :: Text)
+      `hashWithSalt` key
+      `hashWithSalt` value
+  hashWithSalt salt (FactDefined key) =
+    salt
+      `hashWithSalt` ("FactDefined" :: Text)
+      `hashWithSalt` key
 
 
 normalizePredicateList
@@ -126,7 +151,7 @@ normalizePredicateList = nub . sortWith (Down . hashWithSalt 1)
 -- >>> normalizePredicate $ And [Moniker foo, Not $ Moniker foo]
 -- Not Always
 -- >>> normalizePredicate $ Or [Moniker foo, Not $ Moniker foo]
--- Always
+-- Or (Moniker (MonikerName "foo") :| [Not (Moniker (MonikerName "foo"))])
 -- >>> let Right a = parseMonikerName "a"
 -- >>> let Right b = parseMonikerName "b"
 -- >>> let Right c = parseMonikerName "c"
@@ -150,7 +175,9 @@ normalizePredicate' (And ps) =
     then Not Always
     else
       let filtered = filter (/= Always) ps'
-      in if (`any` filtered) $ \case Not p' -> p' `elem` filtered; _ -> False
+      in if (`any` filtered) $ \case
+           Not p' -> p' `elem` filtered && not (mayBeUndefined p')
+           _ -> False
            then Not Always
            else
              let reduced =
@@ -174,7 +201,9 @@ normalizePredicate' (Or ps) =
     then Always
     else
       let filtered = filter (/= Not Always) ps'
-      in if (`any` filtered) $ \case Not p' -> p' `elem` filtered; _ -> False
+      in if (`any` filtered) $ \case
+           Not p' -> p' `elem` filtered && not (mayBeUndefined p')
+           _ -> False
            then Always
            else
              let reduced =
@@ -195,3 +224,46 @@ normalizePredicate' (Or ps) =
 normalizePredicate' (Not (Not p)) = normalizePredicate' p
 normalizePredicate' (Not p) = Not $ normalizePredicate' p
 normalizePredicate' p = p
+
+
+-- Fact-backed monikers cannot be distinguished from total monikers until
+-- evaluation, so complements containing either form must remain explicit.
+mayBeUndefined :: EnvironmentPredicate -> Bool
+mayBeUndefined (Not predicate) = mayBeUndefined predicate
+mayBeUndefined (And predicates) = any mayBeUndefined predicates
+mayBeUndefined (Or predicates) = any mayBeUndefined predicates
+mayBeUndefined (Moniker _) = True
+mayBeUndefined (Fact _ _) = True
+mayBeUndefined (FactDefined _) = True
+mayBeUndefined _ = False
+
+
+-- | Finds named machine facts referenced by a reachable predicate branch.
+--
+-- Monikers are followed once, so recursive definitions cannot loop forever.
+referencedFacts
+  :: (MonikerName -> Maybe EnvironmentPredicate)
+  -> EnvironmentPredicate
+  -> Set FactKey
+referencedFacts resolver = go Set.empty . normalizePredicate
+ where
+  go visited predicate = case predicate of
+    Always -> Set.empty
+    Not child -> go visited child
+    And children -> foldMap (go visited) children
+    Or children -> foldMap (go visited) children
+    Moniker name
+      | name `Set.member` visited -> Set.empty
+      | otherwise ->
+          maybe
+            Set.empty
+            (go (Set.insert name visited) . normalizePredicate)
+            (resolver name)
+    Fact key _ -> Set.singleton key
+    FactDefined key -> Set.singleton key
+    OperatingSystem _ -> Set.empty
+    Architecture _ -> Set.empty
+    KernelName _ -> Set.empty
+    KernelRelease _ -> Set.empty
+    KernelReleasePrefix _ -> Set.empty
+    KernelReleaseSuffix _ -> Set.empty

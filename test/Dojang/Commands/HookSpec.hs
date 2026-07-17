@@ -80,7 +80,10 @@ import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Context (Context (..))
-import Dojang.Types.Environment (Environment (..), Kernel (..))
+import Dojang.Types.Environment
+  ( Kernel (..)
+  , emptyEnvironment
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.Hook
   ( Hook (..)
@@ -140,6 +143,7 @@ spec = sequential $ do
       let inherited =
             [ ("DOJANG_COMMAND_OUTCOME", "success")
             , ("DOJANG_EXIT_CODE", "0")
+            , ("DOJANG_HOSTNAME", "stale.example")
             , (pathVariable, "stale")
             , ("DOJANG_ALLOW_HOOK_RECURSION", "1")
             , ("DOJANG_TEST_PARENT", "inherited")
@@ -147,6 +151,7 @@ spec = sequential $ do
       let merged = mergeHookEnvironment "linux" dojangEnv inherited
       lookup "DOJANG_COMMAND_OUTCOME" merged === Nothing
       lookup "DOJANG_EXIT_CODE" merged === Nothing
+      lookup "DOJANG_HOSTNAME" merged === Nothing
       lookup pathVariable merged === Nothing
       lookup "DOJANG_ALLOW_HOOK_RECURSION" merged === Just "1"
       lookup "DOJANG_TEST_PARENT" merged === Just "inherited"
@@ -156,6 +161,7 @@ spec = sequential $ do
         "mingw32"
         dojangEnv
         [ ("Dojang_Command_Outcome", "success")
+        , ("Dojang_Hostname", "stale.example")
         , ("dojang_path_7", "stale")
         , ("PATH", "C:\\Windows")
         ]
@@ -290,7 +296,7 @@ spec = sequential $ do
         === False
 
   describe "shouldRunHook" $ do
-    let env = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+    let env = emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
 
     it "returns True for Always condition" $ do
       let hook =
@@ -490,7 +496,7 @@ spec = sequential $ do
         let timestamp = read "2026-07-15 00:00:00 UTC"
         let state =
               MachineState
-                3
+                4
                 repositoryId
                 machineId
                 generationId
@@ -498,6 +504,8 @@ spec = sequential $ do
                 (tmpDir </> manifestFilename)
                 (tmpDir </> intermediateDir)
                 (managedTargetSnapshotRoot stateRootPath repositoryId)
+                Nothing
+                Map.empty
                 timestamp
                 timestamp
                 False
@@ -524,6 +532,7 @@ spec = sequential $ do
                 "x86_64"
                 "Linux"
                 "6.0.0"
+                Map.empty
                 "apply"
                 []
                 state
@@ -563,7 +572,8 @@ spec = sequential $ do
               Manifest (Just repositoryId) empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
-        let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+        let environment =
+              emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
         let context = Context repository environment (const $ pure Nothing)
         let appEnv =
               AppEnv
@@ -584,10 +594,11 @@ spec = sequential $ do
                 "x86_64"
                 "Linux"
                 "6.0.0"
+                Map.empty
                 "apply"
                 []
                 ( MachineState
-                    3
+                    4
                     repositoryId
                     machineId
                     generationId
@@ -595,6 +606,8 @@ spec = sequential $ do
                     (tmpDir </> manifestFilename)
                     (tmpDir </> intermediateDir)
                     (tmpDir </> stateDir)
+                    Nothing
+                    Map.empty
                     (read "2026-07-15 00:00:00 UTC")
                     (read "2026-07-15 00:00:00 UTC")
                     False
@@ -655,14 +668,15 @@ spec = sequential $ do
               Manifest (Just repositoryId) empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
-        let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+        let environment =
+              emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
         let context = Context repository environment (const $ pure Nothing)
         let stateRootPath = tmpDir </> stateDir
         let createdTime = read "2026-07-15 00:00:00 UTC"
         let recreatedTime = read "2026-07-15 01:00:00 UTC"
         let oldState =
               MachineState
-                3
+                4
                 repositoryId
                 machineId
                 generationId
@@ -670,6 +684,8 @@ spec = sequential $ do
                 (tmpDir </> manifestFilename)
                 (tmpDir </> intermediateDir)
                 (managedTargetSnapshotRoot stateRootPath repositoryId)
+                Nothing
+                Map.empty
                 createdTime
                 createdTime
                 False
@@ -709,6 +725,7 @@ spec = sequential $ do
                 "x86_64"
                 "Linux"
                 "6.0.0"
+                Map.empty
                 "apply"
                 []
                 oldState
@@ -814,13 +831,14 @@ posixNonUtf8HookScopeSpec =
             Manifest (Just repositoryId) empty Map.empty Map.empty $
               Map.singleton PreApply [hook]
       let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
-      let environment = Environment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
+      let environment =
+            emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
       let context = Context repository environment (const $ pure Nothing)
       let stateRootPath = tmpDir </> stateDir
       let timestamp = read "2026-07-15 00:00:00 UTC"
       let state =
             MachineState
-              3
+              4
               repositoryId
               machineId
               generationId
@@ -828,6 +846,8 @@ posixNonUtf8HookScopeSpec =
               (tmpDir </> manifestFilename)
               (tmpDir </> intermediateDir)
               (managedTargetSnapshotRoot stateRootPath repositoryId)
+              Nothing
+              Map.empty
               timestamp
               timestamp
               False
@@ -864,6 +884,7 @@ posixNonUtf8HookScopeSpec =
               "x86_64"
               "Linux"
               "6.0.0"
+              Map.empty
               "apply"
               [selectedPath]
               state

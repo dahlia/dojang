@@ -5,9 +5,10 @@ module Dojang.Types.Environment.CurrentSpec (spec) where
 
 import Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (..)
+  , Environment (architecture, kernel, operatingSystem)
   , Kernel (..)
   , OperatingSystem (..)
+  , lookupFact
   )
 import Dojang.Types.Environment.Current
   ( currentArchitecture
@@ -19,6 +20,7 @@ import Dojang.Types.Environment.Current
   )
 
 import Data.CaseInsensitive (original)
+import Data.Maybe (isJust)
 import Data.String (IsString (fromString))
 import Data.Text (Text)
 import System.Info (arch, os)
@@ -46,6 +48,7 @@ spec = do
     env.operatingSystem `shouldBe` expectedOS
     env.architecture `shouldBe` expectedArch
     expectKernel env.kernel
+    lookupFact "hostname" env `shouldSatisfy` isJust
 
   specify "parseOperatingSystem" $ do
     parseOperatingSystem "linux-android" `shouldBe` Android

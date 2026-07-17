@@ -38,6 +38,7 @@ nav:
   - hooks.md
   - routing.md
   - environment.md
+  - machine-facts.md
   - environment-predicate.md
   - file-path-expression.md
   - exit-codes.md

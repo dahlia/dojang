@@ -12,11 +12,15 @@ import Test.Hspec.Hedgehog (forAll, hedgehog, (/==), (===))
 import Dojang.Gen qualified as Gen
 import Dojang.Types.Environment
   ( Architecture (..)
-  , Environment (Environment)
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
+  , withFacts
   )
-import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.EnvironmentPredicate
+  ( EnvironmentPredicate (..)
+  , normalizePredicate
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate
   ( EvaluationWarning (..)
   , evaluate
@@ -52,7 +56,9 @@ spec = do
           ]
             :: HashMap MonikerName EnvironmentPredicate
     let kernel = Kernel "Linux" "5.10.0-8"
-    let environment = Environment Linux X86_64 kernel
+    let environment =
+          withFacts [("class", "work")] $
+            emptyEnvironment Linux X86_64 kernel
     let eval = evaluate environment monikerMap
 
     specify "Always" $
@@ -75,6 +81,37 @@ spec = do
                    , [UnrecognizedArchitecture $ Etc "etc"]
                    )
 
+    specify "Fact" $ do
+      eval (Fact "class" "work") `shouldBe` (True, [])
+      eval (Fact "class" "personal") `shouldBe` (False, [])
+      eval (Fact "os" "linux") `shouldBe` (True, [])
+      eval (Fact "missing" "value")
+        `shouldBe` (False, [UndefinedFact "missing"])
+      eval (Not $ Fact "missing" "value")
+        `shouldBe` (False, [UndefinedFact "missing"])
+      eval (And [Not $ Fact "missing" "a", Not $ Fact "missing" "b"])
+        `shouldBe` (False, [UndefinedFact "missing", UndefinedFact "missing"])
+      eval (FactDefined "class") `shouldBe` (True, [])
+      eval (FactDefined "missing")
+        `shouldBe` (False, [UndefinedFact "missing"])
+      eval (Not $ FactDefined "missing")
+        `shouldBe` (False, [UndefinedFact "missing"])
+      eval
+        ( normalizePredicate $
+            Or [Fact "missing" "value", Not $ Fact "missing" "value"]
+        )
+        `shouldBe` ( False
+                   , [UndefinedFact "missing", UndefinedFact "missing"]
+                   )
+      eval
+        ( normalizePredicate $
+            Not $
+              And [Fact "missing" "value", Not $ Fact "missing" "value"]
+        )
+        `shouldBe` ( False
+                   , [UndefinedFact "missing", UndefinedFact "missing"]
+                   )
+
     specify "Moniker" $ do
       eval (Moniker linuxAmd64) `shouldBe` (True, [])
       eval (Moniker linuxAmd64') `shouldBe` (True, [])
@@ -89,6 +126,12 @@ spec = do
       eval (Not $ Moniker linuxAmd64) `shouldBe` (False, [])
       eval (Not $ Moniker linuxArm64) `shouldBe` (True, [])
       eval (Not $ Moniker linuxAmd64') `shouldBe` (False, [])
+      eval
+        (Not $ And [Fact "missing" "value", OperatingSystem Windows])
+        `shouldBe` (True, [UndefinedFact "missing"])
+      eval
+        (Or [Not $ Fact "missing" "value", Not $ OperatingSystem Windows])
+        `shouldBe` (True, [UndefinedFact "missing"])
 
     specify "And" $ do
       eval (And [OperatingSystem Linux]) `shouldBe` (True, [])

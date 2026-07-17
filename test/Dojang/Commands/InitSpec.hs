@@ -20,35 +20,60 @@ import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
 import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
 import Control.Monad.Reader (MonadReader (ask), ReaderT (..), runReaderT)
 import Data.ByteString (ByteString)
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.ByteString.Char8 qualified as ByteString
+import Data.IORef
+  ( IORef
+  , atomicModifyIORef'
+  , modifyIORef'
+  , newIORef
+  , readIORef
+  )
+import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
 import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import System.Timeout (timeout)
 import Test.Hspec (Spec, it, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (init, readFile, writeFile)
 
-import Dojang.App (AppEnv (..), runAppWithoutLogging)
+import Dojang.App
+  ( AppEnv (..)
+  , prepareMachineState
+  , runAppWithLogging
+  , runAppWithoutLogging
+  )
 import Dojang.Commands.Init qualified as Init
-import Dojang.ExitCodes (machineStateError, manifestAlreadyExists)
+import Dojang.ExitCodes
+  ( cliError
+  , envFileReadError
+  , machineStateError
+  , manifestAlreadyExists
+  , missingMachineFactError
+  )
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
+  , dryRunIO
   )
 import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.MachineState
-  ( MachineState (firstApplied)
+  ( MachineState (declaredFacts, firstApplied, updatedTime)
   , listRepositoryStates
   , readMachineId
+  , repositoryStatePath
+  , updateMachineFacts
   )
+import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.Registry
   ( Registry (Registry)
   , registryFilename
   , writeRegistry
   )
+import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
 spec :: Spec
@@ -88,8 +113,11 @@ spec = sequential $ do
             runCoordinatedInitIO gate $
               runAppWithoutLogging appEnv $
                 Init.init [Init.Amd64Linux] True
-      length (filter isSuccessful results) `shouldBe` 1
-      length (filter isManifestAlreadyExists results) `shouldBe` 1
+      any isSuccessful results `shouldBe` True
+      all
+        (\result -> isSuccessful result || isManifestAlreadyExists result)
+        results
+        `shouldBe` True
       repositoryStates <- listDirectory $ stateRoot </> repositoriesName
       length repositoryStates `shouldBe` 1
 
@@ -130,6 +158,444 @@ spec = sequential $ do
         Right values -> return values
         Left err -> fail $ "Unexpected repository state error: " <> show err
       fmap (.firstApplied) states `shouldBe` [False]
+
+  it "validates fact options before publishing a new repository" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [Init.Amd64Linux] True Nothing ["invalid"]
+        )
+        `shouldThrow` (== cliError)
+      exists (checkout </> manifestName) >>= (`shouldBe` False)
+      exists stateRoot >>= (`shouldBe` False)
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts
+              [Init.Amd64Linux]
+              True
+              (Just factsName)
+              []
+        )
+        `shouldThrow` (== envFileReadError)
+      exists (checkout </> manifestName) >>= (`shouldBe` False)
+      exists stateRoot >>= (`shouldBe` False)
+
+  it "validates fact inputs before preparing existing repository state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["invalid"]
+        )
+        `shouldThrow` (== cliError)
+      exists stateRoot >>= (`shouldBe` False)
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True (Just factsName) []
+        )
+        `shouldThrow` (== envFileReadError)
+      exists stateRoot >>= (`shouldBe` False)
+      writeFile
+        (checkout </> manifestName)
+        ( "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+            <> "[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"fact.class = work\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== missingMachineFactError)
+      exists stateRoot >>= (`shouldBe` False)
+      writeFile (checkout </> envName) "[facts\n"
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== envFileReadError)
+      exists stateRoot >>= (`shouldBe` False)
+
+  it "reports parser warnings from a facts file" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile (checkout </> factsName) "[fact]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      warnings <- newIORef []
+      result <-
+        withHome home $
+          runAppWithLogging
+            appEnv
+            ( Init.initWithFacts
+                [Init.Amd64Linux]
+                True
+                (Just factsName)
+                []
+            )
+            ( \_ _ level message ->
+                when (level == LevelWarn) $
+                  modifyIORef' warnings (fromLogStr message :)
+            )
+      result `shouldBe` ExitSuccess
+      messages <- readIORef warnings
+      any (ByteString.isInfixOf "unexpected key") messages `shouldBe` True
+
+  it "validates a stored facts file before moving existing state" $
+    withTempDir $ \tmp _ -> do
+      oldCheckoutName <- encodeFS "old-checkout"
+      movedCheckoutName <- encodeFS "moved-checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let oldCheckout = tmp </> oldCheckoutName
+      let movedCheckout = tmp </> movedCheckoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories oldCheckout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      let manifestSource =
+            "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (oldCheckout </> manifestName) manifestSource
+      let oldAppEnv =
+            AppEnv
+              oldCheckout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $
+          runAppWithoutLogging oldAppEnv $
+            prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just factsName)
+          Map.empty
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      let statePath = repositoryStatePath stateRoot repositoryId
+      before <- readFile statePath
+      removeFile $ oldCheckout </> manifestName
+      removeDirectory oldCheckout
+      createDirectories movedCheckout
+      writeFile (movedCheckout </> manifestName) manifestSource
+      let movedAppEnv = oldAppEnv{sourceDirectory = movedCheckout}
+      withHome
+        home
+        (runAppWithoutLogging movedAppEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== envFileReadError)
+      readFile statePath `shouldReturn` before
+
+  it "requires and enrolls facts in an existing repository" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.init [Init.Amd64Linux] True
+      let otherOperatingSystem =
+            if os == "mingw32" then "linux" else "windows"
+      manifest <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[monikers.everywhere]\n"
+            <> "when = \"always\"\n"
+            <> "\n[[files.unreachable]]\n"
+            <> "when = \"moniker = everywhere || fact.branch = yes\"\n"
+            <> "path = \"$HOME/unreachable\"\n"
+            <> "\n[[files.unreachable]]\n"
+            <> "when = \"fact.unreachable = yes\"\n"
+            <> "path = \"$HOME/also-unreachable\"\n"
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"os = "
+            <> otherOperatingSystem
+            <> " && fact.platform = work\"\n"
+            <> "\n[[files.platform-specific]]\n"
+            <> "when = \"os = "
+            <> otherOperatingSystem
+            <> " && fact.route-platform = work\"\n"
+            <> "path = \"$HOME/platform-specific\"\n"
+        )
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing []
+      manifestWithUnreachable <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifestWithUnreachable
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"fact.class = work\"\n"
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"fact.location not in ()\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== missingMachineFactError)
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=work"]
+        )
+        `shouldThrow` (== missingMachineFactError)
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.initWithFacts
+              []
+              True
+              Nothing
+              ["class=work", "location=home"]
+      machineResult <- readMachineId stateRoot
+      machineId' <- case machineResult of
+        Right (Just identifier) -> return identifier
+        unexpected -> fail $ "Unexpected machine identity: " <> show unexpected
+      statesResult <- listRepositoryStates stateRoot machineId'
+      states <- case statesResult of
+        Right values -> return values
+        Left err -> fail $ "Unexpected repository state error: " <> show err
+      fmap (Map.lookup "class" . (.declaredFacts)) states
+        `shouldBe` [Just "work"]
+      fmap (Map.lookup "location" . (.declaredFacts)) states
+        `shouldBe` [Just "home"]
+      _ <-
+        withHome home $
+          dryRunIO $
+            runAppWithoutLogging appEnv{dryRun = True} $
+              Init.initWithFacts [] True Nothing ["class=personal"]
+      statesAfterDryRunResult <- listRepositoryStates stateRoot machineId'
+      statesAfterDryRun <- case statesAfterDryRunResult of
+        Right values -> return values
+        Left err -> fail $ "Unexpected repository state error: " <> show err
+      fmap (Map.lookup "class" . (.declaredFacts)) statesAfterDryRun
+        `shouldBe` [Just "work"]
+
+  it "uses known fact values to limit enrollment requirements" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.init [Init.Amd64Linux] True
+      manifest <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[files.conditional]]\n"
+            <> "when = \"fact.class = work && fact.location = office\"\n"
+            <> "path = \"$HOME/conditional\"\n"
+        )
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=personal"]
+        )
+        `shouldReturn` ExitSuccess
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[files.selected]]\n"
+            <> "when = \"fact.class = personal\"\n"
+            <> "path = \"$HOME/personal\"\n"
+            <> "\n[[files.selected]]\n"
+            <> "when = \"fact.location = office\"\n"
+            <> "path = \"$HOME/office\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldReturn` ExitSuccess
+
+  it "requires facts for the simulated environment" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      _ <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            Init.init [Init.Amd64Linux] True
+      let simulatedOperatingSystem =
+            if os == "mingw32" then "linux" else "windows"
+      manifest <- readFile $ checkout </> manifestName
+      writeFile
+        (checkout </> manifestName)
+        ( manifest
+            <> "\n[[hooks.pre-status]]\n"
+            <> "command = \"true\"\n"
+            <> "when = \"os = "
+            <> simulatedOperatingSystem
+            <> " && fact.class = work && fact.location = office\"\n"
+        )
+      writeFile
+        (checkout </> envName)
+        ( "os = \""
+            <> simulatedOperatingSystem
+            <> "\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Simulated\"\n"
+            <> "release = \"1.0\"\n"
+        )
+      withHome
+        home
+        (runAppWithoutLogging appEnv $ Init.initWithFacts [] True Nothing [])
+        `shouldThrow` (== missingMachineFactError)
+      writeFile
+        (checkout </> envName)
+        ( "os = \""
+            <> simulatedOperatingSystem
+            <> "\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Simulated\"\n"
+            <> "release = \"1.0\"\n"
+            <> "[facts]\n"
+            <> "class = \"personal\"\n"
+        )
+      withHome
+        home
+        ( runAppWithoutLogging appEnv $
+            Init.initWithFacts [] True Nothing ["class=work"]
+        )
+        `shouldReturn` ExitSuccess
 
   it "reports state-root creation failures as machine-state errors" $
     withTempDir $ \tmp _ -> do

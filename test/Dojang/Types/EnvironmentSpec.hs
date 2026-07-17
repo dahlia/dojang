@@ -10,12 +10,20 @@ module Dojang.Types.EnvironmentSpec (spec) where
 
 import Dojang.Types.Environment
   ( Architecture (..)
+  , Environment (..)
+  , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
+  , factKeyText
+  , lookupFact
+  , parseFactKey
+  , withFacts
   )
 import Dojang.Types.Gen qualified as Gen
 
 import Data.CaseInsensitive (original)
 import Data.Hashable (Hashable (hash, hashWithSalt))
+import Data.Map.Strict qualified as Map
 import Data.String (IsString (fromString))
 import Data.Text (unpack)
 import Hedgehog.Gen (unicodeAll)
@@ -140,6 +148,63 @@ spec = do
       (hashWithSalt 0 kernel == hashWithSalt 0 kernel') === (kernel == kernel')
 
   describe "Environment" $ do
+    specify "constructs and matches every fact as a record field" $ do
+      let facts' = Map.fromList [("class", "work"), ("hostname", "atlas")]
+      let env =
+            Environment
+              { operatingSystem = Linux
+              , architecture = X86_64
+              , kernel = Kernel "Linux" "6.0"
+              , additionalFacts = facts'
+              }
+      case env of
+        Environment
+          { operatingSystem = os'
+          , architecture = arch'
+          , kernel = kernel'
+          , additionalFacts = additionalFacts'
+          } ->
+            (os', arch', kernel', additionalFacts')
+              `shouldBe` (Linux, X86_64, Kernel "Linux" "6.0", facts')
+
+    specify "open facts" $ do
+      let env =
+            withFacts
+              ( Map.fromList
+                  [("class", "work"), ("hostname", "atlas"), ("os", "windows")]
+              )
+              $ emptyEnvironment Linux X86_64 (Kernel "Linux" "6.0")
+      lookupFact "class" env `shouldBe` Just "work"
+      lookupFact "hostname" env `shouldBe` Just "atlas"
+      lookupFact "os" env `shouldBe` Just "linux"
+      lookupFact "arch" env `shouldBe` Just "x86_64"
+      lookupFact "kernel" env `shouldBe` Just "Linux"
+      lookupFact "kernel-release" env `shouldBe` Just "6.0"
+      lookupFact "missing" env `shouldBe` Nothing
+
+    specify "record updates preserve additional facts" $ do
+      let env =
+            withFacts
+              (Map.fromList [("class", "work"), ("hostname", "atlas")])
+              $ emptyEnvironment Linux X86_64 (Kernel "Linux" "6.0")
+      let updated =
+            env
+              { operatingSystem = Windows
+              , architecture = AArch64
+              , kernel = Kernel "Windows" "10.0"
+              }
+      lookupFact "class" updated `shouldBe` Just "work"
+      lookupFact "hostname" updated `shouldBe` Just "atlas"
+      lookupFact "os" updated `shouldBe` Just "windows"
+      lookupFact "arch" updated `shouldBe` Just "aarch64"
+      lookupFact "kernel" updated `shouldBe` Just "Windows"
+      lookupFact "kernel-release" updated `shouldBe` Just "10.0"
+
+    specify "namespaced fact keys" $ do
+      fmap factKeyText (parseFactKey "org.team") `shouldBe` Right "org.team"
+      parseFactKey "org..team" `shouldBe` Left "Invalid machine fact key: org..team."
+      parseFactKey "9team" `shouldBe` Left "Invalid machine fact key: 9team."
+
     specify "Eq" $ hedgehog $ do
       env <- forAll Gen.environment
       env' <- forAll Gen.environment

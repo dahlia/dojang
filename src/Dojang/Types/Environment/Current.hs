@@ -6,6 +6,7 @@
 module Dojang.Types.Environment.Current
   ( MonadArchitecture (..)
   , MonadEnvironment (..)
+  , MonadHostname (..)
   , MonadOperatingSystem (..)
   , MonadKernel (..)
   , parseArchitecture
@@ -13,12 +14,14 @@ module Dojang.Types.Environment.Current
   ) where
 
 import Data.Char (isDigit)
+import qualified Data.Map.Strict as Map
 import Data.String (IsString (fromString))
 import System.Info (arch, os)
 import Prelude hiding (break)
 
 import Data.CaseInsensitive (mk)
-import Data.Text (break, dropAround, pack, strip, stripEnd)
+import Data.Text (Text, break, dropAround, pack, strip, stripEnd, unpack)
+import Network.HostName (getHostName)
 import System.Process (readCreateProcess, readProcess, shell)
 
 import Dojang.Types.Environment
@@ -26,6 +29,8 @@ import Dojang.Types.Environment
   , Environment (..)
   , Kernel (..)
   , OperatingSystem (..)
+  , emptyEnvironment
+  , withFacts
   )
 
 
@@ -90,6 +95,16 @@ instance MonadKernel IO where
         return $ Kernel (mk name) (mk release)
 
 
+-- | A monad that can get the current machine hostname.
+class (Monad m) => MonadHostname m where
+  -- | Gets the current machine hostname.
+  currentHostname :: m Text
+
+
+instance MonadHostname IO where
+  currentHostname = pack <$> getHostName
+
+
 -- | A monad that can get the current 'Environment'.
 class (Monad m) => MonadEnvironment m where
   -- | Gets the current 'Environment'.
@@ -97,16 +112,20 @@ class (Monad m) => MonadEnvironment m where
 
 
 instance
-  (Monad m, MonadOperatingSystem m, MonadArchitecture m, MonadKernel m)
+  ( Monad m
+  , MonadOperatingSystem m
+  , MonadArchitecture m
+  , MonadKernel m
+  , MonadHostname m
+  )
   => MonadEnvironment m
   where
   currentEnvironment = do
     os' <- currentOperatingSystem
     arch' <- currentArchitecture
     kernel' <- currentKernel
+    hostname <- currentHostname
     return
-      Environment
-        { operatingSystem = os'
-        , architecture = arch'
-        , kernel = kernel'
-        }
+      $ withFacts
+        (Map.singleton (fromString "hostname") $ fromString $ unpack hostname)
+      $ emptyEnvironment os' arch' kernel'

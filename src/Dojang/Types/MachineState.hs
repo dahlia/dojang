@@ -59,11 +59,12 @@ module Dojang.Types.MachineState
   , validateSelectedSnapshotLocation
   , updateManagedTargets
   , updateManagedTargetsWith
+  , updateMachineFacts
   , withRepositoryStateGeneration
   , withStateFileLock
   ) where
 
-import Control.Monad (filterM, forM, unless, when)
+import Control.Monad (filterM, foldM, forM, unless, when)
 import Control.Monad.Except
   ( MonadError (catchError, throwError)
   , tryError
@@ -75,6 +76,7 @@ import Data.List (find, isPrefixOf, isSuffixOf, nub, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
@@ -120,7 +122,14 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , writeFileAtomically
   )
-import Dojang.Types.Environment (OperatingSystem (..))
+import Dojang.Types.Environment
+  ( FactMap
+  , OperatingSystem (..)
+  , factKeyText
+  , factValueText
+  , isBuiltInFact
+  , parseFactKey
+  )
 import Dojang.Types.Hook
   ( HookId
   , HookType
@@ -145,7 +154,7 @@ import Dojang.Types.RepositoryId
 
 -- | The on-disk schema version understood by this release.
 schemaVersion :: Integer
-schemaVersion = 3
+schemaVersion = 4
 
 
 -- | A stable identifier for the local machine-state store.
@@ -369,6 +378,10 @@ data MachineState = MachineState
   -- ^ Persisted full intermediate snapshot path.
   , targetSnapshotRoot :: OsPath
   -- ^ Private root for immutable managed-target baselines.
+  , factsFile :: Maybe OsPath
+  -- ^ Optional repository-relative or absolute shared machine-facts file.
+  , declaredFacts :: FactMap
+  -- ^ Repository-specific machine facts declared during enrollment.
   , createdTime :: UTCTime
   -- ^ Time at which the repository record was created.
   , updatedTime :: UTCTime
@@ -665,12 +678,33 @@ data StateDocument = StateDocument
   , documentManifestPath :: Text
   , documentIntermediatePath :: Text
   , documentTargetSnapshotRoot :: Text
+  , documentFactsFile :: Maybe Text
+  , documentFacts :: Map Text Text
   , documentCreatedTime :: Text
   , documentUpdatedTime :: Text
   , documentLifecycle :: LifecycleDocument
   , documentTargets :: Map Text TargetDocument
   , documentHooks :: Map Text Text
   , documentHookExecutions :: Map Text HookExecutionDocument
+  }
+
+
+-- | Schema version 3, before repository machine facts were introduced.
+data LegacyV3StateDocument = LegacyV3StateDocument
+  { v3DocumentSchemaVersion :: Integer
+  , v3DocumentRepositoryId :: Text
+  , v3DocumentMachineId :: Text
+  , v3DocumentGenerationId :: Text
+  , v3DocumentCheckoutPath :: Text
+  , v3DocumentManifestPath :: Text
+  , v3DocumentIntermediatePath :: Text
+  , v3DocumentTargetSnapshotRoot :: Text
+  , v3DocumentCreatedTime :: Text
+  , v3DocumentUpdatedTime :: Text
+  , v3DocumentLifecycle :: LifecycleDocument
+  , v3DocumentTargets :: Map Text TargetDocument
+  , v3DocumentHooks :: Map Text Text
+  , v3DocumentHookExecutions :: Map Text HookExecutionDocument
   }
 
 
@@ -851,6 +885,28 @@ instance FromValue StateDocument where
         <*> reqKey "manifest-path"
         <*> reqKey "intermediate-path"
         <*> reqKey "target-snapshot-root"
+        <*> optKey "facts-file"
+        <*> (fromMaybe Map.empty <$> optKey "facts")
+        <*> reqKey "created-at"
+        <*> reqKey "updated-at"
+        <*> reqKey "lifecycle"
+        <*> reqKey "targets"
+        <*> reqKey "hooks"
+        <*> reqKey "hook-executions"
+
+
+instance FromValue LegacyV3StateDocument where
+  fromValue =
+    parseTableFromValue $
+      LegacyV3StateDocument
+        <$> reqKey "schema-version"
+        <*> reqKey "repository-id"
+        <*> reqKey "machine-id"
+        <*> reqKey "generation-id"
+        <*> reqKey "checkout-path"
+        <*> reqKey "manifest-path"
+        <*> reqKey "intermediate-path"
+        <*> reqKey "target-snapshot-root"
         <*> reqKey "created-at"
         <*> reqKey "updated-at"
         <*> reqKey "lifecycle"
@@ -900,7 +956,7 @@ instance ToValue StateDocument where
 
 instance ToTable StateDocument where
   toTable document =
-    table
+    table $
       [ "schema-version" .= document.documentSchemaVersion
       , "repository-id" .= document.documentRepositoryId
       , "machine-id" .= document.documentMachineId
@@ -909,13 +965,19 @@ instance ToTable StateDocument where
       , "manifest-path" .= document.documentManifestPath
       , "intermediate-path" .= document.documentIntermediatePath
       , "target-snapshot-root" .= document.documentTargetSnapshotRoot
-      , "created-at" .= document.documentCreatedTime
-      , "updated-at" .= document.documentUpdatedTime
-      , "lifecycle" .= document.documentLifecycle
-      , "targets" .= document.documentTargets
-      , "hooks" .= document.documentHooks
-      , "hook-executions" .= document.documentHookExecutions
       ]
+        ++ maybe
+          []
+          (\factsFile -> ["facts-file" .= factsFile])
+          document.documentFactsFile
+        ++ [ "facts" .= document.documentFacts
+           , "created-at" .= document.documentCreatedTime
+           , "updated-at" .= document.documentUpdatedTime
+           , "lifecycle" .= document.documentLifecycle
+           , "targets" .= document.documentTargets
+           , "hooks" .= document.documentHooks
+           , "hook-executions" .= document.documentHookExecutions
+           ]
 
 
 -- | Encodes a repository record to versioned TOML.
@@ -932,6 +994,12 @@ encodeMachineState state = showt $ FromStringShow $ encode document
       (osPathText state.manifestPath)
       (osPathText state.intermediatePath)
       (osPathText state.targetSnapshotRoot)
+      (osPathText <$> state.factsFile)
+      ( Map.fromList
+          [ (factKeyText key, factValueText value)
+          | (key, value) <- Map.toList state.declaredFacts
+          ]
+      )
       (timeText state.createdTime)
       (timeText state.updatedTime)
       ( LifecycleDocument
@@ -969,6 +1037,7 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
   document <- case versionDocument.schemaDocumentVersion of
     1 -> upgradeLegacyDocument expectedTargetRoot source
     2 -> upgradeV2Document source
+    3 -> upgradeV3Document source
     version
       | version == schemaVersion -> decodeCurrentDocument source
       | otherwise -> Left $ UnsupportedSchemaVersion version
@@ -996,6 +1065,12 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
       mapLeft MalformedState $ textOsPath document.documentIntermediatePath
     targetSnapshots <-
       mapLeft MalformedState $ textOsPath document.documentTargetSnapshotRoot
+    factsFile' <-
+      traverse
+        (mapLeft MalformedState . textOsPath)
+        document.documentFactsFile
+    facts <- factsFromDocument document.documentFacts
+    validateMachineFacts factsFile' facts
     whenEither (not $ isAbsolute checkout) $
       MalformedState "The checkout-path field must be absolute."
     whenEither (not $ isAbsolute manifest) $
@@ -1038,6 +1113,8 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
         manifest
         intermediate
         targetSnapshots
+        factsFile'
+        facts
         created
         updated
         document.documentLifecycle.lifecycleFirstApplied
@@ -1051,6 +1128,65 @@ decodeCurrentDocument :: Text -> Either StateError StateDocument
 decodeCurrentDocument source = case decode $ Text.unpack source of
   Success _ value -> Right value
   Failure errors -> Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
+
+
+factsFromDocument :: Map Text Text -> Either StateError FactMap
+factsFromDocument = foldM insertFact Map.empty . Map.toList
+ where
+  insertFact facts (keyText, value) = do
+    key <- mapLeft MalformedState $ parseFactKey keyText
+    whenEither (Map.member key facts) $
+      MalformedState $
+        "The facts table contains a duplicate case-insensitive key: "
+          <> keyText
+          <> "."
+    return $ Map.insert key (fromString $ Text.unpack value) facts
+
+
+validateMachineFacts :: Maybe OsPath -> FactMap -> Either StateError ()
+validateMachineFacts factsFile' facts = do
+  whenEither
+    ( maybe
+        False
+        ( \candidate ->
+            not (isAbsolute candidate)
+              && not (isSafeManagedRelativePath candidate)
+        )
+        factsFile'
+    )
+    (MalformedState "The facts-file field must be absolute or a safe relative path.")
+  whenEither (any isBuiltInFact $ Map.keys facts) $
+    MalformedState "The facts table must not override a built-in machine fact."
+
+
+upgradeV3Document :: Text -> Either StateError StateDocument
+upgradeV3Document source = case decoded of
+  Success _ document -> do
+    whenEither (document.v3DocumentSchemaVersion /= 3) $
+      UnsupportedSchemaVersion document.v3DocumentSchemaVersion
+    Right $
+      StateDocument
+        schemaVersion
+        document.v3DocumentRepositoryId
+        document.v3DocumentMachineId
+        document.v3DocumentGenerationId
+        document.v3DocumentCheckoutPath
+        document.v3DocumentManifestPath
+        document.v3DocumentIntermediatePath
+        document.v3DocumentTargetSnapshotRoot
+        Nothing
+        Map.empty
+        document.v3DocumentCreatedTime
+        document.v3DocumentUpdatedTime
+        document.v3DocumentLifecycle
+        document.v3DocumentTargets
+        document.v3DocumentHooks
+        document.v3DocumentHookExecutions
+  Failure errors ->
+    Left $ MalformedState $ Text.intercalate "\n" $ Text.pack <$> errors
+ where
+  decoded :: Result String LegacyV3StateDocument
+  decoded = decode $ Text.unpack source
 
 
 upgradeV2Document :: Text -> Either StateError StateDocument
@@ -1068,6 +1204,8 @@ upgradeV2Document source = case decoded of
         document.v2DocumentManifestPath
         document.v2DocumentIntermediatePath
         document.v2DocumentTargetSnapshotRoot
+        Nothing
+        Map.empty
         document.v2DocumentCreatedTime
         document.v2DocumentUpdatedTime
         document.v2DocumentLifecycle
@@ -1109,6 +1247,8 @@ upgradeLegacyDocument expectedTargetRoot source = do
       legacy.legacyDocumentManifestPath
       legacy.legacyDocumentIntermediatePath
       (osPathText targetRoot)
+      Nothing
+      Map.empty
       legacy.legacyDocumentCreatedTime
       legacy.legacyDocumentUpdatedTime
       legacy.legacyDocumentLifecycle
@@ -2418,6 +2558,8 @@ prepareRepositoryStateUnlocked
                   manifest'
                   requested
                   (managedTargetSnapshotRoot root repositoryId')
+                  Nothing
+                  Map.empty
                   now
                   now
                   legacyFirstApplied
@@ -2692,6 +2834,57 @@ markFirstApplied root now state = catchStateIOErrors $ do
             let updated = current{firstApplied = True, updatedTime = now}
             writeState root updated
             return $ Right updated
+
+
+-- | Atomically applies machine-fact source changes to a repository record.
+--
+-- The fact map contains only additions or replacements requested by the
+-- caller.  The optional path replaces the associated facts file when present;
+-- 'Nothing' preserves the association reloaded under the repository lock.
+updateMachineFacts
+  :: (MonadFileSystem m)
+  => OsPath
+  -- ^ Platform-native machine-state root.
+  -> UTCTime
+  -- ^ Time to store as the record's last update.
+  -> MachineState
+  -- ^ Repository-state generation observed before enrollment began.
+  -> Maybe OsPath
+  -- ^ Facts-file association to replace, or 'Nothing' to preserve it.
+  -> FactMap
+  -- ^ Declared fact additions and replacements to merge into current state.
+  -> m (Either StateError MachineState)
+  -- ^ Updated state, or a validation or persistence error.
+updateMachineFacts root now state requestedFactsFile declaredFactUpdates =
+  case validateMachineFacts requestedFactsFile declaredFactUpdates of
+    Left err -> return $ Left err
+    Right () -> catchStateIOErrors $ do
+      createDirectories $ repositoryStateDirectory root state.repositoryId
+      withFileLock (repositoryStateLockPath root state.repositoryId) $ do
+        forgetting <- isRepositoryForgetInProgress root state.repositoryId
+        case forgetting of
+          Left err -> return $ Left err
+          Right True ->
+            return $ Left $ RepositoryForgetInProgress state.repositoryId
+          Right False -> do
+            loaded <- readRepositoryState root state.repositoryId state.machineId
+            case loaded of
+              Left err -> return $ Left err
+              Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
+              Right (Just current) ->
+                case validateRepositoryStateGeneration state current of
+                  Left err -> return $ Left err
+                  Right () -> do
+                    let updated =
+                          current
+                            { factsFile =
+                                maybe current.factsFile Just requestedFactsFile
+                            , declaredFacts =
+                                Map.union declaredFactUpdates current.declaredFacts
+                            , updatedTime = now
+                            }
+                    writeState root updated
+                    return $ Right updated
 
 
 -- | Records one successful stateful hook execution atomically.

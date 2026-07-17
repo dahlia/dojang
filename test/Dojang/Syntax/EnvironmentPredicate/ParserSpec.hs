@@ -28,7 +28,10 @@ import Dojang.Syntax.EnvironmentPredicate.Parser
   , strings
   , suffixOp
   )
-import Dojang.Types.Environment (Architecture (..), OperatingSystem (..))
+import Dojang.Types.Environment
+  ( Architecture (..)
+  , OperatingSystem (..)
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.MonikerName (parseMonikerName)
 
@@ -100,6 +103,9 @@ spec = do
     parse p "" " arch = 'x86_64' " `shouldParse` Architecture X86_64
     parse p "" "kernel = Darwin" `shouldParse` KernelName "Darwin"
     parse p "" "kernel-release=\"1.2.3\"" `shouldParse` KernelRelease "1.2.3"
+    parse p "" "fact.class = \"work\"" `shouldParse` Fact "class" "work"
+    parse p "" "fact.org.example.role = developer"
+      `shouldParse` Fact "org.example.role" "developer"
     let Right fooBar = parseMonikerName "foo-bar"
     parse p "" " moniker == \"foo-bar\" " `shouldParse` Moniker fooBar
     parse p "" " moniker = 'invalid moniker' " `shouldParse` Not Always
@@ -123,8 +129,11 @@ spec = do
         , Not $ OperatingSystem MacOS
         ]
     parse p "" " arch not in () " `shouldParse` Always
+    parse p "" "fact.class not in ()" `shouldParse` FactDefined "class"
     parse p "" "moniker not in ('foo-bar', baz,)"
       `shouldParse` And [Not $ Moniker fooBar, Not $ Moniker baz]
+    parse p "" "fact.class in (work, personal)"
+      `shouldParse` Or [Fact "class" "work", Fact "class" "personal"]
     parse p "" "os ^= lin"
       `shouldFailWith` err
         3
@@ -271,11 +280,15 @@ spec = do
     parse p "" "kernel" `shouldParse` Kernel
     parse p "" "kernel-release" `shouldParse` KernelRelease'
     parse p "" "moniker" `shouldParse` Moniker'
+    parse p "" "fact.class" `shouldParse` FactField "class"
+    parse p "" "fact.org.example-role"
+      `shouldParse` FactField "org.example-role"
     parse p "" "foo"
       `shouldFailWith` err
         0
         ( utoks "foo"
             <> etoks "arch"
+            <> etoks "fact."
             <> etoks "kernel"
             <> etoks "kernel-release"
             <> etoks "moniker"

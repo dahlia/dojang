@@ -20,7 +20,7 @@ import Dojang.Syntax.Manifest.Parser
   , formatErrors
   , readManifest
   )
-import Dojang.Types.Environment (Environment (Environment), Kernel (Kernel))
+import Dojang.Types.Environment (Kernel (Kernel), emptyEnvironment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression
   ( FilePathExpression (BareComponent)
@@ -306,7 +306,7 @@ spec = do
         let Just route = Map.lookup foo routes
         route.predicates `shouldBe` [(Always, Just "target")]
         dispatch
-          (Environment "linux" "x86_64" $ Kernel "Linux" "6.0")
+          (emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0")
           route
           `shouldBe` ([Just "target"], [])
 

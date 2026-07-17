@@ -12,6 +12,8 @@ os = linux
 arch = "x86_64"
 os in (linux, freebsd, macos)
 arch not in (x86, "x86_64")
+fact.class = work
+fact.org.team in (platform, infrastructure)
 kernel-release ^= "4.1"
 !(os in (linux, freebsd, macos) && arch = "x86_64" || os = openbsd)
 ~~~~
@@ -20,13 +22,17 @@ kernel-release ^= "4.1"
 좌항
 ----
 
-서술 대상이 되는 필드로는 세 가지가 있습니다.
+서술 대상이 되는 필드는 다음과 같습니다.
 
  -  `os`: 운영체제
  -  `arch`: 프로세서 아키텍처
  -  `kernel`: 커널
  -  `kernel-release`: 커널 버전
+ -  `fact.KEY`: 이름 붙은 [머신 정보].  `KEY`에는 `org.team` 같은 점 구분
+    이름공간을 쓸 수 있음
  -  `moniker`: 모니커
+
+[머신 정보]: machine-facts.ko.md
 
 
 비교 연산자
@@ -43,6 +49,7 @@ kernel-release ^= "4.1"
 
 비교 연산자의 앞쪽에는 언제나 필드가 오고, `=`, `!=`, `^=`, `$=` 뒤에는 문자열
 리터럴이, `in`과 `not in` 뒤에는 목록이 옵니다.
+일반 `fact.KEY` 필드에는 `=`, `!=`, `in`, `not in`을 쓸 수 있습니다.
 
 > **Note**
 >

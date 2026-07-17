@@ -84,7 +84,13 @@ import Dojang.Commands (Admonition (..), die', pathStyleFor, printStderr')
 import Dojang.ExitCodes (hookFailedError, machineStateError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context (Context (..))
-import Dojang.Types.Environment (Environment (..), Kernel (..))
+import Dojang.Types.Environment
+  ( Environment (..)
+  , FactMap
+  , Kernel (..)
+  , factKeyText
+  , factValueText
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate (evaluate)
 import Dojang.Types.Hook
   ( Hook (..)
@@ -136,6 +142,8 @@ data HookEnv = HookEnv
   -- ^ The current kernel name.
   , currentKernelRelease :: Text
   -- ^ The current kernel release.
+  , currentFacts :: FactMap
+  -- ^ The hostname and user-defined machine facts.
   , commandName :: Text
   -- ^ The command whose lifecycle event is running.
   , selectedPaths :: [OsPath]
@@ -215,6 +223,7 @@ makeHookEnv command paths ctx state = do
       (original environment.architecture.identifier)
       (original environment.kernel.name)
       (original environment.kernel.release)
+      environment.additionalFacts
       command
       (sort $ nub normalizedPaths)
       state
@@ -352,6 +361,7 @@ managedHookContextNames =
   , "DOJANG_ARCH"
   , "DOJANG_KERNEL"
   , "DOJANG_KERNEL_RELEASE"
+  , "DOJANG_HOSTNAME"
   , "DOJANG_COMMAND"
   , "DOJANG_HOOK_EVENT"
   , "DOJANG_HOOK_ID"
@@ -663,6 +673,9 @@ hookFingerprint hookEnv hookType hook =
               , hookEnv.currentKernelRelease
               ]
       )
+        ++ [ encodeUtf8 $ factKeyText key <> "=" <> factValueText value
+           | (key, value) <- Map.toAscList hookEnv.currentFacts
+           ]
         ++ (osPathBytes <$> hookEnv.selectedPaths)
 
 
@@ -763,11 +776,15 @@ runHookProcess hookEnv hookType recursionKey identifier hook start = do
         , ("DOJANG_HOOK_DEPTH", show $ depth + 1)
         , ("DOJANG_HOOK_STACK", unpack recursionKey <> stackSuffix parentEnv)
         ]
-          <> zipWith
-            (\index value -> ("DOJANG_PATH_" <> show index, value))
-            [0 :: Int ..]
-            paths
-          <> postEnvironment
+          ++ maybe
+            []
+            (\value -> [("DOJANG_HOSTNAME", unpack $ factValueText value)])
+            (Map.lookup "hostname" hookEnv.currentFacts)
+            <> zipWith
+              (\index value -> ("DOJANG_PATH_" <> show index, value))
+              [0 :: Int ..]
+              paths
+            <> postEnvironment
       postEnvironment =
         if "post-" `Text.isPrefixOf` renderHookType hookType
           then [("DOJANG_COMMAND_OUTCOME", "success"), ("DOJANG_EXIT_CODE", "0")]

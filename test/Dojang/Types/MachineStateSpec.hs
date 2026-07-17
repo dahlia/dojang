@@ -106,6 +106,7 @@ import Dojang.Types.MachineState
   , repositoryStatePath
   , resolveStateRoot
   , selectRepositoryState
+  , updateMachineFacts
   , updateManagedTargets
   , updateManagedTargetsWith
   , validateMachineStateStore
@@ -211,6 +212,34 @@ spec = do
       decodeMachineState state.repositoryId state.machineId (encodeMachineState state)
         `shouldBe` Right state
 
+    it "round-trips repository machine facts" $ do
+      state <- fixtureState
+      factsName <- encodeFS "facts.toml"
+      let populated =
+            state
+              { factsFile = Just factsName
+              , declaredFacts =
+                  Map.fromList [("class", "work"), ("org.team", "platform")]
+              }
+      decodeMachineState
+        state.repositoryId
+        state.machineId
+        (encodeMachineState populated)
+        `shouldBe` Right populated
+
+    it "rejects case-insensitive duplicate machine facts" $ do
+      state <- fixtureState
+      let populated = state{declaredFacts = Map.singleton "class" "work"}
+      let document = encodeMachineState populated
+      Text.isInfixOf "class = \"work\"" document `shouldBe` True
+      let duplicated =
+            Text.replace
+              "class = \"work\""
+              "class = \"work\"\nCLASS = \"personal\""
+              document
+      decodeMachineState state.repositoryId state.machineId duplicated
+        `shouldSatisfy` isMalformed
+
     it "upgrades the schema-v1 state written before target tracking" $
       withTempDir $ \root _ -> do
         initial <- fixtureState
@@ -292,6 +321,22 @@ spec = do
         current.machineId
         legacyDocument
         `shouldBe` Right expected
+
+    it "upgrades schema-version 3 with empty machine facts" $ do
+      current <- fixtureState
+      let currentDocument = encodeMachineState current
+      Text.isInfixOf "schema-version = 4" currentDocument `shouldBe` True
+      let legacyDocument =
+            Text.replace
+              "schema-version = 4"
+              "schema-version = 3"
+              currentDocument
+      Text.isInfixOf "schema-version = 3" legacyDocument `shouldBe` True
+      decodeMachineState
+        current.repositoryId
+        current.machineId
+        legacyDocument
+        `shouldBe` Right current
 
     it "round-trips managed targets and hook execution history" $ do
       state <- fixtureState
@@ -632,14 +677,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 3" "schema-version = 4" encoded
+          Text.replace "schema-version = 4" "schema-version = 5" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 4)
+        `shouldBe` Left (UnsupportedSchemaVersion 5)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 4\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 4)
+        "schema-version = 5\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 5)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -1735,7 +1780,7 @@ spec = do
               parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
         let unsafeState =
               MachineState
-                2
+                4
                 paths.repositoryId
                 paths.machineId
                 generation
@@ -1743,6 +1788,8 @@ spec = do
                 (paths.checkout </> paths.file)
                 paths.checkout
                 (managedTargetSnapshotRoot paths.root paths.repositoryId)
+                Nothing
+                Map.empty
                 fixtureTime
                 fixtureTime
                 False
@@ -2497,6 +2544,141 @@ spec = do
         readFile (new </> paths.file) >>= (`shouldBe` "ancestor")
 
   describe "concurrent state persistence" $ do
+    it "rejects built-in facts before updating machine state" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            state
+            Nothing
+            (Map.singleton "os" "linux")
+        updated `shouldSatisfy` isMalformed
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
+    it "rejects unsafe facts-file paths before updating machine state" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        parent <- encodeFS ".."
+        factsName <- encodeFS "facts.toml"
+        let unsafeFactsFile = parent </> factsName
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            state
+            (Just unsafeFactsFile)
+            Map.empty
+        updated `shouldSatisfy` isMalformed
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
+    it "merges machine facts with state reloaded under the lock" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        oldProfile <- encodeFS "old-facts.toml"
+        newProfile <- encodeFS "new-facts.toml"
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        initial <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        seeded <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            initial
+            (Just oldProfile)
+            (Map.singleton "class" "work")
+        stale <- case seeded of
+          Right state -> return state
+          _ -> fail $ "Unexpected state: " <> show seeded
+        concurrent <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            stale
+            (Just newProfile)
+            (Map.singleton "org.team" "platform")
+        concurrent `shouldSatisfy` isRight
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            stale
+            Nothing
+            (Map.singleton "location" "home")
+        case updated of
+          Right current -> do
+            current.factsFile `shouldBe` Just newProfile
+            current.declaredFacts
+              `shouldBe` Map.fromList
+                [ ("class", "work")
+                , ("location", "home")
+                , ("org.team", "platform")
+                ]
+            readRepositoryState paths.root paths.repositoryId paths.machineId
+              `shouldReturn` Right (Just current)
+          _ -> fail $ "Unexpected state: " <> show updated
+
+    it "rejects fact enrollment while repository forget is pending" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        state <- case prepared of
+          Right (created, CreatedRepositoryState) -> return created
+          _ -> fail $ "Unexpected state: " <> show prepared
+        markRepositoryForgetInProgress paths.root paths.repositoryId
+          `shouldReturn` Right ()
+        updated <-
+          updateMachineFacts
+            paths.root
+            fixtureTime
+            state
+            Nothing
+            (Map.singleton "class" "work")
+        updated
+          `shouldBe` Left (RepositoryForgetInProgress paths.repositoryId)
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just state)
+
     it "rejects target updates while repository forget is pending" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp
@@ -2932,7 +3114,7 @@ fixtureState = do
   let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      3
+      4
       repositoryId'
       machineId'
       generationId
@@ -2940,6 +3122,8 @@ fixtureState = do
       (checkout </> manifestName)
       intermediate
       targetSnapshots
+      Nothing
+      Map.empty
       fixtureTime
       fixtureTime
       False

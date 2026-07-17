@@ -60,6 +60,7 @@ spec = do
     specificity undefined (Always) `shouldBe` Specificity 0 0
     specificity undefined (OperatingSystem Linux) `shouldBe` Specificity 1 1
     specificity undefined (Architecture X86_64) `shouldBe` Specificity 1 1
+    specificity undefined (Fact "class" "work") `shouldBe` Specificity 1 1
     specificity undefined (Not Always) `shouldBe` Specificity 0 0
     specificity undefined (Not (Architecture X86_64)) `shouldBe` Specificity 1 1
     specificity undefined (And [Always, Architecture X86_64])

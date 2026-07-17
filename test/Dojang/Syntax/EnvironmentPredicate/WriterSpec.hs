@@ -35,6 +35,8 @@ spec = do
       write (OperatingSystem "linux") `shouldBe` "os = linux"
       write (Architecture "x86_64")
         `shouldBe` "arch = \"x86_64\""
+      write (Fact "class" "work") `shouldBe` "fact.class = work"
+      write (FactDefined "class") `shouldBe` "fact.class not in ()"
       let Right fooBar = parseMonikerName "foo-bar"
       write (Moniker fooBar) `shouldBe` "moniker = \"foo-bar\""
 
@@ -62,6 +64,8 @@ spec = do
       let Right foo = parseMonikerName "foo"
       let Right bar = parseMonikerName "bar"
       write (Or [Moniker foo, Moniker bar]) `shouldBe` "moniker in (foo, bar)"
+      write (Or [Fact "class" "work", Fact "class" "personal"])
+        `shouldBe` "fact.class in (work, personal)"
 
     specify
       ( "homogenous negative predicates in And are expressed using "
@@ -77,6 +81,8 @@ spec = do
         let Right bar = parseMonikerName "bar"
         write (And [Not $ Moniker foo, Not $ Moniker bar])
           `shouldBe` "moniker not in (foo, bar)"
+        write (And [Not $ Fact "class" "work", Not $ Fact "class" "personal"])
+          `shouldBe` "fact.class not in (work, personal)"
 
     it "properly wrap sub-expressions with parentheses" $ do
       let Right foo = parseMonikerName "foo"

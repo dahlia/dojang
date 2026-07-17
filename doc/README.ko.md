@@ -25,6 +25,7 @@ Dojang, 크로스플랫폼 닷파일 관리자
  -  [훅](hooks.ko.md)
  -  [경로 지정](routing.ko.md)
  -  [환경](environment.ko.md)
+ -  [머신 정보](machine-facts.ko.md)
  -  [환경 서술어](environment-predicate.ko.md)
  -  [파일 경로 표현식](file-path-expression.ko.md)
  -  [종료 코드](exit-codes.ko.md)

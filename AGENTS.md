@@ -399,6 +399,21 @@ conventions:
 Important conventions
 ---------------------
 
+### Compatibility
+
+Dojang's command-line interface is its primary public interface.  Preserve
+backward compatibility for commands, options, manifest syntax, environment
+files, persisted state, and documented workflows whenever practical.  If a CLI
+or file-format change must be incompatible, provide a migration path and
+describe it prominently in *CHANGES.md*.
+
+The Haskell API is still under development before version 1.0.0.  Source
+compatibility for that API is not a goal when it would require an unsafe or
+misleading abstraction, complicate the data model, or weaken the design.  In
+those cases, prefer the clearer and safer API, update all in-tree callers, and
+document the breaking change and its migration in *CHANGES.md*.  Reassess this
+policy when preparing version 1.0.0.
+
 ### Error handling
 
  -  Use `ExitCode` constants from `Dojang.ExitCodes` (never hardcode exit codes)

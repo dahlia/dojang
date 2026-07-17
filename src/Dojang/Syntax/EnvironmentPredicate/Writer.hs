@@ -6,7 +6,12 @@ module Dojang.Syntax.EnvironmentPredicate.Writer
   )
 where
 
-import Dojang.Types.Environment (Architecture, OperatingSystem)
+import Dojang.Types.Environment
+  ( Architecture
+  , OperatingSystem
+  , factKeyText
+  , factValueText
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.MonikerName (MonikerName)
 
@@ -26,6 +31,7 @@ import Data.Text
   )
 import Numeric (showHex)
 import Prelude hiding (all, concatMap, elem, reverse)
+import qualified Prelude
 
 
 -- | Turns an 'EnvironmentPredicate' into a string that can be used in a
@@ -53,17 +59,23 @@ write (KernelReleasePrefix prefix) =
   ("kernel-release ^= " <> stringLiteral (original prefix), False)
 write (KernelReleaseSuffix suffix) =
   ("kernel-release $= " <> stringLiteral (original suffix), False)
+write (Fact key value) =
+  ( "fact." <> factKeyText key <> " = " <> stringLiteral (factValueText value)
+  , False
+  )
+write (FactDefined key) =
+  ("fact." <> factKeyText key <> " not in ()", False)
 write (Moniker moniker) =
   ("moniker = " <> stringLiteral (original moniker.name), False)
 write (And predicates) =
-  case (excludeOses, excludeArchitectures, excludeMonikers) of
-    (_ : _, [], [])
+  case (excludeOses, excludeArchitectures, excludeMonikers, excludeFacts) of
+    (_ : _, [], [], [])
       | length excludeOses == length predicates ->
           ( "os not in "
               <> strings [original os.identifier | os <- excludeOses]
           , False
           )
-    ([], _ : _, [])
+    ([], _ : _, [], [])
       | length excludeArchitectures == length predicates ->
           ( "arch not in "
               <> strings
@@ -72,10 +84,19 @@ write (And predicates) =
                 ]
           , False
           )
-    ([], [], _ : _)
+    ([], [], _ : _, [])
       | length excludeMonikers == length predicates ->
           ( "moniker not in "
               <> strings [original moniker.name | moniker <- excludeMonikers]
+          , False
+          )
+    ([], [], [], (key, _) : _)
+      | length excludeFacts == length predicates
+      , Prelude.all ((== key) . fst) excludeFacts ->
+          ( "fact."
+              <> factKeyText key
+              <> " not in "
+              <> strings [factValueText value | (_, value) <- excludeFacts]
           , False
           )
     _ ->
@@ -94,21 +115,31 @@ write (And predicates) =
   excludeArchitectures = [arch | Not (Architecture arch) <- toList predicates]
   excludeMonikers :: [MonikerName]
   excludeMonikers = [moniker | Not (Moniker moniker) <- toList predicates]
+  excludeFacts = [(key, value) | Not (Fact key value) <- toList predicates]
 write (Or predicates) =
-  case (oses, architectures, monikers) of
-    (_ : _, [], [])
+  case (oses, architectures, monikers, facts) of
+    (_ : _, [], [], [])
       | length oses == length predicates ->
           ("os in " <> strings [original os.identifier | os <- oses], False)
-    ([], _ : _, [])
+    ([], _ : _, [], [])
       | length architectures == length predicates ->
           ( "arch in "
               <> strings [original arch.identifier | arch <- architectures]
           , False
           )
-    ([], [], _ : _)
+    ([], [], _ : _, [])
       | length monikers == length predicates ->
           ( "moniker in "
               <> strings [original moniker.name | moniker <- monikers]
+          , False
+          )
+    ([], [], [], (key, _) : _)
+      | length facts == length predicates
+      , Prelude.all ((== key) . fst) facts ->
+          ( "fact."
+              <> factKeyText key
+              <> " in "
+              <> strings [factValueText value | (_, value) <- facts]
           , False
           )
     _ -> (intercalate " || " (fst . write <$> toList predicates), True)
@@ -119,6 +150,7 @@ write (Or predicates) =
   architectures = [arch | Architecture arch <- toList predicates]
   monikers :: [MonikerName]
   monikers = [moniker | Moniker moniker <- toList predicates]
+  facts = [(key, value) | Fact key value <- toList predicates]
 write (Not Always) = ("never", False)
 write (Not (OperatingSystem os)) =
   ("os != " <> stringLiteral (original os.identifier), False)
@@ -126,6 +158,10 @@ write (Not (Architecture arch)) =
   ("arch != " <> stringLiteral (original arch.identifier), False)
 write (Not (Moniker moniker)) =
   ("moniker != " <> stringLiteral (original moniker.name), False)
+write (Not (Fact key value)) =
+  ( "fact." <> factKeyText key <> " != " <> stringLiteral (factValueText value)
+  , False
+  )
 write (Not p) = ("!(" <> fst (write p) <> ")", False)
 
 

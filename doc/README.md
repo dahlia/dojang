@@ -26,6 +26,7 @@ There are also reference docs for various topics:
  -  [Hooks](hooks.en.md)
  -  [Routing](routing.en.md)
  -  [Environment](environment.en.md)
+ -  [Machine facts](machine-facts.en.md)
  -  [Environment predicate](environment-predicate.en.md)
  -  [File path expression](file-path-expression.en.md)
  -  [Exit codes](exit-codes.en.md)

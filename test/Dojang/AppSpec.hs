@@ -7,6 +7,10 @@
 module Dojang.AppSpec (spec) where
 
 import Control.Exception qualified
+import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
+import Data.ByteString.Char8 qualified as ByteString
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Map.Strict qualified as Map
 
 
 #ifndef mingw32_HOST_OS
@@ -14,26 +18,41 @@ import Control.Exception (bracket_)
 #endif
 
 import System.Directory.OsPath qualified
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Info (os)
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, it, runIO, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldThrow)
-import Prelude hiding (writeFile)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Prelude hiding (readFile, writeFile)
 
 import Dojang.App
   ( AppEnv (..)
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
+  , currentEnvironment'
   , prepareMachineState
+  , runAppWithLogging
   , runAppWithoutLogging
   , validateRepositoryCheckout
   )
 import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
-  ( MonadFileSystem (createDirectories, writeFile)
+  ( MonadFileSystem
+      ( createDirectories
+      , exists
+      , readFile
+      , removeDirectory
+      , writeFile
+      )
   )
 import Dojang.TestUtils (withHome, withTempDir)
-import Dojang.Types.MachineState (MachineState (..), StateError (..))
+import Dojang.Types.Environment (lookupFact)
+import Dojang.Types.MachineState
+  ( MachineState (..)
+  , StateError (..)
+  , repositoryStatePath
+  , updateMachineFacts
+  )
 import Dojang.Types.Manifest (Manifest (Manifest))
 import Dojang.Types.Registry
   ( Registry (Registry)
@@ -55,8 +74,397 @@ spec = sequential $ do
       )
       `catchIO` const (return False)
   let redirectedHomeIt = if os == "mingw32" then xit else it
+  let posixIt = if os == "mingw32" then xit else it
   let redirectedHomeSymlinkIt =
         if symlinkAvailable then redirectedHomeIt else xit
+
+  posixIt "reads a complete environment file without detecting the host" $
+    withTempDir $ \tmp tmpPath -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      createDirectories checkout
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              (tmp </> stateName)
+              manifestName
+              envName
+              False
+              False
+      environment <-
+        withPath tmpPath $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "os" environment `shouldBe` Just "linux"
+
+  it "combines a facts-only environment file with the detected host" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      createDirectories checkout
+      writeFile
+        (checkout </> envName)
+        "[facts]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              (tmp </> stateName)
+              manifestName
+              envName
+              False
+              False
+      environment <- runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+
+  it "inspects a repository environment without creating machine state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+            <> "[facts]\n"
+            <> "class = \"work\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+      exists stateRoot `shouldReturn` False
+
+  it "inspects a legacy repository environment without machine state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      writeFile (checkout </> manifestName) ""
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "os" environment `shouldBe` Just "linux"
+      exists stateRoot `shouldReturn` False
+
+  it "loads persisted facts without rewriting machine state" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile
+        (checkout </> envName)
+        ( "os = \"linux\"\n"
+            <> "arch = \"x86_64\"\n"
+            <> "[kernel]\n"
+            <> "name = \"Linux\"\n"
+            <> "release = \"6.0\"\n"
+        )
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          Nothing
+          (Map.singleton "class" "work")
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      let statePath = repositoryStatePath stateRoot repositoryId
+      before <- readFile statePath
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+      readFile statePath `shouldReturn` before
+
+  it "lets repository facts override a facts-only default file" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (checkout </> envName) "[facts]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just envName)
+          (Map.singleton "class" "personal")
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "personal"
+
+  it "lets an explicit facts-only environment override repository facts" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      simulationName <- encodeFS "simulation.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (checkout </> simulationName) "[facts]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              simulationName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          Nothing
+          (Map.singleton "class" "personal")
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      environment <-
+        withHome home $ runAppWithoutLogging appEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+
+  it "loads associated facts once during detected-host fallback" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories checkout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      writeFile
+        (checkout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile (checkout </> factsName) "[fact]\nclass = \"work\"\n"
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just factsName)
+          Map.empty
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      warnings <- newIORef []
+      _ <-
+        withHome home $
+          runAppWithLogging appEnv currentEnvironment' $
+            \_ _ level message ->
+              if level == LevelWarn
+                then modifyIORef' warnings (fromLogStr message :)
+                else return ()
+      messages <- readIORef warnings
+      length
+        (filter (ByteString.isInfixOf "unexpected key") messages)
+        `shouldBe` 1
+
+  it "resolves a relative facts file from a moved checkout" $
+    withTempDir $ \tmp _ -> do
+      oldCheckoutName <- encodeFS "old-checkout"
+      movedCheckoutName <- encodeFS "moved-checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      factsName <- encodeFS "facts.toml"
+      let oldCheckout = tmp </> oldCheckoutName
+      let movedCheckout = tmp </> movedCheckoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      createDirectories oldCheckout
+      createDirectories home
+      let Right repositoryId =
+            parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+      let oldAppEnv =
+            AppEnv
+              oldCheckout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      state <-
+        withHome home $
+          runAppWithoutLogging oldAppEnv $
+            prepareMachineState manifest
+      enrolled <-
+        updateMachineFacts
+          stateRoot
+          state.updatedTime
+          state
+          (Just factsName)
+          Map.empty
+      case enrolled of
+        Left err -> fail $ "Unexpected state error: " <> show err
+        Right _ -> return ()
+      removeDirectory oldCheckout
+      createDirectories movedCheckout
+      writeFile
+        (movedCheckout </> manifestName)
+        "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
+      writeFile
+        (movedCheckout </> factsName)
+        "[facts]\nclass = \"work\"\n"
+      let movedAppEnv = oldAppEnv{sourceDirectory = movedCheckout}
+      let statePath = repositoryStatePath stateRoot repositoryId
+      before <- readFile statePath
+      environment <-
+        withHome home $ runAppWithoutLogging movedAppEnv currentEnvironment'
+      lookupFact "class" environment `shouldBe` Just "work"
+      readFile statePath `shouldReturn` before
 
   redirectedHomeSymlinkIt "preserves first-apply history across checkout aliases" $
     withTempDir $ \tmp _ -> do
@@ -597,3 +1005,13 @@ posixUnreadableRegistrySpec =
 
 catchIO :: IO a -> (IOError -> IO a) -> IO a
 catchIO = Control.Exception.catch
+
+
+withPath :: String -> IO a -> IO a
+withPath path action =
+  Control.Exception.bracket (lookupEnv "PATH") restore $ \_ -> do
+    setEnv "PATH" path
+    action
+ where
+  restore Nothing = unsetEnv "PATH"
+  restore (Just previous) = setEnv "PATH" previous
