@@ -68,7 +68,9 @@ when = "os = linux"
  -  `args` (문자열 배열): 명령 인자.  기본값은 빈 배열.
  -  `when` (문자열): 훅을 검토하기 전에 만족해야 하는 [환경 서술어].  기본값은
     `always`.
- -  `working-directory` (문자열): 작업 디렉터리.  기본값은 저장소 디렉터리.
+ -  `working-directory` (문자열): 작업 디렉터리를 나타내는 [파일 경로 표현식].
+    상대 경로 결과는 저장소 디렉터리를 기준으로 하며, 기본값도 저장소
+    디렉터리입니다.
  -  `ignore-failure` (불리언): 실행 실패나 0이 아닌 종료 코드 뒤에도 명령을
     계속 진행할지 여부.  기본값은 `false`.
  -  `id` (문자열): 상태 저장형 훅의 안정적인 식별자.
@@ -78,6 +80,7 @@ when = "os = linux"
  -  `change-key` (비어 있지 않은 문자열): `on-change`에 필요한 명시적인 개정 키.
 
 [환경 서술어]: environment-predicate.ko.md
+[파일 경로 표현식]: file-path-expression.ko.md
 
 
 실행 정책
@@ -97,8 +100,8 @@ command = "/usr/local/bin/install-status-helper"
 ~~~~
 
 `on-change`에는 `id`와 `change-key`가 모두 필요합니다.  명시적인 키, 정규화된
-훅 설정, 일치하는 머신 정보, 수명 주기 이벤트, 선택한 경로 범위 중 하나가
-바뀌면 실행됩니다:
+훅 설정, 일치하는 머신 정보, 수명 주기 이벤트, 선택한 경로 범위, 실제 작업
+디렉터리, 또는 그 디렉터리를 결정하는 입력 중 하나가 바뀌면 실행됩니다:
 
 ~~~~ toml
 [[hooks.post-apply]]

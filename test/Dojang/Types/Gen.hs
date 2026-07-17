@@ -22,6 +22,8 @@ module Dojang.Types.Gen
   , kernel
   , manifest
   , manifest'
+  , manifestVariableMap
+  , manifestVariableName
   , monikerMap
   , monikerMap'
   , monikerName
@@ -38,6 +40,7 @@ module Dojang.Types.Gen
 
 import Data.Char (isAlpha, isAlphaNum, isAscii, isControl, toUpper)
 import Data.List (nub)
+import Data.List.NonEmpty qualified as NonEmpty
 import Data.String (IsString (fromString))
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (lookup)
@@ -84,6 +87,13 @@ import Dojang.Types.Hook
   , renderHookId
   )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.ManifestVariable
+  ( ManifestVariableMap
+  , ManifestVariableName
+  , manifestVariable
+  , manifestVariablePreservingOrder
+  , parseManifestVariableName
+  )
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName
   ( MonikerName
@@ -300,7 +310,7 @@ filePathExpression' maxDepth =
       <$> Gen.text
         (constantFrom 1 1 256)
         ( Gen.filterT
-            (`notElem` ['/', '\\', '$', '{', '}', ':', '\r', '\n'])
+            (`notElem` ['/', '\\', '{', '}', ':', '\r', '\n'])
             osChar
         )
   root :: (MonadGen m) => m FilePathExpression
@@ -471,14 +481,51 @@ ignoreMap :: (MonadGen m) => m (Map.Map OsPath [String])
 ignoreMap = ignoreMap' (constantFrom 0 0 5)
 
 
+manifestVariableName :: (MonadGen m) => m ManifestVariableName
+manifestVariableName = do
+  first <- Gen.element $ '_' : ['A' .. 'Z'] ++ ['a' .. 'z']
+  rest <-
+    Gen.text
+      (constantFrom 0 0 32)
+      (Gen.element $ '_' : ['A' .. 'Z'] ++ ['a' .. 'z'] ++ ['0' .. '9'])
+  let Right name = parseManifestVariableName $ cons first rest
+  return name
+
+
+manifestVariableMap
+  :: (MonadGen m) => Range Int -> MonikerMap -> m ManifestVariableMap
+manifestVariableMap range monikers = Gen.map range $ do
+  name <- manifestVariableName
+  variable <- Gen.frequency [(2, compact), (8, detailed)]
+  return (name, variable)
+ where
+  value =
+    Gen.frequency
+      [ (1, pure $ BareComponent $ pack "")
+      , (9, filePathExpression)
+      ]
+  compact = manifestVariable monikers <$> value
+  detailed = do
+    count <- Gen.integral $ constantFrom 1 1 4
+    predicates <-
+      Gen.list (singleton count) $ normalizePredicate <$> environmentPredicate' 2
+    values <- Gen.list (singleton count) value
+    return $
+      manifestVariablePreservingOrder
+        (`lookup` monikers)
+        (NonEmpty.fromList $ zip predicates values)
+
+
 manifest' :: forall m. (MonadGen m) => Range Int -> Range Int -> m Manifest
 manifest' monikerMapRange fileRouteMapRange = do
   repositoryId <- Gen.maybe repositoryIdGen
   monikers <- monikerMap' monikerMapRange
+  variables <- manifestVariableMap (constantFrom 0 0 5) monikers
   fileRoutes <- fileRouteMap fileRouteMapRange monikers
   ignorePatterns <- ignoreMap
   hooks <- hookMap (constant 0 3)
-  return $ Manifest repositoryId monikers fileRoutes ignorePatterns hooks
+  return $
+    Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks
 
 
 manifest :: (MonadGen m) => m Manifest
@@ -489,10 +536,12 @@ arbitraryManifest :: (MonadGen m) => m Manifest
 arbitraryManifest = do
   repositoryId <- Gen.maybe repositoryIdGen
   monikers <- monikerMap' (constantFrom 0 0 5)
+  variables <- manifestVariableMap (constantFrom 0 0 5) monikers
   fileRoutes <- arbitraryFileRouteMap (constantFrom 0 0 5) monikers
   ignorePatterns <- ignoreMap' (constantFrom 1 1 5)
   hooks <- hookMap (constant 0 3)
-  return $ Manifest repositoryId monikers fileRoutes ignorePatterns hooks
+  return $
+    Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks
 
 
 repositoryIdGen :: (MonadGen m) => m RepositoryId
@@ -516,7 +565,7 @@ hook = do
   argsCount <- Gen.integral (constant 0 5)
   args' <- Gen.list (singleton argsCount) $ Gen.text (constant 1 20) Gen.alphaNum
   cond <- normalizePredicate <$> environmentPredicate' 2
-  workDir <- Gen.maybe $ osPath (constant 1 3)
+  workDir <- Gen.maybe filePathExpression
   ignoreFail <- Gen.bool
   return
     Hook

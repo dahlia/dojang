@@ -63,7 +63,7 @@ import Dojang.Commands.Hook
   , commandHookTypes
   , defaultHookProcessRunner
   , disambiguatedHookScopePaths
-  , effectiveHookWorkingDirectory
+  , effectiveHookWorkingDirectoryWithVariables
   , executeHooks
   , hookDueReason
   , hookIsDue
@@ -85,6 +85,10 @@ import Dojang.Types.Environment
   , emptyEnvironment
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent, PathSeparator, Substitution)
+  )
+import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
 import Dojang.Types.Hook
   ( Hook (..)
   , HookPolicy (..)
@@ -441,10 +445,16 @@ spec = sequential $ do
         let Right repositoryId =
               parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
         let initialManifest =
-              Manifest (Just repositoryId) empty Map.empty Map.empty $
+              Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty $
                 Map.singleton PostStatus [hook]
         let replacementManifest =
-              Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty
+              Manifest
+                (Just repositoryId)
+                empty
+                Map.empty
+                Map.empty
+                Map.empty
+                Map.empty
         let manifestFilePath = tmpDir </> manifestFilename
         let appEnv =
               AppEnv
@@ -475,6 +485,7 @@ spec = sequential $ do
         stateDir <- encodeFS ".state"
         command <- encodeFS "hook-command"
         relativeWorkingDirectory <- encodeFS "tools/hooks"
+        toolsDirectory <- encodeFS "tools"
         let hook =
               Hook
                 { hookId = Nothing
@@ -483,7 +494,11 @@ spec = sequential $ do
                 , command = command
                 , args = []
                 , condition = Always
-                , workingDirectory = Just relativeWorkingDirectory
+                , workingDirectory =
+                    Just $
+                      PathSeparator
+                        (Substitution "TOOLS")
+                        (BareComponent "hooks")
                 , ignoreFailure = False
                 }
         let Right repositoryId =
@@ -540,7 +555,15 @@ spec = sequential $ do
                 defaultHookProcessRunner
         resolved <-
           runAppWithoutLogging appEnv $
-            effectiveHookWorkingDirectory hookEnv hook
+            effectiveHookWorkingDirectoryWithVariables
+              ( simpleVariableGetter $ \variable ->
+                  pure $
+                    if variable == "TOOLS"
+                      then Just toolsDirectory
+                      else Nothing
+              )
+              hookEnv
+              hook
         resolved `shouldBe` normalise (tmpDir </> relativeWorkingDirectory)
 
     it "inherits the parent environment and overrides Dojang variables" $
@@ -569,12 +592,16 @@ spec = sequential $ do
         let Right generationId =
               parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
         let manifest' =
-              Manifest (Just repositoryId) empty Map.empty Map.empty $
+              Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
         let environment =
               emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
-        let context = Context repository environment (const $ pure Nothing)
+        let context =
+              Context repository environment $
+                simpleVariableGetter $
+                  const $
+                    pure Nothing
         let appEnv =
               AppEnv
                 tmpDir
@@ -626,12 +653,15 @@ spec = sequential $ do
           $ executeHooks hookEnv context PreApply
         let ignoredHook = hook{ignoreFailure = True}
         let ignoredManifest =
-              Manifest (Just repositoryId) empty Map.empty Map.empty $
+              Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty $
                 Map.singleton PreApply [ignoredHook]
         let ignoredRepository =
               Repository tmpDir (tmpDir </> intermediateDir) ignoredManifest
         let ignoredContext =
-              Context ignoredRepository environment (const $ pure Nothing)
+              Context ignoredRepository environment $
+                simpleVariableGetter $
+                  const $
+                    pure Nothing
         let failingHookEnv =
               hookEnv{processStarter = const $ pure $ Left $ userError "not found"}
         runAppWithoutLogging appEnv $
@@ -665,12 +695,16 @@ spec = sequential $ do
         let Right recreatedGenerationId =
               parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
         let manifest' =
-              Manifest (Just repositoryId) empty Map.empty Map.empty $
+              Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty $
                 Map.singleton PreApply [hook]
         let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
         let environment =
               emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
-        let context = Context repository environment (const $ pure Nothing)
+        let context =
+              Context repository environment $
+                simpleVariableGetter $
+                  const $
+                    pure Nothing
         let stateRootPath = tmpDir </> stateDir
         let createdTime = read "2026-07-15 00:00:00 UTC"
         let recreatedTime = read "2026-07-15 01:00:00 UTC"
@@ -828,12 +862,14 @@ posixNonUtf8HookScopeSpec =
       let Right generationId =
             parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
       let manifest' =
-            Manifest (Just repositoryId) empty Map.empty Map.empty $
+            Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty $
               Map.singleton PreApply [hook]
       let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
       let environment =
             emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
-      let context = Context repository environment (const $ pure Nothing)
+      let context =
+            Context repository environment $
+              simpleVariableGetter $ const $ pure Nothing
       let stateRootPath = tmpDir </> stateDir
       let timestamp = read "2026-07-15 00:00:00 UTC"
       let state =

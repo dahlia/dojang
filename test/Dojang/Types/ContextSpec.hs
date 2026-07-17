@@ -64,6 +64,7 @@ import Dojang.Types.Environment
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
+import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -285,6 +286,7 @@ spec = do
         let ctx = Context
               repo
               (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ simpleVariableGetter
               $ \e ->
                 return $ case e of
                   "FOO" -> Just $ tmpDir </> foo
@@ -1192,6 +1194,7 @@ spec = do
             Context
               repo
               (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ simpleVariableGetter
               $ \e -> return $ case e of
                 "DST" -> Just $ tmpDir </> dst
                 "DST_FOO" -> Just $ tmpDir </> dst </> foo
@@ -1231,6 +1234,7 @@ spec = do
             Context
               repo
               (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ simpleVariableGetter
               $ \e -> return $ case e of
                 "DST" -> Just $ tmpDir </> dst
                 _ -> Nothing

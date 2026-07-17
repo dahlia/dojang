@@ -77,6 +77,15 @@ valid_manifests = [
             ]
         }
     },
+    {
+        "vars": {
+            "CONFIG_HOME": "${XDG_CONFIG_HOME:-$HOME/.config}",
+            "PROFILE_HOME": [
+                {"moniker": "work", "value": "$HOME/.config-work"},
+                {"when": "always", "value": "$CONFIG_HOME"},
+            ],
+        }
+    },
 ]
 invalid_manifests = [
     {"repository-id": "not-a-uuid"},
@@ -92,6 +101,18 @@ invalid_manifests = [
     {"files": {"vimrc": [{"when": "always", "path": 1}]}},
     {"files": {"vimrc": [{"when": "always", "unknown": True}]}},
     {"files": {"vimrc": {"123invalid": "~/.vimrc"}}},
+    {"vars": {"2HOME": "$HOME"}},
+    {"vars": {"HOME": []}},
+    {"vars": {"HOME": [{"value": "$HOME"}]}},
+    {"vars": {"HOME": [{"when": "always"}]}},
+    {
+        "vars": {
+            "HOME": [
+                {"moniker": "linux", "when": "always", "value": "$HOME"}
+            ]
+        }
+    },
+    {"vars": {"HOME": [{"when": "always", "value": "$HOME", "x": 1}]}},
     {"unknown": {}},
 ]
 

@@ -4,6 +4,7 @@
 module Dojang.Syntax.Manifest.WriterSpec (spec) where
 
 import qualified Data.HashMap.Strict as HashMap
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, isInfixOf, unpack)
 import qualified Hedgehog.Gen as Hedgehog
@@ -31,7 +32,11 @@ import Dojang.MonadFileSystem (FileType (File))
 import qualified Dojang.MonadFileSystem as FileSystem
 import Dojang.Syntax.Manifest.Parser (formatErrors, readManifest)
 import Dojang.Syntax.Manifest.Writer
-  ( WriteError (DuplicateStatefulHookId, InvalidHookConfiguration)
+  ( WriteError
+      ( DuplicateStatefulHookId
+      , InvalidHookConfiguration
+      , UnrepresentableVariableMoniker
+      )
   , insertRepositoryId
   , writeManifest
   , writeManifestFile
@@ -61,6 +66,10 @@ import Dojang.Types.Hook
   , renderHookId
   )
 import Dojang.Types.Manifest (Manifest (Manifest))
+import Dojang.Types.ManifestVariable
+  ( manifestVariablePreservingOrder
+  , parseManifestVariableName
+  )
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId
   ( parseRepositoryId
@@ -83,10 +92,56 @@ spec = do
   specify "writes a repository identity before manifest tables" $ do
     let Right repositoryId =
           parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
-        manifest' = Manifest (Just repositoryId) mempty mempty mempty mempty
+        manifest' = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
     writeValidManifest manifest'
       `shouldSatisfy` isInfixOf
         "repository-id = \"123e4567-e89b-42d3-a456-426614174000\""
+
+  specify "rejects a variable moniker with a different resolver" $ do
+    let Right variableName = parseManifestVariableName "ROOT"
+        globalMonikers = HashMap.singleton alpha linux
+        variable =
+          manifestVariablePreservingOrder
+            ( \name ->
+                if name == alpha
+                  then Just $ OperatingSystem "windows"
+                  else Nothing
+            )
+            ((Moniker alpha, BareComponent "value") :| [])
+        manifest' =
+          Manifest
+            Nothing
+            globalMonikers
+            (Map.singleton variableName variable)
+            Map.empty
+            Map.empty
+            Map.empty
+    writeManifest manifest'
+      `shouldBe` Left (UnrepresentableVariableMoniker variableName alpha)
+
+  specify "finds a nested variable moniker resolver mismatch" $ do
+    let Right variableName = parseManifestVariableName "ROOT"
+        globalMonikers =
+          HashMap.fromList
+            [(alpha, Moniker zeta), (zeta, OperatingSystem "linux")]
+        variable =
+          manifestVariablePreservingOrder
+            ( \name -> case name of
+                _ | name == alpha -> Just $ Moniker zeta
+                _ | name == zeta -> Just $ OperatingSystem "windows"
+                _ -> Nothing
+            )
+            ((Moniker alpha, BareComponent "value") :| [])
+        manifest' =
+          Manifest
+            Nothing
+            globalMonikers
+            (Map.singleton variableName variable)
+            Map.empty
+            Map.empty
+            Map.empty
+    writeManifest manifest'
+      `shouldBe` Left (UnrepresentableVariableMoniker variableName zeta)
 
   specify "adds an identity without rewriting existing manifest text" $ do
     let Right repositoryId =
@@ -172,6 +227,7 @@ spec = do
             HashMap.empty
             Map.empty
             Map.empty
+            Map.empty
             (Map.singleton PreApply [invalidHook])
     case writeManifest manifest' of
       Left (InvalidHookConfiguration PreApply 1 _) -> assert True
@@ -204,6 +260,7 @@ spec = do
             HashMap.empty
             Map.empty
             Map.empty
+            Map.empty
             ( Map.singleton
                 PreApply
                 [makeHook firstPolicy, makeHook secondPolicy]
@@ -233,20 +290,23 @@ spec = do
               HashMap.empty
               Map.empty
               Map.empty
+              Map.empty
               (Map.singleton PreApply [invalidHook])
           outputPath = tmpDir </> outputName
       writeManifestFile manifest' outputPath `shouldThrow` anyIOException
       FileSystem.exists outputPath `shouldReturn` False
 
   specify "preserves arbitrary manifest route semantics" $ hedgehog $ do
-    manifest'@(Manifest repositoryId monikers routes ignores hooks) <-
+    manifest'@(Manifest repositoryId monikers variables routes ignores hooks) <-
       forAll Gen.arbitraryManifest
     let toml = writeValidManifest manifest'
     annotate $ unpack toml
     case readManifest toml of
       Left err -> annotateShow (formatErrors err) >> assert False
       Right
-        (parsed@(Manifest repositoryId' monikers' routes' ignores' hooks'), _) -> do
+        ( parsed@(Manifest repositoryId' monikers' variables' routes' ignores' hooks')
+          , _
+          ) -> do
           annotateShow parsed
           let routeShape (FileRoute _ predicates fileType) =
                 ( [ (normalizePredicate predicate, destination)
@@ -256,6 +316,7 @@ spec = do
                 )
           repositoryId' === repositoryId
           monikers' === monikers
+          variables' === variables
           Map.map routeShape routes' === Map.map routeShape routes
           ignores' === ignores
           hooks' === hooks
@@ -264,7 +325,13 @@ spec = do
     let monikers = HashMap.singleton alpha linux
         route = fileRoute' (`HashMap.lookup` monikers) [(Moniker alpha, Nothing)] File
         manifest' =
-          Manifest Nothing monikers (Map.singleton path route) Map.empty Map.empty
+          Manifest
+            Nothing
+            monikers
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
         toml = writeValidManifest manifest'
     toml `shouldSatisfy` isInfixOf "foo.alpha = \"\""
     toml `shouldSatisfy` isInfixOf "alpha = \"\""
@@ -280,7 +347,13 @@ spec = do
               [(Moniker alpha, Just "first"), (Moniker zeta, Just "second")]
               File
           manifest' =
-            Manifest Nothing monikers (Map.singleton path route) Map.empty Map.empty
+            Manifest
+              Nothing
+              monikers
+              Map.empty
+              (Map.singleton path route)
+              Map.empty
+              Map.empty
           toml = writeValidManifest manifest'
       annotate $ unpack toml
       assert $ isInfixOf "[[files.foo]]" toml
@@ -291,7 +364,13 @@ spec = do
     let monikers = HashMap.singleton alpha linux
         route = fileRoute' (`HashMap.lookup` monikers) [(linux, Nothing)] File
         manifest' =
-          Manifest Nothing monikers (Map.singleton path route) Map.empty Map.empty
+          Manifest
+            Nothing
+            monikers
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
         toml = writeValidManifest manifest'
     toml `shouldSatisfy` isInfixOf "[[files.foo]]"
     toml `shouldSatisfy` isInfixOf "when = \"os = linux\""
@@ -306,7 +385,13 @@ spec = do
             [(Moniker alpha, Nothing), (linux, Just "target")]
             File
         manifest' =
-          Manifest Nothing monikers (Map.singleton path route) Map.empty Map.empty
+          Manifest
+            Nothing
+            monikers
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
         toml = writeValidManifest manifest'
     toml `shouldSatisfy` isInfixOf "[[files.foo]]"
     toml `shouldSatisfy` isInfixOf "moniker = \"alpha\""
@@ -323,7 +408,13 @@ spec = do
             [(predicate, Nothing), (predicate, Just "target")]
             File
         manifest' =
-          Manifest Nothing HashMap.empty (Map.singleton path route) Map.empty Map.empty
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
         toml = writeValidManifest manifest'
     annotate $ unpack toml
     let Right (parsed, _) = readManifest toml
@@ -343,12 +434,13 @@ spec = do
             Manifest
               Nothing
               HashMap.empty
+              Map.empty
               (Map.singleton path route)
               Map.empty
               Map.empty
           toml = writeValidManifest manifest'
       annotate $ unpack toml
-      let Right (Manifest _ _ parsedRoutes _ _, _) = readManifest toml
+      let Right (Manifest _ _ _ parsedRoutes _ _, _) = readManifest toml
           Just (FileRoute _ parsedPredicates _) = Map.lookup path parsedRoutes
       parsedPredicates
         === [ (Always, Just "first")
@@ -365,7 +457,13 @@ spec = do
             ]
             File
         manifest' =
-          Manifest Nothing HashMap.empty (Map.singleton path route) Map.empty Map.empty
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
         toml = writeValidManifest manifest'
     annotate $ unpack toml
     let Right (parsed, _) = readManifest toml
@@ -380,7 +478,13 @@ spec = do
             ]
             File
         manifest' =
-          Manifest Nothing HashMap.empty (Map.singleton path route) Map.empty Map.empty
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
         toml = writeValidManifest manifest'
     toml `shouldSatisfy` isInfixOf "path = \"\""
     let Right (parsed, _) = readManifest toml
@@ -395,6 +499,7 @@ spec = do
           Manifest
             Nothing
             monikers
+            Map.empty
             (Map.singleton path $ route monikers)
             Map.empty
             Map.empty

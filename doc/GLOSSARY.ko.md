@@ -56,6 +56,7 @@
 | managed destination          | 관리 대상 경로             |                                                                                              |
 | managed target               | 관리 대상                  |                                                                                              |
 | manifest                     | 선언 파일                  | 짧은 문서 제목이나 링크에서는 “선언”으로 쓸 수 있습니다.                                     |
+| manifest variable            | 선언 변수                  | `vars` 구획에서 정의하는 재사용 가능한 값을 뜻합니다.                                        |
 | marker                       | 마커                       |                                                                                              |
 | match                        | 일치, 일치하다             |                                                                                              |
 | moniker                      | 모니커                     |                                                                                              |

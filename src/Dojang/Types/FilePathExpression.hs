@@ -17,7 +17,7 @@ import Prelude hiding (head, null, (++))
 import Data.Hashable (Hashable (hashWithSalt))
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text, head, null, pack)
+import Data.Text (Text, head, null, pack, replace)
 
 
 -- | An environment variable.
@@ -120,7 +120,7 @@ toPathText'
   -- ^ The 'FilePathExpression' to render.
   -> Text
   -- ^ The rendered 'FilePathExpression'.
-toPathText' _ (BareComponent component) = component
+toPathText' _ (BareComponent component) = replace "$" "$$" component
 toPathText' _ (Root Nothing) = "/"
 toPathText' _ (Root (Just driveLetter)) = pack [driveLetter, ':']
 toPathText' followedByBare (Concatenation a b) =

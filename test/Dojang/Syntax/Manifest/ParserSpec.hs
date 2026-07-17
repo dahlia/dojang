@@ -6,6 +6,7 @@ module Dojang.Syntax.Manifest.ParserSpec (spec) where
 
 import Control.Monad (forM_)
 import Data.List (sort)
+import Data.List.NonEmpty qualified as NonEmpty
 import Data.Map.Strict qualified as Map
 import Data.Text (Text, isInfixOf, unpack)
 import Data.Text qualified as Text
@@ -23,11 +24,16 @@ import Dojang.Syntax.Manifest.Parser
 import Dojang.Types.Environment (Kernel (Kernel), emptyEnvironment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression
-  ( FilePathExpression (BareComponent)
+  ( FilePathExpression (BareComponent, PathSeparator, Substitution)
   , toPathText
   )
 import Dojang.Types.FileRoute (FileRoute (..), dispatch)
+import Dojang.Types.Hook (Hook (..), HookType (PreApply))
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.ManifestVariable
+  ( ManifestVariable (..)
+  , parseManifestVariableName
+  )
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId
   ( parseRepositoryId
@@ -74,6 +80,70 @@ spec = do
   foo <- runIO $ encodeFS "foo"
   let Right posix = parseMonikerName "posix"
 
+  specify "reads compact and conditional manifest variables" $ do
+    let toml =
+          Text.unlines
+            [ "[vars]"
+            , "CONFIG_HOME = \"${XDG_CONFIG_HOME:-$HOME/.config}\""
+            , "PROFILE_HOME = ["
+            , "  { moniker = \"posix\", value = \"$CONFIG_HOME/posix\" },"
+            , "  { when = \"fact.class = personal\", value = \"$HOME/personal\" },"
+            , "]"
+            , "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers.posix]"
+            , "os = \"linux\""
+            ]
+        Right configHome = parseManifestVariableName "CONFIG_HOME"
+        Right profileHome = parseManifestVariableName "PROFILE_HOME"
+    case readManifest toml of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (manifest', warnings) -> do
+        warnings `shouldBe` []
+        fmap
+          ( fmap (\(predicate, value) -> (predicate, toPathText value))
+              . NonEmpty.toList
+              . (.branches)
+          )
+          manifest'.variables
+          `shouldBe` Map.fromList
+            [
+              ( configHome
+              , [(Always, "${XDG_CONFIG_HOME:-$HOME/.config}")]
+              )
+            ,
+              ( profileHome
+              ,
+                [ (Moniker posix, "$CONFIG_HOME/posix")
+                , (Fact "class" "personal", "$HOME/personal")
+                ]
+              )
+            ]
+
+  specify "rejects invalid conditional manifest-variable branches" $ do
+    let prefix value =
+          Text.unlines
+            [ "[vars]"
+            , "CONFIG_HOME = " <> value
+            , "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers]"
+            ]
+        invalid =
+          [ "[]"
+          , "[{ value = \"home\" }]"
+          , "[{ moniker = \"missing\", value = \"home\" }]"
+          , "[{ moniker = \"known\", when = \"always\", value = \"home\" }]"
+          , "[{ when = \"always\" }]"
+          , "[{ when = \"always\", value = \"home\", extra = true }]"
+          ]
+    forM_ invalid $ \value ->
+      case readManifest (prefix value) of
+        Left _ -> return ()
+        Right _ -> expectationFailure $ "Expected rejection: " <> unpack value
+
   specify "reads a repository identity" $ do
     let repositoryIdText = "123e4567-e89b-42d3-a456-426614174000"
         Right expected = parseRepositoryId repositoryIdText
@@ -109,6 +179,27 @@ spec = do
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
       Right _ -> return ()
+
+  specify "parses hook working directories as file-path expressions" $ do
+    let toml =
+          Text.unlines
+            [ "[dirs]"
+            , "[files]"
+            , "[ignores]"
+            , "[monikers]"
+            , "[[hooks.pre-apply]]"
+            , "command = \"refresh\""
+            , "working-directory = \"$TOOLS/hooks\""
+            ]
+    case readManifest toml of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (manifest', _) ->
+        case Map.lookup PreApply manifest'.hooks of
+          Just [hook] ->
+            hook.workingDirectory
+              `shouldBe` Just
+                (PathSeparator (Substitution "TOOLS") (BareComponent "hooks"))
+          hooks -> expectationFailure $ "Unexpected hooks: " <> show hooks
 
   specify "rejects invalid stateful hook configurations" $ do
     let prefix =
@@ -227,7 +318,7 @@ spec = do
             , "[monikers.posix]"
             , "os = [\"linux\", \"macos\"]"
             ]
-        Right (Manifest _ _ routes _ _, warnings) = readManifest toml
+        Right (Manifest _ _ _ routes _ _, warnings) = readManifest toml
         Just homeRoute = Map.lookup home routes
         Just bashrcRoute = Map.lookup bashrc routes
         routeShape :: FileRoute -> [(String, Maybe Text)]
@@ -261,7 +352,7 @@ spec = do
             , ""
             , "[monikers]"
             ]
-        Right (Manifest _ _ routes _ _, _) = readManifest toml
+        Right (Manifest _ _ _ routes _ _, _) = readManifest toml
         Just route = Map.lookup gitconfig routes
     [ (show predicate, toPathText <$> path)
       | (predicate, path) <- route.predicates
@@ -287,7 +378,7 @@ spec = do
             ]
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ routes _ _, _) -> do
+      Right (Manifest _ _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
         [ (show predicate, toPathText <$> path)
           | (predicate, path) <- route.predicates
@@ -302,7 +393,7 @@ spec = do
             "{ when = \"os = plan9 || always\", path = \"target\" }"
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ routes _ _, _) -> do
+      Right (Manifest _ _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
         route.predicates `shouldBe` [(Always, Just "target")]
         dispatch
@@ -350,7 +441,7 @@ spec = do
           readManifest $ detailedManifest "{ when = \"always\", path = \"\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ routes _ _, _) -> do
+      Right (Manifest _ _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
         route.predicates `shouldBe` [(Always, Just $ BareComponent "")]
 

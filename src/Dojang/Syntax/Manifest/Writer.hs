@@ -15,6 +15,7 @@ import Data.Bifunctor (Bifunctor (first, second))
 import Data.List (partition)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Maybe (fromMaybe, isJust)
+import qualified Data.Set as Set
 import GHC.IsList (IsList (fromList))
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (all, any, writeFile)
@@ -46,6 +47,9 @@ import Dojang.Syntax.Manifest.Internal
   , Hooks' (..)
   , IgnoreMap'
   , Manifest' (Manifest')
+  , ManifestVariable' (..)
+  , ManifestVariableBranch' (..)
+  , ManifestVariableMap'
   , MonikerMap'
   , always
   )
@@ -71,6 +75,12 @@ import Dojang.Types.Hook
   , validateHookConfiguration
   )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.ManifestVariable
+  ( ManifestVariable (..)
+  , ManifestVariableMap
+  , ManifestVariableName
+  , renderManifestVariableName
+  )
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
@@ -86,6 +96,8 @@ data WriteError
     InvalidHookConfiguration HookType Int Text
   | -- | Stateful hooks repeat one stable ID in a lifecycle event.
     DuplicateStatefulHookId HookType HookId
+  | -- | A variable resolves a moniker differently from the manifest table.
+    UnrepresentableVariableMoniker ManifestVariableName MonikerName
   deriving (Eq, Show)
 
 
@@ -104,6 +116,12 @@ formatWriteError (DuplicateStatefulHookId hookType identifier) =
     <> ": "
     <> renderHookId identifier
     <> "."
+formatWriteError (UnrepresentableVariableMoniker variable moniker) =
+  "Manifest variable "
+    <> renderManifestVariableName variable
+    <> " resolves moniker "
+    <> original moniker.name
+    <> " differently from the manifest moniker table."
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -135,8 +153,9 @@ writeManifest
   :: Manifest
   -- ^ The 'Manifest' to encode.
   -> Either WriteError Text
-  -- ^ The encoded TOML document, or an invalid hook configuration.
+  -- ^ The encoded TOML document, or a configuration that cannot be preserved.
 writeManifest manifest = do
+  validateVariables manifest.monikers manifest.variables
   validateHooks manifest.hooks
   pure $
     "#:schema "
@@ -148,10 +167,11 @@ writeManifest manifest = do
   order :: [String] -> String -> Either Int String
   order [] field = case field of
     "repository-id" -> Left 0
-    "dirs" -> Left 1
-    "files" -> Left 2
-    "ignores" -> Left 3
-    "monikers" -> Left 4
+    "vars" -> Left 1
+    "dirs" -> Left 2
+    "files" -> Left 3
+    "ignores" -> Left 4
+    "monikers" -> Left 5
     _ -> Right field
   order _ field = Right field
   validateHooks hookMap =
@@ -165,6 +185,14 @@ writeManifest manifest = do
     case duplicateStatefulHookIds hooks' of
       identifier : _ -> Left $ DuplicateStatefulHookId hookType identifier
       [] -> Right ()
+  validateVariables monikers variables =
+    mapM_ (uncurry $ validateVariable monikers) $
+      Data.Map.Strict.toAscList variables
+  validateVariable monikers variableName variable =
+    case firstMismatchedMoniker monikers variable of
+      Nothing -> Right ()
+      Just moniker ->
+        Left $ UnrepresentableVariableMoniker variableName moniker
 
 
 -- | Writes a 'Manifest' file to the given path.  Throws an 'IOError' if the
@@ -187,6 +215,7 @@ mapManifest' manifest =
   Manifest'
     (repositoryIdText <$> manifest.repositoryId)
     monikers'
+    variables'
     dirs
     files
     ignores
@@ -195,6 +224,8 @@ mapManifest' manifest =
   (dirs, files) = mapFiles manifest.fileRoutes manifest.monikers
   monikers' :: MonikerMap'
   monikers' = mapMonikers' manifest.monikers
+  variables' :: ManifestVariableMap'
+  variables' = mapManifestVariables manifest.monikers manifest.variables
   ignores :: IgnoreMap'
   ignores =
     fromList
@@ -206,6 +237,61 @@ mapManifest' manifest =
     if Data.Map.Strict.null manifest.hooks
       then Nothing
       else Just $ mapHooks' manifest.hooks
+
+
+mapManifestVariables
+  :: MonikerMap -> ManifestVariableMap -> ManifestVariableMap'
+mapManifestVariables monikers = fmap mapVariable
+ where
+  mapVariable :: ManifestVariable -> ManifestVariable'
+  mapVariable variable = case Data.List.NonEmpty.toList variable.branches of
+    [(Always, value)] -> CompactManifestVariable $ toPathText value
+    branches ->
+      DetailedManifestVariable $ mapBranch <$> branches
+  mapBranch
+    :: (EnvironmentPredicate, FilePathExpression)
+    -> ManifestVariableBranch'
+  mapBranch (predicate, value) =
+    ManifestVariableBranch'
+      { Internal.variableMoniker = case predicate of
+          Moniker name | Data.HashMap.Strict.member name monikers -> Just name
+          _ -> Nothing
+      , Internal.variableCondition = case predicate of
+          Moniker name | Data.HashMap.Strict.member name monikers -> Nothing
+          _ -> Just $ writeEnvironmentPredicate predicate
+      , Internal.variableValue = Just $ toPathText value
+      , Internal.variableUnexpectedFields = []
+      }
+
+
+firstMismatchedMoniker
+  :: MonikerMap -> ManifestVariable -> Maybe MonikerName
+firstMismatchedMoniker monikers variable =
+  checkNames Set.empty $
+    foldMap (monikersInPredicate . fst) variable.branches
+ where
+  checkNames visited names = case Set.minView names of
+    Nothing -> Nothing
+    Just (name, remaining)
+      | name `Set.member` visited -> checkNames visited remaining
+      | localDefinition /= globalDefinition -> Just name
+      | otherwise ->
+          checkNames
+            (Set.insert name visited)
+            (remaining <> foldMap monikersInPredicate localDefinition)
+     where
+      localDefinition = normalizePredicate <$> variable.monikerResolver name
+      globalDefinition =
+        normalizePredicate <$> Data.HashMap.Strict.lookup name monikers
+
+
+monikersInPredicate :: EnvironmentPredicate -> Set.Set MonikerName
+monikersInPredicate predicate = case predicate of
+  Moniker name -> Set.singleton name
+  Not child -> monikersInPredicate child
+  And children -> foldMap monikersInPredicate children
+  Or children -> foldMap monikersInPredicate children
+  _ -> Set.empty
 
 
 mapFiles
@@ -414,7 +500,7 @@ mapHooks' hookMap =
           if hook.condition == Always
             then Nothing
             else Just $ writeEnvironmentPredicate hook.condition
-      , Internal.workingDirectory = decodePath <$> hook.workingDirectory
+      , Internal.workingDirectory = toPathText <$> hook.workingDirectory
       , Internal.ignoreFailure = if hook.ignoreFailure then Just True else Nothing
       }
   decodePath' :: OsPath -> Text

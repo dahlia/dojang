@@ -31,7 +31,12 @@ import Data.IORef
   , newIORef
   , readIORef
   )
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
+import Data.Text qualified as Text
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
 import System.Exit (ExitCode (ExitSuccess))
 import System.FileLock qualified as FileLock
 import System.Info (os)
@@ -39,6 +44,7 @@ import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import System.Timeout (timeout)
 import Test.Hspec (Spec, it, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 import Prelude hiding (init, readFile, writeFile)
 
 import Dojang.App
@@ -60,6 +66,9 @@ import Dojang.MonadFileSystem
   , dryRunIO
   )
 import Dojang.TestUtils (withHome, withTempDir)
+import Dojang.Types.Environment (parseFactKey)
+import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
+import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.MachineState
   ( MachineState (declaredFacts, firstApplied, updatedTime)
   , listRepositoryStates
@@ -68,6 +77,10 @@ import Dojang.Types.MachineState
   , updateMachineFacts
   )
 import Dojang.Types.Manifest (Manifest (Manifest))
+import Dojang.Types.ManifestVariable
+  ( manifestVariablePreservingOrder
+  , parseManifestVariableName
+  )
 import Dojang.Types.Registry
   ( Registry (Registry)
   , registryFilename
@@ -79,6 +92,46 @@ import Dojang.Types.RepositoryId (parseRepositoryId)
 spec :: Spec
 spec = sequential $ do
   let redirectedHomeIt = if os == "mingw32" then xit else it
+
+  it "finds facts in reachable manifest-variable branches" $ hedgehog $ do
+    suffix <- forAll $ Gen.text (Range.linear 1 30) Gen.alphaNum
+    let Right factKey = parseFactKey $ "x" <> Text.toLower suffix
+        Right variableName = parseManifestVariableName "ROOT"
+        variable =
+          manifestVariablePreservingOrder
+            (const Nothing)
+            ( (Fact factKey "work", BareComponent "work")
+                :| [(Always, BareComponent "fallback")]
+            )
+        manifest' =
+          Manifest
+            Nothing
+            mempty
+            (Map.singleton variableName variable)
+            Map.empty
+            Map.empty
+            Map.empty
+    Init.referencedMachineFacts manifest' === Set.singleton factKey
+
+  it "ignores facts after an unconditional variable branch" $ hedgehog $ do
+    suffix <- forAll $ Gen.text (Range.linear 1 30) Gen.alphaNum
+    let Right factKey = parseFactKey $ "x" <> Text.toLower suffix
+        Right variableName = parseManifestVariableName "ROOT"
+        variable =
+          manifestVariablePreservingOrder
+            (const Nothing)
+            ( (Always, BareComponent "fallback")
+                :| [(Fact factKey "work", BareComponent "work")]
+            )
+        manifest' =
+          Manifest
+            Nothing
+            mempty
+            (Map.singleton variableName variable)
+            Map.empty
+            Map.empty
+            Map.empty
+    Init.referencedMachineFacts manifest' === Set.empty
 
   it "creates one repository identity during concurrent initialization" $
     withTempDir $ \tmp _ -> do
@@ -335,7 +388,8 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest =
+            Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $
           runAppWithoutLogging oldAppEnv $

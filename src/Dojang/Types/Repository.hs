@@ -12,6 +12,7 @@ module Dojang.Types.Repository
   , findOverlappingRouteResults
   , overlaps
   , routePaths
+  , routePathsWithVariables
   ) where
 
 import Control.Monad (forM)
@@ -64,12 +65,16 @@ import Dojang.Types.FilePathExpression
   , environmentVariables
   , toPathText
   )
-import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning)
+import Dojang.Types.FilePathExpression.Expansion
+  ( ExpansionWarning
+  , VariableGetter
+  , VariableLookup (..)
+  )
 import Dojang.Types.FileRoute
   ( FileRoute (..)
   , RouteWarning
   , dispatch
-  , routePath
+  , routePathWithVariables
   )
 import Dojang.Types.FileRoute qualified as FileRoute (RouteWarning (..))
 import Dojang.Types.Manifest (Manifest (..))
@@ -139,8 +144,31 @@ routePaths
   -> m ([RouteResult], [RouteMapWarning])
   -- ^ The expanded paths, along with any warnings that were generated.
 routePaths repo env lookupEnvVar = do
+  routePathsWithVariables repo env legacyGetter
+ where
+  legacyGetter variable = do
+    value <- lookupEnvVar variable
+    rendered <- case value of
+      Nothing -> return "unset"
+      Just value' | value' == mempty -> return "empty"
+      Just value' -> return $ "sha256:" <> sha256OsString value'
+    return $
+      VariableLookup value [] $
+        Map.singleton ("env." <> variable) rendered
+
+
+-- | Routes paths through a warning- and provenance-aware variable getter.
+routePathsWithVariables
+  :: forall m
+   . (MonadFileSystem m)
+  => Repository
+  -> Environment
+  -> VariableGetter m
+  -> m ([RouteResult], [RouteMapWarning])
+routePathsWithVariables repo env lookupVariable = do
   paths <- forM fileRoutes $ \(src, route) -> do
-    (dstPath, warnings) <- routePath route env lookupEnvVar
+    (dstPath, warnings, _) <-
+      routePathWithVariables route env lookupVariable
     let selected = case fst $ dispatch env route of
           Just expression : _ -> Just expression
           _ -> Nothing
@@ -173,12 +201,8 @@ routePaths repo env lookupEnvVar = do
       Nothing -> return []
       Just expression ->
         forM (Set.toList $ environmentVariables expression) $ \variable -> do
-          value <- lookupEnvVar variable
-          rendered <- case value of
-            Nothing -> return "unset"
-            Just value' | value' == mempty -> return "empty"
-            Just value' -> return $ "sha256:" <> sha256OsString value'
-          return ("env." <> variable, rendered)
+          found <- lookupVariable variable
+          return $ Map.toList found.provenance
     return $
       Map.fromList $
         [ ("operating-system", original env.operatingSystem.identifier)
@@ -186,7 +210,7 @@ routePaths repo env lookupEnvVar = do
         , ("kernel-name", original env.kernel.name)
         , ("kernel-release", original env.kernel.release)
         ]
-          ++ inputs
+          ++ concat inputs
           ++ [ ("fact." <> factKeyText key, factValueText value)
              | (key, value) <- Map.toAscList env.additionalFacts
              ]

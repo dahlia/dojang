@@ -26,7 +26,7 @@ import Dojang.Types.FilePathExpression
 import Control.Applicative (Alternative ((<|>)), optional)
 import Control.Monad (void)
 import Data.Char (isAlpha, isAlphaNum, isAscii, isControl)
-import Data.Text (Text, cons, pack)
+import Data.Text (Text, concat, cons, pack, singleton)
 import Data.Void (Void)
 import Text.Megaparsec
   ( MonadParsec (eof, takeWhile1P, takeWhileP)
@@ -43,6 +43,7 @@ import Text.Megaparsec
 import Text.Megaparsec.Char (char, string)
 import Text.Megaparsec.Error (ParseErrorBundle)
 import Text.Megaparsec.Error qualified (errorBundlePretty)
+import Prelude hiding (concat)
 
 
 type Parser = Parsec Void Text
@@ -97,10 +98,14 @@ component begin disallowedBareChars =
 
 
 bareComponent :: [Char] -> Parser FilePathExpression
-bareComponent disallowedChars = do
-  component' <- takeWhile1P (Just "component") isValidChar
-  return $ BareComponent component'
+bareComponent disallowedChars = label "component" $ do
+  components <-
+    some $
+      label "component" $
+        literalDollar <|> takeWhile1P Nothing isValidChar
+  return $ BareComponent $ concat components
  where
+  literalDollar = try $ singleton '$' <$ (char '$' >> char '$')
   isValidChar :: Char -> Bool
   isValidChar = not . isInvalidChar
   isInvalidChar :: Char -> Bool

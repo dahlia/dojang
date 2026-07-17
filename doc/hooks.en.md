@@ -70,8 +70,9 @@ within an event.
     array.
  -  `when` (string): [environment predicate] that must match before the hook
     is considered.  The default is `always`.
- -  `working-directory` (string): working directory.  The default is the
-    repository directory.
+ -  `working-directory` (string): [file path expression] for the working
+    directory.  Relative results use the repository directory as their base.
+    The default is the repository directory.
  -  `ignore-failure` (boolean): continue the command after a launch error or
     nonzero exit.  The default is `false`.
  -  `id` (string): stable identity for a stateful hook.  It must match
@@ -82,6 +83,7 @@ within an event.
     `on-change`.
 
 [environment predicate]: environment-predicate.en.md
+[file path expression]: file-path-expression.en.md
 
 
 Execution policies
@@ -102,7 +104,8 @@ command = "/usr/local/bin/install-status-helper"
 
 `on-change` requires both `id` and `change-key`.  It runs after the explicit
 key, normalized hook configuration, matching machine facts, lifecycle event,
-or selected path scope changes:
+selected path scope, resolved working directory, or an input used to derive
+that directory changes:
 
 ~~~~ toml
 [[hooks.post-apply]]

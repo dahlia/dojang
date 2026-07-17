@@ -4,6 +4,61 @@
   "title": "Dojang manifest",
   "description": "Dojang manifest (so-called dojang.toml) is a TOML file that describes a Dojang repository.",
   "$defs": {
+    "manifestVariableMap": {
+      "title": "Manifest variables",
+      "description": "Repository configuration values available to file path expressions.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/manifestVariable"
+      }
+    },
+    "manifestVariable": {
+      "title": "Manifest variable",
+      "description": "An unconditional file path expression or an ordered list of conditional values.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/manifestVariableBranch"
+          }
+        }
+      ]
+    },
+    "manifestVariableBranch": {
+      "title": "Conditional manifest-variable branch",
+      "description": "An ordered value selected by either a moniker or an inline environment predicate.",
+      "type": "object",
+      "properties": {
+        "moniker": {
+          "$ref": "#/$defs/monikerName"
+        },
+        "when": {
+          "title": "Inline environment predicate",
+          "type": "string"
+        },
+        "value": {
+          "title": "File path expression",
+          "type": "string"
+        }
+      },
+      "required": ["value"],
+      "oneOf": [
+        {
+          "required": ["moniker"]
+        },
+        {
+          "required": ["when"]
+        }
+      ],
+      "additionalProperties": false
+    },
     "routeMap": {
       "title": "Route definitions",
       "description": "A map of route names to their corresponding route definitions.",
@@ -245,7 +300,7 @@
         },
         "working-directory": {
           "title": "Working directory",
-          "description": "The working directory for the hook. Defaults to the repository directory.",
+          "description": "A file path expression for the hook working directory. Relative results use the repository directory as their base. Defaults to the repository directory.",
           "type": "string"
         },
         "ignore-failure": {
@@ -297,6 +352,9 @@
       "description": "A stable UUID that travels with the repository and keys machine-local state.",
       "type": "string",
       "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "vars": {
+      "$ref": "#/$defs/manifestVariableMap"
     },
     "files": {
       "$ref": "#/$defs/routeMap"

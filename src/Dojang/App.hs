@@ -130,6 +130,13 @@ import Dojang.Types.MachineState
   , sameExistingPath
   )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.ManifestVariable
+  ( VariableEnvironment (..)
+  , formatVariableResolutionError
+  , lookupVariable
+  , renderManifestVariableName
+  , resolveManifestVariables
+  )
 import Dojang.Types.Registry
   ( Registry (repositoryPath)
   , readRegistryStrict
@@ -850,7 +857,22 @@ ensureContext = do
   repo <- ensureRepository
   currentEnv <- currentEnvironment'
   $(logDebugSH) currentEnv
-  return $ Context repo currentEnv lookupEnv'
+  resolved <-
+    resolveManifestVariables currentEnv repo.manifest.variables lookupEnv'
+  variables <- case resolved of
+    Left err -> die' manifestReadError $ formatVariableResolutionError err
+    Right environment -> return environment
+  forM_ variables.evaluationWarnings $ \warning ->
+    $(logWarn) $
+      "Manifest variable condition warning: "
+        <> showt (FromStringShow warning)
+        <> "."
+  forM_ variables.shadowedVariables $ \name ->
+    $(logDebug) $
+      "Manifest variable "
+        <> renderManifestVariableName name
+        <> " shadows an inherited environment variable."
+  return $ Context repo currentEnv $ lookupVariable variables
 
 
 lookupEnv'

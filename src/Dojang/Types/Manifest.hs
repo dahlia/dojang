@@ -5,6 +5,7 @@ module Dojang.Types.Manifest
   ( IgnoreMap
   , Manifest (..)
   , manifest
+  , manifestWithVariables
   ) where
 
 import Data.Map.Strict (Map, fromList, toAscList, toList)
@@ -16,6 +17,7 @@ import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook (HookMap)
+import Dojang.Types.ManifestVariable (ManifestVariableMap)
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 import Dojang.Types.RepositoryId (RepositoryId)
@@ -33,6 +35,8 @@ data Manifest = Manifest
   -- they are explicitly migrated.
   , monikers :: MonikerMap
   -- ^ The definitions of monikers that are used to resolve the directory routes.
+  , variables :: ManifestVariableMap
+  -- ^ Declarative values available to file-path expressions.
   , fileRoutes :: FileRouteMap
   -- ^ The directory routes that are resolved by the monikers.
   , ignorePatterns :: IgnoreMap
@@ -67,26 +71,52 @@ manifest
   -- ^ The hooks to run before and after applying.
   -> Manifest
   -- ^ The made 'Manifest'.
-manifest monikers' fileRoutes' dirRoutes' ignorePatterns' hooks' =
-  Manifest
-    { repositoryId = Nothing
-    , monikers = monikers'
-    , fileRoutes = fromList $ files ++ dirs
-    , ignorePatterns = ignores
-    , hooks = hooks'
-    }
- where
-  files :: [(OsPath, FileRoute)]
-  files = do
-    (filename, monikerPairs) <- toList fileRoutes'
-    pure (normalise filename, fileRoute monikers' monikerPairs File)
-  dirs :: [(OsPath, FileRoute)]
-  dirs = do
-    (dirName, monikerPairs) <- toList dirRoutes'
-    pure (normalise dirName, fileRoute monikers' monikerPairs Directory)
-  ignores :: IgnoreMap
-  ignores =
-    fromList
-      [ (normalise p, pattern)
-      | (p, pattern) <- toAscList ignorePatterns'
-      ]
+manifest monikers' = manifestWithVariables monikers' mempty
+
+
+-- | Makes a 'Manifest' with declarative variables.
+manifestWithVariables
+  :: MonikerMap
+  -- ^ The monikers that are used to resolve routes and variable branches.
+  -> ManifestVariableMap
+  -- ^ Declarative values available to file-path expressions.
+  -> Map OsPath [(MonikerName, Maybe FilePathExpression)]
+  -- ^ File routes resolved by the monikers.
+  -> Map OsPath [(MonikerName, Maybe FilePathExpression)]
+  -- ^ Directory routes resolved by the monikers.
+  -> IgnoreMap
+  -- ^ Ignore patterns keyed by directory route.
+  -> HookMap
+  -- ^ Hooks to run around commands.
+  -> Manifest
+  -- ^ The made 'Manifest'.
+manifestWithVariables
+  monikers'
+  variables'
+  fileRoutes'
+  dirRoutes'
+  ignorePatterns'
+  hooks' =
+    Manifest
+      { repositoryId = Nothing
+      , monikers = monikers'
+      , variables = variables'
+      , fileRoutes = fromList $ files ++ dirs
+      , ignorePatterns = ignores
+      , hooks = hooks'
+      }
+   where
+    files :: [(OsPath, FileRoute)]
+    files = do
+      (filename, monikerPairs) <- toList fileRoutes'
+      pure (normalise filename, fileRoute monikers' monikerPairs File)
+    dirs :: [(OsPath, FileRoute)]
+    dirs = do
+      (dirName, monikerPairs) <- toList dirRoutes'
+      pure (normalise dirName, fileRoute monikers' monikerPairs Directory)
+    ignores :: IgnoreMap
+    ignores =
+      fromList
+        [ (normalise p, pattern)
+        | (p, pattern) <- toAscList ignorePatterns'
+        ]
