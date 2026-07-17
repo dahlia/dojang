@@ -30,8 +30,14 @@ import Dojang.Types.Environment
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression
-  ( FilePathExpression (BareComponent, PathSeparator, Substitution)
+  ( FilePathExpression
+      ( BareComponent
+      , PathSeparator
+      , Substitution
+      , SubstitutionWithDefault
+      )
   )
+import Dojang.Types.FilePathExpression.Expansion (VariableLookup (..))
 import Dojang.Types.FileRoute (fileRoute, fileRoutePreservingOrder)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.ManifestVariable
@@ -208,6 +214,60 @@ spec = do
             Map.member "var.DESTINATION" result.routeProvenance `shouldBe` True
             Map.member "env.BASE" result.routeProvenance `shouldBe` True
           _ -> expectationFailure $ "Unexpected routes: " <> show routes
+
+  specify "routePaths keeps only provenance used during expansion" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  SubstitutionWithDefault
+                    "PRIMARY"
+                    (Substitution "FALLBACK")
+              )
+            ]
+            Directory
+        manifest' =
+          Manifest
+            { repositoryId = Nothing
+            , monikers = mempty
+            , variables = mempty
+            , fileRoutes = Map.singleton foo route
+            , ignorePatterns = mempty
+            , hooks = mempty
+            }
+        repo = Repository (root </> src) (root </> src </> inter) manifest'
+        env =
+          emptyEnvironment "linux" "x86_64" $
+            Kernel "Linux" "4.19.0-16-amd64"
+        lookupInput variable = pure $ case variable of
+          "PRIMARY" ->
+            VariableLookup
+              (Just $ root </> dst)
+              []
+              (Map.singleton "env.PRIMARY" "primary")
+          "FALLBACK" ->
+            VariableLookup
+              (Just $ root </> baz)
+              []
+              (Map.singleton "env.FALLBACK" "fallback")
+          _ -> VariableLookup Nothing [] mempty
+        expectedProvenance =
+          Map.fromList
+            [ ("operating-system", "linux")
+            , ("architecture", "x86_64")
+            , ("kernel-name", "Linux")
+            , ("kernel-release", "4.19.0-16-amd64")
+            , ("env.PRIMARY", "primary")
+            ]
+    (routes, warnings) <- routePathsWithVariables repo env lookupInput
+    warnings `shouldBe` []
+    case routes of
+      [result] -> do
+        result.destinationPath `shouldBe` root </> dst
+        result.routeProvenance `shouldBe` expectedProvenance
+      _ -> expectationFailure $ "Unexpected routes: " <> show routes
 
   if win
     then return ()

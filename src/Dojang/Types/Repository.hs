@@ -35,7 +35,6 @@ import Data.List.NonEmpty
 
 import Data.Map.Strict (Map, findWithDefault, fromListWith, toList)
 import Data.Map.Strict qualified as Map
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Numeric (showHex)
@@ -61,8 +60,6 @@ import Dojang.Types.Environment
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression
   ( EnvironmentVariable
-  , FilePathExpression
-  , environmentVariables
   , toPathText
   )
 import Dojang.Types.FilePathExpression.Expansion
@@ -167,12 +164,12 @@ routePathsWithVariables
   -> m ([RouteResult], [RouteMapWarning])
 routePathsWithVariables repo env lookupVariable = do
   paths <- forM fileRoutes $ \(src, route) -> do
-    (dstPath, warnings, _) <-
+    (dstPath, warnings, expansionProvenance) <-
       routePathWithVariables route env lookupVariable
     let selected = case fst $ dispatch env route of
           Just expression : _ -> Just expression
           _ -> Nothing
-    provenance <- makeProvenance selected
+    let provenance = environmentProvenance <> expansionProvenance
     let definition = maybe "" toPathText selected
     return (src, dstPath, route.fileType, definition, provenance, warnings)
   let paths' =
@@ -195,25 +192,16 @@ routePathsWithVariables repo env lookupVariable = do
  where
   fileRoutes :: [(OsPath, FileRoute)]
   fileRoutes = Data.Map.Strict.toList repo.manifest.fileRoutes
-  makeProvenance :: Maybe FilePathExpression -> m (Map Text Text)
-  makeProvenance selected = do
-    inputs <- case selected of
-      Nothing -> return []
-      Just expression ->
-        forM (Set.toList $ environmentVariables expression) $ \variable -> do
-          found <- lookupVariable variable
-          return $ Map.toList found.provenance
-    return $
-      Map.fromList $
-        [ ("operating-system", original env.operatingSystem.identifier)
-        , ("architecture", original env.architecture.identifier)
-        , ("kernel-name", original env.kernel.name)
-        , ("kernel-release", original env.kernel.release)
-        ]
-          ++ concat inputs
-          ++ [ ("fact." <> factKeyText key, factValueText value)
-             | (key, value) <- Map.toAscList env.additionalFacts
-             ]
+  environmentProvenance =
+    Map.fromList $
+      [ ("operating-system", original env.operatingSystem.identifier)
+      , ("architecture", original env.architecture.identifier)
+      , ("kernel-name", original env.kernel.name)
+      , ("kernel-release", original env.kernel.release)
+      ]
+        ++ [ ("fact." <> factKeyText key, factValueText value)
+           | (key, value) <- Map.toAscList env.additionalFacts
+           ]
   filterIgnoredPathsFromOverlaps
     :: OsPath
     -> [FilePattern]
