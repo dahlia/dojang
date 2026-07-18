@@ -59,7 +59,6 @@ import Data.Map.Strict
 import System.FilePattern (FilePattern, matchMany)
 import System.OsPath
   ( OsPath
-  , OsString
   , joinPath
   , makeRelative
   , normalise
@@ -73,14 +72,14 @@ import Data.Set (toList, union)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
-import Dojang.Types.FilePathExpression (EnvironmentVariable)
+import Dojang.Types.FilePathExpression.Expansion (VariableGetter)
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.Repository
   ( Repository (..)
   , RouteMapWarning
   , RouteResult (..)
   )
-import Dojang.Types.Repository qualified (routePaths)
+import Dojang.Types.Repository qualified (routePathsWithVariables)
 
 
 -- | The context in which repository operations are performed.
@@ -89,8 +88,8 @@ data (MonadFileSystem m) => Context m = Context
   -- ^ The repository.
   , environment :: Environment
   -- ^ The environment.
-  , environmentVariableGetter :: EnvironmentVariable -> m (Maybe OsString)
-  -- ^ A function to look up an environment variable.
+  , variableGetter :: VariableGetter m
+  -- ^ Shared manifest and inherited variable lookup.
   }
 
 
@@ -104,10 +103,10 @@ routePaths
   -> m ([RouteResult], [RouteMapWarning])
   -- ^ The expanded paths, along with any warnings that were generated.
 routePaths ctx =
-  Dojang.Types.Repository.routePaths
+  Dojang.Types.Repository.routePathsWithVariables
     ctx.repository
     ctx.environment
-    ctx.environmentVariableGetter
+    ctx.variableGetter
 
 
 -- | The small stat of a file.

@@ -12,6 +12,7 @@ module Dojang.Types.Repository
   , findOverlappingRouteResults
   , overlaps
   , routePaths
+  , routePathsWithVariables
   ) where
 
 import Control.Monad (forM)
@@ -34,7 +35,6 @@ import Data.List.NonEmpty
 
 import Data.Map.Strict (Map, findWithDefault, fromListWith, toList)
 import Data.Map.Strict qualified as Map
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Numeric (showHex)
@@ -60,16 +60,18 @@ import Dojang.Types.Environment
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression
   ( EnvironmentVariable
-  , FilePathExpression
-  , environmentVariables
   , toPathText
   )
-import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning)
+import Dojang.Types.FilePathExpression.Expansion
+  ( ExpansionWarning
+  , VariableGetter
+  , VariableLookup (..)
+  )
 import Dojang.Types.FileRoute
   ( FileRoute (..)
   , RouteWarning
   , dispatch
-  , routePath
+  , routePathWithVariables
   )
 import Dojang.Types.FileRoute qualified as FileRoute (RouteWarning (..))
 import Dojang.Types.Manifest (Manifest (..))
@@ -139,12 +141,39 @@ routePaths
   -> m ([RouteResult], [RouteMapWarning])
   -- ^ The expanded paths, along with any warnings that were generated.
 routePaths repo env lookupEnvVar = do
+  routePathsWithVariables repo env legacyGetter
+ where
+  legacyGetter variable = do
+    value <- lookupEnvVar variable
+    rendered <- case value of
+      Nothing -> return "unset"
+      Just value' | value' == mempty -> return "empty"
+      Just value' -> return $ "sha256:" <> sha256OsString value'
+    return $
+      VariableLookup value [] $
+        Map.singleton ("env." <> variable) rendered
+
+
+-- | Routes paths through a warning- and provenance-aware variable getter.
+routePathsWithVariables
+  :: forall m
+   . (MonadFileSystem m)
+  => Repository
+  -- ^ Repository whose file routes are expanded.
+  -> Environment
+  -- ^ Environment used to select route branches.
+  -> VariableGetter m
+  -- ^ Warning- and provenance-aware variable lookup.
+  -> m ([RouteResult], [RouteMapWarning])
+  -- ^ Expanded non-null routes and any routing warnings.
+routePathsWithVariables repo env lookupVariable = do
   paths <- forM fileRoutes $ \(src, route) -> do
-    (dstPath, warnings) <- routePath route env lookupEnvVar
+    (dstPath, warnings, expansionProvenance) <-
+      routePathWithVariables route env lookupVariable
     let selected = case fst $ dispatch env route of
           Just expression : _ -> Just expression
           _ -> Nothing
-    provenance <- makeProvenance selected
+    let provenance = environmentProvenance <> expansionProvenance
     let definition = maybe "" toPathText selected
     return (src, dstPath, route.fileType, definition, provenance, warnings)
   let paths' =
@@ -167,29 +196,16 @@ routePaths repo env lookupEnvVar = do
  where
   fileRoutes :: [(OsPath, FileRoute)]
   fileRoutes = Data.Map.Strict.toList repo.manifest.fileRoutes
-  makeProvenance :: Maybe FilePathExpression -> m (Map Text Text)
-  makeProvenance selected = do
-    inputs <- case selected of
-      Nothing -> return []
-      Just expression ->
-        forM (Set.toList $ environmentVariables expression) $ \variable -> do
-          value <- lookupEnvVar variable
-          rendered <- case value of
-            Nothing -> return "unset"
-            Just value' | value' == mempty -> return "empty"
-            Just value' -> return $ "sha256:" <> sha256OsString value'
-          return ("env." <> variable, rendered)
-    return $
-      Map.fromList $
-        [ ("operating-system", original env.operatingSystem.identifier)
-        , ("architecture", original env.architecture.identifier)
-        , ("kernel-name", original env.kernel.name)
-        , ("kernel-release", original env.kernel.release)
-        ]
-          ++ inputs
-          ++ [ ("fact." <> factKeyText key, factValueText value)
-             | (key, value) <- Map.toAscList env.additionalFacts
-             ]
+  environmentProvenance =
+    Map.fromList $
+      [ ("operating-system", original env.operatingSystem.identifier)
+      , ("architecture", original env.architecture.identifier)
+      , ("kernel-name", original env.kernel.name)
+      , ("kernel-release", original env.kernel.release)
+      ]
+        ++ [ ("fact." <> factKeyText key, factValueText value)
+           | (key, value) <- Map.toAscList env.additionalFacts
+           ]
   filterIgnoredPathsFromOverlaps
     :: OsPath
     -> [FilePattern]

@@ -6,7 +6,8 @@ it resides is a repository for config files managed by Dojang, and sets up how
 those config files should be applied on the actual machine.
 
 It is in [TOML] format, as you might guess from the extension, and is divided
-into five main sections: `dirs`, `files`, `monikers`, `ignores`, and `hooks`.
+into six main sections: `vars`, `dirs`, `files`, `monikers`, `ignores`, and
+`hooks`.
 This document assumes that the reader knows the basic syntax of TOML.
 
 [TOML]: https://toml.io/
@@ -123,6 +124,50 @@ see the [corresponding documentation](environment-predicate.en.md).
     predicate](environment-predicate.en.md) syntax.  It is satisfied if
     the criteria are satisfied.  If used with the fields above,
     all criteria together must be satisfied.
+
+
+Manifest variables
+------------------
+
+The optional `vars` section declares reusable values for
+[file path expressions].  A compact declaration is an unconditional value:
+
+~~~~ toml
+[vars]
+CONFIG_HOME = "${XDG_CONFIG_HOME:-$HOME/.config}"
+CACHE_HOME = "$CONFIG_HOME/cache"
+~~~~
+
+Names are case-sensitive and must match `[A-Za-z_][A-Za-z0-9_]*`.  References
+use the same `$NAME` or `${NAME}` syntax as inherited environment variables.
+Declarations may refer to one another in any table order.  A reference cycle
+is an error, and Dojang reports the cycle instead of applying any files.
+
+Use an ordered array of branch tables when a value depends on the environment:
+
+~~~~ toml
+[vars]
+TOOLS_HOME = [
+  { when = "fact.class = work", value = "$HOME/work/tools" },
+  { moniker = "windows", value = "$UserProfile/tools" },
+  { when = "always", value = "$HOME/tools" },
+]
+~~~~
+
+Each branch must contain `value` and exactly one of `moniker` or `when`.
+Branches are tried in declaration order, and the first match wins.  If no
+branch matches, lookup falls through to an inherited environment variable of
+the same name.  A selected empty string is different: it is a defined empty
+value and shadows the inherited variable.
+
+Manifest variables take precedence over inherited environment variables.
+Machine facts and other environment predicates select branches; they are not
+automatically exposed as variable values.  `dojang init` asks for custom facts
+referenced by reachable variable branches.  Variable values are configuration,
+not secrets: Dojang avoids storing their plaintext in route records and hook
+fingerprints, but processes and diagnostics can still observe expanded paths.
+
+[file path expressions]: file-path-expression.en.md
 
 
 Routing of directories and files

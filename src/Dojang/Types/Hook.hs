@@ -24,6 +24,7 @@ import qualified Data.Text as Text
 import System.OsPath (OsPath)
 
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate)
+import Dojang.Types.FilePathExpression (FilePathExpression)
 
 
 -- | The type of hook, determining when it runs.
@@ -141,8 +142,8 @@ data Hook = Hook
   -- ^ Command arguments (default: []).
   , condition :: EnvironmentPredicate
   -- ^ Condition to run (combined from moniker and when fields).
-  , workingDirectory :: Maybe OsPath
-  -- ^ Working directory (default: repository root).
+  , workingDirectory :: Maybe FilePathExpression
+  -- ^ Working-directory expression (default: repository root).
   , ignoreFailure :: Bool
   -- ^ Continue on failure (default: False).
   }

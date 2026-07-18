@@ -66,6 +66,8 @@ spec = do
     parse bareComponent' "" "甲" `shouldParse` BareComponent "甲"
     parse bareComponent' "" "123-foo-乙"
       `shouldParse` BareComponent "123-foo-乙"
+    parse bareComponent' "" "$$HOME"
+      `shouldParse` BareComponent "$HOME"
     parse (bareComponent "") "" "/foo"
       `shouldFailWith` err
         0

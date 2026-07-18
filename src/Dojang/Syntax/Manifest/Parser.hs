@@ -6,6 +6,7 @@
 
 module Dojang.Syntax.Manifest.Parser
   ( DetailedRouteError (..)
+  , DetailedVariableError (..)
   , Error (..)
   , formatErrors
   , readManifest
@@ -17,6 +18,7 @@ import Data.Either (lefts)
 import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty (toList)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.String (IsString (fromString))
 import Data.Void (Void)
 import qualified System.FilePath.Windows as Windows
@@ -64,6 +66,9 @@ import Dojang.Syntax.Manifest.Internal
   , FileRouteMap'
   , FlatOrNonEmptyStrings (..)
   , Manifest' (..)
+  , ManifestVariable' (..)
+  , ManifestVariableBranch' (..)
+  , ManifestVariableMap'
   , MonikerMap'
   )
 import qualified Dojang.Syntax.Manifest.Internal as Internal
@@ -92,6 +97,14 @@ import Dojang.Types.Hook
   , validateHookConfiguration
   )
 import Dojang.Types.Manifest (Manifest (Manifest))
+import Dojang.Types.ManifestVariable
+  ( ManifestVariable
+  , ManifestVariableMap
+  , ManifestVariableName
+  , manifestVariable
+  , manifestVariablePreservingOrder
+  , renderManifestVariableName
+  )
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
@@ -109,6 +122,8 @@ data Error
     FilePathExpressionError (ParseErrorBundle Text Void)
   | -- | An invalid branch in a detailed file route.
     FileRouteBranchError FileType OsPath Int DetailedRouteError
+  | -- | An invalid manifest-variable declaration or branch.
+    ManifestVariableError ManifestVariableName (Maybe Int) DetailedVariableError
   | -- | A route name can escape the repository root.
     InvalidRoutePathError FileType OsPath
   | -- | Distinct route names normalize to one lifecycle identity.
@@ -129,6 +144,17 @@ data DetailedRouteError
     UnknownRouteMoniker MonikerName
   | -- | The branch contains fields other than @moniker@, @when@, and @path@.
     UnexpectedRouteFields [Text]
+  deriving (Eq, Show)
+
+
+-- | An error in a manifest-variable declaration or detailed branch.
+data DetailedVariableError
+  = EmptyVariableBranches
+  | MissingVariableCondition
+  | ConflictingVariableConditions
+  | MissingVariableValue
+  | UnknownVariableMoniker MonikerName
+  | UnexpectedVariableFields [Text]
   deriving (Eq, Show)
 
 
@@ -199,6 +225,24 @@ formatErrors (FileRouteBranchError fileType path index reason) =
     "refers to undefined moniker " <> original name.name <> "."
   formatReason (UnexpectedRouteFields fields) =
     "contains unexpected field(s): " <> intercalate ", " fields <> "."
+formatErrors (ManifestVariableError name branchIndex reason) =
+  [ prefix <> formatReason reason
+  ]
+ where
+  prefix =
+    "Manifest variable "
+      <> renderManifestVariableName name
+      <> maybe " " (\index -> " branch " <> pack (show $ index + 1) <> " ") branchIndex
+  formatReason EmptyVariableBranches = "must have at least one branch."
+  formatReason MissingVariableCondition =
+    "must specify either moniker or when."
+  formatReason ConflictingVariableConditions =
+    "cannot specify both moniker and when."
+  formatReason MissingVariableValue = "must specify value."
+  formatReason (UnknownVariableMoniker moniker) =
+    "refers to undefined moniker " <> original moniker.name <> "."
+  formatReason (UnexpectedVariableFields fields) =
+    "contains unexpected field(s): " <> intercalate ", " fields <> "."
 formatErrors (InvalidRoutePathError fileType routePath) =
   [ routeKind fileType
       <> " route name "
@@ -227,14 +271,23 @@ mapManifest manifest' =
     Right repositoryId' -> case monikersResult of
       Left e -> Left e
       Right monikers' ->
-        case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
+        case mapManifestVariableMap monikers' manifest'.variables of
           Left e -> Left e
-          Right fileRoutes' ->
-            case mapHooks monikers' manifest'.hooks of
+          Right variables' ->
+            case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
               Left e -> Left e
-              Right hooks' ->
-                Right $
-                  Manifest repositoryId' monikers' fileRoutes' ignores' hooks'
+              Right fileRoutes' ->
+                case mapHooks monikers' manifest'.hooks of
+                  Left e -> Left e
+                  Right hooks' ->
+                    Right $
+                      Manifest
+                        repositoryId'
+                        monikers'
+                        variables'
+                        fileRoutes'
+                        ignores'
+                        hooks'
  where
   repositoryIdResult =
     traverse
@@ -266,6 +319,88 @@ mapMonikerMap m =
     ]
   errors :: [Error]
   errors = lefts [r | (_, r) <- results]
+
+
+mapManifestVariableMap
+  :: MonikerMap
+  -> ManifestVariableMap'
+  -> Either Error ManifestVariableMap
+mapManifestVariableMap monikers variables =
+  Map.fromList <$> traverse mapEntry (Map.toList variables)
+ where
+  mapEntry
+    :: (ManifestVariableName, ManifestVariable')
+    -> Either Error (ManifestVariableName, ManifestVariable)
+  mapEntry (name, CompactManifestVariable value) = do
+    expression <- parseValue name Nothing value
+    return (name, manifestVariable monikers expression)
+  mapEntry (name, DetailedManifestVariable []) =
+    Left $ ManifestVariableError name Nothing EmptyVariableBranches
+  mapEntry (name, DetailedManifestVariable branches) = do
+    mapped <- traverse (uncurry $ mapBranch name) $ zip [0 ..] branches
+    case NonEmpty.nonEmpty mapped of
+      Nothing -> Left $ ManifestVariableError name Nothing EmptyVariableBranches
+      Just nonempty ->
+        return
+          ( name
+          , manifestVariablePreservingOrder (`HashMap.lookup` monikers) nonempty
+          )
+  mapBranch
+    :: ManifestVariableName
+    -> Int
+    -> ManifestVariableBranch'
+    -> Either Error (EnvironmentPredicate, FilePathExpression)
+  mapBranch name index branch
+    | not $ null branch.variableUnexpectedFields =
+        variableError name index $
+          UnexpectedVariableFields branch.variableUnexpectedFields
+    | otherwise = do
+        predicate <- case (branch.variableMoniker, branch.variableCondition) of
+          (Nothing, Nothing) ->
+            variableError name index MissingVariableCondition
+          (Just _, Just _) ->
+            variableError name index ConflictingVariableConditions
+          (Just moniker, Nothing)
+            | HashMap.member moniker monikers -> Right $ Moniker moniker
+            | otherwise ->
+                variableError name index $ UnknownVariableMoniker moniker
+          (Nothing, Just condition) ->
+            first EnvironmentPredicateError $
+              normalizePredicate
+                <$> parseEnvironmentPredicate
+                  (branchSource name index "when")
+                  condition
+        value <- case branch.variableValue of
+          Nothing -> variableError name index MissingVariableValue
+          Just source -> parseValue name (Just index) source
+        return (predicate, value)
+  parseValue
+    :: ManifestVariableName
+    -> Maybe Int
+    -> Text
+    -> Either Error FilePathExpression
+  parseValue _ _ "" = Right $ BareComponent ""
+  parseValue name index source =
+    first FilePathExpressionError $
+      parseFilePathExpression
+        ( maybe
+            ("vars." <> unpack (renderManifestVariableName name))
+            (\branch -> branchSource name branch "value")
+            index
+        )
+        source
+  variableError
+    :: ManifestVariableName -> Int -> DetailedVariableError -> Either Error a
+  variableError name index =
+    Left . ManifestVariableError name (Just index)
+  branchSource :: ManifestVariableName -> Int -> String -> String
+  branchSource name index field =
+    "vars."
+      <> unpack (renderManifestVariableName name)
+      <> "["
+      <> show index
+      <> "]."
+      <> field
 
 
 mapEnvironmentPredicate'
@@ -537,6 +672,7 @@ mapHook monikers hook' = do
   identifier <- traverse parseIdentifier hook'.hookId
   policy' <- parsePolicy hook'.policy
   cond <- conditionResult
+  workDir <- traverse parseWorkingDirectory hook'.workingDirectory
   let hook =
         Hook
           { hookId = identifier
@@ -545,7 +681,7 @@ mapHook monikers hook' = do
           , command = encodePath $ unpack hook'.command
           , args = maybe [] id hook'.args
           , condition = cond
-          , workingDirectory = encodePath <$> hook'.workingDirectory
+          , workingDirectory = workDir
           , ignoreFailure = maybe False id hook'.ignoreFailure
           }
   first HookConfigurationError $ validateHookConfiguration hook
@@ -562,6 +698,10 @@ mapHook monikers hook' = do
   parsePolicy (Just "on-change") = Right HookOnChange
   parsePolicy (Just value) =
     Left $ HookConfigurationError $ "Unknown hook policy: " <> value <> "."
+  parseWorkingDirectory "" = Right $ BareComponent ""
+  parseWorkingDirectory expression =
+    first FilePathExpressionError $
+      parseFilePathExpression "hooks.working-directory" expression
   conditionResult :: Either Error EnvironmentPredicate
   conditionResult = case hook'.moniker of
     Just monikerName ->

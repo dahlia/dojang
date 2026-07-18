@@ -16,6 +16,9 @@ module Dojang.Syntax.Manifest.Internal
   , IgnoreMap'
   , Manifest' (..)
   , MonikerMap'
+  , ManifestVariable' (..)
+  , ManifestVariableBranch' (..)
+  , ManifestVariableMap'
   , always
   , emptyHooks
   ) where
@@ -28,6 +31,11 @@ import Data.CaseInsensitive (CI (original))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, pack, unpack)
+import Dojang.Types.ManifestVariable
+  ( ManifestVariableName
+  , parseManifestVariableName
+  , renderManifestVariableName
+  )
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import System.FilePattern (FilePattern)
 import Toml (Value (..))
@@ -105,6 +113,16 @@ instance ToValue MonikerName where
   toValue monikerName = toValue $ original monikerName.name
 
 
+instance FromKey ManifestVariableName where
+  fromKey key = case parseManifestVariableName $ pack key of
+    Right name -> return name
+    Left message -> fail $ unpack message
+
+
+instance ToKey ManifestVariableName where
+  toKey = unpack . renderManifestVariableName
+
+
 data EnvironmentPredicate' = EnvironmentPredicate'
   { os :: Maybe FlatOrNonEmptyStrings
   , arch :: Maybe FlatOrNonEmptyStrings
@@ -172,6 +190,62 @@ instance ToTable EnvironmentPredicate' where
 
 
 type MonikerMap' = Map MonikerName EnvironmentPredicate'
+
+
+data ManifestVariable'
+  = CompactManifestVariable Text
+  | DetailedManifestVariable [ManifestVariableBranch']
+  deriving (Eq, Show)
+
+
+instance FromValue ManifestVariable' where
+  fromValue value@String{} = CompactManifestVariable <$> fromValue value
+  fromValue value@Array{} = DetailedManifestVariable <$> fromValue value
+  fromValue value = typeError value "string or array of variable branches"
+
+
+instance ToValue ManifestVariable' where
+  toValue (CompactManifestVariable value) = toValue value
+  toValue (DetailedManifestVariable branches) = toValue branches
+
+
+data ManifestVariableBranch' = ManifestVariableBranch'
+  { variableMoniker :: Maybe MonikerName
+  , variableCondition :: Maybe Text
+  , variableValue :: Maybe Text
+  , variableUnexpectedFields :: [Text]
+  }
+  deriving (Eq, Show)
+
+
+instance FromValue ManifestVariableBranch' where
+  fromValue = parseTableFromValue $ do
+    moniker <- optKey "moniker"
+    condition <- optKey "when"
+    value <- optKey "value"
+    unexpectedFields <- fmap pack . Map.keys <$> getTable
+    setTable Map.empty
+    return $
+      ManifestVariableBranch' moniker condition value unexpectedFields
+
+
+instance ToValue ManifestVariableBranch' where
+  toValue = defaultTableToValue
+
+
+instance ToTable ManifestVariableBranch' where
+  toTable branch =
+    table $
+      maybeField "moniker" branch.variableMoniker
+        ++ maybeField "when" branch.variableCondition
+        ++ maybeField "value" branch.variableValue
+   where
+    maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
+    maybeField key (Just value) = [(key, toValue value)]
+    maybeField _ Nothing = []
+
+
+type ManifestVariableMap' = Map ManifestVariableName ManifestVariable'
 
 
 data FileRoute'
@@ -248,8 +322,8 @@ data Hook' = Hook'
   -- ^ Run only when this moniker matches.
   , condition :: Maybe Text
   -- ^ Run only when this predicate matches (parsed from "when" in TOML).
-  , workingDirectory :: Maybe FilePath
-  -- ^ Working directory (default: repository root).
+  , workingDirectory :: Maybe Text
+  -- ^ Working-directory expression (default: repository root).
   , ignoreFailure :: Maybe Bool
   -- ^ Continue on failure (default: False).
   }
@@ -389,6 +463,7 @@ instance ToTable Hooks' where
 data Manifest' = Manifest'
   { repositoryId :: Maybe Text
   , monikers :: MonikerMap'
+  , variables :: ManifestVariableMap'
   , dirs :: FileRouteMap'
   , files :: FileRouteMap'
   , ignores :: IgnoreMap'
@@ -403,6 +478,7 @@ instance FromValue Manifest' where
       Manifest'
         <$> optKey "repository-id"
         <*> (fromMaybe Map.empty <$> optKey "monikers")
+        <*> (fromMaybe Map.empty <$> optKey "vars")
         <*> (fromMaybe Map.empty <$> optKey "dirs")
         <*> (fromMaybe Map.empty <$> optKey "files")
         <*> (fromMaybe Map.empty <$> optKey "ignores")
@@ -417,6 +493,10 @@ instance ToTable Manifest' where
   toTable manifest =
     table $
       maybeField "repository-id" manifest.repositoryId
+        ++ ( if Map.null manifest.variables
+               then []
+               else [("vars", toValue manifest.variables)]
+           )
         ++ [ ("monikers", toValue manifest.monikers)
            , ("dirs", toValue manifest.dirs)
            , ("files", toValue manifest.files)

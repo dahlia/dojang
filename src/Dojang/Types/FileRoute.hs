@@ -9,6 +9,7 @@ module Dojang.Types.FileRoute
   , fileRoutePreservingOrder
   , dispatch
   , routePath
+  , routePathWithVariables
   ) where
 
 import Data.List (sortOn)
@@ -17,7 +18,8 @@ import Prelude hiding (lookup)
 
 import Data.HashMap.Strict (lookup)
 import Data.HashSet (HashSet, singleton, union, unions)
-import Data.Text (unpack)
+import Data.Map.Strict (Map)
+import Data.Text (Text, unpack)
 import System.OsPath (OsPath, OsString)
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
@@ -28,7 +30,9 @@ import Dojang.Types.EnvironmentPredicate.Specificity (Specificity, specificity)
 import Dojang.Types.FilePathExpression (EnvironmentVariable, FilePathExpression)
 import Dojang.Types.FilePathExpression.Expansion
   ( ExpansionWarning
-  , expandFilePath
+  , VariableGetter
+  , expandFilePathWithVariables
+  , simpleVariableGetter
   )
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
@@ -191,15 +195,40 @@ routePath
   -- during evaluation and expansion.  For null routes, returns 'Nothing',
   -- but still returns any warnings that occurred (if any).
 routePath route env lookupEnvVar = do
+  (path, warnings, _) <-
+    routePathWithVariables route env $ simpleVariableGetter lookupEnvVar
+  return (path, warnings)
+
+
+-- | Routes and expands a path with nested lookup warnings and provenance.
+routePathWithVariables
+  :: (MonadFileSystem m)
+  => FileRoute
+  -- ^ Route to dispatch and expand.
+  -> Environment
+  -- ^ Environment used to select a route branch.
+  -> VariableGetter m
+  -- ^ Warning- and provenance-aware variable lookup.
+  -> m (Maybe OsPath, [RouteWarning], Map Text Text)
+  -- ^ Routed path, if any, plus evaluation and expansion warnings and the
+  -- provenance of inputs used during expansion.
+routePathWithVariables route env lookupVariable = do
   let (matched, warnings) = dispatch env route
   let predWarnings = map EnvironmentPredicateWarning warnings
   case matched of
-    [] -> return (Nothing, predWarnings)
-    (Nothing : _) -> return (Nothing, predWarnings)
+    [] -> return (Nothing, predWarnings, mempty)
+    (Nothing : _) -> return (Nothing, predWarnings, mempty)
     (Just pathExpr : _) -> do
-      (path, exprWarnings) <-
-        expandFilePath pathExpr lookupEnvVar (encodePath . unpack)
-      return (Just path, predWarnings ++ map FilePathExpressionWarning exprWarnings)
+      (path, exprWarnings, provenance) <-
+        expandFilePathWithVariables
+          pathExpr
+          lookupVariable
+          (encodePath . unpack)
+      return
+        ( Just path
+        , predWarnings ++ map FilePathExpressionWarning exprWarnings
+        , provenance
+        )
 
 
 instance Show FileRoute where

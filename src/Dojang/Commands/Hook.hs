@@ -13,6 +13,7 @@ module Dojang.Commands.Hook
   , commandHookTypes
   , disambiguatedHookScopePaths
   , effectiveHookWorkingDirectory
+  , effectiveHookWorkingDirectoryWithVariables
   , executeHooks
   , defaultHookProcessRunner
   , hookDueReason
@@ -92,6 +93,12 @@ import Dojang.Types.Environment
   , factValueText
   )
 import Dojang.Types.EnvironmentPredicate.Evaluate (evaluate)
+import Dojang.Types.FilePathExpression.Expansion
+  ( ExpansionWarning (UndefinedEnvironmentVariable)
+  , VariableGetter
+  , expandFilePathWithVariables
+  , simpleVariableGetter
+  )
 import Dojang.Types.Hook
   ( Hook (..)
   , HookMap
@@ -405,7 +412,7 @@ executeHooks hookEnv ctx hookType = do
           let monikers = manifest'.monikers
           let environment = ctx.environment
           if shouldRunHook monikers environment hook
-            then executeHook hookEnv hookType hook
+            then executeHook hookEnv ctx.variableGetter hookType hook
             else
               $(logDebug) $
                 "Skipping hook (condition not met): "
@@ -443,11 +450,15 @@ hookRecursionKey repositoryId event identifier =
 executeHook
   :: (MonadFileSystem i, MonadIO i)
   => HookEnv
+  -> VariableGetter (App i)
   -> HookType
   -> Hook
   -> App i ()
-executeHook hookEnv hookType hook = do
+executeHook hookEnv variableGetter hookType hook = do
   dryRun' <- asks (.dryRun)
+  (workingDirectory, expansionWarnings, provenance) <-
+    resolveHookWorkingDirectory variableGetter hookEnv hook
+  forM_ expansionWarnings printExpansionWarning
   let event = renderHookType hookType
   let identifier = effectiveHookId hookType hook
   let executionKey = hookExecutionKey hookType <$> hook.hookId
@@ -455,7 +466,13 @@ executeHook hookEnv hookType hook = do
         maybe (event <> "/" <> identifier) renderHookExecutionKey executionKey
   let recursionKey =
         hookRecursionKey hookEnv.machineState.repositoryId event identifier
-  let fingerprint = hookFingerprint hookEnv hookType hook
+  let fingerprint =
+        hookFingerprint
+          hookEnv
+          hookType
+          hook
+          workingDirectory
+          provenance
   ancestorStack <- liftIO $ fromMaybe "" <$> lookupEnv "DOJANG_HOOK_STACK"
   if recursionKey `elem` Text.splitOn "," (pack ancestorStack)
     then $(logDebug) $ "Suppressing recursive hook " <> recursionKey <> "."
@@ -466,7 +483,7 @@ executeHook hookEnv hookType hook = do
           fingerprint
           (executionKey >>= (`Map.lookup` hookEnv.machineState.hookExecutions)) of
           Nothing -> return ()
-          Just reason -> printDryRun event reason hook
+          Just reason -> printDryRun event workingDirectory reason hook
         else case hook.policy of
           HookAlways -> do
             _ <-
@@ -476,6 +493,7 @@ executeHook hookEnv hookType hook = do
                 recursionKey
                 identifier
                 hook
+                workingDirectory
                 (liftIO . hookEnv.processStarter)
             return ()
           _ -> case executionKey of
@@ -516,14 +534,14 @@ executeHook hookEnv hookType hook = do
                               typedKey
                               recursionKey
                               identifier
+                              workingDirectory
                               fingerprint
               case locked of
                 Left err -> die' machineStateError $ formatStateError err
                 Right () -> return ()
  where
-  printDryRun event reason hook' = do
+  printDryRun event workingDirectory reason hook' = do
     pathStyle <- pathStyleFor stderr
-    workingDirectory <- effectiveHookWorkingDirectory hookEnv hook'
     printStderr' Note $
       renderHookDryRun
         event
@@ -532,34 +550,40 @@ executeHook hookEnv hookType hook = do
         (pathStyle hook'.command)
         hook'.args
 
-  runAndRecord executionKey recursionKey identifier fingerprint = do
-    succeeded <-
-      runHookProcess
-        hookEnv
-        hookType
-        recursionKey
-        identifier
-        hook
-        startCurrentGeneration
-    when (succeeded && hook.policy /= HookAlways) $ do
-      now <- liftIO getCurrentTime
-      case hookExecutionPolicy hook.policy fingerprint of
-        Nothing ->
-          die'
-            machineStateError
-            "A stateful hook has invalid execution policy data."
-        Just policy -> do
-          let execution = HookExecution policy now
-          result <-
-            recordHookExecution
-              hookEnv.stateRoot
-              now
-              hookEnv.machineState
-              executionKey
-              execution
-          case result of
-            Left err -> die' machineStateError $ formatStateError err
-            Right _ -> return ()
+  runAndRecord
+    executionKey
+    recursionKey
+    identifier
+    workingDirectory
+    fingerprint = do
+      succeeded <-
+        runHookProcess
+          hookEnv
+          hookType
+          recursionKey
+          identifier
+          hook
+          workingDirectory
+          startCurrentGeneration
+      when (succeeded && hook.policy /= HookAlways) $ do
+        now <- liftIO getCurrentTime
+        case hookExecutionPolicy hook.policy fingerprint of
+          Nothing ->
+            die'
+              machineStateError
+              "A stateful hook has invalid execution policy data."
+          Just policy -> do
+            let execution = HookExecution policy now
+            result <-
+              recordHookExecution
+                hookEnv.stateRoot
+                now
+                hookEnv.machineState
+                executionKey
+                execution
+            case result of
+              Left err -> die' machineStateError $ formatStateError err
+              Right _ -> return ()
 
   hookExecutionPolicy HookOnce _ = Just HookOnceExecution
   hookExecutionPolicy HookOnChange (Just value) =
@@ -658,9 +682,10 @@ effectiveHookId hookType hook =
     hook.hookId
 
 
-hookFingerprint :: HookEnv -> HookType -> Hook -> Maybe Text
-hookFingerprint _ _ hook | hook.policy /= HookOnChange = Nothing
-hookFingerprint hookEnv hookType hook =
+hookFingerprint
+  :: HookEnv -> HookType -> Hook -> OsPath -> Map.Map Text Text -> Maybe Text
+hookFingerprint _ _ hook _ _ | hook.policy /= HookOnChange = Nothing
+hookFingerprint hookEnv hookType hook workingDirectory provenance =
   Just $
     digestParts $
       ( encodeUtf8
@@ -675,6 +700,10 @@ hookFingerprint hookEnv hookType hook =
       )
         ++ [ encodeUtf8 $ factKeyText key <> "=" <> factValueText value
            | (key, value) <- Map.toAscList hookEnv.currentFacts
+           ]
+        ++ [osPathBytes workingDirectory]
+        ++ [ encodeUtf8 $ key <> "=" <> value
+           | (key, value) <- Map.toAscList provenance
            ]
         ++ (osPathBytes <$> hookEnv.selectedPaths)
 
@@ -729,9 +758,10 @@ runHookProcess
   -> Text
   -> Text
   -> Hook
+  -> OsPath
   -> (CreateProcess -> App i (Either IOException (IO (Either IOException ExitCode))))
   -> App i Bool
-runHookProcess hookEnv hookType recursionKey identifier hook start = do
+runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start = do
   pathStyle <- pathStyleFor stderr
   cmdPath <- liftIO $ decodeFS hook.command
   let argsStr = unpack <$> hook.args
@@ -741,7 +771,6 @@ runHookProcess hookEnv hookType recursionKey identifier hook start = do
       <> " "
       <> showt argsStr
       <> "..."
-  workDirPath <- effectiveHookWorkingDirectory hookEnv hook
   workDir <- Just <$> decodePath workDirPath
   repoPath <- makeAbsolute hookEnv.repositoryPath >>= decodePath
   manifestPath' <- decodePath hookEnv.manifestPath
@@ -847,13 +876,64 @@ effectiveHookWorkingDirectory
   -> App i OsPath
   -- ^ Normalized absolute working directory.
 effectiveHookWorkingDirectory hookEnv hook =
-  normalise <$> makeAbsolute candidate
+  effectiveHookWorkingDirectoryWithVariables
+    (simpleVariableGetter inheritedGetter)
+    hookEnv
+    hook
  where
-  candidate = case hook.workingDirectory of
-    Nothing -> hookEnv.repositoryPath
-    Just configured
-      | isAbsolute configured -> configured
-      | otherwise -> hookEnv.repositoryPath </> configured
+  inheritedGetter variable = do
+    value <- liftIO $ lookupEnv $ unpack variable
+    traverse encodePath value
+
+
+-- | Resolves a hook working directory with the shared manifest-variable
+-- lookup.
+effectiveHookWorkingDirectoryWithVariables
+  :: (MonadFileSystem i, MonadIO i)
+  => VariableGetter (App i)
+  -- ^ Manifest-variable and inherited-environment lookup.
+  -> HookEnv
+  -- ^ Hook context whose repository is the relative-path base.
+  -> Hook
+  -- ^ Hook with an optional working-directory expression.
+  -> App i OsPath
+  -- ^ Normalized absolute working directory.
+effectiveHookWorkingDirectoryWithVariables variableGetter hookEnv hook =
+  firstPath <$> resolveHookWorkingDirectory variableGetter hookEnv hook
+ where
+  firstPath (path, _, _) = path
+
+
+resolveHookWorkingDirectory
+  :: (MonadFileSystem i, MonadIO i)
+  => VariableGetter (App i)
+  -> HookEnv
+  -> Hook
+  -> App i (OsPath, [ExpansionWarning], Map.Map Text Text)
+resolveHookWorkingDirectory variableGetter hookEnv hook = do
+  case hook.workingDirectory of
+    Nothing -> do
+      absolute <- makeAbsolute hookEnv.repositoryPath
+      return (normalise absolute, [], Map.empty)
+    Just expression -> do
+      (configured, warnings, provenance) <-
+        expandFilePathWithVariables
+          expression
+          variableGetter
+          (encodePath . Text.unpack)
+      absolute <-
+        makeAbsolute $
+          if isAbsolute configured
+            then configured
+            else hookEnv.repositoryPath </> configured
+      return (normalise absolute, warnings, provenance)
+
+
+printExpansionWarning
+  :: (MonadIO i) => ExpansionWarning -> App i ()
+printExpansionWarning (UndefinedEnvironmentVariable variable) =
+  printStderr' Warning $
+    "Reference to an undefined environment variable: " <> variable <> "."
 
 
 -- | Starts a hook process and returns an action that waits for its exit status.

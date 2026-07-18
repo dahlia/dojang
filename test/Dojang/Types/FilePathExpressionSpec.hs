@@ -47,6 +47,12 @@ spec = do
       toPathText (Root Nothing) `shouldBe` "/"
       toPathText (Root $ Just 'C') `shouldBe` "C:/"
 
+    it "escapes literal dollar signs" $ do
+      let expression = BareComponent "$HOME-${CONFIG}"
+          rendered = toPathText expression
+      rendered `shouldBe` "$$HOME-$${CONFIG}"
+      parseFilePathExpression "test" rendered `shouldBe` Right expression
+
     it "yields what parseFilePathExpression can parse" $ hedgehog $ do
       expr <- forAll Gen.filePathExpression
       let exprText = toPathText expr

@@ -35,6 +35,7 @@ import Dojang.Types.Context
   , RouteState (..)
   )
 import Dojang.Types.Environment.Current (MonadEnvironment (currentEnvironment))
+import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
@@ -629,7 +630,11 @@ spec = do
               tmpDir
               (tmpDir </> intermediateDir)
               (Manifest.manifest mempty mempty mempty mempty mempty)
-      let context = Context repository environment (const $ return Nothing)
+      let context =
+            Context repository environment $
+              simpleVariableGetter $
+                const $
+                  return Nothing
       let correspondence =
             FileCorrespondence
               { source = FileEntry sourcePath (File 4)

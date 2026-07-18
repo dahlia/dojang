@@ -243,7 +243,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       enrolled <-
@@ -291,7 +291,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       enrolled <-
@@ -336,7 +336,7 @@ spec = sequential $ do
               simulationName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       enrolled <-
@@ -382,7 +382,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       enrolled <-
@@ -435,7 +435,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $
           runAppWithoutLogging oldAppEnv $
@@ -494,7 +494,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       (state.firstApplied) `shouldBe` True
@@ -524,7 +524,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       withHome home (runAppWithoutLogging appEnv $ prepareMachineState manifest)
         `shouldThrow` (== machineStateError)
 
@@ -554,7 +554,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       first <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       writeFile (home </> registryFilename) "invalid toml"
@@ -588,7 +588,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       writeFile
@@ -621,7 +621,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       writeFile
@@ -656,7 +656,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $
           runAppWithoutLogging storedAppEnv $
@@ -709,7 +709,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       System.Directory.OsPath.removeDirectory checkout
@@ -742,7 +742,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       state <-
         withHome home $ runAppWithoutLogging appEnv $ prepareMachineState manifest
       writeFile
@@ -768,7 +768,7 @@ spec = sequential $ do
       createDirectories home
       let Right repositoryId =
             parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       let appEnv source =
             AppEnv
               source
@@ -809,7 +809,7 @@ spec = sequential $ do
       createDirectories home
       let Right repositoryId =
             parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       let appEnv source =
             AppEnv
               source
@@ -852,7 +852,7 @@ spec = sequential $ do
       createDirectories home
       let Right repositoryId =
             parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       let manifestContents =
             "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
       writeFile (checkout </> firstManifestName) manifestContents
@@ -898,7 +898,7 @@ spec = sequential $ do
       createDirectories home
       let Right repositoryId =
             parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       writeFile
         externalManifest
         "repository-id = \"123e4567-e89b-42d3-a456-426614174000\"\n"
@@ -952,7 +952,7 @@ spec = sequential $ do
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       withHome home (runAppWithoutLogging appEnv $ prepareMachineState manifest)
         `shouldThrow` (== machineStateError)
 
@@ -991,7 +991,7 @@ posixUnreadableRegistrySpec =
               envName
               False
               False
-      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty
+      let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       bracket_
         (System.Directory.OsPath.setPermissions registryPath unreadable)
         (System.Directory.OsPath.setPermissions registryPath permissions)

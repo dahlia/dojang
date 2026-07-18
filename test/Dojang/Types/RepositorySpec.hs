@@ -1,17 +1,20 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Types.RepositorySpec (spec) where
 
 import Control.Monad.IO.Class (liftIO)
+import Data.Map.Strict qualified as Map
+import Data.Text qualified as Text
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
 import System.Info (os)
 
 import System.OsPath (encodeFS, (</>))
-import Test.Hspec (Spec, runIO, specify)
+import Test.Hspec (Spec, expectationFailure, runIO, specify)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldNotSatisfy
@@ -26,9 +29,24 @@ import Dojang.Types.Environment
   , emptyEnvironment
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
-import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
-import Dojang.Types.FileRoute (fileRoute)
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression
+      ( BareComponent
+      , PathSeparator
+      , Substitution
+      , SubstitutionWithDefault
+      )
+  )
+import Dojang.Types.FilePathExpression.Expansion (VariableLookup (..))
+import Dojang.Types.FileRoute (fileRoute, fileRoutePreservingOrder)
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.ManifestVariable
+  ( formatVariableResolutionError
+  , lookupVariable
+  , manifestVariable
+  , parseManifestVariableName
+  , resolveManifestVariables
+  )
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.Repository
@@ -38,6 +56,7 @@ import Dojang.Types.Repository
   , findOverlappingRouteResults
   , overlaps
   , routePaths
+  , routePathsWithVariables
   )
 
 
@@ -54,6 +73,7 @@ spec = do
   qux <- runIO $ encodeFS "qux"
   src <- runIO $ encodeFS "src"
   dst <- runIO $ encodeFS "dst"
+  nested <- runIO $ encodeFS "nested"
   inter <- runIO $ encodeFS ".dojang"
 
   specify "routePaths" $ do
@@ -64,6 +84,7 @@ spec = do
           Manifest
             { repositoryId = Nothing
             , monikers = monikers
+            , variables = mempty
             , fileRoutes =
                 [ (foo, dirRoute $ if win then "C:\\dst\\foo" else "/dst/foo")
                 ,
@@ -149,6 +170,105 @@ spec = do
                        ]
                      )
 
+  specify "routePaths expands nested manifest variables" $ do
+    let Right destinationName = parseManifestVariableName "DESTINATION"
+        variables =
+          Map.singleton destinationName $
+            manifestVariable mempty $
+              PathSeparator (Substitution "BASE") (BareComponent "nested")
+        route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [(Always, Just $ Substitution "DESTINATION")]
+            Directory
+        manifest' =
+          Manifest
+            { repositoryId = Nothing
+            , monikers = mempty
+            , variables = variables
+            , fileRoutes = Map.singleton foo route
+            , ignorePatterns = mempty
+            , hooks = mempty
+            }
+        repo = Repository (root </> src) (root </> src </> inter) manifest'
+        env =
+          emptyEnvironment "linux" "x86_64" $
+            Kernel "Linux" "4.19.0-16-amd64"
+        inherited variable =
+          pure $
+            if variable == "BASE"
+              then Just $ root </> dst
+              else Nothing
+    resolution <- resolveManifestVariables env variables inherited
+    case resolution of
+      Left err ->
+        expectationFailure $ Text.unpack $ formatVariableResolutionError err
+      Right variableEnvironment -> do
+        (routes, warnings) <-
+          routePathsWithVariables repo env $ lookupVariable variableEnvironment
+        warnings `shouldBe` []
+        case routes of
+          [result] -> do
+            result.destinationPath `shouldBe` root </> dst </> nested
+            result.routeDefinition `shouldBe` "$DESTINATION"
+            Map.member "var.DESTINATION" result.routeProvenance `shouldBe` True
+            Map.member "env.BASE" result.routeProvenance `shouldBe` True
+          _ -> expectationFailure $ "Unexpected routes: " <> show routes
+
+  specify "routePaths keeps only provenance used during expansion" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  SubstitutionWithDefault
+                    "PRIMARY"
+                    (Substitution "FALLBACK")
+              )
+            ]
+            Directory
+        manifest' =
+          Manifest
+            { repositoryId = Nothing
+            , monikers = mempty
+            , variables = mempty
+            , fileRoutes = Map.singleton foo route
+            , ignorePatterns = mempty
+            , hooks = mempty
+            }
+        repo = Repository (root </> src) (root </> src </> inter) manifest'
+        env =
+          emptyEnvironment "linux" "x86_64" $
+            Kernel "Linux" "4.19.0-16-amd64"
+        lookupInput variable = pure $ case variable of
+          "PRIMARY" ->
+            VariableLookup
+              (Just $ root </> dst)
+              []
+              (Map.singleton "env.PRIMARY" "primary")
+          "FALLBACK" ->
+            VariableLookup
+              (Just $ root </> baz)
+              []
+              (Map.singleton "env.FALLBACK" "fallback")
+          _ -> VariableLookup Nothing [] mempty
+        expectedProvenance =
+          Map.fromList
+            [ ("operating-system", "linux")
+            , ("architecture", "x86_64")
+            , ("kernel-name", "Linux")
+            , ("kernel-release", "4.19.0-16-amd64")
+            , ("env.PRIMARY", "primary")
+            ]
+    (routes, warnings) <- routePathsWithVariables repo env lookupInput
+    warnings `shouldBe` []
+    case routes of
+      [result] -> do
+        result.destinationPath `shouldBe` root </> dst
+        result.routeProvenance `shouldBe` expectedProvenance
+      _ -> expectationFailure $ "Unexpected routes: " <> show routes
+
   if win
     then return ()
     else specify "routePaths distinguishes native non-UTF-8 environment values" $
@@ -167,6 +287,7 @@ spec = do
               Manifest
                 { repositoryId = Nothing
                 , monikers = monikers
+                , variables = mempty
                 , fileRoutes = [(foo, route)]
                 , ignorePatterns = mempty
                 , hooks = mempty

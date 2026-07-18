@@ -6,6 +6,34 @@ Version 0.3.0
 
 To be released.
 
+ -  Added reusable, case-sensitive manifest variables in the `[vars]` table.
+    Variables can be unconditional strings or ordered conditional branches
+    selected by a moniker or environment predicate.  They can reference one
+    another regardless of declaration order, take precedence over inherited
+    environment variables, preserve an explicitly selected empty value, and
+    fall through to an inherited value when no branch matches.  Reference
+    cycles are reported before synchronization.  `dojang init` now includes
+    facts referenced by reachable variable branches when checking machine
+    enrollment.  Machine facts select branches but are not exposed as variable
+    values.  Treat variable values as nonsecret configuration.
+
+    File and directory routes and hook `working-directory` fields share the
+    same variable resolver.  Hook working directories are now file path
+    expressions; relative results remain repository-relative, and their
+    privacy-preserving input hashes affect `on-change` fingerprints without
+    storing plaintext values.  Write `$$` for a literal dollar sign in any
+    file path expression.  In particular, a hook working directory that
+    previously contained a literal `$` must double it.  [[#33], [#40], [#68]]
+
+    The pre-1.0 Haskell API adds `variables` to `Manifest`, changes
+    `Hook.workingDirectory` from `Maybe OsPath` to
+    `Maybe FilePathExpression`, and gives `Context` a warning- and
+    provenance-aware `variableGetter`.  The existing `manifest` helper keeps
+    its previous arguments and creates an empty variable table; use
+    `manifestWithVariables` when declarations are needed.  Manifest writing
+    rejects a variable whose independent moniker resolver disagrees with the
+    manifest's moniker table, instead of serializing changed branch semantics.
+
  -  Added open, repository-scoped machine facts.  Dojang now detects a
     `hostname` fact alongside the existing operating-system, architecture, and
     kernel facts, and manifests can use arbitrary namespaced values with the
@@ -291,6 +319,7 @@ To be released.
 [#37]: https://github.com/dahlia/dojang/issues/37
 [#38]: https://github.com/dahlia/dojang/issues/38
 [#39]: https://github.com/dahlia/dojang/issues/39
+[#40]: https://github.com/dahlia/dojang/issues/40
 [#41]: https://github.com/dahlia/dojang/issues/41
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#61]: https://github.com/dahlia/dojang/pull/61
@@ -300,6 +329,7 @@ To be released.
 [#65]: https://github.com/dahlia/dojang/pull/65
 [#66]: https://github.com/dahlia/dojang/pull/66
 [#67]: https://github.com/dahlia/dojang/pull/67
+[#68]: https://github.com/dahlia/dojang/pull/68
 
 
 Version 0.2.1

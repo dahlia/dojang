@@ -11,6 +11,8 @@ module Dojang.Commands.Init
   , init
   , initWithFacts
   , initPresetName
+  , referencedMachineFacts
+  , requiredMachineFacts
   ) where
 
 import Control.Monad (foldM, forM, forM_, void, when)
@@ -131,6 +133,7 @@ import Dojang.Types.MachineState
   )
 import Dojang.Types.ManagedTarget (isSafeManagedRelativePath)
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.ManifestVariable (ManifestVariable (branches))
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, newRepositoryId)
@@ -344,7 +347,7 @@ makeRouteMap neededMonikers monikers' =
 
 makeManifest :: RepositoryId -> [InitPreset] -> Manifest
 makeManifest repositoryId presets =
-  Manifest (Just repositoryId) monikers' routeMap ignorePatterns'' empty
+  Manifest (Just repositoryId) monikers' empty routeMap ignorePatterns'' empty
  where
   neededMonikers :: [(InitPreset, NonEmpty MonikerName)]
   neededMonikers = listNeededMonikers presets
@@ -733,11 +736,24 @@ readFactsSource factsPath = do
       return facts
 
 
-referencedMachineFacts :: Manifest -> Set FactKey
+-- | Collects custom machine facts referenced by reachable manifest branches.
+referencedMachineFacts
+  :: Manifest
+  -- ^ Manifest whose reachable predicates are inspected.
+  -> Set FactKey
+  -- ^ Custom fact keys referenced by reachable branches.
 referencedMachineFacts = machineFactsRequiredBy id
 
 
-requiredMachineFacts :: Environment -> Manifest -> Set FactKey
+-- | Collects custom machine facts still required after specializing a
+-- manifest for the known environment.
+requiredMachineFacts
+  :: Environment
+  -- ^ Known environment used to specialize predicates.
+  -> Manifest
+  -- ^ Manifest whose reachable predicates are inspected.
+  -> Set FactKey
+  -- ^ Custom fact keys whose values are still required.
 requiredMachineFacts environment =
   machineFactsRequiredBy $ specializePredicate environment
 
@@ -749,7 +765,8 @@ machineFactsRequiredBy
 machineFactsRequiredBy specialize manifest =
   Set.filter (not . isBuiltInFact) $
     Set.unions $
-      referencedFacts resolver <$> routePredicates <> hookPredicates
+      referencedFacts resolver
+        <$> routePredicates <> variablePredicates <> hookPredicates
  where
   resolver = (`HashMap.lookup` manifest.monikers)
   routePredicates =
@@ -761,6 +778,11 @@ machineFactsRequiredBy specialize manifest =
     [ specialize $ resolvePredicate Set.empty hook.condition
     | hooks <- Map.elems manifest.hooks
     , hook <- hooks
+    ]
+  variablePredicates =
+    [ predicate
+    | variable <- Map.elems manifest.variables
+    , predicate <- reachablePredicates $ NonEmpty.toList variable.branches
     ]
   reachablePredicates [] = []
   reachablePredicates ((predicate, _) : branches) =
