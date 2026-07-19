@@ -574,8 +574,14 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
           )
           [ m
           | m <- initialManaged
-          , splitDirectories (normalise m.route.destinationPath)
-              `isPrefixOf` splitDirectories (normalise file.destination.path)
+          , -- Compare by native identity so case-variant Windows
+          -- destinations still find their owning route:
+          fmap
+            destinationPathIdentity
+            (splitDirectories $ normalise m.route.destinationPath)
+            `isPrefixOf` fmap
+              destinationPathIdentity
+              (splitDirectories $ normalise file.destination.path)
           ] of
           m : _ -> Just m
           [] -> Nothing

@@ -41,6 +41,7 @@ import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, sortOn)
 import Data.Ord (Down (Down))
+import Data.Word (Word32)
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
@@ -85,6 +86,7 @@ import Dojang.Types.FileRoute
   , RouteMode (DefaultMode)
   )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.PathIdentity (destinationPathIdentity)
 import Dojang.Types.Repository
   ( Repository (..)
   , RouteMapWarning
@@ -174,6 +176,12 @@ resolveTargetFrom :: OsPath -> OsPath -> OsPath
 resolveTargetFrom link target
   | System.OsPath.isAbsolute target = normalise target
   | otherwise = normalise $ takeDirectory link </> target
+
+
+-- | Splits a path into components compared by their native identity
+-- (case-insensitive on Windows), for prefix tests against owned roots.
+identityComponents :: OsPath -> [[Word32]]
+identityComponents path = destinationPathIdentity <$> splitDirectories path
 
 
 -- | Observes the state of a filesystem entry without following symbolic links.
@@ -548,7 +556,7 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores exclusio
   excluded :: OsPath -> Bool
   excluded path =
     any
-      (\root -> splitDirectories root `isPrefixOf` splitDirectories path)
+      (\root -> identityComponents root `isPrefixOf` identityComponents path)
       exclusions
   getDelta
     :: OsPath
@@ -857,8 +865,8 @@ getIgnoredFiles ctx = do
                   not $
                     any
                       ( \root ->
-                          splitDirectories root
-                            `isPrefixOf` splitDirectories entry.path
+                          identityComponents root
+                            `isPrefixOf` identityComponents entry.path
                       )
                       nestedRoots
             allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
@@ -944,8 +952,8 @@ getUnregisteredFiles' ctx registeredCorrespondences = do
               not $
                 any
                   ( \root ->
-                      splitDirectories root
-                        `isPrefixOf` splitDirectories entry.path
+                      identityComponents root
+                        `isPrefixOf` identityComponents entry.path
                   )
                   nestedRoots
         allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
