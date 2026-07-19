@@ -35,6 +35,7 @@ import Dojang.Commands
   , Color (..)
   , colorFor
   , die'
+  , ensureRouteOwnership
   , pathStyleFor
   , pathStyleFor'
   , printStderr'
@@ -77,7 +78,7 @@ diffCore
   -> App i ExitCode
 diffCore mode diffProgram files = do
   ctx <- ensureContext
-  (corresponds, ws) <- makeCorrespond ctx
+  (corresponds, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
   routedFiles <- forM corresponds $ \c -> do
     sourcePath <- makeAbsolute c.source.path
     destinationPath <- makeAbsolute c.destination.path

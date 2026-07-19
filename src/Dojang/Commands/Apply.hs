@@ -37,6 +37,7 @@ import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
   , die'
+  , ensureRouteOwnership
   , pathStyleFor
   , printStderr
   , printStderr'
@@ -116,7 +117,7 @@ apply force filePaths = do
     $(logDebug) "Running pre-first-apply hooks..."
     executeHooks hookEnv ctx PreFirstApply
 
-  (allManaged, ws) <- makeManagedCorrespond ctx
+  (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   fileMap <- fmap fromList $ forM allManaged $ \managed -> do
     srcAbsPath <- makeAbsolute managed.correspondence.source.path
     return (srcAbsPath, managed)

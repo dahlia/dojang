@@ -29,6 +29,7 @@ import Dojang.App (App, ensureContext, prepareMachineState)
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
+  , ensureRouteOwnership
   , pathStyleFor
   , printStderr'
   , printTable
@@ -93,7 +94,7 @@ statusCore :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
 statusCore options = do
   ctx <- ensureContext
   machineState <- prepareMachineState ctx.repository.manifest
-  (managed, ws) <- makeManagedCorrespond ctx
+  (managed, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   let files = (.correspondence) <$> managed
   let files' = if options.onlyChanges then filter isChanged files else files
   sourcePath <- makeAbsolute ctx.repository.sourcePath

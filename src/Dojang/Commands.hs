@@ -9,6 +9,7 @@ module Dojang.Commands
   , colorFor
   , die'
   , dieWithErrors
+  , ensureRouteOwnership
   , pathStyleFor
   , pathStyleFor'
   , printStderr
@@ -36,6 +37,12 @@ import System.Console.Pretty
   )
 import System.Console.Pretty qualified (color)
 import System.OsPath (OsPath, decodeFS)
+
+import Dojang.ExitCodes (routeOwnershipError)
+import Dojang.Types.RouteOwnership
+  ( OwnershipError
+  , formatOwnershipError
+  )
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 
@@ -115,6 +122,16 @@ die' :: (MonadIO m) => ExitCode -> Text -> m a
 die' exitCode message = do
   printStderr' Error message
   liftIO $ exitWith exitCode
+
+
+-- | Unwraps a route-ownership result, dying with 'routeOwnershipError'
+-- and a formatted message when the route configuration is unsafe.
+ensureRouteOwnership
+  :: (MonadIO m) => Either OwnershipError a -> m a
+ensureRouteOwnership (Right value) = return value
+ensureRouteOwnership (Left err) = do
+  pathStyle <- pathStyleFor stderr
+  die' routeOwnershipError $ formatOwnershipError pathStyle err
 
 
 dieWithErrors :: (MonadIO m) => ExitCode -> [Text] -> m a

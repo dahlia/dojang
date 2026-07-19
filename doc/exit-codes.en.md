@@ -31,4 +31,6 @@ it returns the following exit codes, depending on the situation.
     destination.
  -  36: The operation is canceled by the user.
  -  37: A lifecycle selection is empty, unknown, or still active.
+ -  38: The route configuration cannot give every destination exactly one
+    owning route, or a route's source and destination alias each other.
  -  40: A hook failed with a non-zero exit code.

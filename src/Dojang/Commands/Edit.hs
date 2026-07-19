@@ -35,6 +35,7 @@ import Dojang.Commands
   , codeStyleFor
   , die'
   , dieWithErrors
+  , ensureRouteOwnership
   , pathStyleFor
   , printStderr
   , printStderr'
@@ -160,7 +161,7 @@ editCore editorOpt noApply force sequential allFlag _includeUnregistered _explic
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
-  (allFiles, ws) <- makeCorrespond ctx
+  (allFiles, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
   let changedFiles = filter isChanged allFiles
   printWarnings ws
 

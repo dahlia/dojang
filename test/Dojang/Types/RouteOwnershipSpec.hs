@@ -9,8 +9,10 @@ import Data.Map.Strict qualified as Map
 import Data.Ord (Down (Down))
 import Data.Set qualified as Set
 
+import Control.Monad.Except (catchError)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import System.Directory.OsPath (createDirectory, createDirectoryLink)
 import System.OsPath
   ( OsPath
   , encodeFS
@@ -19,11 +21,12 @@ import System.OsPath
   , splitDirectories
   , (</>)
   )
-import Test.Hspec (Spec, describe, runIO, specify)
+import Test.Hspec (Spec, describe, it, runIO, specify, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 import Test.Hspec.Hedgehog (annotateShow, assert, forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (Directory, File))
+import Dojang.TestUtils (withTempDir)
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
@@ -32,8 +35,10 @@ import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RouteOwnership
   ( ExpectedState (..)
   , OwnershipError (..)
+  , ownedExclusions
   , ownerOf
   , selectOwnership
+  , verifyResolvedIdentities
   )
 
 
@@ -103,6 +108,24 @@ spec = do
       let Right state = selectOwnership [routeA]
       state.boundaries `shouldBe` Set.singleton (normalise $ dst </> a)
 
+    specify "rejects a lexically aliased source and destination" $ do
+      let routeA = mkRoute src a (src </> a) Directory CopyRoute
+      selectOwnership [routeA]
+        `shouldBe` Left
+          ( SourceDestinationAliased
+              a
+              (normalise $ src </> a)
+              (normalise $ src </> a)
+          )
+      let routeB = mkRoute src b (src </> b </> c) Directory CopyRoute
+      selectOwnership [routeB]
+        `shouldBe` Left
+          ( SourceDestinationAliased
+              b
+              (normalise $ src </> b)
+              (normalise $ src </> b </> c)
+          )
+
     specify "rejects routes under a symlink boundary" $ do
       let routeA = mkRoute src a (dst </> a) Directory SymlinkRoute
       let routeB = mkRoute src b (dst </> a </> b) File CopyRoute
@@ -113,6 +136,53 @@ spec = do
               (normalise $ dst </> a </> b)
               (normalise $ dst </> a)
           )
+
+  describe "verifyResolvedIdentities" $ do
+    symlinkAvailable <- runIO $ withTempDir $ \tmpDir _ ->
+      ( do
+          createDirectory $ tmpDir </> a
+          createDirectoryLink (tmpDir </> a) (tmpDir </> b)
+          return True
+      )
+        `catchError` const (return False)
+    let symIt = if symlinkAvailable then it else xit
+
+    symIt "rejects destinations that resolve into the source" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectoryLink (tmpDir </> src </> a) (tmpDir </> b)
+        let route =
+              mkRoute (tmpDir </> src) a (tmpDir </> b) Directory CopyRoute
+        let Right state = selectOwnership [route]
+        result <- verifyResolvedIdentities state
+        result
+          `shouldBe` Left
+            ( SourceDestinationAliased
+                a
+                (tmpDir </> src </> a)
+                (normalise $ tmpDir </> b)
+            )
+
+    symIt "accepts destinations that resolve elsewhere" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectory $ tmpDir </> c
+        createDirectoryLink (tmpDir </> c) (tmpDir </> b)
+        let route =
+              mkRoute (tmpDir </> src) a (tmpDir </> b) Directory CopyRoute
+        let Right state = selectOwnership [route]
+        result <- verifyResolvedIdentities state
+        result `shouldBe` Right ()
+
+  describe "ownedExclusions" $ do
+    specify "returns nested roots relative to the owner" $ do
+      let routeA = mkRoute src a (dst </> a) Directory CopyRoute
+      let routeB = mkRoute src b (dst </> a </> b </> c) Directory CopyRoute
+      let Right state = selectOwnership [routeA, routeB]
+      ownedExclusions state (dst </> a) `shouldBe` [b </> c]
+      ownedExclusions state (dst </> a </> b </> c) `shouldBe` []
 
   describe "ownerOf" $ do
     specify "resolves the most-specific containing route" $ do

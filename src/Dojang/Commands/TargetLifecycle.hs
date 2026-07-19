@@ -30,6 +30,7 @@ import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
   , die'
+  , ensureRouteOwnership
   , pathStyleFor
   , printStderr'
   )
@@ -139,7 +140,7 @@ unmanageCore routeSelector destinations force = do
         <> "' to inspect orphan records."
   (routes, _) <- routePaths ctx
   current <- makeCurrentRoutes routes
-  (managed, _) <- makeManagedCorrespond ctx
+  (managed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   let entries = makeCurrentEntries managed
   let selected =
         filter ((/= Nothing) . classifyOrphan current entries) matched
@@ -175,7 +176,8 @@ unmanageCore routeSelector destinations force = do
       ( \currentRecords -> do
           (lockedRoutes, _) <- routePaths ctx
           lockedCurrent <- makeCurrentRoutes lockedRoutes
-          (lockedManaged, _) <- makeManagedCorrespond ctx
+          (lockedManaged, _) <-
+            makeManagedCorrespond ctx >>= ensureRouteOwnership
           let lockedEntries = makeCurrentEntries lockedManaged
           removed <- case selectOrphanRecords
             lockedCurrent

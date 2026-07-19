@@ -42,6 +42,7 @@ import Dojang.Commands
   , codeStyleFor
   , die'
   , dieWithErrors
+  , ensureRouteOwnership
   , pathStyleFor
   , printStderr
   , printStderr'
@@ -154,7 +155,7 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
-  (allFiles, ws) <- makeCorrespond ctx
+  (allFiles, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
   let changedFiles = filter isChanged allFiles
   printWarnings ws
 
@@ -218,7 +219,7 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
   unregisteredCorrespondences <-
     if includeUnregistered
       then do
-        unregisteredFiles <- getUnregisteredFiles ctx
+        unregisteredFiles <- getUnregisteredFiles ctx >>= ensureRouteOwnership
         if null unregisteredFiles
           then return []
           else do
@@ -284,7 +285,7 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
     then do
       printStderr "No changed files to reflect."
       machineState <- prepareMachineState ctx.repository.manifest
-      (managed, _) <- makeManagedCorrespond ctx
+      (managed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
       persistConvergedTargets ctx machineState managed
       return ExitSuccess
     else do
@@ -349,7 +350,7 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
     if null dirPaths
       then return []
       else do
-        (allFiles, ws) <- makeCorrespond ctx
+        (allFiles, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
         printWarnings ws
         let changedFiles = filter isChanged allFiles
         -- Filter files within the directories
@@ -525,7 +526,7 @@ reflectCorrespondences
   -> App i ()
 reflectCorrespondences ctx force persistAll selectedCorrespondences = do
   machineState <- prepareMachineState ctx.repository.manifest
-  (initialManaged, _) <- makeManagedCorrespond ctx
+  (initialManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   let selectedFiles = snd <$> selectedCorrespondences
   let matchesSelection :: ManagedCorrespondence -> Bool
       matchesSelection managed =
@@ -579,7 +580,7 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
       ConflictDetected -> return ()
       Skipped reason -> printSkippedReconciliation pathStyle c reason
   let persist = do
-        (refreshedManaged, _) <- makeManagedCorrespond ctx
+        (refreshedManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
         let selectedManaged =
               nub $
                 (if persistAll then initialManaged else initialSelectedManaged)

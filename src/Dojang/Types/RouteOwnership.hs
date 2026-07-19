@@ -1,6 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- | Selection of one owning route per destination entry.
@@ -18,6 +19,7 @@ module Dojang.Types.RouteOwnership
   , ownerOf
   , ownedExclusions
   , selectOwnership
+  , verifyResolvedIdentities
   ) where
 
 import Data.List (isPrefixOf, sortOn)
@@ -30,6 +32,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories)
 
+import Dojang.MonadFileSystem (MonadFileSystem (canonicalizePath, exists))
 import Dojang.Types.FileRoute (RouteKind (SymlinkRoute))
 import Dojang.Types.Repository (RouteResult (..))
 
@@ -61,6 +64,10 @@ data OwnershipError
     -- deployed as a symbolic link.  Carries the offending route name, its
     -- destination, and the boundary destination.
     RouteThroughLinkBoundary OsPath OsPath OsPath
+  | -- | A route's source and destination are the same filesystem tree, or
+    -- one contains the other, either lexically or after resolving symbolic
+    -- links.  Carries the route name, its source path, and its destination.
+    SourceDestinationAliased OsPath OsPath OsPath
   deriving (Eq, Show)
 
 
@@ -83,6 +90,14 @@ formatOwnershipError renderPath (RouteThroughLinkBoundary name dst boundary) =
     <> ", which is inside the symbolic link deployed at "
     <> renderPath boundary
     <> "; routes cannot reach through a deployed link."
+formatOwnershipError renderPath (SourceDestinationAliased name source dst) =
+  "Route "
+    <> renderPath name
+    <> " would synchronize "
+    <> renderPath source
+    <> " with "
+    <> renderPath dst
+    <> ", but they are the same filesystem tree or one contains the other."
 
 
 -- | Selects one owning route per destination from the active routes of
@@ -93,6 +108,10 @@ selectOwnership :: [RouteResult] -> Either OwnershipError ExpectedState
 selectOwnership routes = do
   case duplicates of
     (dst, a, b) : _ -> Left $ DuplicateDestinationOwner dst a b
+    [] -> pure ()
+  case lexicalAliases of
+    (name, source, dst) : _ ->
+      Left $ SourceDestinationAliased name source dst
     [] -> pure ()
   case boundaryViolations of
     (name, dst, boundary) : _ ->
@@ -124,6 +143,15 @@ selectOwnership routes = do
     | ((dst, a), (dst', b)) <- zip normalized (drop 1 normalized)
     , dst == dst'
     ]
+  lexicalAliases :: [(OsPath, OsPath, OsPath)]
+  lexicalAliases =
+    [ (route.routeName, source, dst)
+    | (dst, route) <- normalized
+    , let source = normalise route.sourcePath
+    , source == dst
+        || source `strictlyInside` dst
+        || dst `strictlyInside` source
+    ]
   boundarySet :: Set OsPath
   boundarySet =
     Set.fromList [dst | (dst, route) <- normalized, route.kind == SymlinkRoute]
@@ -134,6 +162,43 @@ selectOwnership routes = do
     , boundary <- Set.toAscList boundarySet
     , dst `strictlyInside` boundary
     ]
+
+
+-- | Checks that no route's source and destination resolve to the same
+-- filesystem tree once symbolic links are followed.  Lexically distinct
+-- paths can still alias each other through links; this pass canonicalizes
+-- every existing source and destination and rejects containment either
+-- way before any mutation is planned.
+verifyResolvedIdentities
+  :: forall m
+   . (MonadFileSystem m)
+  => ExpectedState
+  -- ^ The ownership selection to verify.
+  -> m (Either OwnershipError ())
+  -- ^ 'Right' when no resolved aliasing exists; the first
+  -- 'SourceDestinationAliased' error otherwise.
+verifyResolvedIdentities state = go $ Map.toAscList state.owners
+ where
+  go :: [(OsPath, RouteResult)] -> m (Either OwnershipError ())
+  go [] = return $ Right ()
+  go ((dst, route) : rest) = do
+    resolvedSource <- resolveIfExists route.sourcePath
+    resolvedDestination <- resolveIfExists dst
+    case (resolvedSource, resolvedDestination) of
+      (Just source', Just dst')
+        | source' == dst'
+            || source' `strictlyInside` dst'
+            || dst' `strictlyInside` source' ->
+            return $
+              Left $
+                SourceDestinationAliased route.routeName route.sourcePath dst
+      _ -> go rest
+  resolveIfExists :: OsPath -> m (Maybe OsPath)
+  resolveIfExists path = do
+    present <- exists path
+    if present
+      then Just . normalise <$> canonicalizePath path
+      else return Nothing
 
 
 -- | Whether the first path lies strictly inside the second.
