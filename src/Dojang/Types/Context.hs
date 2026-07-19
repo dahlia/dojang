@@ -374,22 +374,26 @@ makeManagedCorrespond ctx = do
           _ | expanded.kind == SymlinkRoute -> do
             -- A deployment link is a single one-way entry: the destination
             -- is never enumerated (it is a traversal boundary), and no
-            -- intermediate snapshot participates.  The destination delta
-            -- reports whether the link still projects the source, so
-            -- status and selection can see missing or diverged links.
-            sourceStat <- observeFileStat expanded.sourcePath
+            -- intermediate snapshot participates.  The source is
+            -- absolutized because it becomes the stored link target, which
+            -- must stay valid regardless of the working directory.  The
+            -- destination delta reports whether the link still projects
+            -- the source, so status and selection can see missing or
+            -- diverged links.
+            absoluteSource <- makeAbsolute expanded.sourcePath
+            sourceStat <- observeFileStat absoluteSource
             destinationStat <- observeFileStat expanded.destinationPath
             let converged = case destinationStat of
                   Symlink target ->
                     resolveTargetFrom expanded.destinationPath target
-                      == normalise expanded.sourcePath
+                      == absoluteSource
                   _ -> False
             return
               [ ManagedCorrespondence
                   expanded
                   mempty
                   FileCorrespondence
-                    { source = FileEntry expanded.sourcePath sourceStat
+                    { source = FileEntry absoluteSource sourceStat
                     , sourceDelta = Unchanged
                     , intermediate = FileEntry interAbsPath Missing
                     , destination =

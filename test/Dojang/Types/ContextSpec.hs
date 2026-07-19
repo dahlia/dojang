@@ -23,6 +23,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map, fromList)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
+import System.Directory qualified
 import System.Directory.OsPath (createDirectoryLink, createFileLink)
 import System.FilePath (combine)
 import System.OsPath (OsPath, encodeFS, normalise, (</>))
@@ -72,15 +73,20 @@ import Dojang.Types.Environment
   , OperatingSystem (..)
   , emptyEnvironment
   )
+import Dojang.Types.EnvironmentPredicate
+  ( EnvironmentPredicate (Always)
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
 import Dojang.Types.FileRoute
-  ( RouteKind (CopyRoute)
+  ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
+  , RouteTarget (RouteTarget)
+  , fileRoutePreservingOrder
   )
 import Dojang.Types.FileRouteSpec (monikerMap)
-import Dojang.Types.Manifest (manifest)
+import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Dojang.Types.Repository
   ( Repository (..)
@@ -503,6 +509,55 @@ spec = do
                    , (outer, bName)
                    , (outer, xName)
                    ]
+
+  specify "makeManagedCorrespond absolutizes deployment-link sources" $
+    withTempDir $ \tmpDir tmpDirFP -> do
+      linked <- encodePath "linked"
+      relativeRepo <- encodePath "relative-repo"
+      let nestedManifest =
+            manifest
+              monikerMap
+              [(linked, [(posix, Just $ Substitution "LINK_DST")])]
+              mempty
+              mempty
+              mempty
+      -- Switch the linked file route to a symlink kind:
+      let linkRoute =
+            fileRoutePreservingOrder
+              (const Nothing)
+              [
+                ( Always
+                , Just $
+                    RouteTarget (Substitution "LINK_DST") DefaultMode SymlinkRoute
+                )
+              ]
+              Dojang.MonadFileSystem.File
+      let manifest'' =
+            nestedManifest{fileRoutes = fromList [(linked, linkRoute)]}
+      createDirectory $ tmpDir </> relativeRepo
+      writeFile (tmpDir </> relativeRepo </> linked) "linked"
+      -- A repository opened through a relative path must still produce an
+      -- absolute link target, because the stored target must stay valid
+      -- regardless of the working directory:
+      System.Directory.withCurrentDirectory tmpDirFP $ do
+        let repo =
+              Repository
+                relativeRepo
+                (relativeRepo </> intermediateDir)
+                manifest''
+        let ctx = Context
+              repo
+              (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+              $ simpleVariableGetter
+              $ \e ->
+                return $
+                  if e == "LINK_DST" then Just (tmpDir </> bar) else Nothing
+        Right (managed, _) <- makeManagedCorrespond ctx
+        case managed of
+          [m] ->
+            m.correspondence.source.path
+              `shouldBe` normalise (tmpDir </> relativeRepo </> linked)
+          other -> expectationFailure $ "Unexpected: " <> show other
 
   specify "makeManagedCorrespond rejects duplicate destinations" $
     withTempDir $ \tmpDir _ -> do

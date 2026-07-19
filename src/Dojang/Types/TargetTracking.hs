@@ -231,11 +231,12 @@ observeConvergedManagedTarget repository snapshotRoot command now managed
       -- still projects the route source; the stored target string is the
       -- snapshot, so no filesystem baseline is materialized.
       let previous = managed.correspondence
+      absoluteSource <- makeAbsolute managed.route.sourcePath
       destinationStat <- observeFileStat previous.destination.path
       case destinationStat of
         Symlink linkTarget
           | resolveTargetFrom previous.destination.path linkTarget
-              == normalise managed.route.sourcePath -> do
+              == normalise absoluteSource -> do
               let refreshed =
                     previous
                       { destination =
