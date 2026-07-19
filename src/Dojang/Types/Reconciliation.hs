@@ -23,11 +23,12 @@ module Dojang.Types.Reconciliation
   , executeReconciliationPlanWith
   , executeSyncOp
   , isDestructiveSyncOp
+  , observeModeDrift
   , observeReconciliationInput
   , planReconciliation
   ) where
 
-import Control.Monad (forM_)
+import Control.Monad (forM, forM_)
 import Control.Monad.Except (catchError)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, nub, sortBy, sortOn)
@@ -49,10 +50,12 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , ManagedCorrespondence (..)
   , RouteState (..)
   , calculateFileDelta
   , getRouteState
   )
+import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RouteMetadata
   ( PortableMode
   , RouteMode (DefaultMode)
@@ -269,6 +272,42 @@ observeReconciliationInput context declaredMode correspondence = do
           if delta == Unchanged
             then ReplicasEquivalent
             else ReplicasDifferent
+
+
+-- | Observes destinations whose permission state does not satisfy the
+-- portable mode declared by their owning route.  Destinations that are
+-- missing, symbolic links, or covered by an unobservable platform field
+-- are not reported.
+observeModeDrift
+  :: (MonadFileSystem m)
+  => [ManagedCorrespondence]
+  -- ^ The managed correspondences to inspect.
+  -> m [(ManagedCorrespondence, PortableMode)]
+  -- ^ Drifted correspondences paired with their observed modes.
+observeModeDrift managed =
+  fmap (concat :: [[a]] -> [a]) $ forM managed $ \m -> do
+    let declared = m.route.mode
+    let path = m.correspondence.destination.path
+    let entryType = case m.correspondence.destination.stat of
+          Directory -> Just FileSystem.Directory
+          File _ -> Just FileSystem.File
+          _ -> Nothing
+    let declaredBits = case entryType of
+          Just FileSystem.Directory -> posixDirectoryModeBits declared
+          Just _ -> posixFileModeBits declared
+          Nothing -> Nothing
+    case declaredBits of
+      Nothing -> return []
+      Just bits -> do
+        observed <-
+          (Just <$> getPortableMode path)
+            `catchError` const (return Nothing)
+        return $ case observed of
+          Just observed'
+            | not $
+                observed' `satisfiesPortableMode` portableModeFromBits bits ->
+                [(m, observed')]
+          _ -> []
 
 
 -- | Produces a pure reconciliation plan from fully observed inputs.

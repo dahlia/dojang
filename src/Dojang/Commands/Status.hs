@@ -6,17 +6,21 @@ module Dojang.Commands.Status
   ( StatusOptions (..)
   , defaultStatusOptions
   , formatWarning
+  , printModeNotes
+  , printUnsupportedModeWarnings
   , printWarnings
   , status
   , statusCore
   ) where
 
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (MonadIO)
+import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (..))
 import System.IO (Handle, stderr)
+import System.Info qualified
 
 import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
@@ -60,9 +64,15 @@ import Dojang.Types.ManagedTarget
   , makeCurrentRoutes
   )
 import Dojang.Types.MonikerName ()
+import Dojang.Types.Reconciliation (observeModeDrift)
 import Dojang.Types.Repository
   ( Repository (..)
   , RouteMapWarning (..)
+  , RouteResult (..)
+  )
+import Dojang.Types.RouteMetadata
+  ( RouteMode (DefaultMode, ReadOnly)
+  , renderRouteMode
   )
 import Dojang.Types.TargetTracking (observeOrphanStatus)
 
@@ -130,8 +140,58 @@ statusCore options = do
     ]
     rows
   printOrphans ctx managed machineState
+  printModeNotes managed
   printWarnings ws
   return ExitSuccess
+
+
+-- | Prints mode-drift notes and, on platforms that cannot enforce the
+-- declared modes, one warning per affected route.
+printModeNotes
+  :: (MonadFileSystem i, MonadIO i)
+  => [ManagedCorrespondence]
+  -> App i ()
+printModeNotes managed = do
+  pathStyle <- pathStyleFor stderr
+  codeStyle <- codeStyleFor stderr
+  drifted <- observeModeDrift managed
+  forM_ drifted $ \(m, _) ->
+    printStderr' Note $
+      "The mode of "
+        <> pathStyle m.correspondence.destination.path
+        <> " does not satisfy the declared "
+        <> codeStyle (renderRouteMode m.route.mode)
+        <> " mode; apply will reconcile it."
+  printUnsupportedModeWarnings managed
+
+
+-- | Warns once per route whose declared mode cannot be enforced on the
+-- current platform.  Windows can only enforce the read-only distinction,
+-- so any other declaration must be surfaced instead of silently claiming
+-- success.
+printUnsupportedModeWarnings
+  :: (MonadIO i)
+  => [ManagedCorrespondence]
+  -> App i ()
+printUnsupportedModeWarnings managed =
+  when (System.Info.os == "mingw32") $ do
+    pathStyle <- pathStyleFor stderr
+    codeStyle <- codeStyleFor stderr
+    forM_ unsupported $ \(name, mode) ->
+      printStderr' Warning $
+        "Route "
+          <> pathStyle name
+          <> " declares mode "
+          <> codeStyle (renderRouteMode mode)
+          <> ", which cannot be enforced on this platform."
+ where
+  unsupported =
+    nub
+      [ (m.route.routeName, m.route.mode)
+      | m <- managed
+      , m.route.mode /= DefaultMode
+      , m.route.mode /= ReadOnly
+      ]
 
 
 printOrphans

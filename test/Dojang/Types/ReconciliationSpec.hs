@@ -32,10 +32,12 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , ManagedCorrespondence (..)
   , RouteState (..)
   )
 import Dojang.Types.Environment.Current (MonadEnvironment (currentEnvironment))
 import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
+import Dojang.Types.FileRoute (RouteKind (CopyRoute))
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
@@ -53,10 +55,11 @@ import Dojang.Types.Reconciliation
   , executeReconciliationPlan
   , executeReconciliationPlanWith
   , executeSyncOp
+  , observeModeDrift
   , observeReconciliationInput
   , planReconciliation
   )
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , RouteMode (DefaultMode, Private, ReadOnly)
@@ -788,6 +791,48 @@ spec = do
           mode `shouldBe` Private
           fileType `shouldBe` FileSystem.File
         other -> fail $ "Unexpected destination ops: " <> show other
+
+  describe "observeModeDrift" $ do
+    it "reports destinations that violate their declared mode" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "mode-source"
+        destinationName <- encodeFS "mode-destination"
+        intermediateName <- encodeFS "mode-intermediate"
+        routeName <- encodeFS "mode-route"
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile destinationPath "contents"
+        FileSystem.setPortableWritable destinationPath True
+        let managedWith mode' =
+              ManagedCorrespondence
+                ( RouteResult
+                    (tmpDir </> sourceName)
+                    routeName
+                    destinationPath
+                    FileSystem.File
+                    mode'
+                    CopyRoute
+                    ""
+                    mempty
+                )
+                mempty
+                FileCorrespondence
+                  { source = FileEntry (tmpDir </> sourceName) (File 8)
+                  , sourceDelta = Unchanged
+                  , intermediate =
+                      FileEntry (tmpDir </> intermediateName) (File 8)
+                  , destination = FileEntry destinationPath (File 8)
+                  , destinationDelta = Unchanged
+                  }
+        drifted <- observeModeDrift [managedWith ReadOnly]
+        [m.route.routeName | (m, _) <- drifted] `shouldBe` [routeName]
+        -- A satisfied declaration reports nothing:
+        FileSystem.setPortableWritable destinationPath False
+        satisfied <- observeModeDrift [managedWith ReadOnly]
+        FileSystem.setPortableWritable destinationPath True
+        [m.route.routeName | (m, _) <- satisfied] `shouldBe` []
+        -- The default mode is never reported:
+        defaulted <- observeModeDrift [managedWith DefaultMode]
+        [m.route.routeName | (m, _) <- defaulted] `shouldBe` []
 
   describe "observeReconciliationInput" $ do
     it "compares equal-size files by content" $ withTempDir $ \tmpDir _ -> do

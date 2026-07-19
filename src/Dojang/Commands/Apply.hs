@@ -47,7 +47,12 @@ import Dojang.Commands.Hook
   , executeHooks
   , makeHookEnv
   )
-import Dojang.Commands.Status (defaultStatusOptions, printWarnings, statusCore)
+import Dojang.Commands.Status
+  ( defaultStatusOptions
+  , printUnsupportedModeWarnings
+  , printWarnings
+  , statusCore
+  )
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
   , conflictError
@@ -141,6 +146,7 @@ apply force filePaths = do
             ]
   let files = (.correspondence) <$> managed
   $(logDebugSH) files
+  printUnsupportedModeWarnings managed
   inputs <- mapM (observeSelectedReconciliationInput ctx) managed
   let conflictPolicy =
         if force then PreferAuthoritative else RefuseConflicts
