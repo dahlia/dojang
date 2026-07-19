@@ -24,6 +24,7 @@ import Data.Set qualified as Set
 import System.OsPath
   ( OsPath
   , addTrailingPathSeparator
+  , normalise
   )
 
 import Dojang.App
@@ -67,6 +68,7 @@ import Dojang.Types.Context
   , ManagedCorrespondence (..)
   , RouteState (..)
   , makeManagedCorrespond
+  , projectExpectedState
   )
 import Dojang.Types.Hook (HookType (..))
 import Dojang.Types.MachineState
@@ -98,7 +100,11 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
-import Dojang.Types.RouteMetadata (renderRouteMode)
+import Dojang.Types.RouteMetadata
+  ( RouteKind (SymlinkRoute)
+  , renderRouteMode
+  )
+import Dojang.Types.RouteOwnership (ExpectedState (..))
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
@@ -124,6 +130,8 @@ apply force filePaths = do
     executeHooks hookEnv ctx PreFirstApply
 
   (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  (ownership, _) <- projectExpectedState ctx
+  expectedState <- ensureRouteOwnership ownership
   fileMap <- fmap fromList $ forM allManaged $ \managed -> do
     srcAbsPath <- makeAbsolute managed.correspondence.source.path
     return (srcAbsPath, managed)
@@ -147,7 +155,8 @@ apply force filePaths = do
   let files = (.correspondence) <$> managed
   $(logDebugSH) files
   printUnsupportedModeWarnings managed
-  inputs <- mapM (observeSelectedReconciliationInput ctx) managed
+  inputs <-
+    mapM (observeSelectedReconciliationInput ctx expectedState) managed
   let conflictPolicy =
         if force then PreferAuthoritative else RefuseConflicts
   let plan =
@@ -222,7 +231,9 @@ apply force filePaths = do
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ statusCore defaultStatusOptions)
-  let persist = persistConvergedTargets ctx machineState managed
+  let persistable =
+        [m | m <- managed, m.route.kind /= SymlinkRoute]
+  let persist = persistConvergedTargets ctx machineState persistable
   void
     ( executeReconciliationPlanGuarded
         (printSyncOp . (.syncOp))
@@ -301,14 +312,26 @@ persistConvergedTargets ctx machineState selected =
 observeSelectedReconciliationInput
   :: (MonadFileSystem i, MonadIO i)
   => Context i
+  -> ExpectedState
   -> ManagedCorrespondence
   -> i ReconciliationInput
-observeSelectedReconciliationInput ctx managed = do
+observeSelectedReconciliationInput ctx expectedState managed = do
   input <-
     observeReconciliationInput ctx managed.route.mode managed.correspondence
-  return $ case input.destinationRouteState of
-    Ignored route _ -> input{destinationRouteState = Routed route}
-    _ -> input
+  let protected =
+        Map.findWithDefault
+          []
+          (normalise managed.route.destinationPath)
+          expectedState.nestedUnder
+  let input' =
+        input
+          { destinationKind = managed.route.kind
+          , routeFileType = managed.route.fileType
+          , protectedDestinations = protected
+          }
+  return $ case input'.destinationRouteState of
+    Ignored route _ -> input'{destinationRouteState = Routed route}
+    _ -> input'
 
 
 printSkippedReconciliation

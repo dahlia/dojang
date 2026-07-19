@@ -76,6 +76,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.FilePathExpression.Expansion (VariableGetter)
+import Dojang.Types.FileRoute (RouteKind (SymlinkRoute))
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.Repository
   ( Repository (..)
@@ -358,6 +359,25 @@ makeManagedCorrespond ctx = do
       files <- forM (elems state.owners) $ \expanded -> do
         let interAbsPath = repo.intermediatePath </> expanded.routeName
         case expanded.fileType of
+          _ | expanded.kind == SymlinkRoute -> do
+            -- A deployment link is a single one-way entry: the destination
+            -- is never enumerated (it is a traversal boundary), and no
+            -- intermediate snapshot participates.
+            sourceStat <- observeFileStat expanded.sourcePath
+            destinationStat <- observeFileStat expanded.destinationPath
+            return
+              [ ManagedCorrespondence
+                  expanded
+                  mempty
+                  FileCorrespondence
+                    { source = FileEntry expanded.sourcePath sourceStat
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry interAbsPath Missing
+                    , destination =
+                        FileEntry expanded.destinationPath destinationStat
+                    , destinationDelta = Unchanged
+                    }
+              ]
           Dojang.MonadFileSystem.Directory -> do
             fs <-
               makeCorrespondBetweenThreeDirs

@@ -9,9 +9,10 @@ module Dojang.Commands.Reflect (reflect) where
 import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (isPrefixOf, nub)
+import Data.List (isPrefixOf, nub, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
+import Data.Ord (Down (Down))
 import Data.Set qualified as Set
 import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
@@ -66,7 +67,7 @@ import Dojang.ExitCodes
   , sourceCannotBeTargetError
   , userCancelledError
   )
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileType (File), MonadFileSystem (..))
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
@@ -116,7 +117,8 @@ import Dojang.Types.Reconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 import Dojang.Types.RouteMetadata
-  ( RouteMode (DefaultMode)
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
   , renderRouteMode
   )
 import Dojang.Types.TargetTracking
@@ -544,22 +546,29 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
           selectedFiles
   let initialSelectedManaged = filter matchesSelection initialManaged
   pathStyle <- pathStyleFor stderr
-  let declaredModeFor :: FileCorrespondence -> RouteMode
-      declaredModeFor file =
-        case [ m.route.mode
-             | m <- initialManaged
-             , destinationPathIdentity m.correspondence.destination.path
-                 == destinationPathIdentity file.destination.path
-             ] of
-          mode : _ -> mode
-          [] -> DefaultMode
+  let ownerFor :: FileCorrespondence -> Maybe ManagedCorrespondence
+      ownerFor file =
+        case sortOn
+          ( Down
+              . length
+              . splitDirectories
+              . normalise
+              . (.route.destinationPath)
+          )
+          [ m
+          | m <- initialManaged
+          , splitDirectories (normalise m.route.destinationPath)
+              `isPrefixOf` splitDirectories (normalise file.destination.path)
+          ] of
+          m : _ -> Just m
+          [] -> Nothing
   inputs <-
     mapM
       ( \(allowIgnored, file) ->
           observeSelectedReconciliationInput
             ctx
             allowIgnored
-            (declaredModeFor file)
+            (ownerFor file)
             file
       )
       selectedCorrespondences
@@ -675,18 +684,30 @@ observeSelectedReconciliationInput
   => Context (App i)
   -> Bool
   -- ^ Whether command-level selection explicitly admitted an ignored path.
-  -> RouteMode
-  -- ^ The portable mode declared by the route owning the destination.
+  -> Maybe ManagedCorrespondence
+  -- ^ The most-specific managed route owning the destination, if any.
+  -- Descendants of a deployment link resolve to the link route, so
+  -- reflection can never reach through a deployed link.
   -> FileCorrespondence
   -> App i ReconciliationInput
-observeSelectedReconciliationInput ctx allowIgnored declaredMode correspondence = do
-  input <- observeReconciliationInput ctx declaredMode correspondence
+observeSelectedReconciliationInput ctx allowIgnored owner correspondence = do
+  input <-
+    observeReconciliationInput
+      ctx
+      (maybe DefaultMode (.route.mode) owner)
+      correspondence
+  let input' =
+        input
+          { destinationKind = maybe CopyRoute (.route.kind) owner
+          , routeFileType =
+              maybe File (.route.fileType) owner
+          }
   return $
     if allowIgnored
-      then case input.destinationRouteState of
-        Ignored route _ -> input{destinationRouteState = Routed route}
-        _ -> input
-      else input
+      then case input'.destinationRouteState of
+        Ignored route _ -> input'{destinationRouteState = Routed route}
+        _ -> input'
+      else input'
 
 
 printSkippedReconciliation

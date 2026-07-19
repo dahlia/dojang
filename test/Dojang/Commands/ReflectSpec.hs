@@ -26,11 +26,17 @@ import Prelude hiding (readFile, writeFile)
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Reflect (reflect)
 import Dojang.ExitCodes (ignoredFileError)
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileType (File), MonadFileSystem (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FileRoute
+  ( RouteKind (SymlinkRoute)
+  , RouteMode (DefaultMode)
+  , RouteTarget (RouteTarget)
+  , fileRoutePreservingOrder
+  )
 import Dojang.Types.MachineState
   ( MachineState (..)
   , encodeMachineState
@@ -38,7 +44,7 @@ import Dojang.Types.MachineState
   , readRepositoryState
   )
 import Dojang.Types.ManagedTarget (ManagedTarget (..))
-import Dojang.Types.Manifest (manifest)
+import Dojang.Types.Manifest (Manifest (..), manifest)
 import qualified Dojang.Types.Manifest as Manifest
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
@@ -63,6 +69,20 @@ spec = sequential $ do
           `shouldReturn` ExitSuccess
         exists source `shouldReturn` False
         exists intermediate `shouldReturn` False
+
+    it "never reflects a deployment link" $
+      withSymlinkRouteDestinationFile $
+        \appEnv source destination -> do
+          runAppWithoutLogging appEnv (reflect False True False Nothing [])
+            `shouldReturn` ExitSuccess
+          readFile source `shouldReturn` "source contents"
+          -- Even a forced, explicitly named destination is refused:
+          runAppWithoutLogging
+            appEnv
+            (reflect True True False Nothing [destination])
+            `shouldReturn` ExitSuccess
+          readFile source `shouldReturn` "source contents"
+          readFile destination `shouldReturn` "destination contents"
 
     it "accepts a source-only change" $
       withSourceOnlyChange $ \appEnv source intermediate destination -> do
@@ -176,6 +196,68 @@ spec = sequential $ do
         case Map.elems state.targetRecords of
           [target] -> target.destinationPath `shouldBe` destination
           records -> fail $ "Unexpected managed targets: " <> show records
+
+
+withSymlinkRouteDestinationFile
+  :: (AppEnv -> OsPath -> OsPath -> IO a) -> IO a
+withSymlinkRouteDestinationFile action = withTempDir $ \tmpDir _ -> do
+  sourceDir <- encodeFS "source"
+  intermediateDir <- encodeFS ".dojang"
+  manifestFilename <- encodeFS "dojang.toml"
+  envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
+  routeName <- encodeFS "linked-file"
+  destinationName <- encodeFS "destination"
+  homeName <- encodeFS "home"
+  let repository = tmpDir </> sourceDir
+  let source = repository </> routeName
+  let destination = tmpDir </> destinationName
+  let home = tmpDir </> homeName
+  let Right repositoryId' =
+        parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+  let route =
+        fileRoutePreservingOrder
+          (const Nothing)
+          [
+            ( Always
+            , Just $
+                RouteTarget
+                  (Substitution "DEST_LINK")
+                  DefaultMode
+                  SymlinkRoute
+            )
+          ]
+          File
+  let manifest' =
+        Manifest
+          { Manifest.repositoryId = Just repositoryId'
+          , monikers = mempty
+          , variables = mempty
+          , fileRoutes = Map.fromList [(routeName, route)]
+          , ignorePatterns = mempty
+          , hooks = mempty
+          }
+  let appEnv =
+        AppEnv
+          repository
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
+          manifestFilename
+          envFilename
+          False
+          False
+
+  createDirectories $ repository </> intermediateDir
+  createDirectories home
+  writeManifestFile manifest' $ repository </> manifestFilename
+  writeFile source "source contents"
+  writeFile destination "destination contents"
+
+  withEnvVar "DEST_LINK" (Just destination) $
+    withEnvVar "HOME" (Just home) $
+      withEnvVar "USERPROFILE" (Just home) $
+        action appEnv source destination
 
 
 withDeletedDestination :: (AppEnv -> OsPath -> OsPath -> OsPath -> IO a) -> IO a

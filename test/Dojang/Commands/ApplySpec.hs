@@ -20,7 +20,7 @@ import Prelude hiding (readFile, writeFile)
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Apply (apply)
-import Dojang.ExitCodes (manifestReadError)
+import Dojang.ExitCodes (conflictError, manifestReadError)
 import Dojang.MonadFileSystem
   ( FileType (File)
   , MonadFileSystem (..)
@@ -31,8 +31,8 @@ import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
 import Dojang.Types.FileRoute
-  ( RouteKind (CopyRoute)
-  , RouteMode (Private)
+  ( RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Private)
   , RouteTarget (RouteTarget)
   , fileRoutePreservingOrder
   )
@@ -97,6 +97,48 @@ spec = sequential $ do
           readRepositoryState appEnv.stateDirectory repositoryId' machineId
         transactions <- listDirectory state.targetSnapshotRoot
         length transactions `shouldBe` 1
+
+    it "deploys and repairs symbolic-link routes" $
+      withSymlinkRoute $ \appEnv source destination -> do
+        (result, isLink, target) <- dryRunIO $ do
+          result <- runAppWithoutLogging appEnv (apply True [])
+          isLink <- isSymlink destination
+          target <- readSymlinkTarget destination
+          return (result, isLink, target)
+        result `shouldBe` ExitSuccess
+        isLink `shouldBe` True
+        target `shouldBe` source
+        -- A link with the wrong target is repaired:
+        (result', target') <- dryRunIO $ do
+          wrongName <- encodePath "wrong-target"
+          () <- writeFile (appEnv.sourceDirectory </> wrongName) "wrong"
+          () <-
+            createSymbolicLink
+              (appEnv.sourceDirectory </> wrongName)
+              destination
+              File
+          result' <- runAppWithoutLogging appEnv (apply True [])
+          target' <- readSymlinkTarget destination
+          return (result', target')
+        result' `shouldBe` ExitSuccess
+        target' `shouldBe` source
+
+    it "refuses to replace an entry with a link without force" $
+      withSymlinkRoute $ \appEnv _ destination -> do
+        dryRunIO
+          ( do
+              () <- writeFile destination "existing"
+              runAppWithoutLogging appEnv (apply False [])
+          )
+          `shouldThrow` (== conflictError)
+        -- With force, the entry is replaced by the link:
+        (result', isLink) <- dryRunIO $ do
+          () <- writeFile destination "existing"
+          result' <- runAppWithoutLogging appEnv (apply True [])
+          isLink <- isSymlink destination
+          return (result', isLink)
+        result' `shouldBe` ExitSuccess
+        isLink `shouldBe` True
 
     it "applies a declared private mode to recreated destinations" $
       withPrivateModeFile $ \appEnv destination -> do
@@ -296,6 +338,70 @@ withPrivateModeFile action = withTempDir $ \tmpDir _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action appEnv destination
+
+
+withSymlinkRoute
+  :: (AppEnv -> OsPath -> OsPath -> IO a)
+  -> IO a
+withSymlinkRoute action = withTempDir $ \tmpDir _ -> do
+  sourceDir <- encodeFS "source"
+  intermediateDir <- encodeFS ".dojang"
+  manifestFilename <- encodeFS "dojang.toml"
+  envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
+  routeName <- encodeFS "linked-file"
+  destinationName <- encodeFS "destination"
+  homeName <- encodeFS "home"
+  let repository = tmpDir </> sourceDir
+  let source = repository </> routeName
+  let destination = tmpDir </> destinationName
+  let home = tmpDir </> homeName
+  let Right repositoryId' =
+        parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+  let route =
+        fileRoutePreservingOrder
+          (const Nothing)
+          [
+            ( Always
+            , Just $
+                RouteTarget
+                  (Substitution "DEST_LINK")
+                  DefaultMode
+                  SymlinkRoute
+            )
+          ]
+          File
+  let manifest' =
+        Manifest
+          { Manifest.repositoryId = Just repositoryId'
+          , monikers = mempty
+          , variables = mempty
+          , fileRoutes = Map.fromList [(routeName, route)]
+          , ignorePatterns = mempty
+          , hooks = mempty
+          }
+  let appEnv =
+        AppEnv
+          repository
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
+          manifestFilename
+          envFilename
+          False
+          False
+
+  createDirectories $ repository </> intermediateDir
+  createDirectories home
+  writeManifestFile manifest' $ repository </> manifestFilename
+  writeFile source "linked contents"
+
+  withEnvVars
+    [ ("DEST_LINK", Just destination)
+    , ("HOME", Just home)
+    , ("USERPROFILE", Just home)
+    ]
+    $ action appEnv source destination
 
 
 withTrackedIgnoredFile
