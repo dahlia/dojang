@@ -17,12 +17,16 @@ import Hedgehog.Range (linear)
 import System.Directory.OsPath qualified
 import System.Info (os)
 
-
-#ifndef mingw32_HOST_OS
 import Control.Monad (when)
 import Control.Monad.Except (catchError)
 import Dojang.Types.ManagedTarget
-  ( TargetFingerprint (FileFingerprint, SymlinkFingerprint)
+  ( TargetFingerprint (SymlinkFingerprint)
+  )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.Types.ManagedTarget
+  ( TargetFingerprint (FileFingerprint)
   )
 import System.OsPath (decodeFS)
 import System.Posix.Files qualified as Posix
