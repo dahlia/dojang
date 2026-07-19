@@ -39,7 +39,10 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FilePathExpression.Expansion (VariableLookup (..))
 import Dojang.Types.FileRoute
-  ( fileRoute
+  ( RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Private)
+  , RouteTarget (RouteTarget)
+  , fileRoute
   , fileRoutePreservingOrder
   , routeTarget
   )
@@ -135,6 +138,8 @@ spec = do
                            bar
                            (root </> dst </> foo </> bar)
                            Directory
+                           DefaultMode
+                           CopyRoute
                            (if win then "C:\\dst\\foo\\bar" else "/dst/foo/bar")
                            provenance
                        , RouteResult
@@ -142,6 +147,8 @@ spec = do
                            baz
                            (root </> dst </> foo </> bar </> baz)
                            Directory
+                           DefaultMode
+                           CopyRoute
                            ( if win
                                then "C:\\dst\\foo\\bar\\baz"
                                else "/dst/foo/bar/baz"
@@ -152,6 +159,8 @@ spec = do
                            foo
                            (root </> dst </> foo)
                            Directory
+                           DefaultMode
+                           CopyRoute
                            (if win then "C:\\dst\\foo" else "/dst/foo")
                            provenance
                        , RouteResult
@@ -159,6 +168,8 @@ spec = do
                            qux
                            (root </> dst </> foo </> qux)
                            Directory
+                           DefaultMode
+                           CopyRoute
                            (if win then "C:\\dst\\foo\\qux" else "/dst/foo/qux")
                            provenance
                        ]
@@ -218,6 +229,51 @@ spec = do
             Map.member "var.DESTINATION" result.routeProvenance `shouldBe` True
             Map.member "env.BASE" result.routeProvenance `shouldBe` True
           _ -> expectationFailure $ "Unexpected routes: " <> show routes
+
+  specify "routePaths carries selected route metadata" $ do
+    let privateRoute =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget
+                    (PathSeparator (Substitution "DEST") (BareComponent "a"))
+                    Private
+                    CopyRoute
+              )
+            ]
+            File
+        linkRoute =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget
+                    (PathSeparator (Substitution "DEST") (BareComponent "b"))
+                    DefaultMode
+                    SymlinkRoute
+              )
+            ]
+            Directory
+        manifest' =
+          Manifest
+            { repositoryId = Nothing
+            , monikers = mempty
+            , variables = mempty
+            , fileRoutes = [(foo, privateRoute), (bar, linkRoute)]
+            , ignorePatterns = mempty
+            , hooks = mempty
+            }
+        repo = Repository (root </> src) (root </> src </> inter) manifest'
+        env = emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.1.0"
+    (routes, warnings) <-
+      routePaths repo env $ \variable ->
+        return $ if variable == "DEST" then Just (root </> dst) else Nothing
+    warnings `shouldBe` []
+    [(r.routeName, r.mode, r.kind) | r <- routes]
+      `shouldBe` [(bar, DefaultMode, SymlinkRoute), (foo, Private, CopyRoute)]
 
   specify "routePaths keeps only provenance used during expansion" $ do
     let route =
@@ -305,8 +361,8 @@ spec = do
         (secondRoutes, _) <-
           liftIO $ routePaths repo env (const $ return $ Just secondValue)
         case (firstRoutes, secondRoutes) of
-          ( [RouteResult _ _ _ _ _ firstProvenance]
-            , [RouteResult _ _ _ _ _ secondProvenance]
+          ( [RouteResult _ _ _ _ _ _ _ firstProvenance]
+            , [RouteResult _ _ _ _ _ _ _ secondProvenance]
             ) ->
               (firstProvenance == secondProvenance) === False
           _ ->
@@ -314,13 +370,31 @@ spec = do
 
   specify "findOverlappingRouteResults" $ do
     findOverlappingRouteResults
-      [ RouteResult (root </> src </> foo) foo (root </> foo) Directory "" mempty
-      , RouteResult (root </> src </> bar) bar (root </> bar) Directory "" mempty
+      [ RouteResult
+          (root </> src </> foo)
+          foo
+          (root </> foo)
+          Directory
+          DefaultMode
+          CopyRoute
+          ""
+          mempty
+      , RouteResult
+          (root </> src </> bar)
+          bar
+          (root </> bar)
+          Directory
+          DefaultMode
+          CopyRoute
+          ""
+          mempty
       , RouteResult
           (root </> src </> baz)
           baz
           (root </> foo </> baz)
           Directory
+          DefaultMode
+          CopyRoute
           ""
           mempty
       , RouteResult
@@ -328,6 +402,8 @@ spec = do
           qux
           (root </> foo </> baz </> qux)
           File
+          DefaultMode
+          CopyRoute
           ""
           mempty
       ]

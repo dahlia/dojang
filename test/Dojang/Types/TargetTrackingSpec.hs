@@ -54,6 +54,10 @@ import Dojang.Types.Context
   , FileStat (Directory, File)
   , ManagedCorrespondence (..)
   )
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , OrphanStatus (..)
@@ -116,6 +120,8 @@ spec = do
               rawRouteName
               canonicalRoute.destinationPath
               canonicalRoute.fileType
+              canonicalRoute.mode
+              canonicalRoute.kind
               canonicalRoute.routeDefinition
               canonicalRoute.routeProvenance
       canonicalId <- managedTargetId repository managed
@@ -133,6 +139,8 @@ spec = do
               route.routeName
               route.destinationPath
               route.fileType
+              route.mode
+              route.kind
               "other-definition"
               route.routeProvenance
       originalId <- managedTargetId repository managed
@@ -152,6 +160,8 @@ spec = do
               route.routeName
               route.destinationPath
               FileSystem.Directory
+              route.mode
+              route.kind
               route.routeDefinition
               route.routeProvenance
       originalId <- managedTargetId repository managed
@@ -190,6 +200,8 @@ spec = do
                       route.routeName
                       route.destinationPath
                       FileSystem.Directory
+                      route.mode
+                      route.kind
                       route.routeDefinition
                       route.routeProvenance
                 , correspondence =
@@ -231,6 +243,8 @@ spec = do
                 route.routeName
                 route.destinationPath
                 route.fileType
+                route.mode
+                route.kind
                 route.routeDefinition
                 route.routeProvenance
         let escaped = managed{route = escapedRoute}
@@ -327,6 +341,8 @@ spec = do
                     routeName
                     destinationRoot
                     FileSystem.Directory
+                    DefaultMode
+                    CopyRoute
                     "definition"
                     Map.empty
                 )
@@ -480,7 +496,16 @@ fixtureManagedPath destination = do
   let entry path = FileEntry path (File 7)
   return $
     ManagedCorrespondence
-      (RouteResult source routeName destination FileSystem.File "definition" Map.empty)
+      ( RouteResult
+          source
+          routeName
+          destination
+          FileSystem.File
+          DefaultMode
+          CopyRoute
+          "definition"
+          Map.empty
+      )
       mempty
       ( FileCorrespondence
           (entry source)
@@ -503,7 +528,16 @@ fixtureManagedAt root = do
   let entry path = FileEntry path (File 12)
   return $
     ManagedCorrespondence
-      (RouteResult source routeName destination FileSystem.File "definition" Map.empty)
+      ( RouteResult
+          source
+          routeName
+          destination
+          FileSystem.File
+          DefaultMode
+          CopyRoute
+          "definition"
+          Map.empty
+      )
       mempty
       ( FileCorrespondence
           (entry source)

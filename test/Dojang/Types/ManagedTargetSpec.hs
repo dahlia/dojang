@@ -29,6 +29,10 @@ import Dojang.Types.Context
   , FileStat (File, Missing)
   , ManagedCorrespondence (..)
   )
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.ManagedTarget
   ( CurrentEntry (..)
   , CurrentRoute (..)
@@ -66,6 +70,8 @@ spec = do
               rawRouteName
               destination
               FileSystem.File
+              DefaultMode
+              CopyRoute
               "definition"
               Map.empty
       routes <- makeCurrentRoutes [route]
@@ -95,6 +101,8 @@ spec = do
                   routeName
                   destinationRoot
                   fileType
+                  DefaultMode
+                  CopyRoute
                   "route-definition"
                   Map.empty
               )

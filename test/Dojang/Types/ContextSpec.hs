@@ -65,6 +65,10 @@ import Dojang.Types.Environment
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.FileRouteSpec (monikerMap)
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -304,6 +308,8 @@ spec = do
                      , routeName = bar
                      , destinationPath = tmpDir </> bar
                      , fileType = Dojang.MonadFileSystem.Directory
+                     , mode = DefaultMode
+                     , kind = CopyRoute
                      , routeDefinition = "$BAR"
                      , routeProvenance = mempty
                      }
@@ -312,6 +318,8 @@ spec = do
                      , routeName = foo
                      , destinationPath = tmpDir </> foo
                      , fileType = Dojang.MonadFileSystem.Directory
+                     , mode = DefaultMode
+                     , kind = CopyRoute
                      , routeDefinition = "$FOO"
                      , routeProvenance = mempty
                      }
@@ -1073,6 +1081,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1085,6 +1095,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1097,6 +1109,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1113,6 +1127,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1122,6 +1138,8 @@ spec = do
               , routeName = baz
               , destinationPath = tmpDir </> bar </> qux
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1137,6 +1155,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1146,6 +1166,8 @@ spec = do
               , routeName = bar
               , destinationPath = tmpDir </> dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
