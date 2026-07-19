@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -23,6 +24,11 @@ import System.OsPath
   )
 import Test.Hspec (Spec, describe, it, runIO, specify, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe)
+
+
+#ifdef mingw32_HOST_OS
+import Test.Hspec.Expectations.Pretty (shouldSatisfy)
+#endif
 import Test.Hspec.Hedgehog (annotateShow, assert, forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (Directory, File))
@@ -369,3 +375,54 @@ spec = do
                 route : _ -> Just route.routeName
                 [] -> Nothing
           ((.routeName) <$> ownerOf state probe) === deepest
+
+  caseVariantSpec src dst a b
+
+-- Case-variant destinations name one filesystem entry on Windows but two
+-- distinct entries on POSIX, so the expected ownership differs by platform.
+#ifdef mingw32_HOST_OS
+caseVariantSpec :: OsPath -> OsPath -> OsPath -> OsPath -> Spec
+caseVariantSpec src dst a b =
+  describe "case-variant destinations (Windows)" $ do
+    upperDst <- runIO $ encodeFS "DST"
+    upperA <- runIO $ encodeFS "A"
+
+    specify "rejects case-variant duplicate destinations" $ do
+      let routeA = mkRoute src a (dst </> a) Directory CopyRoute
+      let routeB = mkRoute src b (upperDst </> upperA) Directory CopyRoute
+      selectOwnership src [routeA, routeB] `shouldSatisfy` isDuplicateOwner
+
+    specify "records case-variant nested destinations" $ do
+      let routeA = mkRoute src a (dst </> a) Directory CopyRoute
+      let routeB = mkRoute src b (upperDst </> upperA </> b) Directory CopyRoute
+      let Right state = selectOwnership src [routeA, routeB]
+      Map.lookup (normalise $ dst </> a) state.nestedUnder
+        `shouldBe` Just [normalise $ upperDst </> upperA </> b]
+
+    specify "resolves owners for case-variant probes" $ do
+      let routeA = mkRoute src a (dst </> a) Directory CopyRoute
+      let Right state = selectOwnership src [routeA]
+      (.routeName)
+        <$> ownerOf state (upperDst </> upperA </> b)
+        `shouldBe` Just a
+
+
+isDuplicateOwner :: Either OwnershipError ExpectedState -> Bool
+isDuplicateOwner (Left DuplicateDestinationOwner{}) = True
+isDuplicateOwner _ = False
+#else
+caseVariantSpec :: OsPath -> OsPath -> OsPath -> OsPath -> Spec
+caseVariantSpec src dst a b =
+  describe "case-variant destinations (POSIX)" $ do
+    upperDst <- runIO $ encodeFS "DST"
+    upperA <- runIO $ encodeFS "A"
+
+    specify "keeps case-variant destinations distinct" $ do
+      let routeA = mkRoute src a (dst </> a) Directory CopyRoute
+      let routeB = mkRoute src b (upperDst </> upperA) Directory CopyRoute
+      let Right state = selectOwnership src [routeA, routeB]
+      Map.keysSet state.owners
+        `shouldBe` Set.fromList
+          [normalise $ dst </> a, normalise $ upperDst </> upperA]
+      state.nestedUnder `shouldBe` Map.empty
+#endif

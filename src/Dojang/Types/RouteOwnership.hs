@@ -43,6 +43,10 @@ import System.OsPath
 import Dojang.MonadFileSystem (MonadFileSystem (canonicalizePath, exists))
 import Dojang.MonadFileSystem qualified as FileSystem (FileType (Directory))
 import Dojang.Types.FileRoute (RouteKind (SymlinkRoute))
+import Dojang.Types.PathIdentity
+  ( destinationPathIdentity
+  , equalDestinationPath
+  )
 import Dojang.Types.Repository (RouteResult (..))
 
 
@@ -193,25 +197,31 @@ selectOwnership repositoryRoot routes = do
   normalized :: [(OsPath, RouteResult)]
   normalized =
     sortOn fst [(normalise route.destinationPath, route) | route <- routes]
+  -- Case-variant duplicates need not sort adjacently, so duplicate
+  -- detection sorts by native identity rather than raw code units.
+  identitySorted :: [(OsPath, RouteResult)]
+  identitySorted = sortOn (destinationPathIdentity . fst) normalized
   duplicates :: [(OsPath, OsPath, OsPath)]
   duplicates =
     [ (dst, a.routeName, b.routeName)
-    | ((dst, a), (dst', b)) <- zip normalized (drop 1 normalized)
-    , dst == dst'
+    | ((dst, a), (dst', b)) <- zip identitySorted (drop 1 identitySorted)
+    , dst `equalDestinationPath` dst'
     ]
   insideRepository :: [(OsPath, OsPath)]
   insideRepository =
     [ (route.routeName, dst)
     | (dst, route) <- normalized
     , let root = normalise repositoryRoot
-    , dst == root || dst `strictlyInside` root || root `strictlyInside` dst
+    , dst `equalDestinationPath` root
+        || dst `strictlyInside` root
+        || root `strictlyInside` dst
     ]
   lexicalAliases :: [(OsPath, OsPath, OsPath)]
   lexicalAliases =
     [ (route.routeName, source, dst)
     | (dst, route) <- normalized
     , let source = normalise route.sourcePath
-    , source == dst
+    , source `equalDestinationPath` dst
         || source `strictlyInside` dst
         || dst `strictlyInside` source
     ]
@@ -282,7 +292,7 @@ verifyResolvedIdentities repositoryRoot state = do
   inRepository resolvedRoot resolved =
     [ (route.routeName, dst)
     | (dst, dst', _, _, route) <- resolved
-    , dst' == resolvedRoot
+    , dst' `equalDestinationPath` resolvedRoot
         || dst' `strictlyInside` resolvedRoot
         || resolvedRoot `strictlyInside` dst'
     ]
@@ -306,7 +316,7 @@ verifyResolvedIdentities repositoryRoot state = do
   aliases resolved =
     [ (route.routeName, route.sourcePath, dst)
     | (dst, dst', _, source', route) <- resolved
-    , source' == dst'
+    , source' `equalDestinationPath` dst'
         || source' `strictlyInside` dst'
         || dst' `strictlyInside` source'
     ]
@@ -318,7 +328,7 @@ verifyResolvedIdentities repositoryRoot state = do
     | ((dstA, resolvedA, _, _, a), rest) <-
         zip resolved (drop 1 $ iterate (drop 1) resolved)
     , (dstB, resolvedB, _, _, b) <- rest
-    , resolvedA == resolvedB
+    , resolvedA `equalDestinationPath` resolvedB
         || ( ( resolvedA `strictlyInside` resolvedB
                  || resolvedB `strictlyInside` resolvedA
              )
@@ -357,13 +367,14 @@ verifyResolvedIdentities repositoryRoot state = do
             return $ normalise $ resolvedParent </> takeFileName path
 
 
--- | Whether the first path lies strictly inside the second.
+-- | Whether the first path lies strictly inside the second, comparing
+-- components by their native identity (case-insensitive on Windows).
 strictlyInside :: OsPath -> OsPath -> Bool
 strictlyInside path ancestor =
   ancestorDirs `isPrefixOf` pathDirs && length ancestorDirs < length pathDirs
  where
-  pathDirs = splitDirectories path
-  ancestorDirs = splitDirectories ancestor
+  pathDirs = destinationPathIdentity <$> splitDirectories path
+  ancestorDirs = destinationPathIdentity <$> splitDirectories ancestor
 
 
 -- | Resolves the most-specific route owning the given destination path,
@@ -378,7 +389,7 @@ ownerOf state path =
   containing =
     [ (dst, route)
     | (dst, route) <- Map.toAscList state.owners
-    , dst == path' || path' `strictlyInside` dst
+    , dst `equalDestinationPath` path' || path' `strictlyInside` dst
     ]
 
 

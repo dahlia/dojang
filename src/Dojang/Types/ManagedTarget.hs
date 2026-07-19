@@ -26,7 +26,6 @@ module Dojang.Types.ManagedTarget
   , unreachableSnapshots
   ) where
 
-import Data.Char (ord, toLower)
 import Data.List (isPrefixOf, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -35,9 +34,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Time (UTCTime)
-import Data.Word (Word32)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Info (os)
 import System.OsPath
   ( OsPath
   , encodeFS
@@ -45,8 +42,6 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
-  , toChar
-  , unpack
   , (</>)
   )
 
@@ -56,6 +51,10 @@ import Dojang.Types.Context
   , FileEntry (..)
   , FileStat (Missing)
   , ManagedCorrespondence (..)
+  )
+import Dojang.Types.PathIdentity
+  ( destinationPathIdentity
+  , equalDestinationPath
   )
 import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RouteMetadata (RouteKind, RouteMode)
@@ -166,27 +165,6 @@ data OrphanReason
 -- | How an orphan destination differs from its last snapshot.
 data OrphanStatus = OrphanUnchanged | OrphanModified | OrphanMissing
   deriving (Eq, Ord, Show)
-
-
--- | Produces the normalized code units used for native destination identity.
---
--- Windows path identity is case-insensitive.  POSIX path identity preserves
--- case and every surrogate-escaped filesystem byte.
-destinationPathIdentity :: OsPath -> [Word32]
-destinationPathIdentity = fmap canonicalUnit . unpack . normalise
- where
-  canonicalUnit value =
-    fromIntegral $
-      ord $
-        if os == "mingw32"
-          then toLower $ toChar value
-          else toChar value
-
-
--- | Compares two destination paths using the host platform's native semantics.
-equalDestinationPath :: OsPath -> OsPath -> Bool
-equalDestinationPath left right =
-  destinationPathIdentity left == destinationPathIdentity right
 
 
 -- | Determines whether a managed record is orphaned by the current routes.
