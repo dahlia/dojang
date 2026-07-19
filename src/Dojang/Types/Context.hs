@@ -80,7 +80,10 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.FilePathExpression.Expansion (VariableGetter)
-import Dojang.Types.FileRoute (RouteKind (SymlinkRoute))
+import Dojang.Types.FileRoute
+  ( RouteKind (SymlinkRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.Repository
   ( Repository (..)
@@ -410,28 +413,47 @@ makeManagedCorrespond ctx = do
                 expanded.destinationPath
                 (findWithDefault [] (normalise expanded.routeName) ignorePatterns)
                 (ownedExclusions state expanded.destinationPath)
-            return
-              [ ManagedCorrespondence
-                  expanded
-                  correspond.source.path
-                  correspond
-                    { source =
-                        correspond.source
-                          { path = expanded.sourcePath </> correspond.source.path
-                          }
-                    , intermediate =
-                        correspond.intermediate
-                          { path = interAbsPath </> correspond.intermediate.path
-                          }
-                    , destination =
-                        correspond.destination
-                          { path =
-                              expanded.destinationPath
-                                </> correspond.destination.path
-                          }
-                    }
-              | correspond <- fs
-              ]
+            -- A declared directory mode applies to the route's destination
+            -- root itself, not only to the entries inside it, so the root
+            -- needs its own correspondence.  Routes without a declared
+            -- mode keep their previous entry-only enumeration, and a
+            -- missing source directory stays a no-op rather than becoming
+            -- a removal:
+            sourceRootStat <- observeFileStat expanded.sourcePath
+            rootEntries <-
+              if expanded.mode == DefaultMode
+                || sourceRootStat /= Directory
+                then return []
+                else do
+                  rootCorrespondence <-
+                    makeCorrespondBetweenThreeFiles
+                      interAbsPath
+                      expanded.sourcePath
+                      expanded.destinationPath
+                  return [ManagedCorrespondence expanded mempty rootCorrespondence]
+            return $
+              rootEntries
+                ++ [ ManagedCorrespondence
+                       expanded
+                       correspond.source.path
+                       correspond
+                         { source =
+                             correspond.source
+                               { path = expanded.sourcePath </> correspond.source.path
+                               }
+                         , intermediate =
+                             correspond.intermediate
+                               { path = interAbsPath </> correspond.intermediate.path
+                               }
+                         , destination =
+                             correspond.destination
+                               { path =
+                                   expanded.destinationPath
+                                     </> correspond.destination.path
+                               }
+                         }
+                   | correspond <- fs
+                   ]
           _ -> do
             f <-
               makeCorrespondBetweenThreeFiles

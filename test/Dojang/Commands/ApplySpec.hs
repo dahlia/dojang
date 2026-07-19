@@ -24,7 +24,7 @@ import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Apply (apply)
 import Dojang.ExitCodes (conflictError, manifestReadError)
 import Dojang.MonadFileSystem
-  ( FileType (File)
+  ( FileType (Directory, File)
   , MonadFileSystem (..)
   , dryRunIO
   )
@@ -213,6 +213,17 @@ spec = sequential $ do
         result `shouldBe` ExitSuccess
         contents `shouldBe` "private contents"
         observedMode `shouldBe` portableModeFromBits 0o600
+
+    it "applies a declared directory mode to the route root" $
+      withPrivateModeDirectory $ \appEnv destinationDir destinationFile -> do
+        (result, dirMode, fileMode) <- dryRunIO $ do
+          result <- runAppWithoutLogging appEnv (apply True [])
+          dirMode <- getPortableMode destinationDir
+          fileMode <- getPortableMode destinationFile
+          return (result, dirMode, fileMode)
+        result `shouldBe` ExitSuccess
+        dirMode `shouldBe` portableModeFromBits 0o700
+        fileMode `shouldBe` portableModeFromBits 0o600
 
     it "reconciles metadata-only drift toward the declared mode" $
       withPrivateModeFile $ \appEnv destination -> do
@@ -465,6 +476,69 @@ withSymlinkRoute action = withTempDir $ \tmpDir _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action appEnv source destination
+
+
+withPrivateModeDirectory
+  :: (AppEnv -> OsPath -> OsPath -> IO a)
+  -> IO a
+withPrivateModeDirectory action = withTempDir $ \tmpDir _ -> do
+  sourceDir <- encodeFS "source"
+  intermediateDir <- encodeFS ".dojang"
+  manifestFilename <- encodeFS "dojang.toml"
+  envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
+  routeName <- encodeFS "private-dir"
+  fileName' <- encodeFS "inner-file"
+  destinationName <- encodeFS "destination-dir"
+  homeName <- encodeFS "home"
+  let repository = tmpDir </> sourceDir
+  let source = repository </> routeName
+  let destination = tmpDir </> destinationName
+  let home = tmpDir </> homeName
+  let Right repositoryId' =
+        parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+  let route =
+        fileRoutePreservingOrder
+          (const Nothing)
+          [
+            ( Always
+            , Just $
+                RouteTarget (Substitution "DEST_DIR") Private CopyRoute
+            )
+          ]
+          Directory
+  let manifest' =
+        Manifest
+          { Manifest.repositoryId = Just repositoryId'
+          , monikers = mempty
+          , variables = mempty
+          , fileRoutes = Map.fromList [(routeName, route)]
+          , ignorePatterns = mempty
+          , hooks = mempty
+          }
+  let appEnv =
+        AppEnv
+          repository
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
+          manifestFilename
+          envFilename
+          False
+          False
+
+  createDirectories $ repository </> intermediateDir
+  createDirectories source
+  createDirectories home
+  writeManifestFile manifest' $ repository </> manifestFilename
+  writeFile (source </> fileName') "inner contents"
+
+  withEnvVars
+    [ ("DEST_DIR", Just destination)
+    , ("HOME", Just home)
+    , ("USERPROFILE", Just home)
+    ]
+    $ action appEnv destination (destination </> fileName')
 
 
 withTrackedIgnoredFile
