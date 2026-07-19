@@ -107,6 +107,38 @@ spec = sequential $ do
         transactions <- listDirectory state.targetSnapshotRoot
         length transactions `shouldBe` 1
 
+    it "reclaims baselines when a route becomes a link" $
+      withKindSwitchRoute $ \appEnv source manifestPath linkManifest -> do
+        let Right repositoryId' =
+              parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+        (result, baselineExisted, result', fingerprints, baselineRemains) <-
+          dryRunIO $ do
+            result <- runAppWithoutLogging appEnv (apply True [])
+            Right (Just machineId) <- readMachineId appEnv.stateDirectory
+            Right (Just state) <-
+              readRepositoryState appEnv.stateDirectory repositoryId' machineId
+            let [copyRecord] = Map.elems state.targetRecords
+            baselineExisted <- exists copyRecord.snapshotPath
+            -- The same route switches from a copied kind to a deployment
+            -- link; its materialized baseline must not leak:
+            () <- writeManifestFile linkManifest manifestPath
+            result' <- runAppWithoutLogging appEnv (apply True [])
+            Right (Just state') <-
+              readRepositoryState appEnv.stateDirectory repositoryId' machineId
+            baselineRemains <- exists copyRecord.snapshotPath
+            return
+              ( result
+              , baselineExisted
+              , result'
+              , (.fingerprint) <$> Map.elems state'.targetRecords
+              , baselineRemains
+              )
+        result `shouldBe` ExitSuccess
+        baselineExisted `shouldBe` True
+        result' `shouldBe` ExitSuccess
+        fingerprints `shouldBe` [SymlinkFingerprint source]
+        baselineRemains `shouldBe` False
+
     it "deploys and repairs symbolic-link routes" $
       withSymlinkRoute $ \appEnv source destination -> do
         (result, isLink, target) <- dryRunIO $ do
@@ -413,6 +445,70 @@ withPrivateModeFile action = withTempDir $ \tmpDir _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action appEnv destination
+
+
+withKindSwitchRoute
+  :: (AppEnv -> OsPath -> OsPath -> Manifest -> IO a)
+  -> IO a
+withKindSwitchRoute action = withTempDir $ \tmpDir _ -> do
+  sourceDir <- encodeFS "source"
+  intermediateDir <- encodeFS ".dojang"
+  manifestFilename <- encodeFS "dojang.toml"
+  envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
+  routeName <- encodeFS "switched-file"
+  destinationName <- encodeFS "destination"
+  homeName <- encodeFS "home"
+  let repository = tmpDir </> sourceDir
+  let source = repository </> routeName
+  let destination = tmpDir </> destinationName
+  let home = tmpDir </> homeName
+  let Right repositoryId' =
+        parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+  let routeOf kind' =
+        fileRoutePreservingOrder
+          (const Nothing)
+          [
+            ( Always
+            , Just $ RouteTarget (Substitution "DEST_FILE") DefaultMode kind'
+            )
+          ]
+          File
+  let manifestOf kind' =
+        Manifest
+          { Manifest.repositoryId = Just repositoryId'
+          , monikers = mempty
+          , variables = mempty
+          , fileRoutes = Map.fromList [(routeName, routeOf kind')]
+          , ignorePatterns = mempty
+          , hooks = mempty
+          }
+  let appEnv =
+        AppEnv
+          repository
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
+          manifestFilename
+          envFilename
+          False
+          False
+
+  createDirectories $ repository </> intermediateDir
+  createDirectories home
+  writeManifestFile (manifestOf CopyRoute) $ repository </> manifestFilename
+  writeFile source "switched contents"
+
+  withEnvVars
+    [ ("DEST_FILE", Just destination)
+    , ("HOME", Just home)
+    , ("USERPROFILE", Just home)
+    ]
+    $ action
+      appEnv
+      source
+      (repository </> manifestFilename)
+      (manifestOf SymlinkRoute)
 
 
 withSymlinkRoute
