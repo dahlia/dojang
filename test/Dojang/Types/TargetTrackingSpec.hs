@@ -41,7 +41,7 @@ import System.OsPath
   , takeDirectory
   , (</>)
   )
-import Test.Hspec (Spec, describe, it)
+import Test.Hspec (Spec, describe, it, sequential)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldNotBe
@@ -86,7 +86,9 @@ import Dojang.Types.TargetTracking
 spec :: Spec
 spec = do
   symlinkOrphanSpec
-  describe "managed-target construction" $ do
+  -- These tests observe or mutate the process working directory, so they
+  -- must not run concurrently with other working-directory users:
+  sequential $ describe "managed-target construction" $ do
     it "persists a relative destination as an absolute path" $
       withTempDir $ \root _ ->
         System.Directory.OsPath.withCurrentDirectory root $ do
