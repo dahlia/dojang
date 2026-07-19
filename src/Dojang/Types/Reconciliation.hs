@@ -580,8 +580,8 @@ planSupportedInput direction input
         modeOperations =
           tagOperations ThirdPhase DestinationReplica $
             planModeChange input authoritative $
-              not $
-                null targetOperations
+              overwrittenReplica == DestinationReplica
+                && not (null targetOperations)
         operations =
           intermediateOperations ++ targetOperations ++ modeOperations
         outcome = case ignored of
@@ -894,8 +894,10 @@ executeReconciliationPlanGuarded observe plan =
     (RefuseConflicts, Just conflicts) -> return $ Left conflicts
     _ -> do
       widened <- go [] plan.operations
-      restoreAll widened
-      return $ Right ()
+      failures <- restoreAll' widened
+      case failures of
+        [] -> return $ Right ()
+        err : _ -> throwError err
  where
   go :: [OsPath] -> [PlannedSyncOp] -> m [OsPath]
   go widened [] = return widened
@@ -916,44 +918,72 @@ executeReconciliationPlanGuarded observe plan =
           SetEntryMode path _ _ -> filter (/= normalise path) widened'
           RemoveFile path -> dropUnder path widened'
           RemoveDirs path -> dropUnder path widened'
-          RemoveDirsExcept path _ -> dropUnder path widened'
+          RemoveDirsExcept path protected ->
+            -- The root and the containers leading to protected subtrees
+            -- survive the removal, so their prior modes must still be
+            -- restored:
+            filter
+              ( \widenedPath ->
+                  not (underRoot path widenedPath)
+                    || any
+                      ( \protectedRoot ->
+                          splitDirectories widenedPath
+                            `isPrefixOf` splitDirectories
+                              (normalise protectedRoot)
+                      )
+                      protected
+              )
+              widened'
           _ -> widened'
     go widened'' rest
+  underRoot :: OsPath -> OsPath -> Bool
+  underRoot root path =
+    splitDirectories (normalise root) `isPrefixOf` splitDirectories path
   dropUnder :: OsPath -> [OsPath] -> [OsPath]
-  dropUnder root =
-    filter $ \path ->
-      not $
-        splitDirectories (normalise root)
-          `isPrefixOf` splitDirectories path
+  dropUnder root = filter $ not . underRoot root
+  -- Restores prior read-only states while unwinding an operation
+  -- failure; restoration failures are swallowed so the original error
+  -- survives:
   restoreAll :: [OsPath] -> m ()
-  restoreAll paths =
-    forM_ paths $ \path ->
+  restoreAll paths = do
+    _ <- restoreAll' paths
+    return ()
+  -- Attempts every restoration and reports the failures, so a
+  -- successful plan does not silently leave entries writable:
+  restoreAll' :: [OsPath] -> m [IOError]
+  restoreAll' paths =
+    fmap concat $ forM paths $ \path ->
       ( do
           isLink <- isSymlink path
           stillExists <- exists path
           if stillExists && not isLink
             then setPortableWritable path False
             else return ()
+          return []
       )
-        `catchError` const (return ())
+        `catchError` \err -> return [err]
   widenForSyncOp :: SyncOp -> m [OsPath]
-  widenForSyncOp (RemoveFile path) = do
-    entry <- widenIfReadOnly path
-    parent <- widenIfReadOnly $ takeDirectory path
-    return $ entry ++ parent
-  widenForSyncOp (RemoveDirs path) = do
-    parent <- widenIfReadOnly $ takeDirectory path
-    tree <- widenTree (const False) path
-    return $ tree ++ parent
+  widenForSyncOp (RemoveFile path) =
+    widenMany
+      [ widenIfReadOnly path
+      , widenIfReadOnly $ takeDirectory path
+      ]
+  widenForSyncOp (RemoveDirs path) =
+    widenMany
+      [ widenIfReadOnly $ takeDirectory path
+      , widenTree (const False) path
+      ]
   widenForSyncOp (RemoveDirsExcept path protected) = do
-    parent <- widenIfReadOnly $ takeDirectory path
     let protected' = fmap normalise protected
-    tree <- widenTree ((`elem` protected') . normalise) path
-    return $ tree ++ parent
-  widenForSyncOp (CopyFile _ destination) = do
-    entry <- widenIfReadOnly destination
-    parent <- widenIfReadOnly $ takeDirectory destination
-    return $ entry ++ parent
+    widenMany
+      [ widenIfReadOnly $ takeDirectory path
+      , widenTree ((`elem` protected') . normalise) path
+      ]
+  widenForSyncOp (CopyFile _ destination) =
+    widenMany
+      [ widenIfReadOnly destination
+      , widenIfReadOnly $ takeDirectory destination
+      ]
   widenForSyncOp (CreateDir path) =
     widenIfReadOnly $ takeDirectory path
   widenForSyncOp (CreateDirs path) =
@@ -963,8 +993,9 @@ executeReconciliationPlanGuarded observe plan =
     widenIfReadOnly $ takeDirectory link
   widenIfReadOnly :: OsPath -> m [OsPath]
   widenIfReadOnly path = do
+    isLink <- isSymlink path
     present <- exists path
-    if not present
+    if isLink || not present
       then return []
       else do
         mode <-
@@ -993,11 +1024,27 @@ executeReconciliationPlanGuarded observe plan =
         isLink <- isSymlink path
         root <- widenIfReadOnly path
         if isDir && not isLink
-          then do
-            entries <- listDirectory path
-            nested <- mapM (widenTree isProtected . (path </>)) entries
-            return $ concat nested ++ root
+          then
+            ( do
+                entries <- listDirectory path
+                nested <-
+                  widenMany $
+                    widenTree isProtected . (path </>) <$> entries
+                return $ nested ++ root
+            )
+              `catchError` \err -> restoreAll root >> throwError err
           else return root
+  -- Runs widening steps in order, restoring already-widened entries
+  -- before rethrowing when a later step fails, so no partial widening
+  -- leaks:
+  widenMany :: [m [OsPath]] -> m [OsPath]
+  widenMany = go' []
+   where
+    go' acc [] = return acc
+    go' acc (action : rest) = do
+      more <-
+        action `catchError` \err -> restoreAll acc >> throwError err
+      go' (more ++ acc) rest
 
 
 -- | Executes a plan in order, invoking an observer immediately before each

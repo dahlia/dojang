@@ -1062,6 +1062,34 @@ spec = do
         result `shouldBe` Right ()
         FileSystem.exists treePath `shouldReturn` False
 
+    it "narrows preserved containers after protected removal" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "guard-tree"
+        midName <- encodeFS "mid"
+        keepName <- encodeFS "keep"
+        goneName <- encodeFS "gone"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        let keepPath = rootPath </> midName </> keepName
+        FileSystem.createDirectories keepPath
+        FileSystem.writeFile (keepPath </> fileName') "kept"
+        FileSystem.createDirectories $ rootPath </> goneName
+        FileSystem.setPortableWritable (rootPath </> midName) False
+        FileSystem.setPortableWritable rootPath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) $
+            manualPlan [RemoveDirsExcept rootPath [keepPath]]
+        result `shouldBe` Right ()
+        FileSystem.exists (rootPath </> goneName) `shouldReturn` False
+        FileSystem.readFile (keepPath </> fileName') `shouldReturn` "kept"
+        -- The surviving root and container are narrowed back:
+        rootMode <- FileSystem.getPortableMode rootPath
+        rootMode.writable `shouldBe` False
+        midMode <- FileSystem.getPortableMode (rootPath </> midName)
+        midMode.writable `shouldBe` False
+        FileSystem.setPortableWritable rootPath True
+        FileSystem.setPortableWritable (rootPath </> midName) True
+
     it "restores prior modes when execution fails" $
       withTempDir $ \tmpDir _ -> do
         sourceName <- encodeFS "guard-source"
