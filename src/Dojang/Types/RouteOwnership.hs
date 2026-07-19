@@ -310,9 +310,12 @@ verifyResolvedIdentities repositoryRoot state = do
   divergedNesting resolved =
     [ (nested.routeName, ancestor.routeName)
     | (dstA, _, parentResolvedA, _, nested) <- resolved
-    , (dstB, resolvedB, _, _, ancestor) <- resolved
+    , (dstB, _, parentResolvedB, _, ancestor) <- resolved
     , dstA `strictlyInside` dstB
-    , not $ parentResolvedA `strictlyInside` resolvedB
+    , -- Both leaves stay unresolved: a leaf link is a replaceable entry,
+    -- and resolving only one side would hide a nested destination that
+    -- reaches through the ancestor's own leaf link.
+    not $ parentResolvedA `strictlyInside` parentResolvedB
     ]
   resolveEffective :: OsPath -> m OsPath
   resolveEffective path = do

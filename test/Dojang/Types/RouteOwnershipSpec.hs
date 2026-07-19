@@ -229,6 +229,39 @@ spec = do
         result <- verifyResolvedIdentities (tmpDir </> src) state
         result `shouldBe` Right ()
 
+    symIt "rejects a nested destination below an ancestor leaf link" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectory $ tmpDir </> src </> b
+        createDirectory $ tmpDir </> c
+        createDirectory $ tmpDir </> d
+        -- The ancestor's own destination is a link elsewhere; a nested
+        -- route below it would operate on the linked tree while the
+        -- ancestor replaces the link itself:
+        createDirectoryLink (tmpDir </> d) (tmpDir </> c </> a)
+        let ancestor =
+              mkRoute
+                (tmpDir </> src)
+                a
+                (tmpDir </> c </> a)
+                Directory
+                CopyRoute
+        let nested =
+              mkRoute
+                (tmpDir </> src)
+                b
+                (tmpDir </> c </> a </> b)
+                File
+                CopyRoute
+        let Right state = selectOwnership (tmpDir </> src) [ancestor, nested]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
+        case result of
+          Left (NestedDestinationsDiverged nested' ancestor') -> do
+            nested' `shouldBe` b
+            ancestor' `shouldBe` a
+          other -> fail $ "Unexpected result: " <> show other
+
     symIt "rejects nested destinations that escape their ancestor" $
       withTempDir $ \tmpDir _ -> do
         createDirectory $ tmpDir </> src
