@@ -251,43 +251,47 @@ verifyResolvedIdentities repositoryRoot state = do
  where
   inRepository
     :: OsPath
-    -> [(OsPath, OsPath, OsPath, RouteResult)]
+    -> [(OsPath, OsPath, OsPath, OsPath, RouteResult)]
     -> [(OsPath, OsPath)]
   inRepository resolvedRoot resolved =
     [ (route.routeName, dst)
-    | (dst, dst', _, route) <- resolved
+    | (dst, dst', _, _, route) <- resolved
     , dst' == resolvedRoot
         || dst' `strictlyInside` resolvedRoot
         || resolvedRoot `strictlyInside` dst'
     ]
   resolveOwner
-    :: (OsPath, RouteResult) -> m (OsPath, OsPath, OsPath, RouteResult)
+    :: (OsPath, RouteResult)
+    -> m (OsPath, OsPath, OsPath, OsPath, RouteResult)
   resolveOwner (dst, route) = do
     resolvedSource <- resolveEffective route.sourcePath
+    -- The parent-resolved form never follows a link at the destination's
+    -- own leaf: an existing leaf symlink is a replaceable entry, not part
+    -- of the path leading to the destination.
+    parent <- resolveEffective $ takeDirectory dst
+    let parentResolved = normalise $ parent </> takeFileName dst
     resolvedDestination <- case route.kind of
-      SymlinkRoute -> do
-        parent <- resolveEffective $ takeDirectory dst
-        return $ normalise $ parent </> takeFileName dst
+      SymlinkRoute -> return parentResolved
       _ -> resolveEffective dst
-    return (dst, resolvedDestination, resolvedSource, route)
+    return (dst, resolvedDestination, parentResolved, resolvedSource, route)
   aliases
-    :: [(OsPath, OsPath, OsPath, RouteResult)]
+    :: [(OsPath, OsPath, OsPath, OsPath, RouteResult)]
     -> [(OsPath, OsPath, OsPath)]
   aliases resolved =
     [ (route.routeName, route.sourcePath, dst)
-    | (dst, dst', source', route) <- resolved
+    | (dst, dst', _, source', route) <- resolved
     , source' == dst'
         || source' `strictlyInside` dst'
         || dst' `strictlyInside` source'
     ]
   resolvedDuplicates
-    :: [(OsPath, OsPath, OsPath, RouteResult)]
+    :: [(OsPath, OsPath, OsPath, OsPath, RouteResult)]
     -> [(OsPath, OsPath, OsPath)]
   resolvedDuplicates resolved =
     [ (dstA, a.routeName, b.routeName)
-    | ((dstA, resolvedA, _, a), rest) <-
+    | ((dstA, resolvedA, _, _, a), rest) <-
         zip resolved (drop 1 $ iterate (drop 1) resolved)
-    , (dstB, resolvedB, _, b) <- rest
+    , (dstB, resolvedB, _, _, b) <- rest
     , resolvedA == resolvedB
         || ( ( resolvedA `strictlyInside` resolvedB
                  || resolvedB `strictlyInside` resolvedA
@@ -301,14 +305,14 @@ verifyResolvedIdentities repositoryRoot state = do
   -- nested destination escaping its ancestor through a link would be
   -- unprotected.
   divergedNesting
-    :: [(OsPath, OsPath, OsPath, RouteResult)]
+    :: [(OsPath, OsPath, OsPath, OsPath, RouteResult)]
     -> [(OsPath, OsPath)]
   divergedNesting resolved =
     [ (nested.routeName, ancestor.routeName)
-    | (dstA, resolvedA, _, nested) <- resolved
-    , (dstB, resolvedB, _, ancestor) <- resolved
+    | (dstA, _, parentResolvedA, _, nested) <- resolved
+    , (dstB, resolvedB, _, _, ancestor) <- resolved
     , dstA `strictlyInside` dstB
-    , not $ resolvedA `strictlyInside` resolvedB
+    , not $ parentResolvedA `strictlyInside` resolvedB
     ]
   resolveEffective :: OsPath -> m OsPath
   resolveEffective path = do

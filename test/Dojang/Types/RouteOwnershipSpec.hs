@@ -211,6 +211,24 @@ spec = do
           Left (DuplicateDestinationOwner _ _ _) -> return ()
           other -> fail $ "Unexpected result: " <> show other
 
+    symIt "accepts a replaceable leaf link at a nested destination" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectory $ tmpDir </> src </> b
+        createDirectory $ tmpDir </> c
+        createDirectory $ tmpDir </> d
+        -- The nested destination itself is a symlink pointing elsewhere;
+        -- it is a replaceable entry, not part of the ancestor chain:
+        createDirectoryLink (tmpDir </> d) (tmpDir </> c </> b)
+        let ancestor =
+              mkRoute (tmpDir </> src) a (tmpDir </> c) Directory CopyRoute
+        let nested =
+              mkRoute (tmpDir </> src) b (tmpDir </> c </> b) File CopyRoute
+        let Right state = selectOwnership (tmpDir </> src) [ancestor, nested]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
+        result `shouldBe` Right ()
+
     symIt "rejects nested destinations that escape their ancestor" $
       withTempDir $ \tmpDir _ -> do
         createDirectory $ tmpDir </> src
