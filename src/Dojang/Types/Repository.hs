@@ -69,6 +69,7 @@ import Dojang.Types.FilePathExpression.Expansion
   )
 import Dojang.Types.FileRoute
   ( FileRoute (..)
+  , RouteTarget (..)
   , RouteWarning
   , dispatch
   , routePathWithVariables
@@ -171,10 +172,10 @@ routePathsWithVariables repo env lookupVariable = do
     (dstPath, warnings, expansionProvenance) <-
       routePathWithVariables route env lookupVariable
     let selected = case fst $ dispatch env route of
-          Just expression : _ -> Just expression
+          Just target : _ -> Just target
           _ -> Nothing
     let provenance = environmentProvenance <> expansionProvenance
-    let definition = maybe "" toPathText selected
+    let definition = maybe "" (toPathText . (.expression)) selected
     return (src, dstPath, route.fileType, definition, provenance, warnings)
   let paths' =
         [ RouteResult (repo.sourcePath </> src) src dst' ft definition provenance

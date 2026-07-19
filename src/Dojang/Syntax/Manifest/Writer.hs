@@ -59,7 +59,7 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (FilePathExpression, toPathText)
-import Dojang.Types.FileRoute (FileRoute (..))
+import Dojang.Types.FileRoute (FileRoute (..), RouteTarget (..))
 import qualified Dojang.Types.FileRoute as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook
@@ -326,28 +326,28 @@ mapFileRoute' monikers fileRoute =
     _ -> DetailedFileRoute $ mapDetailedPredicate <$> routePredicates
  where
   routePredicates
-    :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+    :: [(EnvironmentPredicate, Maybe RouteTarget)]
   routePredicates = fileRoute.predicates
   compactPredicates
-    :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+    :: [(EnvironmentPredicate, Maybe RouteTarget)]
   compactPredicates =
     ( FileRoute.fileRoute
         monikers
-        [ (name, path)
-        | (Moniker name, path) <- routePredicates
+        [ (name, (.expression) <$> target)
+        | (Moniker name, target) <- routePredicates
         ]
         fileRoute.fileType
     ).predicates
   mapCompactPredicate
-    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    :: (EnvironmentPredicate, Maybe RouteTarget)
     -> Maybe (MonikerName, Text)
   mapCompactPredicate (Moniker name, Nothing) = Just (name, "")
-  mapCompactPredicate (Moniker name, Just path)
-    | toPathText path == "" = Nothing
-    | otherwise = Just (name, toPathText path)
+  mapCompactPredicate (Moniker name, Just target)
+    | toPathText target.expression == "" = Nothing
+    | otherwise = Just (name, toPathText target.expression)
   mapCompactPredicate _ = Nothing
   mapDetailedPredicate
-    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    :: (EnvironmentPredicate, Maybe RouteTarget)
     -> FileRouteBranch'
   mapDetailedPredicate (predicate, filePath) =
     FileRouteBranch'
@@ -357,7 +357,7 @@ mapFileRoute' monikers fileRoute =
       , Internal.routeCondition = case predicate of
           Moniker name | Data.HashMap.Strict.member name monikers -> Nothing
           _ -> Just $ writeEnvironmentPredicate predicate
-      , Internal.routePath = toPathText <$> filePath
+      , Internal.routePath = toPathText . (.expression) <$> filePath
       , Internal.routeUnexpectedFields = []
       }
 

@@ -81,8 +81,10 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FileRoute
   ( FileRoute
+  , RouteTarget
   , fileRoute
   , fileRoutePreservingOrder
+  , routeTarget
   )
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook
@@ -565,7 +567,7 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
   mapBranch
     :: Int
     -> FileRouteBranch'
-    -> Either Error (EnvironmentPredicate, Maybe FilePathExpression)
+    -> Either Error (EnvironmentPredicate, Maybe RouteTarget)
   mapBranch index branch
     | not $ null branch.routeUnexpectedFields =
         Left $
@@ -590,7 +592,7 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
                     condition
               )
         path <- traverse parseDetailedPath branch.routePath
-        pure (predicate, path)
+        pure (predicate, routeTarget <$> path)
    where
     parseDetailedPath "" = Right $ BareComponent ""
     parseDetailedPath expression =

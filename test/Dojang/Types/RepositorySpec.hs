@@ -38,7 +38,11 @@ import Dojang.Types.FilePathExpression
       )
   )
 import Dojang.Types.FilePathExpression.Expansion (VariableLookup (..))
-import Dojang.Types.FileRoute (fileRoute, fileRoutePreservingOrder)
+import Dojang.Types.FileRoute
+  ( fileRoute
+  , fileRoutePreservingOrder
+  , routeTarget
+  )
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.ManifestVariable
   ( formatVariableResolutionError
@@ -179,7 +183,7 @@ spec = do
         route =
           fileRoutePreservingOrder
             (const Nothing)
-            [(Always, Just $ Substitution "DESTINATION")]
+            [(Always, Just $ routeTarget $ Substitution "DESTINATION")]
             Directory
         manifest' =
           Manifest
@@ -222,9 +226,10 @@ spec = do
             [
               ( Always
               , Just $
-                  SubstitutionWithDefault
-                    "PRIMARY"
-                    (Substitution "FALLBACK")
+                  routeTarget $
+                    SubstitutionWithDefault
+                      "PRIMARY"
+                      (Substitution "FALLBACK")
               )
             ]
             Directory

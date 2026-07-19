@@ -3,6 +3,9 @@
 
 module Dojang.Types.FileRoute
   ( FileRoute (..)
+  , RouteKind (..)
+  , RouteMode (..)
+  , RouteTarget (..)
   , RouteWarning (..)
   , fileRoute
   , fileRoute'
@@ -10,6 +13,7 @@ module Dojang.Types.FileRoute
   , dispatch
   , routePath
   , routePathWithVariables
+  , routeTarget
   ) where
 
 import Data.List (sortOn)
@@ -36,23 +40,30 @@ import Dojang.Types.FilePathExpression.Expansion
   )
 import Dojang.Types.MonikerMap (MonikerMap, MonikerResolver)
 import Dojang.Types.MonikerName (MonikerName)
+import Dojang.Types.RouteMetadata
+  ( RouteKind (..)
+  , RouteMode (..)
+  , RouteTarget (..)
+  , routeTarget
+  )
 
 
--- | A route that maps 'EnvironmentPredicate's to 'FilePathExpression's.
+-- | A route that maps 'EnvironmentPredicate's to 'RouteTarget's.
 --
 -- Each 'EnvironmentPredicate' represents a condition that must be met for the
--- 'FilePathExpression' to be dispatched.  The 'FilePathExpression' is
--- the path to the directory that should be dispatched to.  If it is 'Nothing',
--- then it is considered a "null route" and will be ignored.
+-- 'RouteTarget' to be dispatched.  The 'RouteTarget' carries the path to
+-- the destination that should be dispatched to, together with its declared
+-- metadata.  If it is 'Nothing', then it is considered a "null route" and
+-- will be ignored.
 --
 -- Note that a null route will still be considered a match, and will be
 -- dispatched as 'Nothing'.
 data FileRoute = FileRoute
   { monikerResolver :: MonikerResolver
   -- ^ The 'MonikerResolver' used to resolve 'MonikerName's.
-  , predicates :: [(EnvironmentPredicate, Maybe FilePathExpression)]
-  -- ^ The pairs of 'EnvironmentPredicate's and 'FilePathExpression's that make
-  -- up the 'FileRoute'.  If the file path expression is 'Nothing', then it is
+  , predicates :: [(EnvironmentPredicate, Maybe RouteTarget)]
+  -- ^ The pairs of 'EnvironmentPredicate's and 'RouteTarget's that make
+  -- up the 'FileRoute'.  If the route target is 'Nothing', then it is
   -- considered a "null route" and will be ignored.
   , fileType :: FileType
   -- ^ Whether the 'FileRoute' represents a file or a directory.
@@ -103,18 +114,18 @@ fileRoute
 fileRoute monikerMap predicates' =
   fileRoute'
     (`lookup` monikerMap)
-    [(Moniker name, pathExpr) | (name, pathExpr) <- predicates']
+    [(Moniker name, routeTarget <$> pathExpr) | (name, pathExpr) <- predicates']
 
 
 -- | Similar to 'FileRoute', but it takes more raw arguments: a 'MonikerResolver'
 -- (instead of a 'MonikerMap'), and a pairs of 'EnvironmentPredicate' (instead
--- of 'MonikerName') and 'FilePathExpression'.
+-- of 'MonikerName') and 'RouteTarget'.
 fileRoute'
   :: MonikerResolver
   -- ^ A function that resolves a 'MonikerName' to an 'EnvironmentPredicate'.
-  -> [(EnvironmentPredicate, Maybe FilePathExpression)]
-  -- ^ The pairs of 'EnvironmentPredicate's and 'FilePathExpression's that make
-  -- up the 'FileRoute'.  If the file path expression is 'Nothing', then it is
+  -> [(EnvironmentPredicate, Maybe RouteTarget)]
+  -- ^ The pairs of 'EnvironmentPredicate's and 'RouteTarget's that make
+  -- up the 'FileRoute'.  If the route target is 'Nothing', then it is
   -- considered a "null route" and will be ignored.
   -> FileType
   -- ^ Whether the 'FileRoute' represents a file or a directory.
@@ -124,7 +135,7 @@ fileRoute' resolver predicates' =
   FileRoute resolver $ sortOn sortKey predicates'
  where
   sortKey
-    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    :: (EnvironmentPredicate, Maybe RouteTarget)
     -> Down (Specificity, String)
   sortKey (pred', _) = Down (specificity resolver pred', show pred')
 
@@ -134,8 +145,8 @@ fileRoute' resolver predicates' =
 fileRoutePreservingOrder
   :: MonikerResolver
   -- ^ A function that resolves 'MonikerName's in predicates.
-  -> [(EnvironmentPredicate, Maybe FilePathExpression)]
-  -- ^ Predicate and destination path pairs in declaration order.
+  -> [(EnvironmentPredicate, Maybe RouteTarget)]
+  -- ^ Predicate and destination target pairs in declaration order.
   -> FileType
   -- ^ Whether the route represents a file or a directory.
   -> FileRoute
@@ -150,24 +161,24 @@ dispatch
   -- ^ The 'Environment' to dispatch against.
   -> FileRoute
   -- ^ The 'FileRoute' to dispatch.
-  -> ([Maybe FilePathExpression], [EvaluationWarning])
-  -- ^ The list of 'Maybe' 'FilePathExpression's that matched
+  -> ([Maybe RouteTarget], [EvaluationWarning])
+  -- ^ The list of 'Maybe' 'RouteTarget's that matched
   -- the given 'Environment' and 'MonikerMap'.  Even if matches are made,
-  -- their values may be 'Nothing' if the 'FilePathExpression' was
+  -- their values may be 'Nothing' if the 'RouteTarget' was
   -- a "null route".
   -- The 'snd' of the result is a list of warnings that occurred
-  -- during evaluation  whether or not any 'FilePathExpression' matched.
+  -- during evaluation  whether or not any 'RouteTarget' matched.
 dispatch environment (FileRoute resolver route _) =
   (matched, warnings)
  where
   eval :: EnvironmentPredicate -> (Bool, [EvaluationWarning])
   eval = evaluate' environment resolver
-  evaluated :: [((Bool, [EvaluationWarning]), Maybe FilePathExpression)]
-  evaluated = [(eval predicate, expr) | (predicate, expr) <- route]
+  evaluated :: [((Bool, [EvaluationWarning]), Maybe RouteTarget)]
+  evaluated = [(eval predicate, target) | (predicate, target) <- route]
   warnings :: [EvaluationWarning]
   warnings = concatMap (snd . fst) evaluated
-  matched :: [Maybe FilePathExpression]
-  matched = [expr | ((True, _), expr) <- evaluated]
+  matched :: [Maybe RouteTarget]
+  matched = [target | ((True, _), target) <- evaluated]
 
 
 -- | A warning that can occur during path routing.
@@ -218,10 +229,10 @@ routePathWithVariables route env lookupVariable = do
   case matched of
     [] -> return (Nothing, predWarnings, mempty)
     (Nothing : _) -> return (Nothing, predWarnings, mempty)
-    (Just pathExpr : _) -> do
+    (Just target : _) -> do
       (path, exprWarnings, provenance) <-
         expandFilePathWithVariables
-          pathExpr
+          target.expression
           lookupVariable
           (encodePath . unpack)
       return

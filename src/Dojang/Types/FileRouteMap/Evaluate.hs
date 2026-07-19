@@ -1,4 +1,5 @@
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
 module Dojang.Types.FileRouteMap.Evaluate
   ( evaluateRoutes
@@ -12,7 +13,7 @@ import Dojang.MonadFileSystem (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning)
 import Dojang.Types.FilePathExpression (FilePathExpression)
-import Dojang.Types.FileRoute (FileRoute (..), dispatch)
+import Dojang.Types.FileRoute (FileRoute (..), RouteTarget (..), dispatch)
 import Dojang.Types.FileRouteMap (FileRouteMap)
 
 
@@ -30,7 +31,7 @@ evaluateRoutes fileRoutes env =
  where
   results :: [(OsPath, FilePathExpression, [EvaluationWarning])]
   results =
-    [ (filePath, match, warnings')
+    [ (filePath, match.expression, warnings')
     | (filePath, route) <- toList fileRoutes
     , let (matches, warnings') = dispatch env route
     , Just match : _ <- [matches]

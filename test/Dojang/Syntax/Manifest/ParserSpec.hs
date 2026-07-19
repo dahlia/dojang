@@ -27,7 +27,12 @@ import Dojang.Types.FilePathExpression
   ( FilePathExpression (BareComponent, PathSeparator, Substitution)
   , toPathText
   )
-import Dojang.Types.FileRoute (FileRoute (..), dispatch)
+import Dojang.Types.FileRoute
+  ( FileRoute (..)
+  , RouteTarget (..)
+  , dispatch
+  , routeTarget
+  )
 import Dojang.Types.Hook (Hook (..), HookType (PreApply))
 import Dojang.Types.Manifest (Manifest (..))
 import Dojang.Types.ManifestVariable
@@ -324,7 +329,7 @@ spec = do
         routeShape :: FileRoute -> [(String, Maybe Text)]
         routeShape route =
           sort
-            [ (show predicate, toPathText <$> path)
+            [ (show predicate, toPathText . (.expression) <$> path)
             | (predicate, path) <- route.predicates
             ]
     warnings `shouldBe` ([] :: [Text])
@@ -354,7 +359,7 @@ spec = do
             ]
         Right (Manifest _ _ _ routes _ _, _) = readManifest toml
         Just route = Map.lookup gitconfig routes
-    [ (show predicate, toPathText <$> path)
+    [ (show predicate, toPathText . (.expression) <$> path)
       | (predicate, path) <- route.predicates
       ]
       `shouldBe` [(show $ Architecture "aarch64", Just "$HOME/.gitconfig")]
@@ -380,7 +385,7 @@ spec = do
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
       Right (Manifest _ _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
-        [ (show predicate, toPathText <$> path)
+        [ (show predicate, toPathText . (.expression) <$> path)
           | (predicate, path) <- route.predicates
           ]
           `shouldBe` [ (show $ Architecture "x86_64", Just "architecture-first")
@@ -443,7 +448,8 @@ spec = do
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
       Right (Manifest _ _ _ routes _ _, _) -> do
         let Just route = Map.lookup foo routes
-        route.predicates `shouldBe` [(Always, Just $ BareComponent "")]
+        route.predicates
+          `shouldBe` [(Always, Just $ routeTarget $ BareComponent "")]
 
   specify "identifies invalid detailed branch paths" $ do
     let result =

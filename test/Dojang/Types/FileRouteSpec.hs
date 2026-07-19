@@ -22,12 +22,14 @@ import Dojang.Types.FilePathExpression (FilePathExpression (Root, Substitution))
 import Dojang.Types.FilePathExpression.Expansion (ExpansionWarning (..))
 import Dojang.Types.FileRoute
   ( FileRoute (monikerResolver, predicates)
+  , RouteTarget
   , RouteWarning (..)
   , dispatch
   , fileRoute
   , fileRoute'
   , fileRoutePreservingOrder
   , routePath
+  , routeTarget
   )
 import Dojang.Types.Gen qualified as Gen
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
@@ -101,10 +103,10 @@ spec = do
         route
           `shouldNotBe` fileRoute'
             (const Nothing)
-            [ (Moniker $ moniker "posix", Just $ Substitution "HOME")
+            [ (Moniker $ moniker "posix", Just $ routeTarget $ Substitution "HOME")
             ,
               ( Moniker $ moniker "windows"
-              , Just $ Substitution "USERPROFILE" -- cSpell:disable-line
+              , Just $ routeTarget $ Substitution "USERPROFILE" -- cSpell:disable-line
               )
             ]
             Directory
@@ -113,11 +115,14 @@ spec = do
       route.predicates
         `shouldBe` ( [
                        ( Moniker $ moniker "windows"
-                       , Just $ Substitution "USERPROFILE" -- cSpell:disable-line
+                       , Just $ routeTarget $ Substitution "USERPROFILE" -- cSpell:disable-line
                        )
-                     , (Moniker $ moniker "posix", Just $ Substitution "HOME")
+                     ,
+                       ( Moniker $ moniker "posix"
+                       , Just $ routeTarget $ Substitution "HOME"
+                       )
                      ]
-                       :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+                       :: [(EnvironmentPredicate, Maybe RouteTarget)]
                    )
 
     specify "preserves input predicate order" $ hedgehog $ do
@@ -140,23 +145,23 @@ spec = do
     dispatch
       (emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "5.10.0-8")
       route
-      `shouldBe` ([Just $ Substitution "HOME"], [])
+      `shouldBe` ([Just $ routeTarget $ Substitution "HOME"], [])
     dispatch
       (emptyEnvironment "macos" "aarch64" $ Kernel "Darwin" "23.1.0")
       route
-      `shouldBe` ([Just $ Substitution "HOME"], [])
+      `shouldBe` ([Just $ routeTarget $ Substitution "HOME"], [])
     dispatch
       ( emptyEnvironment "windows" "x86_64" $
           Kernel "Microsoft Windows" "10.0.23585.1001"
       )
       route
-      `shouldBe` ([Just $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
+      `shouldBe` ([Just $ routeTarget $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
     dispatch
       ( emptyEnvironment "windows" "x86_64" $
           Kernel "Microsoft Windows" "10.0.23585.1001"
       )
       route
-      `shouldBe` ([Just $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
+      `shouldBe` ([Just $ routeTarget $ Substitution "USERPROFILE"], []) -- cSpell:disable-line
     let withWarnings =
           fileRoute
             monikerMap
@@ -165,7 +170,7 @@ spec = do
     dispatch
       (emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "5.10.0-8")
       withWarnings
-      `shouldBe` ( [Just $ Substitution "HOME"]
+      `shouldBe` ( [Just $ routeTarget $ Substitution "HOME"]
                  , [UndefinedMoniker (moniker "non-existent")]
                  )
 

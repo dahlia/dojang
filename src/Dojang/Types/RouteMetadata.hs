@@ -21,6 +21,7 @@ module Dojang.Types.RouteMetadata
   , routeTarget
   ) where
 
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 
 import Dojang.Types.FilePathExpression (FilePathExpression)
@@ -72,6 +73,12 @@ data RouteTarget = RouteTarget
   -- ^ The declared kind of the destination.
   }
   deriving (Eq, Show)
+
+
+-- | A string literal denotes a destination path expression with no
+-- metadata, mirroring the 'IsString' instance of 'FilePathExpression'.
+instance IsString RouteTarget where
+  fromString = routeTarget . fromString
 
 
 -- | Wraps a bare 'FilePathExpression' into a 'RouteTarget' carrying no

@@ -51,6 +51,7 @@ import Dojang.Types.FileRoute
   ( FileRoute (FileRoute)
   , fileRoute'
   , fileRoutePreservingOrder
+  , routeTarget
   )
 import Dojang.Types.Gen as Gen
   ( arbitraryManifest
@@ -473,7 +474,7 @@ spec = do
     let route =
           fileRoutePreservingOrder
             (const Nothing)
-            [ (Always, Just $ BareComponent "")
+            [ (Always, Just $ routeTarget $ BareComponent "")
             , (linux, Nothing)
             ]
             File

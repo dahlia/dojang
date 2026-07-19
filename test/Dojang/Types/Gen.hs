@@ -403,7 +403,9 @@ fileRoute' predicatesNumberRange mm predGen = do
     nub . map normalizePredicate <$> Gen.list predicatesNumberRange predGen
   let cardinality = Prelude.length predicates
   paths <-
-    Gen.list (constant cardinality cardinality) $ Gen.maybe filePathExpression
+    Gen.list (constant cardinality cardinality) $
+      Gen.maybe $
+        FileRoute.routeTarget <$> filePathExpression
   fileOrDir <- Gen.element [File, Directory]
   return $ FileRoute.fileRoute' (`lookup` mm) (predicates `zip` paths) fileOrDir
 
@@ -454,7 +456,8 @@ arbitraryFileRouteMap range monikers =
     let cardinality = Prelude.length predicates
     paths <-
       Gen.list (constant cardinality cardinality) $
-        Gen.maybe arbitraryFilePathExpression
+        Gen.maybe $
+          FileRoute.routeTarget <$> arbitraryFilePathExpression
     fileOrDir <- Gen.element [File, Directory]
     let value =
           FileRoute.fileRoute'
