@@ -72,6 +72,7 @@ import Dojang.Types.Context
   , getIgnoredFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeFiles
+  , projectExpectedState
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 
@@ -254,6 +255,10 @@ editCore editorOpt noApply force sequential _allFlag _includeUnregistered explic
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
+
+  -- Reject unsafe route configurations before touching any file:
+  (ownership, _) <- projectExpectedState ctx
+  _ <- ensureRouteOwnership ownership
 
   -- Make paths absolute first.
   absPaths <- mapM makeAbsolute paths

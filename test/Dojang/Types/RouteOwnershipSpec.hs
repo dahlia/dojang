@@ -164,6 +164,52 @@ spec = do
                 (normalise $ tmpDir </> b)
             )
 
+    symIt "accepts an already deployed symlink destination" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectoryLink (tmpDir </> src </> a) (tmpDir </> b)
+        let route =
+              mkRoute (tmpDir </> src) a (tmpDir </> b) Directory SymlinkRoute
+        let Right state = selectOwnership [route]
+        result <- verifyResolvedIdentities state
+        result `shouldBe` Right ()
+
+    symIt "rejects a missing destination under an aliased ancestor" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectoryLink (tmpDir </> src </> a) (tmpDir </> b)
+        let route =
+              mkRoute
+                (tmpDir </> src)
+                a
+                (tmpDir </> b </> c </> d)
+                Directory
+                CopyRoute
+        let Right state = selectOwnership [route]
+        result <- verifyResolvedIdentities state
+        case result of
+          Left (SourceDestinationAliased name _ _) -> name `shouldBe` a
+          other -> fail $ "Unexpected result: " <> show other
+
+    symIt "rejects destinations that resolve to one tree" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectory $ tmpDir </> src </> b
+        createDirectory $ tmpDir </> c
+        createDirectoryLink (tmpDir </> c) (tmpDir </> d)
+        let routeA =
+              mkRoute (tmpDir </> src) a (tmpDir </> c) Directory CopyRoute
+        let routeB =
+              mkRoute (tmpDir </> src) b (tmpDir </> d) Directory CopyRoute
+        let Right state = selectOwnership [routeA, routeB]
+        result <- verifyResolvedIdentities state
+        case result of
+          Left (DuplicateDestinationOwner _ _ _) -> return ()
+          other -> fail $ "Unexpected result: " <> show other
+
     symIt "accepts destinations that resolve elsewhere" $
       withTempDir $ \tmpDir _ -> do
         createDirectory $ tmpDir </> src

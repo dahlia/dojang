@@ -1326,6 +1326,15 @@ spec = do
           createSymbolicLink bar (tmpDir </> baz) File
         e' `shouldSatisfy` isAlreadyExistsError
 
+    symSpecify "sees target writes made after link creation" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "old"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- writeFile (tmpDir </> foo) "new"
+          readFile (tmpDir </> bar)
+        observed `shouldBe` "new"
+
     symSpecify "allows re-creating a link after removal" $
       withTempDir $ \tmpDir tmpDir' -> do
         Prelude.writeFile (tmpDir' `combine` "foo") "real"

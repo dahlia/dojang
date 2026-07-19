@@ -30,7 +30,15 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import System.OsPath (OsPath, makeRelative, normalise, splitDirectories)
+import System.OsPath
+  ( OsPath
+  , makeRelative
+  , normalise
+  , splitDirectories
+  , takeDirectory
+  , takeFileName
+  , (</>)
+  )
 
 import Dojang.MonadFileSystem (MonadFileSystem (canonicalizePath, exists))
 import Dojang.Types.FileRoute (RouteKind (SymlinkRoute))
@@ -167,8 +175,15 @@ selectOwnership routes = do
 -- | Checks that no route's source and destination resolve to the same
 -- filesystem tree once symbolic links are followed.  Lexically distinct
 -- paths can still alias each other through links; this pass canonicalizes
--- every existing source and destination and rejects containment either
--- way before any mutation is planned.
+-- every source and destination (resolving the deepest existing ancestor
+-- of paths that do not exist yet) and rejects containment either way
+-- before any mutation is planned.  It also rejects two destinations that
+-- resolve to one tree, which lexical duplicate detection cannot see.
+--
+-- The destination of a symlink route is resolved only up to its parent
+-- directory: the destination leaf is expected to be a link back at the
+-- route's source once deployed, and following it would misreport every
+-- correctly deployed link as aliasing.
 verifyResolvedIdentities
   :: forall m
    . (MonadFileSystem m)
@@ -176,29 +191,61 @@ verifyResolvedIdentities
   -- ^ The ownership selection to verify.
   -> m (Either OwnershipError ())
   -- ^ 'Right' when no resolved aliasing exists; the first
-  -- 'SourceDestinationAliased' error otherwise.
-verifyResolvedIdentities state = go $ Map.toAscList state.owners
+  -- 'SourceDestinationAliased' or 'DuplicateDestinationOwner' error
+  -- otherwise.
+verifyResolvedIdentities state = do
+  resolved <- mapM resolveOwner $ Map.toAscList state.owners
+  case aliases resolved of
+    (name, source, dst) : _ ->
+      return $ Left $ SourceDestinationAliased name source dst
+    [] -> case resolvedDuplicates resolved of
+      (dst, a, b) : _ ->
+        return $ Left $ DuplicateDestinationOwner dst a b
+      [] -> return $ Right ()
  where
-  go :: [(OsPath, RouteResult)] -> m (Either OwnershipError ())
-  go [] = return $ Right ()
-  go ((dst, route) : rest) = do
-    resolvedSource <- resolveIfExists route.sourcePath
-    resolvedDestination <- resolveIfExists dst
-    case (resolvedSource, resolvedDestination) of
-      (Just source', Just dst')
-        | source' == dst'
-            || source' `strictlyInside` dst'
-            || dst' `strictlyInside` source' ->
-            return $
-              Left $
-                SourceDestinationAliased route.routeName route.sourcePath dst
-      _ -> go rest
-  resolveIfExists :: OsPath -> m (Maybe OsPath)
-  resolveIfExists path = do
+  resolveOwner
+    :: (OsPath, RouteResult) -> m (OsPath, OsPath, OsPath, RouteResult)
+  resolveOwner (dst, route) = do
+    resolvedSource <- resolveEffective route.sourcePath
+    resolvedDestination <- case route.kind of
+      SymlinkRoute -> do
+        parent <- resolveEffective $ takeDirectory dst
+        return $ normalise $ parent </> takeFileName dst
+      _ -> resolveEffective dst
+    return (dst, resolvedDestination, resolvedSource, route)
+  aliases
+    :: [(OsPath, OsPath, OsPath, RouteResult)]
+    -> [(OsPath, OsPath, OsPath)]
+  aliases resolved =
+    [ (route.routeName, route.sourcePath, dst)
+    | (dst, dst', source', route) <- resolved
+    , source' == dst'
+        || source' `strictlyInside` dst'
+        || dst' `strictlyInside` source'
+    ]
+  resolvedDuplicates
+    :: [(OsPath, OsPath, OsPath, RouteResult)]
+    -> [(OsPath, OsPath, OsPath)]
+  resolvedDuplicates resolved =
+    [ (dst, a.routeName, b.routeName)
+    | ((dst, resolved', _, a), (_, resolved'', _, b)) <-
+        zip sorted (drop 1 sorted)
+    , resolved' == resolved''
+    ]
+   where
+    sorted = sortOn (\(_, resolved', _, _) -> resolved') resolved
+  resolveEffective :: OsPath -> m OsPath
+  resolveEffective path = do
     present <- exists path
     if present
-      then Just . normalise <$> canonicalizePath path
-      else return Nothing
+      then normalise <$> canonicalizePath path
+      else do
+        let parent = takeDirectory path
+        if parent == path
+          then return $ normalise path
+          else do
+            resolvedParent <- resolveEffective parent
+            return $ normalise $ resolvedParent </> takeFileName path
 
 
 -- | Whether the first path lies strictly inside the second.

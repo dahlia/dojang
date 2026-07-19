@@ -782,8 +782,8 @@ readFileFromDryRunIO seqOffset src = do
            (_, Contents contents) : _ -> return contents
            (seqNo, Copied src') : _ ->
              readFileFromDryRunIO seqNo src'
-           (seqNo, SymlinkTo target _) : _ ->
-             readFileFromDryRunIO seqNo $ resolveLinkTarget src target
+           (_, SymlinkTo target _) : _ ->
+             readFileFromDryRunIO seqOffset $ resolveLinkTarget src target
            (_, Gone) : _ -> do
              src' <- decodePath src
              throwError $

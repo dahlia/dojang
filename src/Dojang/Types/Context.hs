@@ -37,7 +37,8 @@ module Dojang.Types.Context
 
 import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sortOn)
+import Data.Ord (Down (Down))
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
@@ -728,22 +729,27 @@ getRouteState ctx path = do
   absPath <- makeAbsolute path
   let dirs = splitDirectories absPath
   (routes, ws) <- routePaths ctx
-  states <- forM routes $ \route -> do
+  matches <- forM routes $ \route -> do
     dstPath <- makeAbsolute route.destinationPath
     let prefix = splitDirectories dstPath
-    if prefix `isPrefixOf` dirs
-      then do
-        let ignores =
-              findWithDefault
-                []
-                (normalise route.routeName)
-                ignorePatterns
-        relPath <- decodePath $ joinPath $ drop (length prefix) dirs
-        case matchMany [(i, i) | i <- ignores] [((), relPath)] of
-          (pattern, _, _) : _ -> return $ Ignored route.routeName pattern
-          _ -> return $ Routed route.routeName
-      else return NotRouted
-  return (if null states then NotRouted else minimum states, ws)
+    return $
+      if prefix `isPrefixOf` dirs
+        then Just (length prefix, route, drop (length prefix) dirs)
+        else Nothing
+  -- The most-specific containing route owns the path; broader routes must
+  -- not override its routing or ignore rules:
+  case sortOn (\(specificity', _, _) -> Down specificity') [m | Just m <- matches] of
+    [] -> return (NotRouted, ws)
+    (_, route, relDirs) : _ -> do
+      let ignores =
+            findWithDefault
+              []
+              (normalise route.routeName)
+              ignorePatterns
+      relPath <- decodePath $ joinPath relDirs
+      case matchMany [(i, i) | i <- ignores] [((), relPath)] of
+        (pattern, _, _) : _ -> return (Ignored route.routeName pattern, ws)
+        _ -> return (Routed route.routeName, ws)
  where
   ignorePatterns :: Map OsPath [FilePattern]
   ignorePatterns = ctx.repository.manifest.ignorePatterns
@@ -761,6 +767,10 @@ getIgnoredFiles
   -- ^ The list of ignored files.
 getIgnoredFiles ctx = do
   (routes, _) <- routePaths ctx
+  let exclusionsFor :: RouteResult -> [OsPath]
+      exclusionsFor route = case selectOwnership routes of
+        Right state -> ownedExclusions state route.destinationPath
+        Left _ -> []
   ignoredLists <- forM routes $ \route ->
     case route.fileType of
       Dojang.MonadFileSystem.Directory -> do
@@ -768,8 +778,19 @@ getIgnoredFiles ctx = do
         if null ignores
           then return []
           else do
-            -- List all files (including those that would be ignored)
-            allFiles <- listFiles route.destinationPath []
+            -- List all files (including those that would be ignored),
+            -- except entries owned by routes nested inside this one:
+            let nestedRoots = exclusionsFor route
+            let owned :: FileEntry -> Bool
+                owned entry =
+                  not $
+                    any
+                      ( \root ->
+                          splitDirectories root
+                            `isPrefixOf` splitDirectories entry.path
+                      )
+                      nestedRoots
+            allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
             -- Find which files match ignore patterns
             forM allFiles $ \entry -> do
               relPath <- decodePath entry.path
