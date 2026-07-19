@@ -80,6 +80,11 @@ data OwnershipError
     -- contains it), so applying it would write into the repository itself.
     -- Carries the route name and its destination.
     DestinationInsideRepository OsPath OsPath
+  | -- | Two lexically nested destinations no longer nest the same way once
+    -- symbolic links are resolved, so the exclusions computed from their
+    -- lexical shape would not protect the nested route's entries.  Carries
+    -- the nested route's name and the ancestor route's name.
+    NestedDestinationsDiverged OsPath OsPath
   deriving (Eq, Show)
 
 
@@ -116,6 +121,12 @@ formatOwnershipError renderPath (DestinationInsideRepository name dst) =
     <> " routes to "
     <> renderPath dst
     <> ", which overlaps the repository checkout itself."
+formatOwnershipError renderPath (NestedDestinationsDiverged nested ancestor) =
+  "The destination of route "
+    <> renderPath nested
+    <> " nests inside the destination of route "
+    <> renderPath ancestor
+    <> " lexically, but resolving symbolic links changes that relationship."
 
 
 -- | Selects one owning route per destination from the active routes of
@@ -233,7 +244,10 @@ verifyResolvedIdentities repositoryRoot state = do
       [] -> case resolvedDuplicates resolved of
         (dst, a, b) : _ ->
           return $ Left $ DuplicateDestinationOwner dst a b
-        [] -> return $ Right ()
+        [] -> case divergedNesting resolved of
+          (nested, ancestor) : _ ->
+            return $ Left $ NestedDestinationsDiverged nested ancestor
+          [] -> return $ Right ()
  where
   inRepository
     :: OsPath
@@ -281,6 +295,20 @@ verifyResolvedIdentities repositoryRoot state = do
                && not (dstA `strictlyInside` dstB)
                && not (dstB `strictlyInside` dstA)
            )
+    ]
+  -- Lexical nesting must survive resolution in the same direction:
+  -- exclusions and boundaries are computed from the lexical shape, so a
+  -- nested destination escaping its ancestor through a link would be
+  -- unprotected.
+  divergedNesting
+    :: [(OsPath, OsPath, OsPath, RouteResult)]
+    -> [(OsPath, OsPath)]
+  divergedNesting resolved =
+    [ (nested.routeName, ancestor.routeName)
+    | (dstA, resolvedA, _, nested) <- resolved
+    , (dstB, resolvedB, _, ancestor) <- resolved
+    , dstA `strictlyInside` dstB
+    , not $ resolvedA `strictlyInside` resolvedB
     ]
   resolveEffective :: OsPath -> m OsPath
   resolveEffective path = do

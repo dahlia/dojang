@@ -130,20 +130,20 @@ renderRouteKind SymlinkRoute = "symlink"
 
 -- | A platform-independent observation of a filesystem entry's permissions.
 --
--- Fields are 'Maybe' when a platform cannot observe them at all (e.g.
--- Windows has no owner-only or executable distinction); such fields are
--- treated as vacuously satisfied by 'satisfiesPortableMode' so that
--- unsupported platforms never report phantom drift.
+-- On platforms with POSIX permissions the exact bits are preserved, so
+-- a declaration is only satisfied by precisely the bits it maps to; lossy
+-- summaries would let materially unsafe permissions (e.g. group-writable
+-- @0020@) satisfy a @read-only@ declaration.  On platforms without POSIX
+-- bits (Windows) only writability is observable, and the unobservable
+-- part is treated as vacuously satisfied so unsupported platforms never
+-- report phantom drift.
 data PortableMode = PortableMode
-  { ownerOnly :: Maybe Bool
-  -- ^ Whether no permission is granted to the group and others.
-  -- 'Nothing' when the platform has no such distinction.
+  { posixBits :: Maybe Word
+  -- ^ The exact POSIX permission bits (masked to @0o777@), or 'Nothing'
+  -- when the platform cannot observe them.
   , writable :: Bool
   -- ^ Whether the owner can write the entry.  Observable on every
   -- supported platform (the read-only attribute on Windows).
-  , executable :: Maybe Bool
-  -- ^ Whether any execute bit is set.  'Nothing' when the platform has
-  -- no execute permission.
   }
   deriving (Eq, Ord, Show)
 
@@ -153,30 +153,26 @@ data PortableMode = PortableMode
 portableModeFromBits :: Word -> PortableMode
 portableModeFromBits bits =
   PortableMode
-    { ownerOnly = Just $ bits .&. 0o077 == 0
+    { posixBits = Just $ bits .&. 0o777
     , writable = bits .&. 0o200 /= 0
-    , executable = Just $ bits .&. 0o111 /= 0
     }
 
 
--- | Whether an observed 'PortableMode' satisfies a declared one.
--- A field that is unobservable ('Nothing' on the observed side) or
--- undeclared ('Nothing' on the declared side) is vacuously satisfied.
+-- | Whether an observed 'PortableMode' satisfies a declared one.  When
+-- both sides carry exact POSIX bits they must match precisely; when
+-- either side cannot observe or declare them, only the universally
+-- observable writability is compared.
 satisfiesPortableMode
   :: PortableMode
   -- ^ The observed mode of an existing filesystem entry.
   -> PortableMode
   -- ^ The declared mode the entry should have.
   -> Bool
-  -- ^ 'True' unless an observable field contradicts a declared one.
+  -- ^ 'True' unless an observable aspect contradicts a declared one.
 satisfiesPortableMode observed declared =
-  agrees observed.ownerOnly declared.ownerOnly
-    && observed.writable == declared.writable
-    && agrees observed.executable declared.executable
- where
-  agrees :: Maybe Bool -> Maybe Bool -> Bool
-  agrees (Just observed') (Just declared') = observed' == declared'
-  agrees _ _ = True
+  case (observed.posixBits, declared.posixBits) of
+    (Just observed', Just declared') -> observed' == declared'
+    _ -> observed.writable == declared.writable
 
 
 -- | The exact POSIX permission bits a 'RouteMode' declares for a regular

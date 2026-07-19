@@ -211,6 +211,34 @@ spec = do
           Left (DuplicateDestinationOwner _ _ _) -> return ()
           other -> fail $ "Unexpected result: " <> show other
 
+    symIt "rejects nested destinations that escape their ancestor" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> src
+        createDirectory $ tmpDir </> src </> a
+        createDirectory $ tmpDir </> src </> b
+        createDirectory $ tmpDir </> c
+        createDirectory $ tmpDir </> c </> d
+        createDirectory $ tmpDir </> d
+        -- The nested route's lexical ancestor chain crosses a link that
+        -- resolves outside the ancestor's destination:
+        createDirectoryLink (tmpDir </> d) (tmpDir </> c </> d </> a)
+        let ancestor =
+              mkRoute (tmpDir </> src) a (tmpDir </> c) Directory CopyRoute
+        let nested =
+              mkRoute
+                (tmpDir </> src)
+                b
+                (tmpDir </> c </> d </> a </> b)
+                Directory
+                CopyRoute
+        let Right state = selectOwnership (tmpDir </> src) [ancestor, nested]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
+        case result of
+          Left (NestedDestinationsDiverged nested' ancestor') -> do
+            nested' `shouldBe` b
+            ancestor' `shouldBe` a
+          other -> fail $ "Unexpected result: " <> show other
+
     symIt "accepts destinations that resolve elsewhere" $
       withTempDir $ \tmpDir _ -> do
         createDirectory $ tmpDir </> src

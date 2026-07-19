@@ -71,7 +71,10 @@ import Dojang.MonadFileSystem
   , tryDryRunIO
   )
 import Dojang.TestUtils (withTempDir)
-import Dojang.Types.RouteMetadata (PortableMode (..))
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , portableModeFromBits
+  )
 
 
 packageYamlFP :: FilePath
@@ -141,13 +144,13 @@ posixPortableModeSpec = do
       Prelude.writeFile fooFP ""
       Posix.setFileMode fooFP 0o600
       getPortableMode (tmpDir </> fooName)
-        `shouldReturn` PortableMode (Just True) True (Just False)
+        `shouldReturn` portableModeFromBits 0o600
       Posix.setFileMode fooFP 0o755
       getPortableMode (tmpDir </> fooName)
-        `shouldReturn` PortableMode (Just False) True (Just True)
+        `shouldReturn` portableModeFromBits 0o755
       Posix.setFileMode fooFP 0o444
       getPortableMode (tmpDir </> fooName)
-        `shouldReturn` PortableMode (Just False) False (Just False)
+        `shouldReturn` portableModeFromBits 0o444
 
   specify "setPortableMode applies exact POSIX bits" $
     withTempDir $ \tmpDir tmpDir' -> do
@@ -181,7 +184,7 @@ posixDryRunPortableModeSpec = do
       Prelude.writeFile fooFP ""
       Posix.setFileMode fooFP 0o600
       dryRunIO (getPortableMode $ tmpDir </> fooName)
-        `shouldReturn` PortableMode (Just True) True (Just False)
+        `shouldReturn` portableModeFromBits 0o600
 
   specify "setPortableMode does not touch the disk" $
     withTempDir $ \tmpDir tmpDir' -> do
@@ -192,7 +195,7 @@ posixDryRunPortableModeSpec = do
       observed <- dryRunIO $ do
         () <- setPortableMode (tmpDir </> fooName) 0o600
         getPortableMode $ tmpDir </> fooName
-      observed `shouldBe` PortableMode (Just True) True (Just False)
+      observed `shouldBe` portableModeFromBits 0o600
       mode <- Posix.fileMode <$> Posix.getFileStatus fooFP
       (mode .&. 0o777) `shouldBe` 0o644
 #endif
@@ -1424,7 +1427,7 @@ spec = do
         observed <- dryRunIO $ do
           () <- setPortableMode (tmpDir </> foo) 0o600
           getPortableMode $ tmpDir </> foo
-        observed `shouldBe` PortableMode (Just True) True (Just False)
+        observed `shouldBe` portableModeFromBits 0o600
 
     specify "setPortableMode fails on a missing path" $
       withTempDir $ \tmpDir _ -> do
@@ -1438,7 +1441,7 @@ spec = do
           () <- setPortableMode (tmpDir </> foo) 0o600
           () <- setPortableWritable (tmpDir </> foo) False
           getPortableMode $ tmpDir </> foo
-        observed `shouldBe` PortableMode (Just True) False (Just False)
+        observed `shouldBe` portableModeFromBits 0o400
 
     specify "getPortableMode keeps a written file's prior mode" $
       withTempDir $ \tmpDir tmpDir' -> do
@@ -1447,7 +1450,7 @@ spec = do
           () <- setPortableMode (tmpDir </> foo) 0o600
           () <- writeFile (tmpDir </> foo) "rewritten"
           getPortableMode $ tmpDir </> foo
-        observed `shouldBe` PortableMode (Just True) True (Just False)
+        observed `shouldBe` portableModeFromBits 0o600
 
     specify "getPortableMode resets overlaid modes after removal" $
       withTempDir $ \tmpDir tmpDir' -> do
@@ -1457,7 +1460,7 @@ spec = do
           () <- removeFile (tmpDir </> foo)
           () <- writeFile (tmpDir </> foo) "recreated"
           getPortableMode $ tmpDir </> foo
-        observed `shouldBe` PortableMode (Just False) True (Just False)
+        observed `shouldBe` portableModeFromBits 0o644
 
     specify "getPortableMode follows Copied overlays" $
       withTempDir $ \tmpDir tmpDir' -> do
@@ -1466,7 +1469,28 @@ spec = do
           () <- setPortableMode (tmpDir </> foo) 0o600
           () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
           getPortableMode $ tmpDir </> bar
-        observed `shouldBe` PortableMode (Just True) True (Just False)
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "getPortableMode keeps historical modes of copies" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
+          -- Later source changes must not affect the copy:
+          () <- setPortableMode (tmpDir </> foo) 0o444
+          getPortableMode $ tmpDir </> bar
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "getPortableMode survives removal of a copy's source" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
+          () <- removeFile (tmpDir </> foo)
+          getPortableMode $ tmpDir </> bar
+        observed `shouldBe` portableModeFromBits 0o600
 
     specify "getPortableMode fails on removed or missing paths" $
       withTempDir $ \tmpDir tmpDir' -> do

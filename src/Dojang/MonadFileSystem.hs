@@ -464,9 +464,8 @@ getPortableModeIO path = do
   permissions <- OsDirectory.getPermissions path
   return
     PortableMode
-      { ownerOnly = Nothing
+      { posixBits = Nothing
       , writable = Directory.writable permissions
-      , executable = Nothing
       }
 
 
@@ -796,6 +795,59 @@ addModeToFile path mode = modify' $ \state ->
     -> Maybe (NonEmpty (SeqNo, PortableMode))
   appendChange seqNo (Just changes) = Just $ (seqNo, mode) :| toList changes
   appendChange seqNo Nothing = Just $ singleton (seqNo, mode)
+
+
+-- | Observes an overlaid entry's portable mode as of the given sequence
+-- number, so historical reads (e.g. through 'Copied' events) see the mode
+-- that was in effect at that time rather than the source's current state.
+getPortableModeAt :: SeqNo -> OsPath -> DryRunIO PortableMode
+getPortableModeAt seqOffset path = do
+  oFiles <- gets overlaidFiles
+  oModes <- gets overlaidModes
+  path' <- decodePath path
+  let path'' = normalise path
+  let changes =
+        [ (no, change)
+        | (no, change) <- maybe [] toList $ oFiles !? path''
+        , no <= seqOffset
+        ]
+  case changes of
+    (_, Gone) : _ ->
+      throwError $
+        mkIOError doesNotExistErrorType "getPortableMode" Nothing (Just path')
+          `ioeSetErrorString` "no such file"
+    _ -> do
+      let goneSeq = case [no | (no, Gone) <- changes] of
+            no : _ -> Just no
+            [] -> Nothing
+      let modeEvents =
+            [ (no, mode)
+            | (no, mode) <- maybe [] toList $ oModes !? path''
+            , no <= seqOffset
+            ]
+      let activeModes =
+            [m | (no, m) <- modeEvents, maybe True (no >) goneSeq]
+      case activeModes of
+        m : _ -> return m
+        [] -> case changes of
+          (no, Copied src) : _ -> getPortableModeAt no src
+          (_, SymlinkTo _ _) : _ ->
+            return $ PortableMode Nothing True
+          (_, change) : rest -> do
+            let recreated = not $ null [no | (no, Gone) <- rest]
+            let fileType = case change of
+                  Directory' -> Directory
+                  _ -> File
+            if recreated
+              then return $ defaultCreatedMode fileType
+              else do
+                realExists <- liftIO $ doesPathExist path
+                if realExists
+                  then liftIO $ getPortableModeIO path
+                  else return $ defaultCreatedMode fileType
+          [] ->
+            liftIO (getPortableModeIO path)
+              `mapError` (`ioePrependLocation` "getPortableMode")
 
 
 -- | The permissions a freshly created overlay entry is assumed to have.
@@ -1259,44 +1311,8 @@ instance MonadFileSystem DryRunIO where
 
 
   getPortableMode path = do
-    oFiles <- gets overlaidFiles
-    oModes <- gets overlaidModes
-    path' <- decodePath path
-    let path'' = normalise path
-    let changes = maybe [] toList $ oFiles !? path''
-    case changes of
-      (_, Gone) : _ ->
-        throwError $
-          mkIOError doesNotExistErrorType "getPortableMode" Nothing (Just path')
-            `ioeSetErrorString` "no such file"
-      _ -> do
-        let goneSeq = case [no | (no, Gone) <- changes] of
-              no : _ -> Just no
-              [] -> Nothing
-        let modeEvents = maybe [] toList $ oModes !? path''
-        let activeModes =
-              [m | (no, m) <- modeEvents, maybe True (no >) goneSeq]
-        case activeModes of
-          m : _ -> return m
-          [] -> case changes of
-            (_, Copied src) : _ -> getPortableMode src
-            (_, SymlinkTo _ _) : _ ->
-              return $ PortableMode Nothing True Nothing
-            (_, change) : rest -> do
-              let recreated = not $ null [no | (no, Gone) <- rest]
-              let fileType = case change of
-                    Directory' -> Directory
-                    _ -> File
-              if recreated
-                then return $ defaultCreatedMode fileType
-                else do
-                  realExists <- liftIO $ doesPathExist path
-                  if realExists
-                    then liftIO $ getPortableModeIO path
-                    else return $ defaultCreatedMode fileType
-            [] ->
-              liftIO (getPortableModeIO path)
-                `mapError` (`ioePrependLocation` "getPortableMode")
+    seqNo <- gets currentSequenceNumber
+    getPortableModeAt seqNo path
 
 
   setPortableMode path bits = do
@@ -1313,7 +1329,16 @@ instance MonadFileSystem DryRunIO where
     current <-
       getPortableMode path
         `mapError` (`ioePrependLocation` "setPortableWritable")
-    addModeToFile path current{writable = writable'}
+    let adjustedBits = case current.posixBits of
+          Nothing -> Nothing
+          Just bits
+            | writable' -> Just $ bits .|. 0o200
+            | otherwise -> Just $ bits .&. complement 0o200
+    addModeToFile path $
+      PortableMode
+        { posixBits = adjustedBits
+        , writable = writable'
+        }
 
 
   createSymbolicLink target link fileType = do

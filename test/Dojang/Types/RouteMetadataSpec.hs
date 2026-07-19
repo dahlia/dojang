@@ -83,18 +83,12 @@ spec = do
 
   describe "PortableMode" $ do
     specify "portableModeFromBits" $ do
-      portableModeFromBits 0o600
-        `shouldBe` PortableMode (Just True) True (Just False)
-      portableModeFromBits 0o700
-        `shouldBe` PortableMode (Just True) True (Just True)
-      portableModeFromBits 0o755
-        `shouldBe` PortableMode (Just False) True (Just True)
-      portableModeFromBits 0o444
-        `shouldBe` PortableMode (Just False) False (Just False)
-      portableModeFromBits 0o555
-        `shouldBe` PortableMode (Just False) False (Just True)
-      portableModeFromBits 0o644
-        `shouldBe` PortableMode (Just False) True (Just False)
+      portableModeFromBits 0o600 `shouldBe` PortableMode (Just 0o600) True
+      portableModeFromBits 0o700 `shouldBe` PortableMode (Just 0o700) True
+      portableModeFromBits 0o755 `shouldBe` PortableMode (Just 0o755) True
+      portableModeFromBits 0o444 `shouldBe` PortableMode (Just 0o444) False
+      portableModeFromBits 0o555 `shouldBe` PortableMode (Just 0o555) False
+      portableModeFromBits 0o644 `shouldBe` PortableMode (Just 0o644) True
 
     specify "satisfiesPortableMode" $ do
       let observed600 = portableModeFromBits 0o600
@@ -104,24 +98,31 @@ spec = do
         `shouldBe` False
       satisfiesPortableMode (portableModeFromBits 0o400) declared600
         `shouldBe` False
-      -- Fields unobservable on the current platform are vacuously
-      -- satisfied rather than reported as drift:
+      -- Lossy summaries must not accept materially unsafe permissions:
       satisfiesPortableMode
-        (PortableMode Nothing True Nothing)
-        declared600
-        `shouldBe` True
+        (portableModeFromBits 0o020)
+        (portableModeFromBits 0o444)
+        `shouldBe` False
       satisfiesPortableMode
-        (PortableMode Nothing False Nothing)
+        (portableModeFromBits 0o200)
         declared600
         `shouldBe` False
       satisfiesPortableMode
-        (PortableMode Nothing False Nothing)
+        (portableModeFromBits 0o700)
+        (portableModeFromBits 0o755)
+        `shouldBe` False
+      -- Bits unobservable on the current platform fall back to the
+      -- universally observable writability instead of reporting drift:
+      satisfiesPortableMode (PortableMode Nothing True) declared600
+        `shouldBe` True
+      satisfiesPortableMode (PortableMode Nothing False) declared600
+        `shouldBe` False
+      satisfiesPortableMode
+        (PortableMode Nothing False)
         (portableModeFromBits 0o444)
         `shouldBe` True
-      -- Undeclared fields are likewise not compared:
-      satisfiesPortableMode
-        observed600
-        (PortableMode Nothing True Nothing)
+      -- An undeclared side is likewise compared by writability only:
+      satisfiesPortableMode observed600 (PortableMode Nothing True)
         `shouldBe` True
 
   describe "RouteTarget" $ do
