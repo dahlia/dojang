@@ -88,6 +88,7 @@
 | state record                 | 상태 레코드                |                                                                                              |
 | state store                  | 상태 저장소                |                                                                                              |
 | symbolic link                | 심볼릭 링크                |                                                                                              |
+| symlink target               | 링크 대상                  | 심볼릭 링크가 가리키는 경로를 뜻합니다. 동기화 대상은 “대상 경로”로 씁니다.                  |
 | target, target file          | 대상, 대상 파일            |                                                                                              |
 | traversal boundary           | 순회 경계                  | 링크로 배포된 디렉터리 경계를 뜻합니다.                                                      |
 | unchanged, modified, missing | 변경 없음, 수정됨, 사라짐  | 상태 표시에 사용합니다.                                                                      |
