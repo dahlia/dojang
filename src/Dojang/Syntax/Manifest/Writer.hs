@@ -61,8 +61,8 @@ import Dojang.Types.EnvironmentPredicate
 import Dojang.Types.FilePathExpression (FilePathExpression, toPathText)
 import Dojang.Types.FileRoute
   ( FileRoute (..)
-  , RouteKind (CopyRoute)
-  , RouteMode (DefaultMode)
+  , RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Executable, PrivateExecutable)
   , RouteTarget (..)
   )
 import qualified Dojang.Types.FileRoute as FileRoute
@@ -104,6 +104,12 @@ data WriteError
     DuplicateStatefulHookId HookType HookId
   | -- | A variable resolves a moniker differently from the manifest table.
     UnrepresentableVariableMoniker ManifestVariableName MonikerName
+  | -- | A directory route declares an executable mode, which the manifest
+    -- syntax rejects.
+    ExecutableModeOnDirectoryRoute OsPath RouteMode
+  | -- | A symlink-kind route target declares a non-default mode, which the
+    -- manifest syntax rejects.
+    ModeOnSymlinkRoute OsPath RouteMode
   deriving (Eq, Show)
 
 
@@ -128,6 +134,18 @@ formatWriteError (UnrepresentableVariableMoniker variable moniker) =
     <> " resolves moniker "
     <> original moniker.name
     <> " differently from the manifest moniker table."
+formatWriteError (ExecutableModeOnDirectoryRoute route mode) =
+  "Directory route "
+    <> pack (decodePath route)
+    <> " declares mode "
+    <> renderRouteMode mode
+    <> ", which is not applicable to directory routes."
+formatWriteError (ModeOnSymlinkRoute route mode) =
+  "Route "
+    <> pack (decodePath route)
+    <> " declares mode "
+    <> renderRouteMode mode
+    <> " on a symlink-kind target, which cannot carry a mode."
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -163,6 +181,7 @@ writeManifest
 writeManifest manifest = do
   validateVariables manifest.monikers manifest.variables
   validateHooks manifest.hooks
+  validateRouteMetadata manifest.fileRoutes
   pure $
     "#:schema "
       <> schema
@@ -199,6 +218,23 @@ writeManifest manifest = do
       Nothing -> Right ()
       Just moniker ->
         Left $ UnrepresentableVariableMoniker variableName moniker
+  validateRouteMetadata :: FileRouteMap -> Either WriteError ()
+  validateRouteMetadata routes =
+    sequence_
+      [ validateTarget routeName route.fileType target
+      | (routeName, route) <- Data.Map.Strict.toAscList routes
+      , (_, Just target) <- route.predicates
+      ]
+  validateTarget
+    :: OsPath -> FileType -> RouteTarget -> Either WriteError ()
+  validateTarget routeName fileType' target
+    | target.kind == SymlinkRoute
+    , target.mode /= DefaultMode =
+        Left $ ModeOnSymlinkRoute routeName target.mode
+    | fileType' == Directory
+    , target.mode == Executable || target.mode == PrivateExecutable =
+        Left $ ExecutableModeOnDirectoryRoute routeName target.mode
+    | otherwise = Right ()
 
 
 -- | Writes a 'Manifest' file to the given path.  Throws an 'IOError' if the

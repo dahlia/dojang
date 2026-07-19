@@ -144,7 +144,51 @@
         "mode": ["path"],
         "kind": ["path"]
       },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "symlink"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "mode": {
+            "const": "default"
+          }
+        }
+      },
       "additionalProperties": false
+    },
+    "dirRouteMap": {
+      "title": "Directory route definitions",
+      "description": "A map of directory route names to their corresponding route definitions.  Directory routes cannot declare executable modes.",
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/compactRoute"
+          },
+          {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/detailedRouteBranch"
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "enum": ["default", "private", "read-only"]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
     },
     "environmentPredicate": {
       "title": "Environment predicate",
@@ -382,7 +426,7 @@
       "$ref": "#/$defs/routeMap"
     },
     "dirs": {
-      "$ref": "#/$defs/routeMap"
+      "$ref": "#/$defs/dirRouteMap"
     },
     "ignores": {
       "title": "Ignore patterns",

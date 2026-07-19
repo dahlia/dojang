@@ -28,13 +28,15 @@ import Test.Hspec.Hedgehog
   , (===)
   )
 
-import Dojang.MonadFileSystem (FileType (File))
+import Dojang.MonadFileSystem (FileType (Directory, File))
 import qualified Dojang.MonadFileSystem as FileSystem
 import Dojang.Syntax.Manifest.Parser (formatErrors, readManifest)
 import Dojang.Syntax.Manifest.Writer
   ( WriteError
       ( DuplicateStatefulHookId
+      , ExecutableModeOnDirectoryRoute
       , InvalidHookConfiguration
+      , ModeOnSymlinkRoute
       , UnrepresentableVariableMoniker
       )
   , insertRepositoryId
@@ -50,7 +52,7 @@ import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.FileRoute
   ( FileRoute (FileRoute)
   , RouteKind (CopyRoute, SymlinkRoute)
-  , RouteMode (DefaultMode, Private)
+  , RouteMode (DefaultMode, Executable, Private)
   , RouteTarget (RouteTarget)
   , fileRoute'
   , fileRoutePreservingOrder
@@ -395,6 +397,49 @@ spec = do
     toml `shouldSatisfy` (not . isInfixOf "kind =")
     let Right (parsed, _) = readManifest toml
     parsed `shouldBe` manifest'
+
+  specify "refuses to write executable modes on directory routes" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget (BareComponent "target") Executable CopyRoute
+              )
+            ]
+            Directory
+        manifest' =
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+    writeManifest manifest'
+      `shouldBe` Left (ExecutableModeOnDirectoryRoute path Executable)
+
+  specify "refuses to write a mode on a symlink route" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget (BareComponent "target") Private SymlinkRoute
+              )
+            ]
+            File
+        manifest' =
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+    writeManifest manifest' `shouldBe` Left (ModeOnSymlinkRoute path Private)
 
   specify "keeps compact routes when every condition is a unique moniker" $ do
     let monikers = HashMap.singleton alpha linux
