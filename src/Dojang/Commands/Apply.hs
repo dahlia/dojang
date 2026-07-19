@@ -199,6 +199,20 @@ apply force filePaths = do
               "Cancelled applying because "
                 <> pathStyle path'
                 <> " (and its children) would be deleted."
+      RemoveDirsExcept path _ -> do
+        let path' = addTrailingPathSeparator path
+        if force
+          then
+            printStderr' Warning $
+              "Would delete "
+                <> pathStyle path'
+                <> " (except entries owned by nested routes)."
+          else
+            printStderr' Error $
+              "Cancelled applying because "
+                <> pathStyle path'
+                <> " (except entries owned by nested routes) would be"
+                <> " deleted."
       RemoveFile path -> do
         if force
           then printStderr' Warning ("Would delete " <> pathStyle path <> ".")

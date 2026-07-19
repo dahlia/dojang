@@ -66,8 +66,10 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
+  , takeDirectory
   , (</>)
   )
+import System.OsPath qualified
 
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
@@ -159,6 +161,14 @@ data ManagedCorrespondence = ManagedCorrespondence
 -- | The kind of change that was made to a file.
 data FileDeltaKind = Unchanged | Added | Removed | Modified
   deriving (Eq, Ord, Show)
+
+
+-- | Resolves a symbolic-link target from the directory containing the
+-- link.
+resolveTargetFrom :: OsPath -> OsPath -> OsPath
+resolveTargetFrom link target
+  | System.OsPath.isAbsolute target = normalise target
+  | otherwise = normalise $ takeDirectory link </> target
 
 
 -- | Observes the state of a filesystem entry without following symbolic links.
@@ -362,9 +372,16 @@ makeManagedCorrespond ctx = do
           _ | expanded.kind == SymlinkRoute -> do
             -- A deployment link is a single one-way entry: the destination
             -- is never enumerated (it is a traversal boundary), and no
-            -- intermediate snapshot participates.
+            -- intermediate snapshot participates.  The destination delta
+            -- reports whether the link still projects the source, so
+            -- status and selection can see missing or diverged links.
             sourceStat <- observeFileStat expanded.sourcePath
             destinationStat <- observeFileStat expanded.destinationPath
+            let converged = case destinationStat of
+                  Symlink target ->
+                    resolveTargetFrom expanded.destinationPath target
+                      == normalise expanded.sourcePath
+                  _ -> False
             return
               [ ManagedCorrespondence
                   expanded
@@ -375,7 +392,8 @@ makeManagedCorrespond ctx = do
                     , intermediate = FileEntry interAbsPath Missing
                     , destination =
                         FileEntry expanded.destinationPath destinationStat
-                    , destinationDelta = Unchanged
+                    , destinationDelta =
+                        if converged then Unchanged else Modified
                     }
               ]
           Dojang.MonadFileSystem.Directory -> do

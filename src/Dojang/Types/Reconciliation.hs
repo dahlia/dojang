@@ -39,6 +39,7 @@ import Data.List.NonEmpty qualified as NE
 import System.FilePattern (FilePattern)
 import System.OsPath
   ( OsPath
+  , isAbsolute
   , normalise
   , splitDirectories
   , takeDirectory
@@ -438,8 +439,11 @@ planDeploymentLink DestinationToSource _ input =
 planDeploymentLink SourceToDestination policy input =
   case destination.stat of
     Symlink target
-      | normalise target == normalise desiredTarget -> converged
-    Missing -> reconciled [createLink]
+      | resolveFrom destination.path target
+          == resolveFrom destination.path desiredTarget ->
+          converged
+    Missing ->
+      reconciled [CreateDirs $ takeDirectory destination.path, createLink]
     Symlink _ -> reconciled [RemoveFile destination.path, createLink]
     _
       | policy == PreferAuthoritative ->
@@ -463,6 +467,15 @@ planDeploymentLink SourceToDestination policy input =
     , []
     , tagOperations SecondPhase DestinationReplica operations
     )
+
+
+-- | Resolves a symbolic-link target from the directory containing the
+-- link, so semantically correct relative targets compare equal to the
+-- absolute path they denote.
+resolveFrom :: OsPath -> OsPath -> OsPath
+resolveFrom link target
+  | isAbsolute target = normalise target
+  | otherwise = normalise $ takeDirectory link </> target
 
 
 isConflict :: ReconciliationInput -> Bool
@@ -826,15 +839,26 @@ removeDirsExcept root protected = go root
   go :: OsPath -> m ()
   go path
     | isProtectedRoot path = return ()
-    | not $ containsProtected path = do
-        isLink <- isSymlink path
-        isDir <- isDirectory path
-        if isDir && not isLink
-          then removeDirectoryRecursively path
-          else removeFile path
     | otherwise = do
-        entries <- listDirectory path
-        forM_ entries $ \entry -> go $ path </> entry
+        isLink <- isSymlink path
+        if isLink
+          then
+            -- A symbolic link on the way to a protected root must not be
+            -- traversed: removing it would lose the protected entries
+            -- reachable through it, and recursing would delete through it.
+            if containsProtected path
+              then return ()
+              else removeFile path
+          else
+            if not $ containsProtected path
+              then do
+                isDir <- isDirectory path
+                if isDir
+                  then removeDirectoryRecursively path
+                  else removeFile path
+              else do
+                entries <- listDirectory path
+                forM_ entries $ \entry -> go $ path </> entry
 
 
 -- | Executes a plan in order.  A refused conflict returns before the first
@@ -880,21 +904,38 @@ executeReconciliationPlanGuarded observe plan =
       widenForSyncOp operation.syncOp
         `catchError` \err -> restoreAll widened >> throwError err
     let widened' = newlyWidened ++ widened
-    observe operation
-    executeSyncOp operation.syncOp
+    ( do
+        observe operation
+        executeSyncOp operation.syncOp
+      )
       `catchError` \err -> restoreAll widened' >> throwError err
-    -- A reapplied declared mode supersedes the widening:
+    -- A reapplied declared mode supersedes the widening, and a removed
+    -- entry no longer has a prior mode to restore (a later entry at the
+    -- same path, such as a deployment link, is a different entry):
     let widened'' = case operation.syncOp of
           SetEntryMode path _ _ -> filter (/= normalise path) widened'
+          RemoveFile path -> dropUnder path widened'
+          RemoveDirs path -> dropUnder path widened'
+          RemoveDirsExcept path _ -> dropUnder path widened'
           _ -> widened'
     go widened'' rest
+  dropUnder :: OsPath -> [OsPath] -> [OsPath]
+  dropUnder root =
+    filter $ \path ->
+      not $
+        splitDirectories (normalise root)
+          `isPrefixOf` splitDirectories path
   restoreAll :: [OsPath] -> m ()
   restoreAll paths =
-    forM_ paths $ \path -> do
-      stillExists <- exists path
-      if stillExists
-        then setPortableWritable path False
-        else return ()
+    forM_ paths $ \path ->
+      ( do
+          isLink <- isSymlink path
+          stillExists <- exists path
+          if stillExists && not isLink
+            then setPortableWritable path False
+            else return ()
+      )
+        `catchError` const (return ())
   widenForSyncOp :: SyncOp -> m [OsPath]
   widenForSyncOp (RemoveFile path) = do
     entry <- widenIfReadOnly path

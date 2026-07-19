@@ -733,6 +733,8 @@ spec = do
       ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
       plan.operations
         `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       CreateDirs (takeDirectory paths.destination)
+                   , PlannedSyncOp DestinationReplica $
                        CreateSymlink
                          paths.source
                          paths.destination

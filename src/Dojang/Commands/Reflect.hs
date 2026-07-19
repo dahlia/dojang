@@ -84,7 +84,6 @@ import Dojang.Types.Context
   , getIgnoredFiles
   , getRouteState
   , getUnregisteredFiles
-  , makeCorrespond
   , makeCorrespondBetweenThreeFiles
   , makeManagedCorrespond
   )
@@ -112,6 +111,7 @@ import Dojang.Types.Reconciliation
   , ReconciliationSkipReason (..)
   , SyncOp (..)
   , executeReconciliationPlanGuarded
+  , observeModeDrift
   , observeReconciliationInput
   , planReconciliation
   )
@@ -161,8 +161,17 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
-  (allFiles, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
-  let changedFiles = filter isChanged allFiles
+  (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  let allFiles = (.correspondence) <$> allManaged
+  -- Metadata-only drift also needs reconciliation, even when contents
+  -- converged:
+  drifted <- observeModeDrift allManaged
+  let driftedFiles =
+        [ m.correspondence
+        | (m, _) <- drifted
+        , not $ isChanged m.correspondence
+        ]
+  let changedFiles = filter isChanged allFiles ++ driftedFiles
   printWarnings ws
 
   -- Get ignored files and warn about them
@@ -356,9 +365,16 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
     if null dirPaths
       then return []
       else do
-        (allFiles, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
+        (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+        let allFiles = (.correspondence) <$> allManaged
         printWarnings ws
-        let changedFiles = filter isChanged allFiles
+        drifted <- observeModeDrift allManaged
+        let driftedFiles =
+              [ m.correspondence
+              | (m, _) <- drifted
+              , not $ isChanged m.correspondence
+              ]
+        let changedFiles = filter isChanged allFiles ++ driftedFiles
         -- Filter files within the directories
         filterFilesInDirs dirPaths changedFiles
   -- For files: process as before
