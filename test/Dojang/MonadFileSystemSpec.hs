@@ -8,7 +8,7 @@ module Dojang.MonadFileSystemSpec (spec) where
 
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (sort, sortOn)
-import GHC.IO.Exception (IOErrorType (InappropriateType))
+import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
@@ -1334,6 +1334,19 @@ spec = do
           () <- writeFile (tmpDir </> foo) "new"
           readFile (tmpDir </> bar)
         observed `shouldBe` "new"
+
+    symSpecify "fails on overlaid link cycles instead of looping" $
+      withTempDir $ \tmpDir _ -> do
+        Left e <- tryDryRunIO $ do
+          () <- createSymbolicLink bar (tmpDir </> foo) File
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          readFile (tmpDir </> foo)
+        ioeGetErrorType e `shouldBe` InvalidArgument
+        Left e' <- tryDryRunIO $ do
+          () <- createSymbolicLink bar (tmpDir </> foo) File
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          exists (tmpDir </> foo)
+        ioeGetErrorType e' `shouldBe` InvalidArgument
 
     symSpecify "allows re-creating a link after removal" $
       withTempDir $ \tmpDir tmpDir' -> do

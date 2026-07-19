@@ -68,7 +68,7 @@ spec = do
     specify "assigns each destination to its own route" $ do
       let routeA = mkRoute src a (dst </> a) Directory CopyRoute
       let routeB = mkRoute src b (dst </> b) File CopyRoute
-      let Right state = selectOwnership [routeA, routeB]
+      let Right state = selectOwnership src [routeA, routeB]
       state.owners
         `shouldBe` Map.fromList
           [ (normalise $ dst </> a, routeA)
@@ -81,7 +81,7 @@ spec = do
       let routeA = mkRoute src a (dst </> a) Directory CopyRoute
       let routeB = mkRoute src b (dst </> a </> b) Directory CopyRoute
       let routeC = mkRoute src c (dst </> a </> b </> c) File CopyRoute
-      let Right state = selectOwnership [routeA, routeB, routeC]
+      let Right state = selectOwnership src [routeA, routeB, routeC]
       state.nestedUnder
         `shouldBe` Map.fromList
           [
@@ -100,36 +100,41 @@ spec = do
     specify "rejects two routes with one destination" $ do
       let routeA = mkRoute src a (dst </> a) Directory CopyRoute
       let routeB = mkRoute src b (dst </> a) Directory CopyRoute
-      selectOwnership [routeA, routeB]
+      selectOwnership src [routeA, routeB]
         `shouldBe` Left (DuplicateDestinationOwner (normalise $ dst </> a) a b)
 
     specify "records symlink destinations as boundaries" $ do
       let routeA = mkRoute src a (dst </> a) Directory SymlinkRoute
-      let Right state = selectOwnership [routeA]
+      let Right state = selectOwnership src [routeA]
       state.boundaries `shouldBe` Set.singleton (normalise $ dst </> a)
 
     specify "rejects a lexically aliased source and destination" $ do
-      let routeA = mkRoute src a (src </> a) Directory CopyRoute
-      selectOwnership [routeA]
+      let outside = mkRoute dst a (dst </> a </> c) Directory CopyRoute
+      -- The destination lies inside the route's own source tree, but the
+      -- source is outside the repository root, so the per-route check
+      -- reports it:
+      selectOwnership src [outside{sourcePath = dst </> a}]
         `shouldBe` Left
           ( SourceDestinationAliased
               a
-              (normalise $ src </> a)
-              (normalise $ src </> a)
+              (normalise $ dst </> a)
+              (normalise $ dst </> a </> c)
           )
-      let routeB = mkRoute src b (src </> b </> c) Directory CopyRoute
-      selectOwnership [routeB]
+
+    specify "rejects destinations inside the repository root" $ do
+      let routeA = mkRoute src a (src </> a) Directory CopyRoute
+      selectOwnership src [routeA]
         `shouldBe` Left
-          ( SourceDestinationAliased
-              b
-              (normalise $ src </> b)
-              (normalise $ src </> b </> c)
-          )
+          (DestinationInsideRepository a (normalise $ src </> a))
+      let routeB = mkRoute src b (src </> b </> c) Directory CopyRoute
+      selectOwnership src [routeB]
+        `shouldBe` Left
+          (DestinationInsideRepository b (normalise $ src </> b </> c))
 
     specify "rejects routes under a symlink boundary" $ do
       let routeA = mkRoute src a (dst </> a) Directory SymlinkRoute
       let routeB = mkRoute src b (dst </> a </> b) File CopyRoute
-      selectOwnership [routeA, routeB]
+      selectOwnership src [routeA, routeB]
         `shouldBe` Left
           ( RouteThroughLinkBoundary
               b
@@ -154,15 +159,11 @@ spec = do
         createDirectoryLink (tmpDir </> src </> a) (tmpDir </> b)
         let route =
               mkRoute (tmpDir </> src) a (tmpDir </> b) Directory CopyRoute
-        let Right state = selectOwnership [route]
-        result <- verifyResolvedIdentities state
-        result
-          `shouldBe` Left
-            ( SourceDestinationAliased
-                a
-                (tmpDir </> src </> a)
-                (normalise $ tmpDir </> b)
-            )
+        let Right state = selectOwnership (tmpDir </> src) [route]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
+        case result of
+          Left (DestinationInsideRepository name _) -> name `shouldBe` a
+          other -> fail $ "Unexpected result: " <> show other
 
     symIt "accepts an already deployed symlink destination" $
       withTempDir $ \tmpDir _ -> do
@@ -171,8 +172,8 @@ spec = do
         createDirectoryLink (tmpDir </> src </> a) (tmpDir </> b)
         let route =
               mkRoute (tmpDir </> src) a (tmpDir </> b) Directory SymlinkRoute
-        let Right state = selectOwnership [route]
-        result <- verifyResolvedIdentities state
+        let Right state = selectOwnership (tmpDir </> src) [route]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
         result `shouldBe` Right ()
 
     symIt "rejects a missing destination under an aliased ancestor" $
@@ -187,10 +188,10 @@ spec = do
                 (tmpDir </> b </> c </> d)
                 Directory
                 CopyRoute
-        let Right state = selectOwnership [route]
-        result <- verifyResolvedIdentities state
+        let Right state = selectOwnership (tmpDir </> src) [route]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
         case result of
-          Left (SourceDestinationAliased name _ _) -> name `shouldBe` a
+          Left (DestinationInsideRepository name _) -> name `shouldBe` a
           other -> fail $ "Unexpected result: " <> show other
 
     symIt "rejects destinations that resolve to one tree" $
@@ -204,8 +205,8 @@ spec = do
               mkRoute (tmpDir </> src) a (tmpDir </> c) Directory CopyRoute
         let routeB =
               mkRoute (tmpDir </> src) b (tmpDir </> d) Directory CopyRoute
-        let Right state = selectOwnership [routeA, routeB]
-        result <- verifyResolvedIdentities state
+        let Right state = selectOwnership (tmpDir </> src) [routeA, routeB]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
         case result of
           Left (DuplicateDestinationOwner _ _ _) -> return ()
           other -> fail $ "Unexpected result: " <> show other
@@ -218,15 +219,15 @@ spec = do
         createDirectoryLink (tmpDir </> c) (tmpDir </> b)
         let route =
               mkRoute (tmpDir </> src) a (tmpDir </> b) Directory CopyRoute
-        let Right state = selectOwnership [route]
-        result <- verifyResolvedIdentities state
+        let Right state = selectOwnership (tmpDir </> src) [route]
+        result <- verifyResolvedIdentities (tmpDir </> src) state
         result `shouldBe` Right ()
 
   describe "ownedExclusions" $ do
     specify "returns nested roots relative to the owner" $ do
       let routeA = mkRoute src a (dst </> a) Directory CopyRoute
       let routeB = mkRoute src b (dst </> a </> b </> c) Directory CopyRoute
-      let Right state = selectOwnership [routeA, routeB]
+      let Right state = selectOwnership src [routeA, routeB]
       ownedExclusions state (dst </> a) `shouldBe` [b </> c]
       ownedExclusions state (dst </> a </> b </> c) `shouldBe` []
 
@@ -234,7 +235,7 @@ spec = do
     specify "resolves the most-specific containing route" $ do
       let routeA = mkRoute src a (dst </> a) Directory CopyRoute
       let routeB = mkRoute src b (dst </> a </> b) Directory CopyRoute
-      let Right state = selectOwnership [routeA, routeB]
+      let Right state = selectOwnership src [routeA, routeB]
       (.routeName) <$> ownerOf state (dst </> a </> c) `shouldBe` Just a
       (.routeName) <$> ownerOf state (dst </> a </> b) `shouldBe` Just b
       (.routeName) <$> ownerOf state (dst </> a </> b </> c) `shouldBe` Just b
@@ -252,7 +253,7 @@ spec = do
             [ mkRoute src destination destination Directory CopyRoute
             | destination <- destinations
             ]
-      case selectOwnership named of
+      case selectOwnership src named of
         Left err -> annotateShow err >> assert False
         Right state -> do
           -- Every route's own destination resolves to itself:

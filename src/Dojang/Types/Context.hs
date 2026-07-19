@@ -87,6 +87,7 @@ import Dojang.Types.RouteOwnership
   ( ExpectedState (..)
   , OwnershipError
   , ownedExclusions
+  , ownerOf
   , selectOwnership
   , verifyResolvedIdentities
   )
@@ -311,10 +312,10 @@ projectExpectedState
   -- configuration unsafe, along with any routing warnings.
 projectExpectedState ctx = do
   (paths, warnings) <- routePaths ctx
-  case selectOwnership paths of
+  case selectOwnership ctx.repository.sourcePath paths of
     Left err -> return (Left err, warnings)
     Right state -> do
-      verified <- verifyResolvedIdentities state
+      verified <- verifyResolvedIdentities ctx.repository.sourcePath state
       return (state <$ verified, warnings)
 
 
@@ -768,9 +769,10 @@ getIgnoredFiles
 getIgnoredFiles ctx = do
   (routes, _) <- routePaths ctx
   let exclusionsFor :: RouteResult -> [OsPath]
-      exclusionsFor route = case selectOwnership routes of
-        Right state -> ownedExclusions state route.destinationPath
-        Left _ -> []
+      exclusionsFor route =
+        case selectOwnership ctx.repository.sourcePath routes of
+          Right state -> ownedExclusions state route.destinationPath
+          Left _ -> []
   ignoredLists <- forM routes $ \route ->
     case route.fileType of
       Dojang.MonadFileSystem.Directory -> do
@@ -854,12 +856,28 @@ getUnregisteredFiles' ctx registeredCorrespondences = do
         | c <- registeredCorrespondences
         , c.destination.stat /= Missing
         ]
+  let ownership = selectOwnership ctx.repository.sourcePath routes
+  let exclusionsFor :: RouteResult -> [OsPath]
+      exclusionsFor route = case ownership of
+        Right state -> ownedExclusions state route.destinationPath
+        Left _ -> []
 
-  -- For each directory route, find files not in the registered set
+  -- For each directory route, find files not in the registered set;
+  -- entries owned by nested routes belong to those routes alone:
   unregisteredLists <- forM routes $ \route ->
     case route.fileType of
       Dojang.MonadFileSystem.Directory -> do
-        allFiles <- listFiles route.destinationPath []
+        let nestedRoots = exclusionsFor route
+        let owned :: FileEntry -> Bool
+            owned entry =
+              not $
+                any
+                  ( \root ->
+                      splitDirectories root
+                        `isPrefixOf` splitDirectories entry.path
+                  )
+                  nestedRoots
+        allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
         let unregistered =
               [ f
               | f <- allFiles
@@ -892,11 +910,19 @@ findCandidateRoutesFor
   -- ^ The list of candidate routes.
 findCandidateRoutesFor ctx filePath = do
   (routes, _) <- routePaths ctx
-  let fileDirs = splitDirectories $ normalise filePath
-  return
-    [ route
-    | route <- routes
-    , route.fileType == Dojang.MonadFileSystem.Directory
-    , let routeDirs = splitDirectories $ normalise route.destinationPath
-    , routeDirs `isPrefixOf` fileDirs
-    ]
+  let containing =
+        [ route
+        | route <- routes
+        , route.fileType == Dojang.MonadFileSystem.Directory
+        , let routeDirs = splitDirectories $ normalise route.destinationPath
+        , routeDirs `isPrefixOf` splitDirectories (normalise filePath)
+        ]
+  -- The most-specific containing route owns the path; broader routes are
+  -- not candidates for entries inside a nested route's subtree:
+  return $ case selectOwnership ctx.repository.sourcePath routes of
+    Right state ->
+      [ owner
+      | Just owner <- [ownerOf state filePath]
+      , owner.fileType == Dojang.MonadFileSystem.Directory
+      ]
+    Left _ -> containing

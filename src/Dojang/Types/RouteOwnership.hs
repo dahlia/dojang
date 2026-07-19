@@ -76,6 +76,10 @@ data OwnershipError
     -- one contains the other, either lexically or after resolving symbolic
     -- links.  Carries the route name, its source path, and its destination.
     SourceDestinationAliased OsPath OsPath OsPath
+  | -- | A route's destination lies inside the repository checkout (or
+    -- contains it), so applying it would write into the repository itself.
+    -- Carries the route name and its destination.
+    DestinationInsideRepository OsPath OsPath
   deriving (Eq, Show)
 
 
@@ -106,16 +110,31 @@ formatOwnershipError renderPath (SourceDestinationAliased name source dst) =
     <> " with "
     <> renderPath dst
     <> ", but they are the same filesystem tree or one contains the other."
+formatOwnershipError renderPath (DestinationInsideRepository name dst) =
+  "Route "
+    <> renderPath name
+    <> " routes to "
+    <> renderPath dst
+    <> ", which overlaps the repository checkout itself."
 
 
 -- | Selects one owning route per destination from the active routes of
 -- the current environment.  Fails when ownership would be ambiguous
--- ('DuplicateDestinationOwner') or would reach through a deployed
--- symbolic link ('RouteThroughLinkBoundary').
-selectOwnership :: [RouteResult] -> Either OwnershipError ExpectedState
-selectOwnership routes = do
+-- ('DuplicateDestinationOwner'), would reach through a deployed symbolic
+-- link ('RouteThroughLinkBoundary'), or would write into the repository
+-- checkout ('DestinationInsideRepository').
+selectOwnership
+  :: OsPath
+  -- ^ The repository checkout root (source directory).
+  -> [RouteResult]
+  -- ^ The active routes of the current environment.
+  -> Either OwnershipError ExpectedState
+selectOwnership repositoryRoot routes = do
   case duplicates of
     (dst, a, b) : _ -> Left $ DuplicateDestinationOwner dst a b
+    [] -> pure ()
+  case insideRepository of
+    (name, dst) : _ -> Left $ DestinationInsideRepository name dst
     [] -> pure ()
   case lexicalAliases of
     (name, source, dst) : _ ->
@@ -150,6 +169,13 @@ selectOwnership routes = do
     [ (dst, a.routeName, b.routeName)
     | ((dst, a), (dst', b)) <- zip normalized (drop 1 normalized)
     , dst == dst'
+    ]
+  insideRepository :: [(OsPath, OsPath)]
+  insideRepository =
+    [ (route.routeName, dst)
+    | (dst, route) <- normalized
+    , let root = normalise repositoryRoot
+    , dst == root || dst `strictlyInside` root || root `strictlyInside` dst
     ]
   lexicalAliases :: [(OsPath, OsPath, OsPath)]
   lexicalAliases =
@@ -187,22 +213,39 @@ selectOwnership routes = do
 verifyResolvedIdentities
   :: forall m
    . (MonadFileSystem m)
-  => ExpectedState
+  => OsPath
+  -- ^ The repository checkout root (source directory).
+  -> ExpectedState
   -- ^ The ownership selection to verify.
   -> m (Either OwnershipError ())
   -- ^ 'Right' when no resolved aliasing exists; the first
-  -- 'SourceDestinationAliased' or 'DuplicateDestinationOwner' error
-  -- otherwise.
-verifyResolvedIdentities state = do
+  -- 'SourceDestinationAliased', 'DestinationInsideRepository', or
+  -- 'DuplicateDestinationOwner' error otherwise.
+verifyResolvedIdentities repositoryRoot state = do
+  resolvedRoot <- resolveEffective repositoryRoot
   resolved <- mapM resolveOwner $ Map.toAscList state.owners
-  case aliases resolved of
-    (name, source, dst) : _ ->
-      return $ Left $ SourceDestinationAliased name source dst
-    [] -> case resolvedDuplicates resolved of
-      (dst, a, b) : _ ->
-        return $ Left $ DuplicateDestinationOwner dst a b
-      [] -> return $ Right ()
+  case inRepository resolvedRoot resolved of
+    (name, dst) : _ ->
+      return $ Left $ DestinationInsideRepository name dst
+    [] -> case aliases resolved of
+      (name, source, dst) : _ ->
+        return $ Left $ SourceDestinationAliased name source dst
+      [] -> case resolvedDuplicates resolved of
+        (dst, a, b) : _ ->
+          return $ Left $ DuplicateDestinationOwner dst a b
+        [] -> return $ Right ()
  where
+  inRepository
+    :: OsPath
+    -> [(OsPath, OsPath, OsPath, RouteResult)]
+    -> [(OsPath, OsPath)]
+  inRepository resolvedRoot resolved =
+    [ (route.routeName, dst)
+    | (dst, dst', _, route) <- resolved
+    , dst' == resolvedRoot
+        || dst' `strictlyInside` resolvedRoot
+        || resolvedRoot `strictlyInside` dst'
+    ]
   resolveOwner
     :: (OsPath, RouteResult) -> m (OsPath, OsPath, OsPath, RouteResult)
   resolveOwner (dst, route) = do
@@ -227,13 +270,18 @@ verifyResolvedIdentities state = do
     :: [(OsPath, OsPath, OsPath, RouteResult)]
     -> [(OsPath, OsPath, OsPath)]
   resolvedDuplicates resolved =
-    [ (dst, a.routeName, b.routeName)
-    | ((dst, resolved', _, a), (_, resolved'', _, b)) <-
-        zip sorted (drop 1 sorted)
-    , resolved' == resolved''
+    [ (dstA, a.routeName, b.routeName)
+    | ((dstA, resolvedA, _, a), rest) <-
+        zip resolved (drop 1 $ iterate (drop 1) resolved)
+    , (dstB, resolvedB, _, b) <- rest
+    , resolvedA == resolvedB
+        || ( ( resolvedA `strictlyInside` resolvedB
+                 || resolvedB `strictlyInside` resolvedA
+             )
+               && not (dstA `strictlyInside` dstB)
+               && not (dstB `strictlyInside` dstA)
+           )
     ]
-   where
-    sorted = sortOn (\(_, resolved', _, _) -> resolved') resolved
   resolveEffective :: OsPath -> m OsPath
   resolveEffective path = do
     present <- exists path

@@ -22,7 +22,7 @@ import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
-import GHC.IO.Exception (IOErrorType (InappropriateType))
+import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( alreadyExistsErrorType
@@ -698,6 +698,27 @@ resolveLinkTarget link target
   | otherwise = normalise $ takeDirectory link </> target
 
 
+-- | Follows chains of overlaid symbolic links until a non-link overlay (or
+-- no overlay) is reached.  Throws an ELOOP-style 'IOError' after too many
+-- hops so overlaid link cycles fail instead of looping forever.
+chaseOverlaidLinks :: String -> OsPath -> DryRunIO OsPath
+chaseOverlaidLinks location = go (0 :: Int)
+ where
+  go :: Int -> OsPath -> DryRunIO OsPath
+  go depth path
+    | depth > 40 = do
+        path' <- decodePath path
+        throwError $
+          mkIOError InvalidArgument location Nothing (Just path')
+            `ioeSetErrorString` "too many levels of symbolic links"
+    | otherwise = do
+        oFiles <- gets overlaidFiles
+        case oFiles !? normalise path of
+          Just ((_, SymlinkTo target _) :| _) ->
+            go (depth + 1) $ resolveLinkTarget path target
+          _ -> return path
+
+
 -- | Internal state of 'DryRun'.
 data DryRunState = DryRunState
   { overlaidFiles :: Map OsPath (NonEmpty (SeqNo, OverlaidFile))
@@ -782,8 +803,10 @@ readFileFromDryRunIO seqOffset src = do
            (_, Contents contents) : _ -> return contents
            (seqNo, Copied src') : _ ->
              readFileFromDryRunIO seqNo src'
-           (_, SymlinkTo target _) : _ ->
-             readFileFromDryRunIO seqOffset $ resolveLinkTarget src target
+           (_, SymlinkTo target _) : _ -> do
+             resolved <-
+               chaseOverlaidLinks "readFile" $ resolveLinkTarget src target
+             readFileFromDryRunIO seqOffset resolved
            (_, Gone) : _ -> do
              src' <- decodePath src
              throwError $
@@ -823,7 +846,7 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> return False
       Just ((_, SymlinkTo target _) :| _) ->
-        exists $ resolveLinkTarget path target
+        chaseOverlaidLinks "exists" (resolveLinkTarget path target) >>= exists
       Just (_ :| _) -> return True
       Nothing -> liftIO $ doesPathExist path
 
@@ -834,7 +857,8 @@ instance MonadFileSystem DryRunIO where
       Just ((_, Contents _) :| _) -> return True
       Just ((_, Copied _) :| _) -> return True
       Just ((_, SymlinkTo target _) :| _) ->
-        isFile $ resolveLinkTarget path target
+        chaseOverlaidLinks "isFile" (resolveLinkTarget path target)
+          >>= isFile
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesFileExist path
 
@@ -853,7 +877,8 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Directory') :| _) -> return True
       Just ((_, SymlinkTo target _) :| _) ->
-        isDirectory $ resolveLinkTarget path target
+        chaseOverlaidLinks "isDirectory" (resolveLinkTarget path target)
+          >>= isDirectory
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesDirectoryExist path
 
@@ -889,12 +914,14 @@ instance MonadFileSystem DryRunIO where
       (Nothing, _) | not dstDirExists -> throwError $ notInsideDirError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dirError dst'
       (_, Nothing) | dstIsDir -> throwError $ dirError dst'
-      (Just ((_, SymlinkTo target _) :| _), _) ->
-        writeFile
-          (resolveLinkTarget dstDir target </> takeFileName dst)
-          contents
-      (_, Just ((_, SymlinkTo target _) :| _)) ->
-        writeFile (resolveLinkTarget dst target) contents
+      (Just ((_, SymlinkTo target _) :| _), _) -> do
+        resolved <-
+          chaseOverlaidLinks "writeFile" $ resolveLinkTarget dstDir target
+        writeFile (resolved </> takeFileName dst) contents
+      (_, Just ((_, SymlinkTo target _) :| _)) -> do
+        resolved <-
+          chaseOverlaidLinks "writeFile" $ resolveLinkTarget dst target
+        writeFile resolved contents
       _ -> do
         addChangeToFile dst $ Contents contents
         return ()
@@ -980,10 +1007,14 @@ instance MonadFileSystem DryRunIO where
         (Nothing, _) | not dstDirIsDir -> throwError $ notInsideDirError dst'
         (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
         (_, Nothing) | dstIsDir -> throwError $ dstIsDirError dst'
-        (Just ((_, SymlinkTo target _) :| _), _) ->
-          copyFile src $ resolveLinkTarget dstDir target </> takeFileName dst
-        (_, Just ((_, SymlinkTo target _) :| _)) ->
-          copyFile src $ resolveLinkTarget dst target
+        (Just ((_, SymlinkTo target _) :| _), _) -> do
+          resolved <-
+            chaseOverlaidLinks "copyFile" $ resolveLinkTarget dstDir target
+          copyFile src $ resolved </> takeFileName dst
+        (_, Just ((_, SymlinkTo target _) :| _)) -> do
+          resolved <-
+            chaseOverlaidLinks "copyFile" $ resolveLinkTarget dst target
+          copyFile src resolved
         _ -> do
           addChangeToFile dst $ Copied src
           return ()
@@ -1143,7 +1174,8 @@ instance MonadFileSystem DryRunIO where
       Just ((_, Copied _) :| _) ->
         throwError $ nonDirError pathFP
       Just ((_, SymlinkTo target _) :| _) ->
-        listDirectory $ resolveLinkTarget path target
+        chaseOverlaidLinks "listDirectory" (resolveLinkTarget path target)
+          >>= listDirectory
       Just ((_, Directory') :| _) ->
         return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
