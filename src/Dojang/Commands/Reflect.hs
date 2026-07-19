@@ -11,7 +11,7 @@ import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (isPrefixOf, nub, sortOn)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Ord (Down (Down))
 import Data.Set qualified as Set
 import Data.Time (getCurrentTime)
@@ -56,7 +56,7 @@ import Dojang.Commands.Hook
   ( disambiguatedHookScopePaths
   , withCommandHooks
   )
-import Dojang.Commands.Status (printWarnings)
+import Dojang.Commands.Status (printUnsupportedModeWarnings, printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
   , conflictError
@@ -579,6 +579,9 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
           ] of
           m : _ -> Just m
           [] -> Nothing
+  -- Reflection still reconciles declared modes toward the destination, so
+  -- unenforceable declarations must be surfaced here too:
+  printUnsupportedModeWarnings $ mapMaybe ownerFor selectedFiles
   inputs <-
     mapM
       ( \(allowIgnored, file) ->
