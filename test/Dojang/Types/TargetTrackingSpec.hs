@@ -19,6 +19,7 @@ import System.Info (os)
 
 
 #ifndef mingw32_HOST_OS
+import Control.Monad (when)
 import Control.Monad.Except (catchError)
 import Dojang.Types.ManagedTarget
   ( TargetFingerprint (FileFingerprint, SymlinkFingerprint)
@@ -475,29 +476,34 @@ symlinkOrphanSpec =
       withTempDir $ \root _ -> do
         sourceName <- encodeFS "linked-source"
         destinationName <- encodeFS "linked-destination"
+        probeName <- encodeFS "link-probe"
         writeFile (root </> sourceName) "linked"
-        ( do
-            createSymbolicLink
-              sourceName
-              (root </> destinationName)
-              FileSystem.File
-            target <- fixtureLinkOrphan root sourceName destinationName
-            observeOrphanStatus target `shouldReturn` OrphanUnchanged
-            -- A retargeted link is modified, and a removed one missing:
-            removeFile $ root </> destinationName
-            otherName <- encodeFS "other"
-            writeFile (root </> otherName) "other"
-            createSymbolicLink
-              otherName
-              (root </> destinationName)
-              FileSystem.File
-            target' <- fixtureLinkOrphan root sourceName destinationName
-            observeOrphanStatus target' `shouldReturn` OrphanModified
-            removeFile $ root </> destinationName
-            target'' <- fixtureLinkOrphan root sourceName destinationName
-            observeOrphanStatus target'' `shouldReturn` OrphanMissing
-          )
-          `catchError` const (return ())
+        symlinkAvailable <-
+          ( do
+              createSymbolicLink sourceName (root </> probeName) FileSystem.File
+              return True
+            )
+            `catchError` const (return False)
+        when symlinkAvailable $ do
+          createSymbolicLink
+            sourceName
+            (root </> destinationName)
+            FileSystem.File
+          target <- fixtureLinkOrphan root sourceName destinationName
+          observeOrphanStatus target `shouldReturn` OrphanUnchanged
+          -- A retargeted link is modified, and a removed one missing:
+          removeFile $ root </> destinationName
+          otherName <- encodeFS "other"
+          writeFile (root </> otherName) "other"
+          createSymbolicLink
+            otherName
+            (root </> destinationName)
+            FileSystem.File
+          target' <- fixtureLinkOrphan root sourceName destinationName
+          observeOrphanStatus target' `shouldReturn` OrphanModified
+          removeFile $ root </> destinationName
+          target'' <- fixtureLinkOrphan root sourceName destinationName
+          observeOrphanStatus target'' `shouldReturn` OrphanMissing
  where
   fixtureLinkOrphan :: OsPath -> OsPath -> OsPath -> IO ManagedTarget
   fixtureLinkOrphan root sourceName destinationName = do
