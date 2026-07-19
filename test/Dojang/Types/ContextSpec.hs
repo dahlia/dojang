@@ -57,7 +57,9 @@ import Dojang.Types.Context
   , calculateSpecificity
   , filterBySpecificity
   , findMatchingRoutes
+  , getIgnoredFiles
   , getRouteState
+  , getUnregisteredFiles
   , listFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeDirs
@@ -598,6 +600,48 @@ spec = do
         Left (DuplicateDestinationOwner dst' _ _) ->
           dst' `shouldBe` normalise (tmpDir </> aName)
         other -> expectationFailure $ "Unexpected result: " <> show other
+
+  symIt "skips deployment-link routes in destination scans" $
+    withTempDir $ \tmpDir _ -> do
+      linked <- encodePath "linked-dir"
+      dstName <- encodePath "deployed"
+      innerName <- encodePath "inner"
+      -- A directory route deployed as a symbolic link is a traversal
+      -- boundary: its destination must not be enumerated, and listing it
+      -- as a directory would throw anyway.
+      let linkRoute =
+            fileRoutePreservingOrder
+              (const Nothing)
+              [
+                ( Always
+                , Just $
+                    RouteTarget (Substitution "LINK_DST") DefaultMode SymlinkRoute
+                )
+              ]
+              Dojang.MonadFileSystem.Directory
+      let manifest'' =
+            (manifest monikerMap mempty mempty mempty mempty)
+              { fileRoutes = fromList [(linked, linkRoute)]
+              , ignorePatterns = fromList [(linked, ["*"])]
+              }
+      createDirectory $ tmpDir </> src
+      createDirectory $ tmpDir </> src </> linked
+      writeFile (tmpDir </> src </> linked </> innerName) "inner"
+      createDirectoryLink (tmpDir </> src </> linked) (tmpDir </> dstName)
+      let repo =
+            Repository
+              (tmpDir </> src)
+              (tmpDir </> src </> intermediateDir)
+              manifest''
+      let ctx = Context
+            repo
+            (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+            $ simpleVariableGetter
+            $ \e ->
+              return $
+                if e == "LINK_DST" then Just (tmpDir </> dstName) else Nothing
+      getIgnoredFiles ctx `shouldReturn` []
+      getUnregisteredFiles ctx `shouldReturn` Right []
 
   describe "listFiles" $ do
     it "lists files recursively" $ withTempDir $ \tmpDir _ -> do

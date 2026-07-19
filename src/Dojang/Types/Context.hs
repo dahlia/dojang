@@ -842,7 +842,9 @@ getIgnoredFiles ctx = do
           Left _ -> []
   ignoredLists <- forM routes $ \route ->
     case route.fileType of
-      Dojang.MonadFileSystem.Directory -> do
+      -- A deployment link is a traversal boundary; its destination is the
+      -- link itself, never a directory to enumerate:
+      Dojang.MonadFileSystem.Directory | route.kind /= SymlinkRoute -> do
         let ignores = findWithDefault [] (normalise route.routeName) ignorePatterns
         if null ignores
           then return []
@@ -933,7 +935,9 @@ getUnregisteredFiles' ctx registeredCorrespondences = do
   -- entries owned by nested routes belong to those routes alone:
   unregisteredLists <- forM routes $ \route ->
     case route.fileType of
-      Dojang.MonadFileSystem.Directory -> do
+      -- A deployment link is a traversal boundary; everything behind it
+      -- belongs to the repository already:
+      Dojang.MonadFileSystem.Directory | route.kind /= SymlinkRoute -> do
         let nestedRoots = exclusionsFor route
         let owned :: FileEntry -> Bool
             owned entry =
