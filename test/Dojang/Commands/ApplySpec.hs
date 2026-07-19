@@ -10,14 +10,13 @@
 module Dojang.Commands.ApplySpec (spec) where
 
 import Control.Exception (bracket_)
-import Control.Monad (when)
 import Control.Monad.Except (catchError)
 import Data.HashMap.Strict (singleton)
 import Data.Map.Strict qualified as Map
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, (</>))
-import Test.Hspec (Spec, describe, it, sequential)
+import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (readFile, writeFile)
 
@@ -60,6 +59,20 @@ import Dojang.Types.RouteMetadata
 
 spec :: Spec
 spec = sequential $ do
+  symlinkAvailable <- runIO $ withTempDir $ \tmpDir _ -> do
+    probeTarget <- encodeFS "probe-target"
+    probeLink <- encodeFS "probe-link"
+    writeFile (tmpDir </> probeTarget) ""
+    ( do
+        createSymbolicLink
+          (tmpDir </> probeTarget)
+          (tmpDir </> probeLink)
+          File
+        return True
+      )
+      `catchError` const (return False)
+  let symIt = if symlinkAvailable then it else xit
+
   describe "apply" $ do
     it "does not update destinations outside the selected paths" $
       withTwoManagedFiles $ \appEnv sourceA destinationA destinationB -> do
@@ -208,33 +221,20 @@ spec = sequential $ do
       dryObserved `shouldBe` realObserved
       dryObserved `shouldBe` (ExitSuccess, "private contents", True)
 
-    it "agrees between dry-run and real link deployment" $ do
-      symlinkAvailable <- withTempDir $ \tmpDir _ -> do
-        probeTarget <- encodeFS "probe-target"
-        probeLink <- encodeFS "probe-link"
-        writeFile (tmpDir </> probeTarget) ""
-        ( do
-            createSymbolicLink
-              (tmpDir </> probeTarget)
-              (tmpDir </> probeLink)
-              File
-            return True
-          )
-          `catchError` const (return False)
-      when symlinkAvailable $ do
-        let observe appEnv source destination = do
-              result <- runAppWithoutLogging appEnv (apply True [])
-              isLink <- isSymlink destination
-              target <- readSymlinkTarget destination
-              return (result, isLink, target == source)
-        dryObserved <-
-          withSymlinkRoute $ \appEnv source destination ->
-            dryRunIO $ observe appEnv source destination
-        realObserved <-
-          withSymlinkRoute $ \appEnv source destination ->
-            observe appEnv source destination
-        dryObserved `shouldBe` realObserved
-        dryObserved `shouldBe` (ExitSuccess, True, True)
+    symIt "agrees between dry-run and real link deployment" $ do
+      let observe appEnv source destination = do
+            result <- runAppWithoutLogging appEnv (apply True [])
+            isLink <- isSymlink destination
+            target <- readSymlinkTarget destination
+            return (result, isLink, target == source)
+      dryObserved <-
+        withSymlinkRoute $ \appEnv source destination ->
+          dryRunIO $ observe appEnv source destination
+      realObserved <-
+        withSymlinkRoute $ \appEnv source destination ->
+          observe appEnv source destination
+      dryObserved `shouldBe` realObserved
+      dryObserved `shouldBe` (ExitSuccess, True, True)
 
     it "applies a declared private mode to recreated destinations" $
       withPrivateModeFile $ \appEnv destination -> do
