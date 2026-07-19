@@ -9,18 +9,22 @@
 -- that both the route layer and the filesystem layer can share the mode
 -- vocabulary without an import cycle.
 module Dojang.Types.RouteMetadata
-  ( RouteKind (..)
+  ( PortableMode (..)
+  , RouteKind (..)
   , RouteMode (..)
   , RouteTarget (..)
   , parseRouteKind
   , parseRouteMode
+  , portableModeFromBits
   , posixDirectoryModeBits
   , posixFileModeBits
   , renderRouteKind
   , renderRouteMode
   , routeTarget
+  , satisfiesPortableMode
   ) where
 
+import Data.Bits ((.&.))
 import Data.String (IsString (fromString))
 import Data.Text (Text)
 
@@ -122,6 +126,57 @@ parseRouteKind _ = Nothing
 renderRouteKind :: RouteKind -> Text
 renderRouteKind CopyRoute = "copy"
 renderRouteKind SymlinkRoute = "symlink"
+
+
+-- | A platform-independent observation of a filesystem entry's permissions.
+--
+-- Fields are 'Maybe' when a platform cannot observe them at all (e.g.
+-- Windows has no owner-only or executable distinction); such fields are
+-- treated as vacuously satisfied by 'satisfiesPortableMode' so that
+-- unsupported platforms never report phantom drift.
+data PortableMode = PortableMode
+  { ownerOnly :: Maybe Bool
+  -- ^ Whether no permission is granted to the group and others.
+  -- 'Nothing' when the platform has no such distinction.
+  , writable :: Bool
+  -- ^ Whether the owner can write the entry.  Observable on every
+  -- supported platform (the read-only attribute on Windows).
+  , executable :: Maybe Bool
+  -- ^ Whether any execute bit is set.  'Nothing' when the platform has
+  -- no execute permission.
+  }
+  deriving (Eq, Ord, Show)
+
+
+-- | Normalizes exact POSIX permission bits into a 'PortableMode'
+-- observation.
+portableModeFromBits :: Word -> PortableMode
+portableModeFromBits bits =
+  PortableMode
+    { ownerOnly = Just $ bits .&. 0o077 == 0
+    , writable = bits .&. 0o200 /= 0
+    , executable = Just $ bits .&. 0o111 /= 0
+    }
+
+
+-- | Whether an observed 'PortableMode' satisfies a declared one.
+-- A field that is unobservable ('Nothing' on the observed side) or
+-- undeclared ('Nothing' on the declared side) is vacuously satisfied.
+satisfiesPortableMode
+  :: PortableMode
+  -- ^ The observed mode of an existing filesystem entry.
+  -> PortableMode
+  -- ^ The declared mode the entry should have.
+  -> Bool
+  -- ^ 'True' unless an observable field contradicts a declared one.
+satisfiesPortableMode observed declared =
+  agrees observed.ownerOnly declared.ownerOnly
+    && observed.writable == declared.writable
+    && agrees observed.executable declared.executable
+ where
+  agrees :: Maybe Bool -> Maybe Bool -> Bool
+  agrees (Just observed') (Just declared') = observed' == declared'
+  agrees _ _ = True
 
 
 -- | The exact POSIX permission bits a 'RouteMode' declares for a regular

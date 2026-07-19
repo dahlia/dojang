@@ -3,6 +3,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
 module Dojang.MonadFileSystem
   ( DryRunIO
@@ -17,6 +18,7 @@ module Dojang.MonadFileSystem
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
@@ -59,6 +61,11 @@ import System.Directory.OsPath
   )
 import System.Directory.OsPath qualified as OsDirectory
 import System.FileLock qualified as FileLock
+
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , portableModeFromBits
+  )
 
 
 #ifndef mingw32_HOST_OS
@@ -323,6 +330,29 @@ class (MonadError IOError m) => MonadFileSystem m where
   getFileSize :: (HasCallStack) => OsPath -> m Integer
 
 
+  -- | Observes the portable permission state of a filesystem entry without
+  -- following symbolic links.  Throws an 'IOError' when the entry does not
+  -- exist.  Fields the platform cannot observe are 'Nothing'.
+  getPortableMode :: (HasCallStack) => OsPath -> m PortableMode
+
+
+  -- | Applies exact POSIX permission bits to a filesystem entry.  On
+  -- platforms without POSIX permission bits (Windows), only the writable
+  -- distinction is applied via the read-only attribute; callers that need
+  -- a stronger guarantee must warn or fail themselves rather than assume
+  -- the whole mode was enforced.  Throws an 'IOError' when the entry does
+  -- not exist.
+  setPortableMode :: (HasCallStack) => OsPath -> Word -> m ()
+
+
+  -- | Sets or clears only the owner-write permission (the read-only
+  -- attribute on Windows), leaving every other permission bit unchanged.
+  -- This is the primitive used to temporarily widen a read-only entry
+  -- before mutating it and to restore the previous state afterwards.
+  -- Throws an 'IOError' when the entry does not exist.
+  setPortableWritable :: (HasCallStack) => OsPath -> Bool -> m ()
+
+
 -- | Writes a sibling temporary file and atomically replaces the destination.
 writeFileAtomically
   :: (HasCallStack, MonadFileSystem m)
@@ -409,6 +439,29 @@ copyFilePermissionsIO source destination = do
 isRegularFileIO :: OsPath -> IO Bool
 isRegularFileIO path =
   (&&) <$> doesFileExist path <*> (not <$> isSymlink path)
+
+
+getPortableModeIO :: OsPath -> IO PortableMode
+getPortableModeIO path = do
+  permissions <- OsDirectory.getPermissions path
+  return
+    PortableMode
+      { ownerOnly = Nothing
+      , writable = Directory.writable permissions
+      , executable = Nothing
+      }
+
+
+setPortableModeIO :: OsPath -> Word -> IO ()
+setPortableModeIO path bits =
+  setPortableWritableIO path $ bits .&. 0o200 /= 0
+
+
+setPortableWritableIO :: OsPath -> Bool -> IO ()
+setPortableWritableIO path writable' = do
+  permissions <- OsDirectory.getPermissions path
+  OsDirectory.setPermissions path $
+    Directory.setOwnerWritable writable' permissions
 #else
 replaceFileIO :: OsPath -> OsPath -> IO ()
 replaceFileIO = OsDirectory.renameFile
@@ -428,6 +481,29 @@ isRegularFileIO path = do
   (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus path')
     `catchError` \err ->
       if isDoesNotExistError err then return False else throwError err
+
+
+getPortableModeIO :: OsPath -> IO PortableMode
+getPortableModeIO path = do
+  path' <- decodeFS path
+  status <- Posix.getSymbolicLinkStatus path'
+  return $ portableModeFromBits $ fromIntegral $ Posix.fileMode status .&. 0o777
+
+
+setPortableModeIO :: OsPath -> Word -> IO ()
+setPortableModeIO path bits = do
+  path' <- decodeFS path
+  Posix.setFileMode path' $ fromIntegral bits
+
+
+setPortableWritableIO :: OsPath -> Bool -> IO ()
+setPortableWritableIO path writable' = do
+  path' <- decodeFS path
+  mode <- Posix.fileMode <$> Posix.getFileStatus path'
+  Posix.setFileMode path' $
+    if writable'
+      then mode .|. 0o200
+      else mode .&. complement 0o200
 #endif
 
 
@@ -563,6 +639,15 @@ instance MonadFileSystem IO where
   copyFile = OsDirectory.copyFile
 
 
+  getPortableMode = getPortableModeIO
+
+
+  setPortableMode = setPortableModeIO
+
+
+  setPortableWritable = setPortableWritableIO
+
+
 type SeqNo = Int
 
 
@@ -585,6 +670,11 @@ data DryRunState = DryRunState
   -- ^ The overlaid files and their list of changes.  Each change is a pair
   -- of the global sequence number and the new event that occurred.  The latest
   -- change comes first and the oldest change comes last.
+  , overlaidModes :: Map OsPath (NonEmpty (SeqNo, PortableMode))
+  -- ^ The overlaid portable modes and their list of changes, newest first.
+  -- A mode change is only effective while no 'Gone' change with a greater
+  -- sequence number exists for the same path, since removing and recreating
+  -- an entry resets its permissions.
   , nextSequenceNumber :: SeqNo
   }
 
@@ -621,6 +711,29 @@ addChangeToFile path change = modify' $ \state ->
     -> Maybe (NonEmpty (SeqNo, OverlaidFile))
   appendChange seqNo (Just changes) = Just $ (seqNo, change) :| toList changes
   appendChange seqNo Nothing = Just $ singleton (seqNo, change)
+
+
+addModeToFile :: OsPath -> PortableMode -> DryRunIO ()
+addModeToFile path mode = modify' $ \state ->
+  let oModes = overlaidModes state
+      nextSeqNo = nextSequenceNumber state
+      newOModes = alter (appendChange nextSeqNo) (normalise path) oModes
+  in state{overlaidModes = newOModes, nextSequenceNumber = nextSeqNo + 1}
+ where
+  appendChange
+    :: SeqNo
+    -> Maybe (NonEmpty (SeqNo, PortableMode))
+    -> Maybe (NonEmpty (SeqNo, PortableMode))
+  appendChange seqNo (Just changes) = Just $ (seqNo, mode) :| toList changes
+  appendChange seqNo Nothing = Just $ singleton (seqNo, mode)
+
+
+-- | The permissions a freshly created overlay entry is assumed to have.
+-- This approximates the common @umask 022@ default; dry-run runs cannot
+-- know the umask a real run would use without mutating the filesystem.
+defaultCreatedMode :: FileType -> PortableMode
+defaultCreatedMode Directory = portableModeFromBits 0o755
+defaultCreatedMode _ = portableModeFromBits 0o644
 
 
 readFileFromDryRunIO :: SeqNo -> OsPath -> DryRunIO ByteString
@@ -1034,6 +1147,62 @@ instance MonadFileSystem DryRunIO where
         `ioeSetErrorString` "not a directory"
 
 
+  getPortableMode path = do
+    oFiles <- gets overlaidFiles
+    oModes <- gets overlaidModes
+    path' <- decodePath path
+    let path'' = normalise path
+    let changes = maybe [] toList $ oFiles !? path''
+    case changes of
+      (_, Gone) : _ ->
+        throwError $
+          mkIOError doesNotExistErrorType "getPortableMode" Nothing (Just path')
+            `ioeSetErrorString` "no such file"
+      _ -> do
+        let goneSeq = case [no | (no, Gone) <- changes] of
+              no : _ -> Just no
+              [] -> Nothing
+        let modeEvents = maybe [] toList $ oModes !? path''
+        let activeModes =
+              [m | (no, m) <- modeEvents, maybe True (no >) goneSeq]
+        case activeModes of
+          m : _ -> return m
+          [] -> case changes of
+            (_, Copied src) : _ -> getPortableMode src
+            (_, change) : rest -> do
+              let recreated = not $ null [no | (no, Gone) <- rest]
+              let fileType = case change of
+                    Directory' -> Directory
+                    _ -> File
+              if recreated
+                then return $ defaultCreatedMode fileType
+                else do
+                  realExists <- liftIO $ doesPathExist path
+                  if realExists
+                    then liftIO $ getPortableModeIO path
+                    else return $ defaultCreatedMode fileType
+            [] ->
+              liftIO (getPortableModeIO path)
+                `mapError` (`ioePrependLocation` "getPortableMode")
+
+
+  setPortableMode path bits = do
+    exists' <- exists path
+    unless exists' $ do
+      path' <- decodePath path
+      throwError $
+        mkIOError doesNotExistErrorType "setPortableMode" Nothing (Just path')
+          `ioeSetErrorString` "no such file"
+    addModeToFile path $ portableModeFromBits bits
+
+
+  setPortableWritable path writable' = do
+    current <-
+      getPortableMode path
+        `mapError` (`ioePrependLocation` "setPortableWritable")
+    addModeToFile path current{writable = writable'}
+
+
   getFileSize path = do
     oFiles <- gets overlaidFiles
     path' <- decodePath path
@@ -1085,7 +1254,12 @@ dryRunIO' action = do
   (value, state) <- runStateT (unDryRunIO action) initialState
   return (value, nextSequenceNumber state)
  where
-  initialState = DryRunState{overlaidFiles = mempty, nextSequenceNumber = 0}
+  initialState =
+    DryRunState
+      { overlaidFiles = mempty
+      , overlaidModes = mempty
+      , nextSequenceNumber = 0
+      }
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns either the result

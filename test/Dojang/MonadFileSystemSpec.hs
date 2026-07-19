@@ -1,5 +1,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.MonadFileSystemSpec (spec) where
@@ -34,13 +36,23 @@ import System.FilePath (combine)
 
 
 #ifndef mingw32_HOST_OS
+import Data.Bits ((.&.))
 import System.Posix.Files qualified as Posix
 import System.OsPath (decodeFS)
 import System.Timeout (timeout)
 #endif
 
 import System.OsPath (OsPath, dropFileName, encodeFS, normalise, (</>))
-import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
+import Test.Hspec
+  ( Spec
+  , describe
+  , expectationFailure
+  , it
+  , runIO
+  , specify
+  , xit
+  , xspecify
+  )
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldContain
@@ -58,6 +70,7 @@ import Dojang.MonadFileSystem
   , tryDryRunIO
   )
 import Dojang.TestUtils (withTempDir)
+import Dojang.Types.RouteMetadata (PortableMode (..))
 
 
 packageYamlFP :: FilePath
@@ -1142,3 +1155,145 @@ spec = do
         ioeGetFileName e' `shouldBe` Just nonExistentFP
         ioeGetLocation e' `shouldBe` "getFileSize"
         show e' `shouldContain` "not a regular file, but a directory"
+
+  describe "portable modes (IO)" $ do
+    specify "getPortableMode observes writability" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- getPortableMode (tmpDir </> foo) :: IO PortableMode
+        observed.writable `shouldBe` True
+
+    specify "getPortableMode fails on a missing path" $
+      withTempDir $ \tmpDir _ ->
+        tryError (getPortableMode (tmpDir </> nonExistentP) :: IO PortableMode)
+          >>= \case
+            Left e -> e `shouldSatisfy` isDoesNotExistError
+            Right mode -> expectationFailure $ "Unexpected mode: " <> show mode
+
+#ifndef mingw32_HOST_OS
+    specify "getPortableMode observes exact POSIX bits" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        Posix.setFileMode (tmpDir' `combine` "foo") 0o600
+        getPortableMode (tmpDir </> foo)
+          `shouldReturn` PortableMode (Just True) True (Just False)
+        Posix.setFileMode (tmpDir' `combine` "foo") 0o755
+        getPortableMode (tmpDir </> foo)
+          `shouldReturn` PortableMode (Just False) True (Just True)
+        Posix.setFileMode (tmpDir' `combine` "foo") 0o444
+        getPortableMode (tmpDir </> foo)
+          `shouldReturn` PortableMode (Just False) False (Just False)
+
+    specify "setPortableMode applies exact POSIX bits" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        setPortableMode (tmpDir </> foo) 0o600 :: IO ()
+        mode <- Posix.fileMode <$> Posix.getFileStatus (tmpDir' `combine` "foo")
+        (mode .&. 0o777) `shouldBe` 0o600
+#endif
+
+
+specify "setPortableWritable widens and narrows only writability" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    setPortableWritable (tmpDir </> foo) False :: IO ()
+    narrowed <- getPortableMode (tmpDir </> foo) :: IO PortableMode
+    narrowed.writable `shouldBe` False
+    setPortableWritable (tmpDir </> foo) True
+    widened <- getPortableMode (tmpDir </> foo) :: IO PortableMode
+    widened.writable `shouldBe` True
+#ifndef mingw32_HOST_OS
+        Posix.setFileMode (tmpDir' `combine` "foo") 0o444
+        setPortableWritable (tmpDir </> foo) True
+        mode <- Posix.fileMode <$> Posix.getFileStatus (tmpDir' `combine` "foo")
+        (mode .&. 0o777) `shouldBe` 0o644
+        setPortableWritable (tmpDir </> foo) False
+        mode' <-
+          Posix.fileMode <$> Posix.getFileStatus (tmpDir' `combine` "foo")
+        (mode' .&. 0o777) `shouldBe` 0o444
+#endif
+
+
+describe "portable modes (DryRunIO)" $ do
+  specify "getPortableMode reads through to the real filesystem" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      Prelude.writeFile (tmpDir' `combine` "foo") ""
+#ifndef mingw32_HOST_OS
+        Posix.setFileMode (tmpDir' `combine` "foo") 0o600
+        dryRunIO (getPortableMode $ tmpDir </> foo)
+          `shouldReturn` PortableMode (Just True) True (Just False)
+#else
+        observed <- dryRunIO (getPortableMode $ tmpDir </> foo)
+        observed.writable `shouldBe` True
+#endif
+
+
+specify "setPortableMode overlays a mode without touching the disk" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    observed <- dryRunIO $ do
+      () <- setPortableMode (tmpDir </> foo) 0o600
+      getPortableMode $ tmpDir </> foo
+    observed `shouldBe` PortableMode (Just True) True (Just False)
+#ifndef mingw32_HOST_OS
+        mode <- Posix.fileMode <$> Posix.getFileStatus (tmpDir' `combine` "foo")
+        (mode .&. 0o777) `shouldSatisfy` (/= 0o600)
+#endif
+
+
+specify "setPortableMode fails on a missing path" $
+  withTempDir $ \tmpDir _ -> do
+    Left e <- tryDryRunIO $ setPortableMode (tmpDir </> nonExistentP) 0o600
+    e `shouldSatisfy` isDoesNotExistError
+
+
+specify "setPortableWritable overlays only writability" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    observed <- dryRunIO $ do
+      () <- setPortableMode (tmpDir </> foo) 0o600
+      () <- setPortableWritable (tmpDir </> foo) False
+      getPortableMode $ tmpDir </> foo
+    observed `shouldBe` PortableMode (Just True) False (Just False)
+
+
+specify "getPortableMode keeps a written file's prior mode" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    observed <- dryRunIO $ do
+      () <- setPortableMode (tmpDir </> foo) 0o600
+      () <- writeFile (tmpDir </> foo) "rewritten"
+      getPortableMode $ tmpDir </> foo
+    observed `shouldBe` PortableMode (Just True) True (Just False)
+
+
+specify "getPortableMode resets overlaid modes after removal" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    observed <- dryRunIO $ do
+      () <- setPortableMode (tmpDir </> foo) 0o600
+      () <- removeFile (tmpDir </> foo)
+      () <- writeFile (tmpDir </> foo) "recreated"
+      getPortableMode $ tmpDir </> foo
+    observed `shouldBe` PortableMode (Just False) True (Just False)
+
+
+specify "getPortableMode follows Copied overlays" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    observed <- dryRunIO $ do
+      () <- setPortableMode (tmpDir </> foo) 0o600
+      () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
+      getPortableMode $ tmpDir </> bar
+    observed `shouldBe` PortableMode (Just True) True (Just False)
+
+
+specify "getPortableMode fails on removed or missing paths" $
+  withTempDir $ \tmpDir tmpDir' -> do
+    Prelude.writeFile (tmpDir' `combine` "foo") ""
+    Left e <- tryDryRunIO $ do
+      () <- removeFile (tmpDir </> foo)
+      getPortableMode $ tmpDir </> foo
+    e `shouldSatisfy` isDoesNotExistError
+    Left e' <- tryDryRunIO $ getPortableMode $ tmpDir </> nonExistentP
+    e' `shouldSatisfy` isDoesNotExistError

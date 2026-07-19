@@ -10,7 +10,8 @@ import Test.Hspec.Expectations.Pretty (shouldBe)
 
 import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.RouteMetadata
-  ( RouteKind (CopyRoute, SymlinkRoute)
+  ( PortableMode (..)
+  , RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode
     ( DefaultMode
     , Executable
@@ -21,11 +22,13 @@ import Dojang.Types.RouteMetadata
   , RouteTarget (..)
   , parseRouteKind
   , parseRouteMode
+  , portableModeFromBits
   , posixDirectoryModeBits
   , posixFileModeBits
   , renderRouteKind
   , renderRouteMode
   , routeTarget
+  , satisfiesPortableMode
   )
 
 
@@ -77,6 +80,49 @@ spec = do
       let kinds = [minBound .. maxBound] :: [RouteKind]
       [parseRouteKind $ renderRouteKind k | k <- kinds]
         `shouldBe` [Just k | k <- kinds]
+
+  describe "PortableMode" $ do
+    specify "portableModeFromBits" $ do
+      portableModeFromBits 0o600
+        `shouldBe` PortableMode (Just True) True (Just False)
+      portableModeFromBits 0o700
+        `shouldBe` PortableMode (Just True) True (Just True)
+      portableModeFromBits 0o755
+        `shouldBe` PortableMode (Just False) True (Just True)
+      portableModeFromBits 0o444
+        `shouldBe` PortableMode (Just False) False (Just False)
+      portableModeFromBits 0o555
+        `shouldBe` PortableMode (Just False) False (Just True)
+      portableModeFromBits 0o644
+        `shouldBe` PortableMode (Just False) True (Just False)
+
+    specify "satisfiesPortableMode" $ do
+      let observed600 = portableModeFromBits 0o600
+      let declared600 = portableModeFromBits 0o600
+      satisfiesPortableMode observed600 declared600 `shouldBe` True
+      satisfiesPortableMode (portableModeFromBits 0o644) declared600
+        `shouldBe` False
+      satisfiesPortableMode (portableModeFromBits 0o400) declared600
+        `shouldBe` False
+      -- Fields unobservable on the current platform are vacuously
+      -- satisfied rather than reported as drift:
+      satisfiesPortableMode
+        (PortableMode Nothing True Nothing)
+        declared600
+        `shouldBe` True
+      satisfiesPortableMode
+        (PortableMode Nothing False Nothing)
+        declared600
+        `shouldBe` False
+      satisfiesPortableMode
+        (PortableMode Nothing False Nothing)
+        (portableModeFromBits 0o444)
+        `shouldBe` True
+      -- Undeclared fields are likewise not compared:
+      satisfiesPortableMode
+        observed600
+        (PortableMode Nothing True Nothing)
+        `shouldBe` True
 
   describe "RouteTarget" $ do
     specify "routeTarget defaults to a plain copied route" $ do

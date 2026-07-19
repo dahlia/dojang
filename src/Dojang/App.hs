@@ -220,6 +220,9 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   removeDirectory = App . lift . lift . removeDirectory
   listDirectory = App . lift . lift . listDirectory
   getFileSize = App . lift . lift . getFileSize
+  getPortableMode = App . lift . lift . getPortableMode
+  setPortableMode path = App . lift . lift . setPortableMode path
+  setPortableWritable path = App . lift . lift . setPortableWritable path
 
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment

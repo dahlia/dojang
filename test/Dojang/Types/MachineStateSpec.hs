@@ -123,6 +123,7 @@ import Dojang.Types.RepositoryId
   , parseRepositoryId
   , repositoryIdText
   )
+import Dojang.Types.RouteMetadata (PortableMode)
 
 
 spec :: Spec
@@ -3303,6 +3304,10 @@ instance MonadFileSystem FailingReplaceIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
 
 
 newtype FailingCopyIO a
@@ -3351,6 +3356,10 @@ instance MonadFileSystem FailingCopyIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
 
 
 newtype FailingRemoveIO a
@@ -3403,3 +3412,7 @@ instance MonadFileSystem FailingRemoveIO where
       else liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
