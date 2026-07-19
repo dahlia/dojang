@@ -708,6 +708,33 @@ spec = do
       [op.syncOp | op <- plan.operations, op.replica == IntermediateReplica]
         `shouldBe` [RemoveDirs paths.intermediate]
 
+    it "skips replacing a directory that contains protected entries" $ do
+      -- The broad route now wants a file where its destination currently
+      -- holds a directory, but a nested route owns a subtree inside that
+      -- directory.  A protected removal would keep the directory in
+      -- place and the following copy would fail after unprotected
+      -- siblings were already deleted, so the replacement must be
+      -- skipped as a whole:
+      let replacement =
+            ( makeInput
+                paths
+                (File 4)
+                Directory
+                Directory
+                Modified
+                Unchanged
+                ReplicasDifferent
+                (Routed route)
+            )
+              { protectedDestinations = [paths.destination </> paths.source]
+              }
+      let plan =
+            planReconciliation SourceToDestination PreferAuthoritative [replacement]
+      fmap (.outcome) plan.items
+        `shouldBe` [Skipped ProtectedSubtreeReplacement]
+      [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+        `shouldBe` []
+
   describe "deployment links" $ do
     let linkInput destinationStat =
           ( makeInput

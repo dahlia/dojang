@@ -157,6 +157,12 @@ data ReconciliationSkipReason
     -- repository source that is never reflected back, regardless of
     -- forcing or path selection.
     DeploymentLinkNotReflectable
+  | -- | The destination directory cannot become a non-directory entry
+    -- because routes nested inside it own subtrees that must survive;
+    -- a protected removal would keep the directory in place and the
+    -- following replacement would fail after destroying unprotected
+    -- siblings.
+    ProtectedSubtreeReplacement
   deriving (Eq, Ord, Show)
 
 
@@ -554,7 +560,20 @@ planSupportedInput direction input
     in (outcome, operations)
 
   planExisting :: (ReconciliationOutcome, [TaggedOperation])
-  planExisting =
+  planExisting
+    -- Replacing a directory with a non-directory is impossible while
+    -- nested routes own entries inside it: the protected removal keeps
+    -- the directory, so the replacement could only fail after deleting
+    -- unprotected siblings.
+    | overwrittenReplica == DestinationReplica
+        && targetNeedsUpdate
+        && overwritten.stat == Directory
+        && authoritative.stat /= Directory
+        && not (null $ protectedWithin input overwritten.path) =
+        (Skipped ProtectedSubtreeReplacement, [])
+    | otherwise = plannedExisting
+  plannedExisting :: (ReconciliationOutcome, [TaggedOperation])
+  plannedExisting =
     let ignored = case (direction, input.destinationRouteState) of
           (SourceToDestination, Ignored route pattern)
             | targetNeedsUpdate ->
@@ -643,17 +662,20 @@ protectRemovals input replica operations
  where
   protect :: SyncOp -> SyncOp
   protect (RemoveDirs path) =
-    case protectedUnder path of
+    case protectedWithin input path of
       [] -> RemoveDirs path
       protected -> RemoveDirsExcept path protected
   protect operation = operation
-  protectedUnder :: OsPath -> [OsPath]
-  protectedUnder path =
-    [ protected
-    | protected <- input.protectedDestinations
-    , splitDirectories (normalise path)
-        `isPrefixOf` splitDirectories (normalise protected)
-    ]
+
+
+-- | Protected destination roots lying at or below the given path.
+protectedWithin :: ReconciliationInput -> OsPath -> [OsPath]
+protectedWithin input path =
+  [ protected
+  | protected <- input.protectedDestinations
+  , splitDirectories (normalise path)
+      `isPrefixOf` splitDirectories (normalise protected)
+  ]
 
 
 isSymlinkStat :: FileStat -> Bool

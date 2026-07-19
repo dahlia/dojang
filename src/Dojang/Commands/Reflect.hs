@@ -763,6 +763,11 @@ printSkippedReconciliation pathStyle correspondence reason =
         "Skipping "
           <> pathStyle correspondence.destination.path
           <> " because deployment links are never reflected."
+    ProtectedSubtreeReplacement ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle correspondence.destination.path
+          <> " because entries inside it are owned by nested routes."
 
 
 logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
