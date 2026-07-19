@@ -12,6 +12,7 @@ import System.OsPath (OsPath, encodeFS, takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, runIO)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
+import Control.Monad.Except (tryError)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -53,6 +54,7 @@ import Dojang.Types.Reconciliation
   , SyncOp (..)
   , destructiveOperations
   , executeReconciliationPlan
+  , executeReconciliationPlanGuarded
   , executeReconciliationPlanWith
   , executeSyncOp
   , observeModeDrift
@@ -791,6 +793,103 @@ spec = do
           mode `shouldBe` Private
           fileType `shouldBe` FileSystem.File
         other -> fail $ "Unexpected destination ops: " <> show other
+
+  describe "executeReconciliationPlanGuarded" $ do
+    let manualPlan ops =
+          ReconciliationPlan
+            { direction = SourceToDestination
+            , conflictPolicy = RefuseConflicts
+            , items = []
+            , conflicts = []
+            , operations = PlannedSyncOp DestinationReplica <$> ops
+            }
+
+    it "widens read-only entries and reapplies declared modes" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "guard-source"
+        destinationName <- encodeFS "guard-destination"
+        let sourcePath = tmpDir </> sourceName
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile sourcePath "new contents"
+        FileSystem.writeFile destinationPath "old contents"
+        FileSystem.setPortableWritable destinationPath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) $
+            manualPlan
+              [ CopyFile sourcePath destinationPath
+              , SetEntryMode destinationPath ReadOnly FileSystem.File
+              ]
+        result `shouldBe` Right ()
+        FileSystem.readFile destinationPath `shouldReturn` "new contents"
+        finalMode <- FileSystem.getPortableMode destinationPath
+        finalMode.writable `shouldBe` False
+        FileSystem.setPortableWritable destinationPath True
+
+    it "leaves recreated entries writable without a declared mode" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "guard-source"
+        destinationName <- encodeFS "guard-destination"
+        let sourcePath = tmpDir </> sourceName
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile sourcePath "new contents"
+        FileSystem.writeFile destinationPath "old contents"
+        FileSystem.setPortableWritable destinationPath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) $
+            manualPlan [CopyFile sourcePath destinationPath]
+        result `shouldBe` Right ()
+        FileSystem.readFile destinationPath `shouldReturn` "new contents"
+        -- The widened entry is narrowed back to its prior state, since no
+        -- declared mode superseded it:
+        finalMode <- FileSystem.getPortableMode destinationPath
+        finalMode.writable `shouldBe` False
+        FileSystem.setPortableWritable destinationPath True
+
+    it "removes read-only trees" $
+      withTempDir $ \tmpDir _ -> do
+        treeName <- encodeFS "guard-tree"
+        childName <- encodeFS "child"
+        fileName' <- encodeFS "file"
+        let treePath = tmpDir </> treeName
+        let childPath = treePath </> childName
+        FileSystem.createDirectories childPath
+        FileSystem.writeFile (childPath </> fileName') "contents"
+        FileSystem.setPortableWritable (childPath </> fileName') False
+        FileSystem.setPortableWritable childPath False
+        FileSystem.setPortableWritable treePath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) $
+            manualPlan [RemoveDirs treePath]
+        result `shouldBe` Right ()
+        FileSystem.exists treePath `shouldReturn` False
+
+    it "restores prior modes when execution fails" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "guard-source"
+        destinationName <- encodeFS "guard-destination"
+        missingName <- encodeFS "guard-missing"
+        otherName <- encodeFS "guard-other"
+        let sourcePath = tmpDir </> sourceName
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile sourcePath "new contents"
+        FileSystem.writeFile destinationPath "old contents"
+        FileSystem.setPortableWritable destinationPath False
+        result <-
+          tryError $
+            executeReconciliationPlanGuarded (const $ return ()) $
+              manualPlan
+                [ CopyFile sourcePath destinationPath
+                , CopyFile (tmpDir </> missingName) (tmpDir </> otherName)
+                , SetEntryMode destinationPath ReadOnly FileSystem.File
+                ]
+        result `shouldSatisfy` \case
+          Left _ -> True
+          Right _ -> False
+        -- The widened destination is restored to read-only despite the
+        -- failure happening before the declared mode was applied:
+        finalMode <- FileSystem.getPortableMode destinationPath
+        finalMode.writable `shouldBe` False
+        FileSystem.setPortableWritable destinationPath True
 
   describe "observeModeDrift" $ do
     it "reports destinations that violate their declared mode" $

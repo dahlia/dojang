@@ -93,7 +93,7 @@ import Dojang.Types.Reconciliation
   , Replica (..)
   , SyncOp (..)
   , destructiveOperations
-  , executeReconciliationPlanWith
+  , executeReconciliationPlanGuarded
   , observeReconciliationInput
   , planReconciliation
   )
@@ -224,7 +224,7 @@ apply force filePaths = do
   when debug' (void $ statusCore defaultStatusOptions)
   let persist = persistConvergedTargets ctx machineState managed
   void
-    ( executeReconciliationPlanWith
+    ( executeReconciliationPlanGuarded
         (printSyncOp . (.syncOp))
         plan
         `catchError` \err -> persist >> throwError err

@@ -110,7 +110,7 @@ import Dojang.Types.Reconciliation
   , ReconciliationPlan (..)
   , ReconciliationSkipReason (..)
   , SyncOp (..)
-  , executeReconciliationPlanWith
+  , executeReconciliationPlanGuarded
   , observeReconciliationInput
   , planReconciliation
   )
@@ -608,7 +608,7 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
                     else filter matchesSelection refreshedManaged
         persistConvergedTargets ctx machineState selectedManaged
   void
-    ( executeReconciliationPlanWith
+    ( executeReconciliationPlanGuarded
         (logSyncOp . (.syncOp))
         plan
         `catchError` \err -> persist >> throwError err

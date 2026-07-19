@@ -2,6 +2,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- | Pure reconciliation planning and filesystem-plan execution.
@@ -20,6 +21,7 @@ module Dojang.Types.Reconciliation
   , SyncOp (..)
   , destructiveOperations
   , executeReconciliationPlan
+  , executeReconciliationPlanGuarded
   , executeReconciliationPlanWith
   , executeSyncOp
   , isDestructiveSyncOp
@@ -29,7 +31,7 @@ module Dojang.Types.Reconciliation
   ) where
 
 import Control.Monad (forM, forM_)
-import Control.Monad.Except (catchError)
+import Control.Monad.Except (catchError, throwError)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, nub, sortBy, sortOn)
 import Data.List.NonEmpty (NonEmpty)
@@ -40,6 +42,7 @@ import System.OsPath
   , normalise
   , splitDirectories
   , takeDirectory
+  , (</>)
   )
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
@@ -57,7 +60,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RouteMetadata
-  ( PortableMode
+  ( PortableMode (..)
   , RouteMode (DefaultMode)
   , portableModeFromBits
   , posixDirectoryModeBits
@@ -688,6 +691,108 @@ executeReconciliationPlan
   -> m (Either (NonEmpty ReconciliationConflict) ())
   -- ^ Refused conflicts, or success after all ordered operations complete.
 executeReconciliationPlan = executeReconciliationPlanWith $ const $ return ()
+
+
+-- | Executes a plan like 'executeReconciliationPlanWith', but treats
+-- read-only permissions as a desired final state rather than a
+-- precondition: entries (and their parents) that an operation must mutate
+-- are temporarily made writable first.  After the plan succeeds, widened
+-- entries whose declared mode was not reapplied by a 'SetEntryMode'
+-- operation are narrowed back; if any operation fails, every widened entry
+-- that still exists is restored in reverse order before the error is
+-- rethrown.
+executeReconciliationPlanGuarded
+  :: forall m
+   . (MonadFileSystem m)
+  => (PlannedSyncOp -> m ())
+  -- ^ An action invoked immediately before each operation is executed.
+  -> ReconciliationPlan
+  -- ^ The plan to execute.
+  -> m (Either (NonEmpty ReconciliationConflict) ())
+  -- ^ Refused conflicts, or success after all ordered operations complete.
+executeReconciliationPlanGuarded observe plan =
+  case (plan.conflictPolicy, NE.nonEmpty plan.conflicts) of
+    (RefuseConflicts, Just conflicts) -> return $ Left conflicts
+    _ -> do
+      widened <- go [] plan.operations
+      restoreAll widened
+      return $ Right ()
+ where
+  go :: [OsPath] -> [PlannedSyncOp] -> m [OsPath]
+  go widened [] = return widened
+  go widened (operation : rest) = do
+    newlyWidened <-
+      widenForSyncOp operation.syncOp
+        `catchError` \err -> restoreAll widened >> throwError err
+    let widened' = newlyWidened ++ widened
+    observe operation
+    executeSyncOp operation.syncOp
+      `catchError` \err -> restoreAll widened' >> throwError err
+    -- A reapplied declared mode supersedes the widening:
+    let widened'' = case operation.syncOp of
+          SetEntryMode path _ _ -> filter (/= normalise path) widened'
+          _ -> widened'
+    go widened'' rest
+  restoreAll :: [OsPath] -> m ()
+  restoreAll paths =
+    forM_ paths $ \path -> do
+      stillExists <- exists path
+      if stillExists
+        then setPortableWritable path False
+        else return ()
+  widenForSyncOp :: SyncOp -> m [OsPath]
+  widenForSyncOp (RemoveFile path) = do
+    entry <- widenIfReadOnly path
+    parent <- widenIfReadOnly $ takeDirectory path
+    return $ entry ++ parent
+  widenForSyncOp (RemoveDirs path) = do
+    parent <- widenIfReadOnly $ takeDirectory path
+    tree <- widenTree path
+    return $ tree ++ parent
+  widenForSyncOp (CopyFile _ destination) = do
+    entry <- widenIfReadOnly destination
+    parent <- widenIfReadOnly $ takeDirectory destination
+    return $ entry ++ parent
+  widenForSyncOp (CreateDir path) =
+    widenIfReadOnly $ takeDirectory path
+  widenForSyncOp (CreateDirs path) =
+    widenNearestExistingAncestor $ takeDirectory path
+  widenForSyncOp (SetEntryMode _ _ _) = return []
+  widenIfReadOnly :: OsPath -> m [OsPath]
+  widenIfReadOnly path = do
+    present <- exists path
+    if not present
+      then return []
+      else do
+        mode <-
+          (Just <$> getPortableMode path)
+            `catchError` const (return Nothing)
+        case mode of
+          Just mode' | not mode'.writable -> do
+            setPortableWritable path True
+            return [normalise path]
+          _ -> return []
+  widenNearestExistingAncestor :: OsPath -> m [OsPath]
+  widenNearestExistingAncestor path = do
+    present <- exists path
+    if present
+      then widenIfReadOnly path
+      else do
+        let parent = takeDirectory path
+        if parent == path
+          then return []
+          else widenNearestExistingAncestor parent
+  widenTree :: OsPath -> m [OsPath]
+  widenTree path = do
+    isDir <- isDirectory path
+    isLink <- isSymlink path
+    root <- widenIfReadOnly path
+    if isDir && not isLink
+      then do
+        entries <- listDirectory path
+        nested <- mapM (widenTree . (path </>)) entries
+        return $ concat nested ++ root
+      else return root
 
 
 -- | Executes a plan in order, invoking an observer immediately before each
