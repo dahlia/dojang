@@ -93,6 +93,7 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.RouteMetadata (renderRouteMode)
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
@@ -345,3 +346,13 @@ printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
+printSyncOp (SetEntryMode path mode _) = do
+  pathStyle <- pathStyleFor stderr
+  codeStyle <- codeStyleFor stderr
+  printStderr
+    ( "Set mode of "
+        <> pathStyle path
+        <> " to "
+        <> codeStyle (renderRouteMode mode)
+        <> "..."
+    )

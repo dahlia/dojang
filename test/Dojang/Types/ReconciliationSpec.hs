@@ -57,6 +57,10 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.RouteMetadata
+  ( RouteMode (DefaultMode, Private, ReadOnly)
+  , portableModeFromBits
+  )
 
 
 data Paths = Paths
@@ -138,6 +142,7 @@ applyModelOperations = foldl' applyOperation
       Map.insert destinationPath (state Map.! sourcePath) state
     CreateDir path -> Map.insert path ModelDirectory state
     CreateDirs path -> Map.insert path ModelDirectory state
+    SetEntryMode _ _ _ -> state
 
 
 swapReplica :: Replica -> Replica
@@ -164,6 +169,8 @@ swapInput input =
           }
     , sourceDestinationComparison = input.sourceDestinationComparison
     , destinationRouteState = input.destinationRouteState
+    , declaredDestinationMode = input.declaredDestinationMode
+    , observedDestinationMode = input.observedDestinationMode
     }
 
 
@@ -189,6 +196,8 @@ makeInput paths sourceStat intermediateStat destinationStat sourceDelta destinat
           }
     , sourceDestinationComparison = comparison
     , destinationRouteState = routeState
+    , declaredDestinationMode = DefaultMode
+    , observedDestinationMode = Nothing
     }
 
 
@@ -613,6 +622,171 @@ spec = do
             planReconciliation direction RefuseConflicts [reconciled]
       secondPlan.operations === []
       fmap (.outcome) secondPlan.items === [NoChange]
+
+  describe "declared destination modes" $ do
+    let withMode declared observed input =
+          input
+            { declaredDestinationMode = declared
+            , observedDestinationMode = observed
+            }
+    let unchangedFile =
+          makeInput
+            paths
+            (File 1)
+            (File 1)
+            (File 1)
+            Unchanged
+            Unchanged
+            ReplicasEquivalent
+            (Routed route)
+    let observed644 = Just $ portableModeFromBits 0o644
+    let observed600 = Just $ portableModeFromBits 0o600
+
+    it "plans a mode change for metadata-only drift" $ do
+      let input = withMode Private observed644 unchangedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       SetEntryMode paths.destination Private FileSystem.File
+                   ]
+
+    it "plans nothing when the observed mode satisfies the declared one" $ do
+      let input = withMode Private observed600 unchangedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "plans nothing for the default mode" $ do
+      let input = withMode DefaultMode observed644 unchangedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "applies the declared mode after content operations" $ do
+      let changedFile =
+            makeInput
+              paths
+              (File 2)
+              (File 1)
+              (File 1)
+              Modified
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+      let input = withMode Private observed600 changedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      let destinationOps =
+            [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+      case reverse destinationOps of
+        SetEntryMode path mode fileType : _ -> do
+          path `shouldBe` paths.destination
+          mode `shouldBe` Private
+          fileType `shouldBe` FileSystem.File
+        other -> fail $ "Unexpected destination ops: " <> show other
+      -- Content copies precede the mode change:
+      destinationOps
+        `shouldSatisfy` any
+          ( \case
+              CopyFile _ _ -> True
+              _ -> False
+          )
+
+    it "targets the destination even when reflecting" $ do
+      let input = withMode ReadOnly observed644 unchangedFile
+      let plan =
+            planReconciliation DestinationToSource RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       SetEntryMode paths.destination ReadOnly FileSystem.File
+                   ]
+
+    it "plans directory modes with directory semantics" $ do
+      let unchangedDir =
+            makeInput
+              paths
+              Directory
+              Directory
+              Directory
+              Unchanged
+              Unchanged
+              ReplicasEquivalent
+              (Routed route)
+      let input = withMode Private observed644 unchangedDir
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       SetEntryMode
+                         paths.destination
+                         Private
+                         FileSystem.Directory
+                   ]
+
+    it "plans no mode change for removals" $ do
+      let removal =
+            makeInput
+              paths
+              Missing
+              (File 1)
+              (File 1)
+              Removed
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+      let input = withMode Private observed600 removal
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldSatisfy` all
+          ( \op -> case op.syncOp of
+              SetEntryMode{} -> False
+              _ -> True
+          )
+
+    it "suppresses mode changes on ignored destinations" $ do
+      let input =
+            withMode Private observed644 $
+              makeInput
+                paths
+                (File 1)
+                (File 1)
+                (File 1)
+                Unchanged
+                Unchanged
+                ReplicasEquivalent
+                (Ignored route "pattern")
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "plans a mode change for a destination it creates" $ do
+      let creation =
+            makeInput
+              paths
+              (File 1)
+              Missing
+              Missing
+              Added
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+      let input = withMode Private Nothing creation
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      let destinationOps =
+            [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+      case reverse destinationOps of
+        SetEntryMode path mode fileType : _ -> do
+          path `shouldBe` paths.destination
+          mode `shouldBe` Private
+          fileType `shouldBe` FileSystem.File
+        other -> fail $ "Unexpected destination ops: " <> show other
 
   describe "observeReconciliationInput" $ do
     it "compares equal-size files by content" $ withTempDir $ \tmpDir _ -> do

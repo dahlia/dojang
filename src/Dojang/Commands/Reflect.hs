@@ -115,6 +115,7 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata (renderRouteMode)
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
@@ -707,6 +708,10 @@ logSyncOp (CreateDir path) = do
 logSyncOp (CreateDirs path) = do
   path' <- decodePath path
   $(logDebug) $ "Create directory recursively: " <> pack path'
+logSyncOp (SetEntryMode path mode _) = do
+  path' <- decodePath path
+  $(logDebug) $
+    "Set mode of " <> pack path' <> " to " <> renderRouteMode mode <> "."
 
 
 -- | Create a 'FileCorrespondence' from a route result and destination path.

@@ -41,6 +41,7 @@ import System.OsPath
   )
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem qualified as FileSystem (FileType (..))
 import Dojang.Types.Context
   ( Context
   , FileCorrespondence (..)
@@ -50,6 +51,14 @@ import Dojang.Types.Context
   , RouteState (..)
   , calculateFileDelta
   , getRouteState
+  )
+import Dojang.Types.RouteMetadata
+  ( PortableMode
+  , RouteMode (DefaultMode)
+  , portableModeFromBits
+  , posixDirectoryModeBits
+  , posixFileModeBits
+  , satisfiesPortableMode
   )
 
 
@@ -99,6 +108,13 @@ data ReconciliationInput = ReconciliationInput
   -- ^ Whether source and destination are equivalent to each other.
   , destinationRouteState :: RouteState
   -- ^ The routing state observed for the destination path.
+  , declaredDestinationMode :: RouteMode
+  -- ^ The portable mode the owning route declares for the destination.
+  -- The manifest is authoritative for modes, so a drift from this value
+  -- is always reconciled toward it and never treated as a conflict.
+  , observedDestinationMode :: Maybe PortableMode
+  -- ^ The observed permission state of the destination entry, or
+  -- 'Nothing' when the destination is missing or a symbolic link.
   }
   deriving (Eq, Ord, Show)
 
@@ -159,6 +175,10 @@ data SyncOp
     CreateDir OsPath
   | -- | Create a directory and any missing ancestors.
     CreateDirs OsPath
+  | -- | Apply a declared portable mode to an existing entry.  The
+    -- 'FileSystem.FileType' selects whether directory or file permission
+    -- bits apply; the default mode is a no-op.
+    SetEntryMode OsPath RouteMode FileSystem.FileType
   deriving (Eq, Show)
 
 
@@ -169,6 +189,7 @@ syncOpOrdKey (CreateDir path) = (path, 3, path)
 syncOpOrdKey (CreateDirs path) = (path, 4, path)
 syncOpOrdKey (CopyFile _ destination) =
   (takeDirectory destination, 5, destination)
+syncOpOrdKey (SetEntryMode path _ _) = (takeDirectory path, 6, path)
 
 
 instance Ord SyncOp where
@@ -220,6 +241,8 @@ observeReconciliationInput context correspondence = do
       { correspondence = correspondence
       , sourceDestinationComparison = comparison
       , destinationRouteState = routeState
+      , declaredDestinationMode = DefaultMode
+      , observedDestinationMode = Nothing
       }
  where
   observeComparison
@@ -270,7 +293,7 @@ inputOrderKey input =
   )
 
 
-data OperationPhase = FirstPhase | SecondPhase
+data OperationPhase = FirstPhase | SecondPhase | ThirdPhase
   deriving (Eq, Ord, Show)
 
 
@@ -406,13 +429,58 @@ planSupportedInput direction input
               | otherwise ->
                   tagOperations SecondPhase overwrittenReplica $
                     replaceEntry stagedIntermediate overwritten
-        operations = intermediateOperations ++ targetOperations
+        modeOperations =
+          tagOperations ThirdPhase DestinationReplica $
+            planModeChange input authoritative $
+              not $
+                null targetOperations
+        operations =
+          intermediateOperations ++ targetOperations ++ modeOperations
         outcome = case ignored of
           Just reason -> Skipped reason
           Nothing
             | null operations -> NoChange
             | otherwise -> WillReconcile
     in (outcome, operations)
+
+
+-- | Plans the mode change reconciling the destination toward the mode
+-- declared by its owning route.  The manifest is authoritative: an
+-- unsatisfied observed mode is reconciled regardless of direction, and
+-- a destination that content operations recreate always has its declared
+-- mode reapplied.  Ignored destinations and symbolic links are left
+-- untouched, and the default mode plans nothing.
+planModeChange :: ReconciliationInput -> FileEntry -> Bool -> [SyncOp]
+planModeChange input finalEntry destinationTouched
+  | input.declaredDestinationMode == DefaultMode = []
+  | ignoredDestination = []
+  | otherwise = case entryType of
+      Nothing -> []
+      Just fileType -> case declaredBits fileType of
+        Nothing -> []
+        Just bits
+          | destinationTouched
+              || not (satisfied $ portableModeFromBits bits) ->
+              [ SetEntryMode
+                  input.correspondence.destination.path
+                  input.declaredDestinationMode
+                  fileType
+              ]
+          | otherwise -> []
+ where
+  ignoredDestination = case input.destinationRouteState of
+    Ignored _ _ -> True
+    _ -> False
+  entryType = case finalEntry.stat of
+    Directory -> Just FileSystem.Directory
+    File _ -> Just FileSystem.File
+    _ -> Nothing
+  declaredBits FileSystem.Directory =
+    posixDirectoryModeBits input.declaredDestinationMode
+  declaredBits _ = posixFileModeBits input.declaredDestinationMode
+  satisfied declared = case input.observedDestinationMode of
+    Just observed -> observed `satisfiesPortableMode` declared
+    Nothing -> False
 
 
 isSymlinkStat :: FileStat -> Bool
@@ -507,6 +575,7 @@ operationKey operation =
     CreateDir _ -> (1, depth)
     CreateDirs _ -> (1, depth)
     CopyFile _ _ -> (2, depth)
+    SetEntryMode{} -> (3, depth)
 
 
 syncOpTarget :: SyncOp -> OsPath
@@ -515,6 +584,7 @@ syncOpTarget (RemoveFile path) = path
 syncOpTarget (CopyFile _ destination) = destination
 syncOpTarget (CreateDir path) = path
 syncOpTarget (CreateDirs path) = path
+syncOpTarget (SetEntryMode path _ _) = path
 
 
 -- | Whether an operation removes an existing filesystem entry.
@@ -550,6 +620,14 @@ executeSyncOp (RemoveFile path) = removeFile path
 executeSyncOp (CopyFile source destination) = copyFile source destination
 executeSyncOp (CreateDir path) = createDirectory path
 executeSyncOp (CreateDirs path) = createDirectories path
+executeSyncOp (SetEntryMode path mode fileType) =
+  case bits of
+    Nothing -> return ()
+    Just bits' -> setPortableMode path bits'
+ where
+  bits = case fileType of
+    FileSystem.Directory -> posixDirectoryModeBits mode
+    _ -> posixFileModeBits mode
 
 
 -- | Executes a plan in order.  A refused conflict returns before the first
