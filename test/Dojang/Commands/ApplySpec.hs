@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
@@ -234,7 +235,7 @@ spec = sequential $ do
           observedMode <- getPortableMode destination
           return (result, observedMode)
         result `shouldBe` ExitSuccess
-        observedMode `shouldBe` portableModeFromBits 0o600
+        observedMode `shouldBe` reconciledPrivateFileMode
 
     it "rejects traversing route names before mutating destinations" $
       withTempDir $ \tmpDir _ -> do
@@ -606,6 +607,17 @@ withTrackedIgnoredFile action = withTempDir $ \tmpDir _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action appEnv intermediate destination
+
+-- Windows cannot observe POSIX permission bits, so a pre-existing
+-- writable file already satisfies the declared private mode there and
+-- no mode reconciliation is planned.
+#ifdef mingw32_HOST_OS
+reconciledPrivateFileMode :: PortableMode
+reconciledPrivateFileMode = PortableMode Nothing True
+#else
+reconciledPrivateFileMode :: PortableMode
+reconciledPrivateFileMode = portableModeFromBits 0o600
+#endif
 
 
 withEnvVars :: [(String, Maybe OsPath)] -> IO a -> IO a
