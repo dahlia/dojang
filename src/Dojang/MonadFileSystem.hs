@@ -699,10 +699,20 @@ resolveLinkTarget link target
 
 
 -- | Follows chains of overlaid symbolic links until a non-link overlay (or
--- no overlay) is reached.  Throws an ELOOP-style 'IOError' after too many
--- hops so overlaid link cycles fail instead of looping forever.
+-- no overlay) is reached, as of the current sequence number.  Throws an
+-- ELOOP-style 'IOError' after too many hops so overlaid link cycles fail
+-- instead of looping forever.
 chaseOverlaidLinks :: String -> OsPath -> DryRunIO OsPath
-chaseOverlaidLinks location = go (0 :: Int)
+chaseOverlaidLinks location path = do
+  seqNo <- gets currentSequenceNumber
+  chaseOverlaidLinksAt location seqNo path
+
+
+-- | Like 'chaseOverlaidLinks', but observes the overlay as of the given
+-- sequence number, so historical reads (e.g. through 'Copied' events) see
+-- the link targets that were in effect at that time.
+chaseOverlaidLinksAt :: String -> SeqNo -> OsPath -> DryRunIO OsPath
+chaseOverlaidLinksAt location seqOffset = go (0 :: Int)
  where
   go :: Int -> OsPath -> DryRunIO OsPath
   go depth path
@@ -713,8 +723,13 @@ chaseOverlaidLinks location = go (0 :: Int)
             `ioeSetErrorString` "too many levels of symbolic links"
     | otherwise = do
         oFiles <- gets overlaidFiles
-        case oFiles !? normalise path of
-          Just ((_, SymlinkTo target _) :| _) ->
+        let changes =
+              [ change
+              | (no, change) <- maybe [] toList $ oFiles !? normalise path
+              , no <= seqOffset
+              ]
+        case changes of
+          SymlinkTo target _ : _ ->
             go (depth + 1) $ resolveLinkTarget path target
           _ -> return path
 
@@ -805,7 +820,8 @@ readFileFromDryRunIO seqOffset src = do
              readFileFromDryRunIO seqNo src'
            (_, SymlinkTo target _) : _ -> do
              resolved <-
-               chaseOverlaidLinks "readFile" $ resolveLinkTarget src target
+               chaseOverlaidLinksAt "readFile" seqOffset $
+                 resolveLinkTarget src target
              readFileFromDryRunIO seqOffset resolved
            (_, Gone) : _ -> do
              src' <- decodePath src
@@ -995,6 +1011,10 @@ instance MonadFileSystem DryRunIO where
     dst' <- decodePath dst
     dstIsDir <- liftIO $ doesDirectoryExist dst
     case oFiles !? normalise src of
+      Just ((_, SymlinkTo target _) :| _) -> do
+        resolved <-
+          chaseOverlaidLinks "copyFile" $ resolveLinkTarget src target
+        copyFile resolved dst
       Just ((_, Gone) :| _) -> throwError $ noSrcFileError src'
       Nothing | not srcExists -> throwError $ noSrcFileError src'
       Just ((_, Directory') :| _) -> throwError $ srcIsDirError src'

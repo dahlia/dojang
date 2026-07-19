@@ -1348,6 +1348,34 @@ spec = do
           exists (tmpDir </> foo)
         ioeGetErrorType e' `shouldBe` InvalidArgument
 
+    symSpecify "copies through an overlaid source link" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "linked"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- copyFile (tmpDir </> bar) (tmpDir </> baz)
+          readFile (tmpDir </> baz)
+        observed `shouldBe` "linked"
+
+    symSpecify "rejects copying a broken overlaid source link" $
+      withTempDir $ \tmpDir _ -> do
+        Left e <- tryDryRunIO $ do
+          () <- createSymbolicLink nonExistentP (tmpDir </> bar) File
+          copyFile (tmpDir </> bar) (tmpDir </> baz)
+        e `shouldSatisfy` isDoesNotExistError
+
+    symSpecify "keeps historical copies of retargeted links" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "original"
+        Prelude.writeFile (tmpDir' `combine` "qux") "retargeted"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- copyFile (tmpDir </> bar) (tmpDir </> baz)
+          () <- removeFile (tmpDir </> bar)
+          () <- createSymbolicLink qux (tmpDir </> bar) File
+          (,) <$> readFile (tmpDir </> baz) <*> readFile (tmpDir </> bar)
+        observed `shouldBe` ("original", "retargeted")
+
     symSpecify "allows re-creating a link after removal" $
       withTempDir $ \tmpDir tmpDir' -> do
         Prelude.writeFile (tmpDir' `combine` "foo") "real"
