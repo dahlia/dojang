@@ -834,9 +834,10 @@ getIgnoredFiles
   -- ^ The list of ignored files.
 getIgnoredFiles ctx = do
   (routes, _) <- routePaths ctx
+  let ownership = selectOwnership ctx.repository.sourcePath routes
   let exclusionsFor :: RouteResult -> [OsPath]
       exclusionsFor route =
-        case selectOwnership ctx.repository.sourcePath routes of
+        case ownership of
           Right state -> ownedExclusions state route.destinationPath
           Left _ -> []
   ignoredLists <- forM routes $ \route ->
