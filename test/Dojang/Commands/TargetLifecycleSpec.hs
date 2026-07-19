@@ -803,3 +803,5 @@ instance MonadFileSystem IsolatedHomeIO where
   setPortableMode path = liftIO . FileSystem.setPortableMode path
   setPortableWritable path =
     liftIO . FileSystem.setPortableWritable path
+  createSymbolicLink target link =
+    liftIO . FileSystem.createSymbolicLink target link

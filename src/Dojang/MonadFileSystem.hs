@@ -353,6 +353,24 @@ class (MonadError IOError m) => MonadFileSystem m where
   setPortableWritable :: (HasCallStack) => OsPath -> Bool -> m ()
 
 
+  -- | Creates a symbolic link.  The target may be absolute or relative;
+  -- a relative target is resolved from the directory containing the link.
+  -- The 'FileType' selects the intrinsic link type on Windows (file link
+  -- or directory link) and is ignored on POSIX.  Throws an 'IOError' when
+  -- the link path already exists, including when it is a broken symbolic
+  -- link.
+  createSymbolicLink
+    :: (HasCallStack)
+    => OsPath
+    -- ^ The path the link points at.
+    -> OsPath
+    -- ^ The path of the symbolic link to create.
+    -> FileType
+    -- ^ The intrinsic link type ('Directory' for a directory link;
+    -- everything else creates a file link).
+    -> m ()
+
+
 -- | Writes a sibling temporary file and atomically replaces the destination.
 writeFileAtomically
   :: (HasCallStack, MonadFileSystem m)
@@ -648,6 +666,12 @@ instance MonadFileSystem IO where
   setPortableWritable = setPortableWritableIO
 
 
+  createSymbolicLink target link Directory =
+    OsDirectory.createDirectoryLink target link
+  createSymbolicLink target link _ =
+    OsDirectory.createFileLink target link
+
+
 type SeqNo = Int
 
 
@@ -661,7 +685,17 @@ data OverlaidFile
     Gone
   | -- | A file that was copied from the given path.
     Copied OsPath
+  | -- | A symbolic link pointing at the given target, together with its
+    -- intrinsic link type.
+    SymlinkTo OsPath FileType
   deriving (Eq, Show)
+
+
+-- | Resolves a symbolic-link target from the directory containing the link.
+resolveLinkTarget :: OsPath -> OsPath -> OsPath
+resolveLinkTarget link target
+  | isAbsolute target = normalise target
+  | otherwise = normalise $ takeDirectory link </> target
 
 
 -- | Internal state of 'DryRun'.
@@ -748,6 +782,8 @@ readFileFromDryRunIO seqOffset src = do
            (_, Contents contents) : _ -> return contents
            (seqNo, Copied src') : _ ->
              readFileFromDryRunIO seqNo src'
+           (seqNo, SymlinkTo target _) : _ ->
+             readFileFromDryRunIO seqNo $ resolveLinkTarget src target
            (_, Gone) : _ -> do
              src' <- decodePath src
              throwError $
@@ -786,6 +822,8 @@ instance MonadFileSystem DryRunIO where
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> return False
+      Just ((_, SymlinkTo target _) :| _) ->
+        exists $ resolveLinkTarget path target
       Just (_ :| _) -> return True
       Nothing -> liftIO $ doesPathExist path
 
@@ -795,6 +833,8 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Contents _) :| _) -> return True
       Just ((_, Copied _) :| _) -> return True
+      Just ((_, SymlinkTo target _) :| _) ->
+        isFile $ resolveLinkTarget path target
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesFileExist path
 
@@ -812,6 +852,8 @@ instance MonadFileSystem DryRunIO where
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
       Just ((_, Directory') :| _) -> return True
+      Just ((_, SymlinkTo target _) :| _) ->
+        isDirectory $ resolveLinkTarget path target
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesDirectoryExist path
 
@@ -819,6 +861,7 @@ instance MonadFileSystem DryRunIO where
   isSymlink path = do
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
+      Just ((_, SymlinkTo _ _) :| _) -> return True
       Just _ -> return False
       Nothing ->
         liftIO (pathIsSymbolicLink path)
@@ -846,6 +889,12 @@ instance MonadFileSystem DryRunIO where
       (Nothing, _) | not dstDirExists -> throwError $ notInsideDirError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dirError dst'
       (_, Nothing) | dstIsDir -> throwError $ dirError dst'
+      (Just ((_, SymlinkTo target _) :| _), _) ->
+        writeFile
+          (resolveLinkTarget dstDir target </> takeFileName dst)
+          contents
+      (_, Just ((_, SymlinkTo target _) :| _)) ->
+        writeFile (resolveLinkTarget dst target) contents
       _ -> do
         addChangeToFile dst $ Contents contents
         return ()
@@ -887,6 +936,7 @@ instance MonadFileSystem DryRunIO where
   readSymlinkTarget path = do
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
+      Just ((_, SymlinkTo target _) :| _) -> return target
       Just ((_, Gone) :| _) -> do
         path' <- decodePath path
         throwError $
@@ -930,6 +980,10 @@ instance MonadFileSystem DryRunIO where
         (Nothing, _) | not dstDirIsDir -> throwError $ notInsideDirError dst'
         (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
         (_, Nothing) | dstIsDir -> throwError $ dstIsDirError dst'
+        (Just ((_, SymlinkTo target _) :| _), _) ->
+          copyFile src $ resolveLinkTarget dstDir target </> takeFileName dst
+        (_, Just ((_, SymlinkTo target _) :| _)) ->
+          copyFile src $ resolveLinkTarget dst target
         _ -> do
           addChangeToFile dst $ Copied src
           return ()
@@ -977,6 +1031,7 @@ instance MonadFileSystem DryRunIO where
       (Nothing, _) | not parentIsDir -> throwError $ notInsideDirError dst'
       (_, Just ((_, Contents _) :| _)) -> throwError $ dstIsFileError dst'
       (_, Just ((_, Copied _) :| _)) -> throwError $ dstIsFileError dst'
+      (_, Just ((_, SymlinkTo _ _) :| _)) -> throwError $ dstIsFileError dst'
       (_, Nothing) | isFile' -> throwError $ dstIsFileError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
       (_, Nothing) | isDir && not isSymlink' -> throwError $ dstIsDirError dst'
@@ -1050,6 +1105,8 @@ instance MonadFileSystem DryRunIO where
         throwError $ nonDirError path'
       Just ((_, Copied _) :| _) ->
         throwError $ nonDirError path'
+      Just ((_, SymlinkTo _ _) :| _) ->
+        throwError $ nonDirError path'
       Nothing
         | not isDir ->
             throwError $ nonDirError path'
@@ -1085,6 +1142,8 @@ instance MonadFileSystem DryRunIO where
         throwError $ nonDirError pathFP
       Just ((_, Copied _) :| _) ->
         throwError $ nonDirError pathFP
+      Just ((_, SymlinkTo target _) :| _) ->
+        listDirectory $ resolveLinkTarget path target
       Just ((_, Directory') :| _) ->
         return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
@@ -1169,6 +1228,8 @@ instance MonadFileSystem DryRunIO where
           m : _ -> return m
           [] -> case changes of
             (_, Copied src) : _ -> getPortableMode src
+            (_, SymlinkTo _ _) : _ ->
+              return $ PortableMode Nothing True Nothing
             (_, change) : rest -> do
               let recreated = not $ null [no | (no, Gone) <- rest]
               let fileType = case change of
@@ -1201,6 +1262,45 @@ instance MonadFileSystem DryRunIO where
       getPortableMode path
         `mapError` (`ioePrependLocation` "setPortableWritable")
     addModeToFile path current{writable = writable'}
+
+
+  createSymbolicLink target link fileType = do
+    oFiles <- gets overlaidFiles
+    link' <- decodePath link
+    let linkDir = normalise $ takeDirectory link
+    parentExists <- liftIO $ doesPathExist linkDir
+    parentIsDir <- liftIO $ doesDirectoryExist linkDir
+    realEntryExists <- liftIO $ do
+      pathExists <- doesPathExist link
+      linkIsSym <-
+        pathIsSymbolicLink link `catchError` \e ->
+          if isDoesNotExistError e then return False else throwError e
+      return $ pathExists || linkIsSym
+    case (oFiles !? linkDir, oFiles !? normalise link) of
+      (Just ((_, Gone) :| _), _) -> throwError $ noParentDirError link'
+      (Nothing, _) | not parentExists -> throwError $ noParentDirError link'
+      (Just ((_, Contents _) :| _), _) -> throwError $ notInsideDirError link'
+      (Just ((_, Copied _) :| _), _) -> throwError $ notInsideDirError link'
+      (Nothing, _) | not parentIsDir -> throwError $ notInsideDirError link'
+      (_, Just ((_, Gone) :| _)) -> create
+      (_, Just _) -> throwError $ existsError link'
+      (_, Nothing) | realEntryExists -> throwError $ existsError link'
+      _ -> create
+   where
+    create :: DryRunIO ()
+    create = addChangeToFile link $ SymlinkTo target fileType
+    noParentDirError :: FilePath -> IOError
+    noParentDirError link' =
+      mkIOError doesNotExistErrorType "createSymbolicLink" Nothing (Just link')
+        `ioeSetErrorString` "no parent directory"
+    notInsideDirError :: FilePath -> IOError
+    notInsideDirError link' =
+      mkIOError InappropriateType "createSymbolicLink" Nothing (Just link')
+        `ioeSetErrorString` "not inside a directory"
+    existsError :: FilePath -> IOError
+    existsError link' =
+      mkIOError alreadyExistsErrorType "createSymbolicLink" Nothing (Just link')
+        `ioeSetErrorString` "link path already exists"
 
 
   getFileSize path = do

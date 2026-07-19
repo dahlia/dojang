@@ -3308,6 +3308,8 @@ instance MonadFileSystem FailingReplaceIO where
   setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
   setPortableWritable path writable' =
     liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 newtype FailingCopyIO a
@@ -3360,6 +3362,8 @@ instance MonadFileSystem FailingCopyIO where
   setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
   setPortableWritable path writable' =
     liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 newtype FailingRemoveIO a
@@ -3416,3 +3420,5 @@ instance MonadFileSystem FailingRemoveIO where
   setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
   setPortableWritable path writable' =
     liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())

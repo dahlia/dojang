@@ -581,6 +581,8 @@ instance MonadFileSystem CoordinatedMigrationIO where
   setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
   setPortableWritable path writable' =
     liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 concurrently
@@ -673,3 +675,5 @@ instance MonadFileSystem FailingManifestWriteIO where
   setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
   setPortableWritable path writable' =
     liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())

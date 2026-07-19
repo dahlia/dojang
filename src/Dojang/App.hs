@@ -223,6 +223,8 @@ instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
   getPortableMode = App . lift . lift . getPortableMode
   setPortableMode path = App . lift . lift . setPortableMode path
   setPortableWritable path = App . lift . lift . setPortableWritable path
+  createSymbolicLink target link =
+    App . lift . lift . createSymbolicLink target link
 
 
 currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
