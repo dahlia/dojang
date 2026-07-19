@@ -58,7 +58,8 @@ import Dojang.Types.Reconciliation
   )
 import Dojang.Types.Repository (Repository (..))
 import Dojang.Types.RouteMetadata
-  ( RouteMode (DefaultMode, Private, ReadOnly)
+  ( PortableMode (..)
+  , RouteMode (DefaultMode, Private, ReadOnly)
   , portableModeFromBits
   )
 
@@ -817,13 +818,17 @@ spec = do
               , destination = FileEntry destinationPath (File 4)
               , destinationDelta = Modified
               }
-      equalInput <- observeReconciliationInput context correspondence
+      equalInput <- observeReconciliationInput context DefaultMode correspondence
       equalInput.sourceDestinationComparison `shouldBe` ReplicasEquivalent
       equalInput.destinationRouteState `shouldBe` NotRouted
+      equalInput.declaredDestinationMode `shouldBe` DefaultMode
+      ((.writable) <$> equalInput.observedDestinationMode) `shouldBe` Just True
 
       FileSystem.writeFile destinationPath "else"
-      differentInput <- observeReconciliationInput context correspondence
+      differentInput <-
+        observeReconciliationInput context Private correspondence
       differentInput.sourceDestinationComparison `shouldBe` ReplicasDifferent
+      differentInput.declaredDestinationMode `shouldBe` Private
 
   describe "execution" $ do
     it "interprets every synchronization operation" $ withTempDir $ \tmpDir _ -> do

@@ -92,7 +92,7 @@ import Dojang.Types.Reconciliation
   , observeReconciliationInput
   , planReconciliation
   )
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
 import Dojang.Types.RouteMetadata (renderRouteMode)
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
@@ -141,7 +141,7 @@ apply force filePaths = do
             ]
   let files = (.correspondence) <$> managed
   $(logDebugSH) files
-  inputs <- mapM (observeSelectedReconciliationInput ctx) files
+  inputs <- mapM (observeSelectedReconciliationInput ctx) managed
   let conflictPolicy =
         if force then PreferAuthoritative else RefuseConflicts
   let plan =
@@ -295,10 +295,11 @@ persistConvergedTargets ctx machineState selected =
 observeSelectedReconciliationInput
   :: (MonadFileSystem i, MonadIO i)
   => Context i
-  -> FileCorrespondence
+  -> ManagedCorrespondence
   -> i ReconciliationInput
-observeSelectedReconciliationInput ctx correspondence = do
-  input <- observeReconciliationInput ctx correspondence
+observeSelectedReconciliationInput ctx managed = do
+  input <-
+    observeReconciliationInput ctx managed.route.mode managed.correspondence
   return $ case input.destinationRouteState of
     Ignored route _ -> input{destinationRouteState = Routed route}
     _ -> input

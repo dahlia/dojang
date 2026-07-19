@@ -28,6 +28,7 @@ module Dojang.Types.Reconciliation
   ) where
 
 import Control.Monad (forM_)
+import Control.Monad.Except (catchError)
 import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, nub, sortBy, sortOn)
 import Data.List.NonEmpty (NonEmpty)
@@ -229,22 +230,31 @@ observeReconciliationInput
   :: (MonadFileSystem m, MonadIO m)
   => Context m
   -- ^ The repository context used to observe destination routing.
+  -> RouteMode
+  -- ^ The portable mode declared by the route owning the destination.
   -> FileCorrespondence
   -- ^ The correspondence whose remaining facts should be observed.
   -> m ReconciliationInput
   -- ^ Pure planner input containing the correspondence and extra observations.
-observeReconciliationInput context correspondence = do
+observeReconciliationInput context declaredMode correspondence = do
   comparison <- observeComparison correspondence
   (routeState, _) <- getRouteState context correspondence.destination.path
+  observedMode <- case correspondence.destination.stat of
+    File _ -> observeDestinationMode
+    Directory -> observeDestinationMode
+    _ -> return Nothing
   return
     ReconciliationInput
       { correspondence = correspondence
       , sourceDestinationComparison = comparison
       , destinationRouteState = routeState
-      , declaredDestinationMode = DefaultMode
-      , observedDestinationMode = Nothing
+      , declaredDestinationMode = declaredMode
+      , observedDestinationMode = observedMode
       }
  where
+  observeDestinationMode =
+    (Just <$> getPortableMode correspondence.destination.path)
+      `catchError` const (return Nothing)
   observeComparison
     :: (MonadFileSystem m) => FileCorrespondence -> m ReplicaComparison
   observeComparison value =

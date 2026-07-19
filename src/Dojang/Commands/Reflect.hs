@@ -115,7 +115,10 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
-import Dojang.Types.RouteMetadata (renderRouteMode)
+import Dojang.Types.RouteMetadata
+  ( RouteMode (DefaultMode)
+  , renderRouteMode
+  )
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
@@ -541,9 +544,24 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
           selectedFiles
   let initialSelectedManaged = filter matchesSelection initialManaged
   pathStyle <- pathStyleFor stderr
+  let declaredModeFor :: FileCorrespondence -> RouteMode
+      declaredModeFor file =
+        case [ m.route.mode
+             | m <- initialManaged
+             , destinationPathIdentity m.correspondence.destination.path
+                 == destinationPathIdentity file.destination.path
+             ] of
+          mode : _ -> mode
+          [] -> DefaultMode
   inputs <-
     mapM
-      (uncurry $ observeSelectedReconciliationInput ctx)
+      ( \(allowIgnored, file) ->
+          observeSelectedReconciliationInput
+            ctx
+            allowIgnored
+            (declaredModeFor file)
+            file
+      )
       selectedCorrespondences
   let policy = if force then PreferAuthoritative else RefuseConflicts
   let plan = planReconciliation DestinationToSource policy inputs
@@ -657,10 +675,12 @@ observeSelectedReconciliationInput
   => Context (App i)
   -> Bool
   -- ^ Whether command-level selection explicitly admitted an ignored path.
+  -> RouteMode
+  -- ^ The portable mode declared by the route owning the destination.
   -> FileCorrespondence
   -> App i ReconciliationInput
-observeSelectedReconciliationInput ctx allowIgnored correspondence = do
-  input <- observeReconciliationInput ctx correspondence
+observeSelectedReconciliationInput ctx allowIgnored declaredMode correspondence = do
+  input <- observeReconciliationInput ctx declaredMode correspondence
   return $
     if allowIgnored
       then case input.destinationRouteState of

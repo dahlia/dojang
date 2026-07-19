@@ -21,11 +21,21 @@ import Prelude hiding (readFile, writeFile)
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
 import Dojang.Commands.Apply (apply)
 import Dojang.ExitCodes (manifestReadError)
-import Dojang.MonadFileSystem (MonadFileSystem (..), dryRunIO)
+import Dojang.MonadFileSystem
+  ( FileType (File)
+  , MonadFileSystem (..)
+  , dryRunIO
+  )
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute)
+  , RouteMode (Private)
+  , RouteTarget (RouteTarget)
+  , fileRoutePreservingOrder
+  )
 import Dojang.Types.MachineState
   ( MachineState (..)
   , readMachineId
@@ -36,6 +46,7 @@ import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
+import Dojang.Types.RouteMetadata (portableModeFromBits)
 
 
 spec :: Spec
@@ -86,6 +97,28 @@ spec = sequential $ do
           readRepositoryState appEnv.stateDirectory repositoryId' machineId
         transactions <- listDirectory state.targetSnapshotRoot
         length transactions `shouldBe` 1
+
+    it "applies a declared private mode to recreated destinations" $
+      withPrivateModeFile $ \appEnv destination -> do
+        (result, contents, observedMode) <- dryRunIO $ do
+          result <- runAppWithoutLogging appEnv (apply True [])
+          contents <- readFile destination
+          observedMode <- getPortableMode destination
+          return (result, contents, observedMode)
+        result `shouldBe` ExitSuccess
+        contents `shouldBe` "private contents"
+        observedMode `shouldBe` portableModeFromBits 0o600
+
+    it "reconciles metadata-only drift toward the declared mode" $
+      withPrivateModeFile $ \appEnv destination -> do
+        (result, observedMode) <- dryRunIO $ do
+          -- Converge contents first so only the mode drifts:
+          () <- writeFile destination "private contents"
+          result <- runAppWithoutLogging appEnv (apply True [])
+          observedMode <- getPortableMode destination
+          return (result, observedMode)
+        result `shouldBe` ExitSuccess
+        observedMode `shouldBe` portableModeFromBits 0o600
 
     it "rejects traversing route names before mutating destinations" $
       withTempDir $ \tmpDir _ -> do
@@ -199,6 +232,70 @@ withTwoManagedFiles action = withTempDir $ \tmpDir _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action appEnv sourceA destinationA destinationB
+
+
+withPrivateModeFile
+  :: (AppEnv -> OsPath -> IO a)
+  -> IO a
+withPrivateModeFile action = withTempDir $ \tmpDir _ -> do
+  sourceDir <- encodeFS "source"
+  intermediateDir <- encodeFS ".dojang"
+  manifestFilename <- encodeFS "dojang.toml"
+  envFilename <- encodeFS "dojang-env.toml"
+  stateDir <- encodeFS ".state"
+  routeName <- encodeFS "private-file"
+  destinationName <- encodeFS "destination"
+  homeName <- encodeFS "home"
+  let repository = tmpDir </> sourceDir
+  let source = repository </> routeName
+  let intermediate = repository </> intermediateDir </> routeName
+  let destination = tmpDir </> destinationName
+  let home = tmpDir </> homeName
+  let Right repositoryId' =
+        parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+  let route =
+        fileRoutePreservingOrder
+          (const Nothing)
+          [
+            ( Always
+            , Just $
+                RouteTarget (Substitution "DEST_PRIVATE") Private CopyRoute
+            )
+          ]
+          File
+  let manifest' =
+        Manifest
+          { Manifest.repositoryId = Just repositoryId'
+          , monikers = mempty
+          , variables = mempty
+          , fileRoutes = Map.fromList [(routeName, route)]
+          , ignorePatterns = mempty
+          , hooks = mempty
+          }
+  let appEnv =
+        AppEnv
+          repository
+          False
+          (Just intermediateDir)
+          (tmpDir </> stateDir)
+          manifestFilename
+          envFilename
+          False
+          False
+
+  createDirectories $ repository </> intermediateDir
+  createDirectories home
+  writeManifestFile manifest' $ repository </> manifestFilename
+  writeFile source "private contents"
+  writeFile intermediate "base"
+  writeFile destination "base"
+
+  withEnvVars
+    [ ("DEST_PRIVATE", Just destination)
+    , ("HOME", Just home)
+    , ("USERPROFILE", Just home)
+    ]
+    $ action appEnv destination
 
 
 withTrackedIgnoredFile
