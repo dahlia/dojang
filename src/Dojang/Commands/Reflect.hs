@@ -720,6 +720,11 @@ logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
 logSyncOp (RemoveDirs path) = do
   path' <- decodePath path
   $(logDebug) $ "Remove directory recursively: " <> pack path'
+logSyncOp (RemoveDirsExcept path _) = do
+  path' <- decodePath path
+  $(logDebug) $
+    "Remove directory recursively (preserving nested-owned entries): "
+      <> pack path'
 logSyncOp (RemoveFile path) = do
   path' <- decodePath path
   $(logDebug) $ "Remove file: " <> pack path'

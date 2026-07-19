@@ -189,6 +189,11 @@ data ReconciliationItem = ReconciliationItem
 data SyncOp
   = -- | Remove a directory and all of its children.
     RemoveDirs OsPath
+  | -- | Remove a directory's contents except the given protected subtree
+    -- roots (and the containers leading to them).  The directory itself is
+    -- kept when protected entries remain under it.  Symbolic links are
+    -- removed as entries and never followed.
+    RemoveDirsExcept OsPath [OsPath]
   | -- | Remove a regular file or symbolic link.
     RemoveFile OsPath
   | -- | Copy a regular file from the first path to the second path.
@@ -211,6 +216,7 @@ data SyncOp
 syncOpOrdKey :: SyncOp -> (OsPath, Int, OsPath)
 syncOpOrdKey (RemoveFile path) = (takeDirectory path, 1, path)
 syncOpOrdKey (RemoveDirs path) = (path, 2, path)
+syncOpOrdKey (RemoveDirsExcept path _) = (path, 2, path)
 syncOpOrdKey (CreateDir path) = (path, 3, path)
 syncOpOrdKey (CreateDirs path) = (path, 4, path)
 syncOpOrdKey (CopyFile _ destination) =
@@ -521,7 +527,8 @@ planSupportedInput direction input
             Just _ -> []
             Nothing ->
               tagOperations FirstPhase overwrittenReplica $
-                removeEntry overwritten
+                protectRemovals input overwrittenReplica $
+                  removeEntry overwritten
         intermediateOperations =
           tagOperations SecondPhase IntermediateReplica $
             removeEntry correspondence.intermediate
@@ -555,7 +562,8 @@ planSupportedInput direction input
               | not targetNeedsUpdate -> []
               | otherwise ->
                   tagOperations SecondPhase overwrittenReplica $
-                    replaceEntry stagedIntermediate overwritten
+                    protectRemovals input overwrittenReplica $
+                      replaceEntry stagedIntermediate overwritten
         modeOperations =
           tagOperations ThirdPhase DestinationReplica $
             planModeChange input authoritative $
@@ -608,6 +616,31 @@ planModeChange input finalEntry destinationTouched
   satisfied declared = case input.observedDestinationMode of
     Just observed -> observed `satisfiesPortableMode` declared
     Nothing -> False
+
+
+-- | Converts recursive destination removals into protected removals when
+-- routes nested inside this route own subtrees under the removed path.
+-- Only destination-replica removals are converted: the repository and the
+-- intermediate contain no nested-owned entries.
+protectRemovals :: ReconciliationInput -> Replica -> [SyncOp] -> [SyncOp]
+protectRemovals input replica operations
+  | replica /= DestinationReplica = operations
+  | null input.protectedDestinations = operations
+  | otherwise = fmap protect operations
+ where
+  protect :: SyncOp -> SyncOp
+  protect (RemoveDirs path) =
+    case protectedUnder path of
+      [] -> RemoveDirs path
+      protected -> RemoveDirsExcept path protected
+  protect operation = operation
+  protectedUnder :: OsPath -> [OsPath]
+  protectedUnder path =
+    [ protected
+    | protected <- input.protectedDestinations
+    , splitDirectories (normalise path)
+        `isPrefixOf` splitDirectories (normalise protected)
+    ]
 
 
 isSymlinkStat :: FileStat -> Bool
@@ -698,6 +731,7 @@ operationKey operation =
   depth = length $ splitDirectories $ normalise path
   (category, depthKey) = case syncOperation of
     RemoveDirs _ -> (0, negate depth)
+    RemoveDirsExcept _ _ -> (0, negate depth)
     RemoveFile _ -> (0, negate depth)
     CreateDir _ -> (1, depth)
     CreateDirs _ -> (1, depth)
@@ -708,6 +742,7 @@ operationKey operation =
 
 syncOpTarget :: SyncOp -> OsPath
 syncOpTarget (RemoveDirs path) = path
+syncOpTarget (RemoveDirsExcept path _) = path
 syncOpTarget (RemoveFile path) = path
 syncOpTarget (CopyFile _ destination) = destination
 syncOpTarget (CreateDir path) = path
@@ -723,6 +758,7 @@ isDestructiveSyncOp
   -> Bool
   -- ^ Whether it removes a file or directory.
 isDestructiveSyncOp (RemoveDirs _) = True
+isDestructiveSyncOp (RemoveDirsExcept _ _) = True
 isDestructiveSyncOp (RemoveFile _) = True
 isDestructiveSyncOp _ = False
 
@@ -745,6 +781,8 @@ executeSyncOp
   -> m ()
   -- ^ The interpreted filesystem effect.
 executeSyncOp (RemoveDirs path) = removeDirectoryRecursively path
+executeSyncOp (RemoveDirsExcept path protected) =
+  removeDirsExcept path protected
 executeSyncOp (RemoveFile path) = removeFile path
 executeSyncOp (CopyFile source destination) = copyFile source destination
 executeSyncOp (CreateDir path) = createDirectory path
@@ -759,6 +797,44 @@ executeSyncOp (SetEntryMode path mode fileType) =
   bits = case fileType of
     FileSystem.Directory -> posixDirectoryModeBits mode
     _ -> posixFileModeBits mode
+
+
+-- | Removes a directory's contents while preserving the protected
+-- subtree roots and every container on the way to them.  Symbolic links
+-- are removed as entries and never followed.
+removeDirsExcept
+  :: forall m
+   . (MonadFileSystem m)
+  => OsPath
+  -- ^ The directory whose contents should be removed.
+  -> [OsPath]
+  -- ^ The protected subtree roots.
+  -> m ()
+removeDirsExcept root protected = go root
+ where
+  protected' = fmap normalise protected
+  isProtectedRoot :: OsPath -> Bool
+  isProtectedRoot path = normalise path `elem` protected'
+  containsProtected :: OsPath -> Bool
+  containsProtected path =
+    any (\p -> path' `isPrefixOf'` p) protected'
+   where
+    path' = normalise path
+  isPrefixOf' :: OsPath -> OsPath -> Bool
+  isPrefixOf' ancestor path =
+    splitDirectories ancestor `isPrefixOf` splitDirectories path
+  go :: OsPath -> m ()
+  go path
+    | isProtectedRoot path = return ()
+    | not $ containsProtected path = do
+        isLink <- isSymlink path
+        isDir <- isDirectory path
+        if isDir && not isLink
+          then removeDirectoryRecursively path
+          else removeFile path
+    | otherwise = do
+        entries <- listDirectory path
+        forM_ entries $ \entry -> go $ path </> entry
 
 
 -- | Executes a plan in order.  A refused conflict returns before the first
@@ -826,7 +902,12 @@ executeReconciliationPlanGuarded observe plan =
     return $ entry ++ parent
   widenForSyncOp (RemoveDirs path) = do
     parent <- widenIfReadOnly $ takeDirectory path
-    tree <- widenTree path
+    tree <- widenTree (const False) path
+    return $ tree ++ parent
+  widenForSyncOp (RemoveDirsExcept path protected) = do
+    parent <- widenIfReadOnly $ takeDirectory path
+    let protected' = fmap normalise protected
+    tree <- widenTree ((`elem` protected') . normalise) path
     return $ tree ++ parent
   widenForSyncOp (CopyFile _ destination) = do
     entry <- widenIfReadOnly destination
@@ -863,17 +944,19 @@ executeReconciliationPlanGuarded observe plan =
         if parent == path
           then return []
           else widenNearestExistingAncestor parent
-  widenTree :: OsPath -> m [OsPath]
-  widenTree path = do
-    isDir <- isDirectory path
-    isLink <- isSymlink path
-    root <- widenIfReadOnly path
-    if isDir && not isLink
-      then do
-        entries <- listDirectory path
-        nested <- mapM (widenTree . (path </>)) entries
-        return $ concat nested ++ root
-      else return root
+  widenTree :: (OsPath -> Bool) -> OsPath -> m [OsPath]
+  widenTree isProtected path
+    | isProtected path = return []
+    | otherwise = do
+        isDir <- isDirectory path
+        isLink <- isSymlink path
+        root <- widenIfReadOnly path
+        if isDir && not isLink
+          then do
+            entries <- listDirectory path
+            nested <- mapM (widenTree isProtected . (path </>)) entries
+            return $ concat nested ++ root
+          else return root
 
 
 -- | Executes a plan in order, invoking an observer immediately before each

@@ -343,6 +343,14 @@ printSyncOp (RemoveDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Remove " <> pathStyle path' <> " (and its children)...")
+printSyncOp (RemoveDirsExcept path _) = do
+  pathStyle <- pathStyleFor stderr
+  let path' = addTrailingPathSeparator path
+  printStderr
+    ( "Remove "
+        <> pathStyle path'
+        <> " (preserving entries owned by nested routes)..."
+    )
 printSyncOp (RemoveFile path) = do
   pathStyle <- pathStyleFor stderr
   printStderr ("Remove " <> pathStyle path <> "...")

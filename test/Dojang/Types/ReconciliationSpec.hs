@@ -150,6 +150,7 @@ applyModelOperations = foldl' applyOperation
     CreateDirs path -> Map.insert path ModelDirectory state
     SetEntryMode _ _ _ -> state
     CreateSymlink _ _ _ -> state
+    RemoveDirsExcept path _ -> Map.insert path ModelMissing state
 
 
 swapReplica :: Replica -> Replica
@@ -635,6 +636,77 @@ spec = do
             planReconciliation direction RefuseConflicts [reconciled]
       secondPlan.operations === []
       fmap (.outcome) secondPlan.items === [NoChange]
+
+  describe "RemoveDirsExcept" $ do
+    it "preserves protected subtrees during removal" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        goneName <- encodeFS "gone"
+        keepName <- encodeFS "keep"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        FileSystem.createDirectories $ rootPath </> goneName
+        FileSystem.writeFile (rootPath </> goneName </> fileName') "gone"
+        FileSystem.writeFile (rootPath </> fileName') "gone"
+        FileSystem.createDirectories $ rootPath </> keepName
+        FileSystem.writeFile (rootPath </> keepName </> fileName') "kept"
+        executeSyncOp $
+          RemoveDirsExcept rootPath [rootPath </> keepName]
+        FileSystem.exists (rootPath </> goneName) `shouldReturn` False
+        FileSystem.exists (rootPath </> fileName') `shouldReturn` False
+        FileSystem.readFile (rootPath </> keepName </> fileName')
+          `shouldReturn` "kept"
+
+    it "preserves deeply nested protected roots" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        midName <- encodeFS "mid"
+        keepName <- encodeFS "keep"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        let keepPath = rootPath </> midName </> keepName
+        FileSystem.createDirectories keepPath
+        FileSystem.writeFile (keepPath </> fileName') "kept"
+        FileSystem.writeFile (rootPath </> midName </> fileName') "gone"
+        executeSyncOp $ RemoveDirsExcept rootPath [keepPath]
+        FileSystem.exists (rootPath </> midName </> fileName')
+          `shouldReturn` False
+        FileSystem.readFile (keepPath </> fileName') `shouldReturn` "kept"
+
+    it "removes everything when nothing is protected" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        FileSystem.createDirectories rootPath
+        FileSystem.writeFile (rootPath </> fileName') "gone"
+        executeSyncOp $ RemoveDirsExcept rootPath []
+        FileSystem.exists rootPath `shouldReturn` False
+
+    it "converts ancestor removals to protected removals" $ do
+      let removal =
+            ( makeInput
+                paths
+                Missing
+                Directory
+                Directory
+                Removed
+                Unchanged
+                ReplicasDifferent
+                (Routed route)
+            )
+              { protectedDestinations = [paths.destination </> paths.source]
+              }
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [removal]
+      [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+        `shouldBe` [ RemoveDirsExcept
+                       paths.destination
+                       [paths.destination </> paths.source]
+                   ]
+      -- The intermediate is unaffected by destination protection:
+      [op.syncOp | op <- plan.operations, op.replica == IntermediateReplica]
+        `shouldBe` [RemoveDirs paths.intermediate]
 
   describe "deployment links" $ do
     let linkInput destinationStat =
