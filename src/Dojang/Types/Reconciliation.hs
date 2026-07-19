@@ -61,6 +61,7 @@ import Dojang.Types.Context
 import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
+  , RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
   , portableModeFromBits
   , posixDirectoryModeBits
@@ -122,6 +123,16 @@ data ReconciliationInput = ReconciliationInput
   , observedDestinationMode :: Maybe PortableMode
   -- ^ The observed permission state of the destination entry, or
   -- 'Nothing' when the destination is missing or a symbolic link.
+  , destinationKind :: RouteKind
+  -- ^ Whether the owning route deploys a copied entry or a symbolic
+  -- link.  Deployment links are one-way projections of the repository
+  -- source: they are created and repaired by apply and never reflected.
+  , routeFileType :: FileSystem.FileType
+  -- ^ The file type the owning route declares, selecting the intrinsic
+  -- link type for deployment links.
+  , protectedDestinations :: [OsPath]
+  -- ^ Absolute destination roots owned by routes nested inside this
+  -- correspondence's route.  Recursive removals must preserve them.
   }
   deriving (Eq, Ord, Show)
 
@@ -141,6 +152,10 @@ data ReconciliationSkipReason
   | -- | Reconciliation would require creating a symbolic link, which the
     -- current filesystem operation vocabulary cannot express.
     UnsupportedSymlink
+  | -- | The destination is a deployment link: a one-way projection of the
+    -- repository source that is never reflected back, regardless of
+    -- forcing or path selection.
+    DeploymentLinkNotReflectable
   deriving (Eq, Ord, Show)
 
 
@@ -186,6 +201,10 @@ data SyncOp
     -- 'FileSystem.FileType' selects whether directory or file permission
     -- bits apply; the default mode is a no-op.
     SetEntryMode OsPath RouteMode FileSystem.FileType
+  | -- | Create a symbolic link at the second path pointing at the first.
+    -- The 'FileSystem.FileType' selects the intrinsic link type on
+    -- Windows.
+    CreateSymlink OsPath OsPath FileSystem.FileType
   deriving (Eq, Show)
 
 
@@ -197,6 +216,7 @@ syncOpOrdKey (CreateDirs path) = (path, 4, path)
 syncOpOrdKey (CopyFile _ destination) =
   (takeDirectory destination, 5, destination)
 syncOpOrdKey (SetEntryMode path _ _) = (takeDirectory path, 6, path)
+syncOpOrdKey (CreateSymlink _ link _) = (takeDirectory link, 5, link)
 
 
 instance Ord SyncOp where
@@ -256,6 +276,9 @@ observeReconciliationInput context declaredMode correspondence = do
       , destinationRouteState = routeState
       , declaredDestinationMode = declaredMode
       , observedDestinationMode = observedMode
+      , destinationKind = CopyRoute
+      , routeFileType = FileSystem.File
+      , protectedDestinations = []
       }
  where
   observeDestinationMode =
@@ -362,6 +385,9 @@ planInput
   -> ReconciliationInput
   -> (ReconciliationItem, [ReconciliationConflict], [TaggedOperation])
 planInput direction policy input
+  | input.destinationKind == SymlinkRoute =
+      planDeploymentLink direction policy input
+planInput direction policy input
   | conflict && policy == RefuseConflicts =
       ( ReconciliationItem correspondence authoritative ConflictDetected
       , conflictList
@@ -382,6 +408,55 @@ planInput direction policy input
   conflict = isConflict input
   conflictList =
     [ReconciliationConflict correspondence | conflict]
+
+
+-- | Plans a deployment-link route: the destination is a one-way
+-- projection of the repository source.  Apply creates or repairs the
+-- link; reflection is refused categorically, including under forcing.
+-- A broken link whose stored target is already correct is converged:
+-- the missing source is a source-side problem, not a missing
+-- destination.
+planDeploymentLink
+  :: ReconciliationDirection
+  -> ConflictPolicy
+  -> ReconciliationInput
+  -> (ReconciliationItem, [ReconciliationConflict], [TaggedOperation])
+planDeploymentLink DestinationToSource _ input =
+  ( ReconciliationItem
+      input.correspondence
+      input.correspondence.source
+      (Skipped DeploymentLinkNotReflectable)
+  , []
+  , []
+  )
+planDeploymentLink SourceToDestination policy input =
+  case destination.stat of
+    Symlink target
+      | normalise target == normalise desiredTarget -> converged
+    Missing -> reconciled [createLink]
+    Symlink _ -> reconciled [RemoveFile destination.path, createLink]
+    _
+      | policy == PreferAuthoritative ->
+          reconciled $ removeEntry destination ++ [createLink]
+      | otherwise ->
+          ( ReconciliationItem correspondence desired ConflictDetected
+          , [ReconciliationConflict correspondence]
+          , []
+          )
+ where
+  correspondence = input.correspondence
+  destination = correspondence.destination
+  desiredTarget = correspondence.source.path
+  desired = FileEntry destination.path $ Symlink desiredTarget
+  createLink =
+    CreateSymlink desiredTarget destination.path input.routeFileType
+  converged =
+    (ReconciliationItem correspondence desired NoChange, [], [])
+  reconciled operations =
+    ( ReconciliationItem correspondence desired WillReconcile
+    , []
+    , tagOperations SecondPhase DestinationReplica operations
+    )
 
 
 isConflict :: ReconciliationInput -> Bool
@@ -627,6 +702,7 @@ operationKey operation =
     CreateDir _ -> (1, depth)
     CreateDirs _ -> (1, depth)
     CopyFile _ _ -> (2, depth)
+    CreateSymlink{} -> (2, depth)
     SetEntryMode{} -> (3, depth)
 
 
@@ -637,6 +713,7 @@ syncOpTarget (CopyFile _ destination) = destination
 syncOpTarget (CreateDir path) = path
 syncOpTarget (CreateDirs path) = path
 syncOpTarget (SetEntryMode path _ _) = path
+syncOpTarget (CreateSymlink _ link _) = link
 
 
 -- | Whether an operation removes an existing filesystem entry.
@@ -672,6 +749,8 @@ executeSyncOp (RemoveFile path) = removeFile path
 executeSyncOp (CopyFile source destination) = copyFile source destination
 executeSyncOp (CreateDir path) = createDirectory path
 executeSyncOp (CreateDirs path) = createDirectories path
+executeSyncOp (CreateSymlink target link fileType) =
+  createSymbolicLink target link fileType
 executeSyncOp (SetEntryMode path mode fileType) =
   case bits of
     Nothing -> return ()
@@ -758,6 +837,8 @@ executeReconciliationPlanGuarded observe plan =
   widenForSyncOp (CreateDirs path) =
     widenNearestExistingAncestor $ takeDirectory path
   widenForSyncOp (SetEntryMode _ _ _) = return []
+  widenForSyncOp (CreateSymlink _ link _) =
+    widenIfReadOnly $ takeDirectory link
   widenIfReadOnly :: OsPath -> m [OsPath]
   widenIfReadOnly path = do
     present <- exists path

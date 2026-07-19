@@ -331,6 +331,11 @@ printSkippedReconciliation pathStyle correspondence reason =
         "Skipping "
           <> pathStyle correspondence.source.path
           <> " because symbolic link synchronization is not supported."
+    DeploymentLinkNotReflectable ->
+      printStderr' Note $
+        "Skipping "
+          <> pathStyle correspondence.destination.path
+          <> " because deployment links are never reflected."
 
 
 printSyncOp :: (MonadIO i) => SyncOp -> App i ()
@@ -353,6 +358,10 @@ printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
+printSyncOp (CreateSymlink target link _) = do
+  pathStyle <- pathStyleFor stderr
+  printStderr
+    ("Link " <> pathStyle link <> " to " <> pathStyle target <> "...")
 printSyncOp (SetEntryMode path mode _) = do
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr

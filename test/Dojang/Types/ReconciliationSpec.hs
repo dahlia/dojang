@@ -38,7 +38,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.Environment.Current (MonadEnvironment (currentEnvironment))
 import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
-import Dojang.Types.FileRoute (RouteKind (CopyRoute))
+import Dojang.Types.FileRoute (RouteKind (CopyRoute, SymlinkRoute))
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
@@ -149,6 +149,7 @@ applyModelOperations = foldl' applyOperation
     CreateDir path -> Map.insert path ModelDirectory state
     CreateDirs path -> Map.insert path ModelDirectory state
     SetEntryMode _ _ _ -> state
+    CreateSymlink _ _ _ -> state
 
 
 swapReplica :: Replica -> Replica
@@ -177,6 +178,9 @@ swapInput input =
     , destinationRouteState = input.destinationRouteState
     , declaredDestinationMode = input.declaredDestinationMode
     , observedDestinationMode = input.observedDestinationMode
+    , destinationKind = input.destinationKind
+    , routeFileType = input.routeFileType
+    , protectedDestinations = input.protectedDestinations
     }
 
 
@@ -204,6 +208,9 @@ makeInput paths sourceStat intermediateStat destinationStat sourceDelta destinat
     , destinationRouteState = routeState
     , declaredDestinationMode = DefaultMode
     , observedDestinationMode = Nothing
+    , destinationKind = CopyRoute
+    , routeFileType = FileSystem.File
+    , protectedDestinations = []
     }
 
 
@@ -628,6 +635,124 @@ spec = do
             planReconciliation direction RefuseConflicts [reconciled]
       secondPlan.operations === []
       fmap (.outcome) secondPlan.items === [NoChange]
+
+  describe "deployment links" $ do
+    let linkInput destinationStat =
+          ( makeInput
+              paths
+              (File 4)
+              Missing
+              destinationStat
+              Unchanged
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+          )
+            { destinationKind = SymlinkRoute
+            , routeFileType = FileSystem.File
+            }
+
+    it "creates a missing deployment link" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput Missing]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.File
+                   ]
+
+    it "accepts a correctly targeted link even when broken" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput $ Symlink paths.source]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "replaces a link with the wrong target" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput $ Symlink paths.intermediate]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       RemoveFile paths.destination
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.File
+                   ]
+
+    it "refuses to replace an existing entry without force" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput $ File 4]
+      ((.outcome) <$> plan.items) `shouldBe` [ConflictDetected]
+      length plan.conflicts `shouldBe` 1
+      plan.operations `shouldBe` []
+
+    it "replaces an existing entry when preferred" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              PreferAuthoritative
+              [linkInput $ File 4]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       RemoveFile paths.destination
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.File
+                   ]
+
+    it "replaces an existing directory when preferred" $ do
+      let input =
+            (linkInput Directory){routeFileType = FileSystem.Directory}
+      let plan =
+            planReconciliation SourceToDestination PreferAuthoritative [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       RemoveDirs paths.destination
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.Directory
+                   ]
+
+    it "never reflects a deployment link" $ do
+      let missingPlan =
+            planReconciliation
+              DestinationToSource
+              RefuseConflicts
+              [linkInput Missing]
+      ((.outcome) <$> missingPlan.items)
+        `shouldBe` [Skipped DeploymentLinkNotReflectable]
+      missingPlan.operations `shouldBe` []
+      -- Even with the authoritative-preference policy (--force):
+      let forcedPlan =
+            planReconciliation
+              DestinationToSource
+              PreferAuthoritative
+              [linkInput $ File 4]
+      ((.outcome) <$> forcedPlan.items)
+        `shouldBe` [Skipped DeploymentLinkNotReflectable]
+      forcedPlan.operations `shouldBe` []
 
   describe "declared destination modes" $ do
     let withMode declared observed input =

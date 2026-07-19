@@ -709,6 +709,11 @@ printSkippedReconciliation pathStyle correspondence reason =
         "Skipping "
           <> pathStyle correspondence.destination.path
           <> " because symbolic link synchronization is not supported."
+    DeploymentLinkNotReflectable ->
+      printStderr' Note $
+        "Skipping "
+          <> pathStyle correspondence.destination.path
+          <> " because deployment links are never reflected."
 
 
 logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
@@ -728,6 +733,11 @@ logSyncOp (CreateDir path) = do
 logSyncOp (CreateDirs path) = do
   path' <- decodePath path
   $(logDebug) $ "Create directory recursively: " <> pack path'
+logSyncOp (CreateSymlink target link _) = do
+  target' <- decodePath target
+  link' <- decodePath link
+  $(logDebug) $
+    "Create symbolic link: " <> pack link' <> " -> " <> pack target'
 logSyncOp (SetEntryMode path mode _) = do
   path' <- decodePath path
   $(logDebug) $
