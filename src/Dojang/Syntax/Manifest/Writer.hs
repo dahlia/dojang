@@ -59,7 +59,12 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (FilePathExpression, toPathText)
-import Dojang.Types.FileRoute (FileRoute (..), RouteTarget (..))
+import Dojang.Types.FileRoute
+  ( FileRoute (..)
+  , RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  , RouteTarget (..)
+  )
 import qualified Dojang.Types.FileRoute as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook
@@ -84,6 +89,7 @@ import Dojang.Types.ManifestVariable
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
+import Dojang.Types.RouteMetadata (renderRouteKind, renderRouteMode)
 
 
 schema :: Text
@@ -358,6 +364,16 @@ mapFileRoute' monikers fileRoute =
           Moniker name | Data.HashMap.Strict.member name monikers -> Nothing
           _ -> Just $ writeEnvironmentPredicate predicate
       , Internal.routePath = toPathText . (.expression) <$> filePath
+      , Internal.routeMode = case filePath of
+          Just target
+            | target.mode /= DefaultMode ->
+                Just $ renderRouteMode target.mode
+          _ -> Nothing
+      , Internal.routeKind = case filePath of
+          Just target
+            | target.kind /= CopyRoute ->
+                Just $ renderRouteKind target.kind
+          _ -> Nothing
       , Internal.routeUnexpectedFields = []
       }
 

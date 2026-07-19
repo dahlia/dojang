@@ -49,6 +49,9 @@ import Dojang.Types.EnvironmentPredicate
 import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.FileRoute
   ( FileRoute (FileRoute)
+  , RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Private)
+  , RouteTarget (RouteTarget)
   , fileRoute'
   , fileRoutePreservingOrder
   , routeTarget
@@ -321,6 +324,77 @@ spec = do
           Map.map routeShape routes' === Map.map routeShape routes
           ignores' === ignores
           hooks' === hooks
+
+  specify "writes route metadata losslessly" $ do
+    let monikers = HashMap.singleton alpha linux
+        route =
+          fileRoute'
+            (`HashMap.lookup` monikers)
+            [
+              ( Moniker alpha
+              , Just $ RouteTarget (BareComponent "target") Private CopyRoute
+              )
+            ]
+            File
+        manifest' =
+          Manifest
+            Nothing
+            monikers
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+        toml = writeValidManifest manifest'
+    toml `shouldSatisfy` isInfixOf "[[files.foo]]"
+    toml `shouldSatisfy` isInfixOf "mode = \"private\""
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
+
+  specify "writes symlink kinds losslessly" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget (BareComponent "target") DefaultMode SymlinkRoute
+              )
+            ]
+            File
+        manifest' =
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+        toml = writeValidManifest manifest'
+    toml `shouldSatisfy` isInfixOf "[[files.foo]]"
+    toml `shouldSatisfy` isInfixOf "kind = \"symlink\""
+    toml `shouldSatisfy` (not . isInfixOf "mode =")
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
+
+  specify "omits metadata keys for default metadata" $ do
+    let route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [(Always, Just $ routeTarget $ BareComponent "target")]
+            File
+        manifest' =
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+        toml = writeValidManifest manifest'
+    toml `shouldSatisfy` (not . isInfixOf "mode =")
+    toml `shouldSatisfy` (not . isInfixOf "kind =")
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
 
   specify "keeps compact routes when every condition is a unique moniker" $ do
     let monikers = HashMap.singleton alpha linux

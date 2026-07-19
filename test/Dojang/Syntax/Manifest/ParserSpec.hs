@@ -29,6 +29,8 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FileRoute
   ( FileRoute (..)
+  , RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Executable, Private, PrivateExecutable)
   , RouteTarget (..)
   , dispatch
   , routeTarget
@@ -62,14 +64,38 @@ detailedManifest branch =
     ]
 
 
+detailedDirManifest :: Text -> Text
+detailedDirManifest branch =
+  Text.unlines
+    [ "[dirs]"
+    , "foo = ["
+    , "  " <> branch <> ","
+    , "]"
+    , ""
+    , "[files]"
+    , ""
+    , "[ignores]"
+    , ""
+    , "[monikers.known]"
+    , "os = \"linux\""
+    ]
+
+
 expectDetailedRouteError
   :: OsPath -> DetailedRouteError -> Text -> Expectation
-expectDetailedRouteError path expected toml = case readManifest toml of
-  Left (FileRouteBranchError routeType path' index reason) ->
-    (routeType, path', index, reason) `shouldBe` (File, path, 0, expected)
-  Left err ->
-    expectationFailure $ show $ unpack <$> formatErrors err
-  Right _ -> expectationFailure "Expected the detailed route to be rejected."
+expectDetailedRouteError = expectDetailedRouteError' File
+
+
+expectDetailedRouteError'
+  :: FileType -> OsPath -> DetailedRouteError -> Text -> Expectation
+expectDetailedRouteError' fileType' path expected toml =
+  case readManifest toml of
+    Left (FileRouteBranchError routeType path' index reason) ->
+      (routeType, path', index, reason)
+        `shouldBe` (fileType', path, 0, expected)
+    Left err ->
+      expectationFailure $ show $ unpack <$> formatErrors err
+    Right _ -> expectationFailure "Expected the detailed route to be rejected."
 
 
 isHookConfigurationError :: Error -> Bool
@@ -459,3 +485,127 @@ spec = do
         formatErrors err
           `shouldSatisfy` any (isInfixOf "files.foo[0].path")
       Right _ -> expectationFailure "Expected the path to be rejected."
+
+  specify "reads a declared mode in a detailed branch" $ do
+    let result =
+          readManifest $
+            detailedManifest
+              "{ moniker = \"known\", path = \"target\", mode = \"private\" }"
+    case result of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (Manifest _ _ _ routes _ _, _) -> do
+        let Just route = Map.lookup foo routes
+        let Right known = parseMonikerName "known"
+        route.predicates
+          `shouldBe` [
+                       ( Moniker known
+                       , Just $
+                           RouteTarget (BareComponent "target") Private CopyRoute
+                       )
+                     ]
+
+  specify "reads a declared kind in a detailed branch" $ do
+    let result =
+          readManifest $
+            detailedManifest
+              "{ when = \"always\", path = \"target\", kind = \"symlink\" }"
+    case result of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (Manifest _ _ _ routes _ _, _) -> do
+        let Just route = Map.lookup foo routes
+        route.predicates
+          `shouldBe` [
+                       ( Always
+                       , Just $
+                           RouteTarget
+                             (BareComponent "target")
+                             DefaultMode
+                             SymlinkRoute
+                       )
+                     ]
+
+  specify "reads explicit default metadata in a detailed branch" $ do
+    let result =
+          readManifest $
+            detailedManifest
+              "{ when = \"always\", path = \"target\"\
+              \, mode = \"default\", kind = \"copy\" }"
+    case result of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (Manifest _ _ _ routes _ _, _) -> do
+        let Just route = Map.lookup foo routes
+        route.predicates
+          `shouldBe` [(Always, Just $ routeTarget $ BareComponent "target")]
+
+  specify "rejects an unknown mode in a detailed branch" $ do
+    expectDetailedRouteError
+      foo
+      (UnknownRouteMode "0600")
+      ( detailedManifest
+          "{ when = \"always\", path = \"target\", mode = \"0600\" }"
+      )
+
+  specify "rejects an unknown kind in a detailed branch" $ do
+    expectDetailedRouteError
+      foo
+      (UnknownRouteKind "hardlink")
+      ( detailedManifest
+          "{ when = \"always\", path = \"target\", kind = \"hardlink\" }"
+      )
+
+  specify "rejects executable modes on directory routes" $ do
+    expectDetailedRouteError'
+      Directory
+      foo
+      (ModeNotApplicableToDirectory Executable)
+      ( detailedDirManifest
+          "{ when = \"always\", path = \"target\", mode = \"executable\" }"
+      )
+    expectDetailedRouteError'
+      Directory
+      foo
+      (ModeNotApplicableToDirectory PrivateExecutable)
+      ( detailedDirManifest
+          "{ when = \"always\", path = \"target\"\
+          \, mode = \"private-executable\" }"
+      )
+
+  specify "rejects a mode on a symlink-kind branch" $ do
+    expectDetailedRouteError
+      foo
+      SymlinkRouteWithMode
+      ( detailedManifest
+          "{ when = \"always\", path = \"target\"\
+          \, kind = \"symlink\", mode = \"private\" }"
+      )
+
+  specify "accepts an explicit default mode on a symlink-kind branch" $ do
+    let result =
+          readManifest $
+            detailedManifest
+              "{ when = \"always\", path = \"target\"\
+              \, kind = \"symlink\", mode = \"default\" }"
+    case result of
+      Left err -> expectationFailure $ show $ unpack <$> formatErrors err
+      Right (Manifest _ _ _ routes _ _, _) -> do
+        let Just route = Map.lookup foo routes
+        route.predicates
+          `shouldBe` [
+                       ( Always
+                       , Just $
+                           RouteTarget
+                             (BareComponent "target")
+                             DefaultMode
+                             SymlinkRoute
+                       )
+                     ]
+
+  specify "rejects metadata on a null route branch" $ do
+    expectDetailedRouteError
+      foo
+      MetadataOnNullRoute
+      (detailedManifest "{ when = \"always\", mode = \"private\" }")
+    expectDetailedRouteError
+      foo
+      MetadataOnNullRoute
+      (detailedManifest "{ when = \"always\", kind = \"symlink\" }")
