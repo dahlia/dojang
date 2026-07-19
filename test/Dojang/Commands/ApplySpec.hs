@@ -9,6 +9,8 @@
 module Dojang.Commands.ApplySpec (spec) where
 
 import Control.Exception (bracket_)
+import Control.Monad (when)
+import Control.Monad.Except (catchError)
 import Data.HashMap.Strict (singleton)
 import Data.Map.Strict qualified as Map
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -49,7 +51,10 @@ import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
-import Dojang.Types.RouteMetadata (portableModeFromBits)
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , portableModeFromBits
+  )
 
 
 spec :: Spec
@@ -154,6 +159,49 @@ spec = sequential $ do
           return (result', isLink)
         result' `shouldBe` ExitSuccess
         isLink `shouldBe` True
+
+    it "agrees between dry-run and real mode application" $ do
+      let observe appEnv destination = do
+            result <- runAppWithoutLogging appEnv (apply True [])
+            contents <- readFile destination
+            mode <- getPortableMode destination
+            return (result, contents, mode.writable)
+      dryObserved <-
+        withPrivateModeFile $ \appEnv destination ->
+          dryRunIO $ observe appEnv destination
+      realObserved <-
+        withPrivateModeFile $ \appEnv destination ->
+          observe appEnv destination
+      dryObserved `shouldBe` realObserved
+      dryObserved `shouldBe` (ExitSuccess, "private contents", True)
+
+    it "agrees between dry-run and real link deployment" $ do
+      symlinkAvailable <- withTempDir $ \tmpDir _ -> do
+        probeTarget <- encodeFS "probe-target"
+        probeLink <- encodeFS "probe-link"
+        writeFile (tmpDir </> probeTarget) ""
+        ( do
+            createSymbolicLink
+              (tmpDir </> probeTarget)
+              (tmpDir </> probeLink)
+              File
+            return True
+          )
+          `catchError` const (return False)
+      when symlinkAvailable $ do
+        let observe appEnv source destination = do
+              result <- runAppWithoutLogging appEnv (apply True [])
+              isLink <- isSymlink destination
+              target <- readSymlinkTarget destination
+              return (result, isLink, target == source)
+        dryObserved <-
+          withSymlinkRoute $ \appEnv source destination ->
+            dryRunIO $ observe appEnv source destination
+        realObserved <-
+          withSymlinkRoute $ \appEnv source destination ->
+            observe appEnv source destination
+        dryObserved `shouldBe` realObserved
+        dryObserved `shouldBe` (ExitSuccess, True, True)
 
     it "applies a declared private mode to recreated destinations" $
       withPrivateModeFile $ \appEnv destination -> do
