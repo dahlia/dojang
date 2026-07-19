@@ -64,7 +64,11 @@ timestamps, an optional facts-file association, declared machine facts, and
 typed sections for managed targets, hook execution history, and lifecycle
 records.  A new generation UUID is issued whenever a forgotten
 repository record is recreated, even when its timestamps match an earlier
-record.  Schema version 4 stores machine facts and their file association;
+record.  Schema version 5 adds the declared route kind and portable mode to
+managed-target records and stores a deployment link's target string as its
+fingerprint; version 4 documents remain readable, with the new fields
+defaulting to a copied route without a declared mode.  Schema version 4
+stores machine facts and their file association;
 schema version 3 introduced successful `once` and `on-change` hook executions
 by event and stable hook identity.  Schema versions 1 through 3 are upgraded in
 memory, and their opaque hook data is preserved.  A successful
