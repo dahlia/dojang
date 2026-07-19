@@ -19,7 +19,10 @@ import System.Info (os)
 
 
 #ifndef mingw32_HOST_OS
-import Dojang.Types.ManagedTarget (TargetFingerprint (FileFingerprint))
+import Control.Monad.Except (catchError)
+import Dojang.Types.ManagedTarget
+  ( TargetFingerprint (FileFingerprint, SymlinkFingerprint)
+  )
 import System.OsPath (decodeFS)
 import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
@@ -55,7 +58,7 @@ import Dojang.Types.Context
   , ManagedCorrespondence (..)
   )
 import Dojang.Types.FileRoute
-  ( RouteKind (CopyRoute)
+  ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
   )
 import Dojang.Types.ManagedTarget
@@ -77,6 +80,7 @@ import Dojang.Types.TargetTracking
 
 spec :: Spec
 spec = do
+  symlinkOrphanSpec
   describe "managed-target construction" $ do
     it "persists a relative destination as an absolute path" $
       withTempDir $ \root _ ->
@@ -464,6 +468,59 @@ posixOrphanStatusSpec = do
 #endif
 
 #ifndef mingw32_HOST_OS
+symlinkOrphanSpec :: Spec
+symlinkOrphanSpec =
+  describe "observeOrphanStatus (deployment links)" $ do
+    it "reports an unchanged link with a relative recorded target" $
+      withTempDir $ \root _ -> do
+        sourceName <- encodeFS "linked-source"
+        destinationName <- encodeFS "linked-destination"
+        writeFile (root </> sourceName) "linked"
+        ( do
+            createSymbolicLink
+              sourceName
+              (root </> destinationName)
+              FileSystem.File
+            target <- fixtureLinkOrphan root sourceName destinationName
+            observeOrphanStatus target `shouldReturn` OrphanUnchanged
+            -- A retargeted link is modified, and a removed one missing:
+            removeFile $ root </> destinationName
+            otherName <- encodeFS "other"
+            writeFile (root </> otherName) "other"
+            createSymbolicLink
+              otherName
+              (root </> destinationName)
+              FileSystem.File
+            target' <- fixtureLinkOrphan root sourceName destinationName
+            observeOrphanStatus target' `shouldReturn` OrphanModified
+            removeFile $ root </> destinationName
+            target'' <- fixtureLinkOrphan root sourceName destinationName
+            observeOrphanStatus target'' `shouldReturn` OrphanMissing
+          )
+          `catchError` const (return ())
+ where
+  fixtureLinkOrphan :: OsPath -> OsPath -> OsPath -> IO ManagedTarget
+  fixtureLinkOrphan root sourceName destinationName = do
+    routeName <- encodeFS "linked"
+    snapshotName <- encodeFS "snapshot/linked"
+    now <- getCurrentTime
+    return $
+      ManagedTarget
+        "link-orphan"
+        routeName
+        routeName
+        FileSystem.File
+        SymlinkRoute
+        DefaultMode
+        (root </> destinationName)
+        (root </> snapshotName)
+        "definition"
+        Map.empty
+        (SymlinkFingerprint sourceName)
+        Applied
+        now
+
+
 fixtureOrphanTarget :: OsPath -> IO ManagedTarget
 fixtureOrphanTarget root = do
   destinationName <- encodeFS "destination"

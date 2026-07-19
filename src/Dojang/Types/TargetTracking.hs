@@ -360,7 +360,7 @@ observeOrphanStatus target
         Missing -> OrphanMissing
         Symlink observedTarget
           | resolveTargetFrom target.destinationPath observedTarget
-              == normalise recordedTarget ->
+              == resolveTargetFrom target.destinationPath recordedTarget ->
               OrphanUnchanged
         _ -> OrphanModified
 observeOrphanStatus target = do
