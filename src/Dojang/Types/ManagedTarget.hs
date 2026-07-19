@@ -57,6 +57,7 @@ import Dojang.Types.Context
   , ManagedCorrespondence (..)
   )
 import Dojang.Types.Repository (RouteResult (..))
+import Dojang.Types.RouteMetadata (RouteKind, RouteMode)
 
 
 -- | The content identity recorded after a successful synchronization.
@@ -65,6 +66,11 @@ data TargetFingerprint
     FileFingerprint Integer Text
   | -- | The destination was a directory.
     DirectoryFingerprint
+  | -- | The destination was a deployment link with the given stored
+    -- target.  The recorded target string is the snapshot: no filesystem
+    -- entry backs it, so the record works on hosts that cannot create
+    -- links.
+    SymlinkFingerprint OsPath
   deriving (Eq, Ord, Show)
 
 
@@ -83,6 +89,13 @@ data ManagedTarget = ManagedTarget
   -- ^ Source entry path relative to the repository root.
   , routeType :: FileSystem.FileType
   -- ^ Whether the producing route managed one file or a directory tree.
+  , routeKind :: RouteKind
+  -- ^ Whether the producing route copies entries or deploys a symbolic
+  -- link.  Records from schema versions before 5 default to 'CopyRoute'.
+  , declaredMode :: RouteMode
+  -- ^ The portable mode the producing route declared, preserved so the
+  -- record can act as a metadata common ancestor.  Records from schema
+  -- versions before 5 default to 'DefaultMode'.
   , destinationPath :: OsPath
   -- ^ Fully expanded destination path.
   , snapshotPath :: OsPath
@@ -111,6 +124,8 @@ data CurrentRoute = CurrentRoute
   -- ^ Canonical selected route definition.
   , fileType :: FileSystem.FileType
   -- ^ Whether this route manages one file or a directory tree.
+  , kind :: RouteKind
+  -- ^ Whether this route copies entries or deploys a symbolic link.
   }
   deriving (Eq, Ord, Show)
 
@@ -178,6 +193,7 @@ classifyOrphan routes entries target = case Map.lookup target.routeName routes o
   Nothing -> Just RouteRemoved
   Just route
     | route.fileType /= target.routeType -> Just RouteChanged
+    | route.kind /= target.routeKind -> Just RouteChanged
     | route.routeDefinition /= target.routeDefinition -> Just RouteChanged
     | not $
         equalDestinationPath
@@ -235,6 +251,7 @@ makeCurrentRouteAbsolute route = do
       (normalise destination)
       route.routeDefinition
       route.fileType
+      route.kind
 
 
 -- | Builds the normalized current-route index used for orphan detection.
@@ -260,6 +277,7 @@ makeCurrentRoutes routes = Map.fromList <$> mapM makeCurrentRoute routes
           route.destinationPath
           route.routeDefinition
           route.fileType
+          route.kind
     return (routeName, absolute)
 
 

@@ -41,7 +41,10 @@ import Dojang.Types.MachineState
   , readMachineId
   , readRepositoryState
   )
-import Dojang.Types.ManagedTarget (ManagedTarget (..))
+import Dojang.Types.ManagedTarget
+  ( ManagedTarget (..)
+  , TargetFingerprint (SymlinkFingerprint)
+  )
 import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.MonikerName (parseMonikerName)
@@ -108,6 +111,18 @@ spec = sequential $ do
         result `shouldBe` ExitSuccess
         isLink `shouldBe` True
         target `shouldBe` source
+        -- The deployed link is recorded in machine state with its stored
+        -- target as the snapshot:
+        records <- dryRunIO $ do
+          _ <- runAppWithoutLogging appEnv (apply True [])
+          Right (Just machineId) <- readMachineId appEnv.stateDirectory
+          let Right repositoryId' =
+                parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+          Right (Just state) <-
+            readRepositoryState appEnv.stateDirectory repositoryId' machineId
+          return $ Map.elems state.targetRecords
+        [record.fingerprint | record <- records]
+          `shouldBe` [SymlinkFingerprint source]
         -- A link with the wrong target is repaired:
         (result', target') <- dryRunIO $ do
           wrongName <- encodePath "wrong-target"

@@ -388,6 +388,8 @@ spec = do
                 routeName
                 routeName
                 FileSystem.Directory
+                CopyRoute
+                DefaultMode
                 destination
                 snapshot
                 "definition"
@@ -474,6 +476,8 @@ fixtureOrphanTarget root = do
       routeName
       routeName
       FileSystem.File
+      CopyRoute
+      DefaultMode
       (root </> destinationName)
       (root </> snapshotName)
       "definition"

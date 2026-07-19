@@ -30,7 +30,7 @@ import Dojang.Types.Context
   , ManagedCorrespondence (..)
   )
 import Dojang.Types.FileRoute
-  ( RouteKind (CopyRoute)
+  ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
   )
 import Dojang.Types.ManagedTarget
@@ -133,8 +133,18 @@ spec = do
               destinationRoot
               "route-definition"
               FileSystem.Directory
+              CopyRoute
       classifyOrphan (Map.singleton routeName route) Set.empty nestedTarget
         `shouldBe` Just EntryRemoved
+
+    it "treats a route kind change as a route change" $ do
+      target <- fixtureTarget "route-definition" "destination"
+      route <- fixtureRoute "route-definition" "destination"
+      classifyOrphan
+        (Map.singleton target.routeName route{kind = SymlinkRoute})
+        (Set.singleton $ CurrentEntry target.routeName target.sourcePath)
+        target
+        `shouldBe` Just RouteChanged
 
     it "uses native destination equality when classifying a route" $ do
       upper <- encodeFS "C:/Users/Alice/App"
@@ -146,6 +156,8 @@ spec = do
               target.routeName
               target.sourcePath
               target.routeType
+              CopyRoute
+              DefaultMode
               upper
               target.snapshotPath
               target.routeDefinition
@@ -159,6 +171,7 @@ spec = do
               lower
               target.routeDefinition
               target.routeType
+              CopyRoute
       classifyOrphan
         (Map.singleton target.routeName route)
         (activeEntry target')
@@ -204,6 +217,7 @@ spec = do
               destinationRoot
               "route-definition"
               FileSystem.Directory
+              CopyRoute
       classifyOrphan
         (Map.singleton routeName route)
         (activeEntry nestedTarget)
@@ -226,6 +240,7 @@ spec = do
               destination
               "route-definition"
               FileSystem.Directory
+              CopyRoute
       classifyOrphan
         (Map.singleton routeName directoryRoute)
         (activeEntry fileTarget)
@@ -327,6 +342,8 @@ fixtureTarget definition destinationName = do
       , routeName = route
       , sourcePath = source
       , routeType = FileSystem.File
+      , routeKind = CopyRoute
+      , declaredMode = DefaultMode
       , destinationPath = destination
       , snapshotPath = snapshot
       , routeDefinition = definition
@@ -347,6 +364,7 @@ fixtureRoute definition destinationName = do
       , destinationPath = destination
       , routeDefinition = definition
       , fileType = FileSystem.File
+      , kind = CopyRoute
       }
 
 

@@ -100,10 +100,7 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
-import Dojang.Types.RouteMetadata
-  ( RouteKind (SymlinkRoute)
-  , renderRouteMode
-  )
+import Dojang.Types.RouteMetadata (renderRouteMode)
 import Dojang.Types.RouteOwnership (ExpectedState (..))
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
@@ -245,9 +242,7 @@ apply force filePaths = do
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when debug' (void $ statusCore defaultStatusOptions)
-  let persistable =
-        [m | m <- managed, m.route.kind /= SymlinkRoute]
-  let persist = persistConvergedTargets ctx machineState persistable
+  let persist = persistConvergedTargets ctx machineState managed
   void
     ( executeReconciliationPlanGuarded
         (printSyncOp . (.syncOp))

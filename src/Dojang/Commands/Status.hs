@@ -26,7 +26,8 @@ import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
 import Data.Text qualified as Text
 import System.Console.Pretty (Color (..))
-import System.OsPath (addTrailingPathSeparator, makeRelative)
+import System.IO.Unsafe (unsafePerformIO)
+import System.OsPath (addTrailingPathSeparator, decodeFS, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, ensureContext, prepareMachineState)
@@ -254,6 +255,7 @@ renderOrphanReason EntryRemoved = "entry no longer managed"
 
 renderFingerprintType :: TargetFingerprint -> (Color, Text)
 renderFingerprintType (FileFingerprint _ _) = (Default, "F")
+renderFingerprintType (SymlinkFingerprint _) = (Default, "L")
 renderFingerprintType DirectoryFingerprint = (Default, "D")
 
 
@@ -261,6 +263,8 @@ renderFingerprint :: TargetFingerprint -> Text
 renderFingerprint (FileFingerprint size digest) =
   showt size <> " B sha256:" <> Text.take 12 digest
 renderFingerprint DirectoryFingerprint = "directory"
+renderFingerprint (SymlinkFingerprint target') =
+  "symlink -> " <> pack (unsafePerformIO $ decodeFS target')
 
 
 isChanged :: FileCorrespondence -> Bool

@@ -31,7 +31,9 @@ module Dojang.Types.Context
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
   , makeCorrespondWithDestination
+  , observeFileStat
   , projectExpectedState
+  , resolveTargetFrom
   , routePaths
   ) where
 

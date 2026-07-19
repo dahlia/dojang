@@ -55,6 +55,8 @@ import Dojang.Types.Context
   , FileStat (..)
   , ManagedCorrespondence (..)
   , makeCorrespondBetweenThreeFiles
+  , observeFileStat
+  , resolveTargetFrom
   )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
@@ -65,6 +67,7 @@ import Dojang.Types.ManagedTarget
   , isSafeManagedRelativePath
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata (RouteKind (SymlinkRoute))
 
 
 -- | Derives a stable identifier from one route generation and destination.
@@ -222,6 +225,32 @@ observeConvergedManagedTarget
   -- ^ Selected correspondence to re-observe.
   -> m (Maybe (Text, Maybe ManagedTarget))
   -- ^ No update, a successful deletion, or a new managed record.
+observeConvergedManagedTarget repository snapshotRoot command now managed
+  | managed.route.kind == SymlinkRoute = do
+      -- A deployment link converged when the destination is a link that
+      -- still projects the route source; the stored target string is the
+      -- snapshot, so no filesystem baseline is materialized.
+      let previous = managed.correspondence
+      destinationStat <- observeFileStat previous.destination.path
+      case destinationStat of
+        Symlink linkTarget
+          | resolveTargetFrom previous.destination.path linkTarget
+              == normalise managed.route.sourcePath -> do
+              let refreshed =
+                    previous
+                      { destination =
+                          FileEntry previous.destination.path destinationStat
+                      , destinationDelta = Unchanged
+                      }
+              target <-
+                observeManagedTarget
+                  repository
+                  snapshotRoot
+                  command
+                  now
+                  managed{correspondence = refreshed}
+              return $ (\value -> (value.targetId, Just value)) <$> target
+        _ -> return Nothing
 observeConvergedManagedTarget repository snapshotRoot command now managed = do
   let previous = managed.correspondence
   refreshed <-
@@ -267,6 +296,12 @@ observeManagedTarget
   -> m (Maybe ManagedTarget)
   -- ^ New record on convergence, or 'Nothing' for unsupported state.
 observeManagedTarget repository snapshotRoot command now managed
+  | managed.route.kind == SymlinkRoute =
+      case correspondence.destination.stat of
+        Symlink linkTarget
+          | correspondence.destinationDelta == Unchanged ->
+              Just <$> makeTarget (SymlinkFingerprint linkTarget)
+        _ -> return Nothing
   | correspondence.sourceDelta /= Unchanged = return Nothing
   | correspondence.destinationDelta /= Unchanged = return Nothing
   | otherwise = case correspondence.destination.stat of
@@ -292,6 +327,8 @@ observeManagedTarget repository snapshotRoot command now managed
         (normalise managed.route.routeName)
         source
         managed.route.fileType
+        managed.route.kind
+        managed.route.mode
         destination
         snapshot
         managed.route.routeDefinition
@@ -397,6 +434,9 @@ materializeSnapshot source destination fingerprint = do
       createDirectories $ takeDirectory destination
       copyFileWithMetadata source destination
     DirectoryFingerprint -> createDirectories destination
+    -- The stored link target in the state record is the snapshot; hosts
+    -- that cannot create links must still be able to hold the record:
+    SymlinkFingerprint _ -> return ()
 
 
 hashParts :: [ByteString.ByteString] -> Text
