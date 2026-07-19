@@ -468,7 +468,7 @@ posixOrphanStatusSpec = do
         `shouldReturn` Just OrphanModified
 #endif
 
-#ifndef mingw32_HOST_OS
+
 symlinkOrphanSpec :: Spec
 symlinkOrphanSpec =
   describe "observeOrphanStatus (deployment links)" $ do
@@ -482,7 +482,7 @@ symlinkOrphanSpec =
           ( do
               createSymbolicLink sourceName (root </> probeName) FileSystem.File
               return True
-            )
+          )
             `catchError` const (return False)
         when symlinkAvailable $ do
           createSymbolicLink
@@ -526,7 +526,7 @@ symlinkOrphanSpec =
         Applied
         now
 
-
+#ifndef mingw32_HOST_OS
 fixtureOrphanTarget :: OsPath -> IO ManagedTarget
 fixtureOrphanTarget root = do
   destinationName <- encodeFS "destination"
