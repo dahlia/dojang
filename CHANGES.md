@@ -6,6 +6,64 @@ Version 0.3.0
 
 To be released.
 
+ -  Route branches in the detailed `[files]` and `[dirs]` syntax can now
+    declare destination metadata.  A `mode` field selects a portable
+    permission intent from a small closed vocabulary — `private` (`0600`;
+    directories `0700`), `executable` (`0755`), `private-executable`
+    (`0700`), and `read-only` (`0444`; directories `0555`) — and a `kind`
+    field distinguishes ordinary copied entries (`copy`, the default) from
+    deployment links (`symlink`).  Compact string routes remain valid and
+    unchanged, the manifest writer stays lossless for the new fields, and
+    the JSON Schema covers them.  Metadata requires a `path`, executable
+    modes are rejected on directory routes, and a symlink-kind branch
+    cannot declare a non-default mode.
+
+    Declared modes are authoritative: `dojang status` reports metadata-only
+    drift, and `dojang apply` and `dojang reflect` reconcile the
+    destination toward the declaration even when contents are unchanged.
+    Read-only modes are a desired final state rather than a precondition:
+    the executor temporarily widens writability where an update requires
+    it, narrows widened entries back afterwards, and restores prior states
+    when an operation fails mid-plan.  Windows can enforce only the
+    `read-only` distinction; other declarations produce a warning there
+    instead of silently claiming success.
+
+    A deployment link places a symbolic link at the destination pointing at
+    the absolute path of the route's source in the repository checkout.  It
+    is a one-way projection: `dojang apply` creates a missing link, repairs
+    one whose target no longer matches (for example after the checkout
+    moved), and treats an existing regular entry as a conflict unless
+    forced, while `dojang reflect` refuses deployment links categorically,
+    including with `--force` and for paths under a linked directory.  A
+    broken link with the correct target is converged rather than treated as
+    missing.  On Windows, the intrinsic file- or directory-link type
+    follows from the declaring `files` or `dirs` table, and creating links
+    requires Developer Mode or administrator privileges.
+
+    Every destination entry now has exactly one owning route: the route
+    with the most specific destination owns its subtree, broader routes no
+    longer read or write nested-owned entries (and preserve them during
+    removals), and a directory deployed as a link is a traversal boundary.
+    Unsafe configurations — duplicate destinations (lexically or after
+    resolving symbolic links), routes reaching through a deployed link, and
+    destinations overlapping the repository checkout or aliasing their own
+    source — are rejected before any mutation with the new exit code 38.
+
+    Machine-state schema version 5 retains each record's declared kind and
+    mode and stores a deployment link's target string as its fingerprint,
+    so metadata participates in three-way comparison instead of depending
+    on accidentally preserved permission bits.  Version 4 state remains
+    readable.  [[#33], [#42]]
+
+    The pre-1.0 Haskell API changes accordingly: `FileRoute` branches carry
+    a `RouteTarget` (path expression plus `RouteMode` and `RouteKind`)
+    instead of a bare `FilePathExpression`, `RouteResult` and
+    `ManagedTarget` expose the selected metadata, `MonadFileSystem` gains
+    portable-mode observation and symbolic-link creation with matching
+    `DryRunIO` overlays, and reconciliation plans include `SetEntryMode`,
+    `CreateSymlink`, and `RemoveDirsExcept` operations executed through a
+    permission-widening interpreter.
+
  -  Added reusable, case-sensitive manifest variables in the `[vars]` table.
     Variables can be unconditional strings or ordered conditional branches
     selected by a moniker or environment predicate.  They can reference one
@@ -321,6 +379,7 @@ To be released.
 [#39]: https://github.com/dahlia/dojang/issues/39
 [#40]: https://github.com/dahlia/dojang/issues/40
 [#41]: https://github.com/dahlia/dojang/issues/41
+[#42]: https://github.com/dahlia/dojang/issues/42
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#61]: https://github.com/dahlia/dojang/pull/61
 [#62]: https://github.com/dahlia/dojang/pull/62

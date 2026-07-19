@@ -31,7 +31,9 @@
 | compact route                | 간결 경로 규칙             |                                                                                              |
 | conflict                     | 충돌                       |                                                                                              |
 | converge                     | 수렴하다                   |                                                                                              |
+| deployment link              | 배포 링크                  | `kind = "symlink"` 경로 규칙이 배치하는 단방향 심볼릭 링크를 뜻합니다.                       |
 | destination                  | 대상 경로                  | 동기화 대상을 뜻할 때 사용합니다. 복사나 마이그레이션의 도착점은 “목적지”로 쓸 수 있습니다.  |
+| destination kind             | 대상 종류                  | `kind` 필드 값(`copy`, `symlink`)은 그대로 씁니다.                                           |
 | detailed route               | 상세 경로 규칙             |                                                                                              |
 | device                       | 기기                       | `device node`는 “장치 노드”로 씁니다.                                                        |
 | directory                    | 디렉터리                   |                                                                                              |
@@ -64,6 +66,7 @@
 | null route                   | 공 경로 규칙               |                                                                                              |
 | orphan, orphan record        | 고아, 고아 레코드          | 문맥에 따라 “고아 대상”, “고아 감지”처럼 씁니다.                                             |
 | overwrite                    | 덮어쓰기, 덮어쓰다         |                                                                                              |
+| portable mode                | 이식 가능한 모드           | `mode` 필드 값(`private` 등)은 그대로 씁니다.                                                |
 | provenance                   | 결정 근거                  | 단순한 출처를 뜻할 때는 “출처”로 쓸 수 있습니다.                                             |
 | record                       | 레코드, 기록하다           | 명사와 동사를 구분합니다.                                                                    |
 | reflection, reflect          | 반영, 반영하다             | 명령 이름 `dojang reflect`는 그대로 씁니다.                                                  |
@@ -72,7 +75,9 @@
 | route                        | 경로 규칙                  |                                                                                              |
 | route branch                 | 경로 규칙 분기             |                                                                                              |
 | route definition             | 경로 규칙 정의             |                                                                                              |
+| route metadata               | 경로 규칙 메타데이터       |                                                                                              |
 | route name                   | 경로 규칙 이름             |                                                                                              |
+| route ownership              | 경로 규칙 소유권           | 문맥에 따라 “소유 경로 규칙”, “소유하다”처럼 씁니다.                                         |
 | routing                      | 경로 지정                  |                                                                                              |
 | snapshot                     | 스냅샷                     |                                                                                              |
 | socket                       | 소켓                       |                                                                                              |
@@ -84,6 +89,7 @@
 | state store                  | 상태 저장소                |                                                                                              |
 | symbolic link                | 심볼릭 링크                |                                                                                              |
 | target, target file          | 대상, 대상 파일            |                                                                                              |
+| traversal boundary           | 순회 경계                  | 링크로 배포된 디렉터리 경계를 뜻합니다.                                                      |
 | unchanged, modified, missing | 변경 없음, 수정됨, 사라짐  | 상태 표시에 사용합니다.                                                                      |
 | unmanage                     | 추적을 중단하다, 추적 해제 | 명령 이름 `dojang unmanage`는 그대로 씁니다.                                                 |
 | worktree                     | 작업 트리                  |                                                                                              |
