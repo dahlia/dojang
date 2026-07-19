@@ -41,6 +41,7 @@ import System.OsPath
   )
 
 import Dojang.MonadFileSystem (MonadFileSystem (canonicalizePath, exists))
+import Dojang.MonadFileSystem qualified as FileSystem (FileType (Directory))
 import Dojang.Types.FileRoute (RouteKind (SymlinkRoute))
 import Dojang.Types.Repository (RouteResult (..))
 
@@ -85,6 +86,11 @@ data OwnershipError
     -- lexical shape would not protect the nested route's entries.  Carries
     -- the nested route's name and the ancestor route's name.
     NestedDestinationsDiverged OsPath OsPath
+  | -- | A route's destination lies strictly inside the destination of a
+    -- route that manages a single file, which cannot simultaneously be
+    -- a directory containing the nested destination.  Carries the nested
+    -- route's name, its destination, and the file route's destination.
+    NestedUnderFileRoute OsPath OsPath OsPath
   deriving (Eq, Show)
 
 
@@ -127,6 +133,14 @@ formatOwnershipError renderPath (NestedDestinationsDiverged nested ancestor) =
     <> " nests inside the destination of route "
     <> renderPath ancestor
     <> " lexically, but resolving symbolic links changes that relationship."
+formatOwnershipError renderPath (NestedUnderFileRoute name dst fileDst) =
+  "Route "
+    <> renderPath name
+    <> " routes to "
+    <> renderPath dst
+    <> ", which is inside the single-file destination "
+    <> renderPath fileDst
+    <> "; a file cannot also be a directory containing other destinations."
 
 
 -- | Selects one owning route per destination from the active routes of
@@ -154,6 +168,10 @@ selectOwnership repositoryRoot routes = do
   case boundaryViolations of
     (name, dst, boundary) : _ ->
       Left $ RouteThroughLinkBoundary name dst boundary
+    [] -> pure ()
+  case nestedUnderFile of
+    (name, dst, fileDst) : _ ->
+      Left $ NestedUnderFileRoute name dst fileDst
     [] -> pure ()
   pure
     ExpectedState
@@ -196,6 +214,14 @@ selectOwnership repositoryRoot routes = do
     , source == dst
         || source `strictlyInside` dst
         || dst `strictlyInside` source
+    ]
+  nestedUnderFile :: [(OsPath, OsPath, OsPath)]
+  nestedUnderFile =
+    [ (route.routeName, dst, fileDst)
+    | (dst, route) <- normalized
+    , (fileDst, fileRoute) <- normalized
+    , fileRoute.fileType /= FileSystem.Directory
+    , dst `strictlyInside` fileDst
     ]
   boundarySet :: Set OsPath
   boundarySet =

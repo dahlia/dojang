@@ -131,6 +131,17 @@ spec = do
         `shouldBe` Left
           (DestinationInsideRepository b (normalise $ src </> b </> c))
 
+    specify "rejects routes under a single-file destination" $ do
+      let routeA = mkRoute src a (dst </> a) File CopyRoute
+      let routeB = mkRoute src b (dst </> a </> b) File CopyRoute
+      selectOwnership src [routeA, routeB]
+        `shouldBe` Left
+          ( NestedUnderFileRoute
+              b
+              (normalise $ dst </> a </> b)
+              (normalise $ dst </> a)
+          )
+
     specify "rejects routes under a symlink boundary" $ do
       let routeA = mkRoute src a (dst </> a) Directory SymlinkRoute
       let routeB = mkRoute src b (dst </> a </> b) File CopyRoute
