@@ -26,8 +26,7 @@ import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
 import Data.Text qualified as Text
 import System.Console.Pretty (Color (..))
-import System.IO.Unsafe (unsafePerformIO)
-import System.OsPath (addTrailingPathSeparator, decodeFS, makeRelative)
+import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, ensureContext, prepareMachineState)
@@ -215,12 +214,13 @@ printOrphans ctx managed machineState = do
     destination <- pack <$> decodePath target.destinationPath
     source <- pack <$> decodePath target.sourcePath
     route <- pack <$> decodePath target.routeName
+    fingerprint <- renderFingerprint target.fingerprint
     return
       [ (statusColor targetStatus, renderOrphanStatus targetStatus)
       , renderFingerprintType target.fingerprint
       , (Default, destination)
       , (Default, source <> " (" <> route <> ")")
-      , (Default, renderFingerprint target.fingerprint)
+      , (Default, fingerprint)
       , (Yellow, renderOrphanReason reason)
       ]
   unlessNull rows $
@@ -259,12 +259,14 @@ renderFingerprintType (SymlinkFingerprint _) = (Default, "L")
 renderFingerprintType DirectoryFingerprint = (Default, "D")
 
 
-renderFingerprint :: TargetFingerprint -> Text
+renderFingerprint
+  :: (MonadFileSystem m) => TargetFingerprint -> m Text
 renderFingerprint (FileFingerprint size digest) =
-  showt size <> " B sha256:" <> Text.take 12 digest
-renderFingerprint DirectoryFingerprint = "directory"
-renderFingerprint (SymlinkFingerprint target') =
-  "symlink -> " <> pack (unsafePerformIO $ decodeFS target')
+  return $ showt size <> " B sha256:" <> Text.take 12 digest
+renderFingerprint DirectoryFingerprint = return "directory"
+renderFingerprint (SymlinkFingerprint target') = do
+  target'' <- decodePath target'
+  return $ "symlink -> " <> pack target''
 
 
 isChanged :: FileCorrespondence -> Bool
