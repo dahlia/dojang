@@ -53,7 +53,7 @@ To be released.
     mode and stores a deployment link's target string as its fingerprint,
     preserving the metadata three-way comparison needs explicitly instead
     of depending on accidentally preserved permission bits.  Version 4 state
-    remains readable.  [[#33], [#42]]
+    remains readable.  [[#33], [#42], [#69]]
 
     The pre-1.0 Haskell API changes accordingly: `FileRoute` branches carry
     a `RouteTarget` (path expression plus `RouteMode` and `RouteKind`)
@@ -389,6 +389,7 @@ To be released.
 [#66]: https://github.com/dahlia/dojang/pull/66
 [#67]: https://github.com/dahlia/dojang/pull/67
 [#68]: https://github.com/dahlia/dojang/pull/68
+[#69]: https://github.com/dahlia/dojang/pull/69
 
 
 Version 0.2.1
