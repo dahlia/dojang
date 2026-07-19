@@ -353,6 +353,16 @@ observeOrphanStatus
   -- ^ Persisted orphan record whose destination is inspected.
   -> m OrphanStatus
   -- ^ Current comparison status, or a filesystem inspection failure.
+observeOrphanStatus target
+  | SymlinkFingerprint recordedTarget <- target.fingerprint = do
+      destinationStat <- observeFileStat target.destinationPath
+      return $ case destinationStat of
+        Missing -> OrphanMissing
+        Symlink observedTarget
+          | resolveTargetFrom target.destinationPath observedTarget
+              == normalise recordedTarget ->
+              OrphanUnchanged
+        _ -> OrphanModified
 observeOrphanStatus target = do
   destinationPresent <- exists target.destinationPath
   destinationSymlink <- isSymlink target.destinationPath

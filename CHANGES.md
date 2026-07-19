@@ -51,9 +51,9 @@ To be released.
 
     Machine-state schema version 5 retains each record's declared kind and
     mode and stores a deployment link's target string as its fingerprint,
-    so metadata participates in three-way comparison instead of depending
-    on accidentally preserved permission bits.  Version 4 state remains
-    readable.  [[#33], [#42]]
+    preserving the metadata three-way comparison needs explicitly instead
+    of depending on accidentally preserved permission bits.  Version 4 state
+    remains readable.  [[#33], [#42]]
 
     The pre-1.0 Haskell API changes accordingly: `FileRoute` branches carry
     a `RouteTarget` (path expression plus `RouteMode` and `RouteKind`)

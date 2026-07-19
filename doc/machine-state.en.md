@@ -262,9 +262,10 @@ entry that actually converged.  A record contains the producing route, whether
 that route manages a file or directory, the source entry, the absolute expanded
 destination, an immutable baseline, its kind and SHA-256 fingerprint, the
 command and time that updated it, and the environment facts used for routing.
-A record also retains the route's declared kind and portable mode, so
-metadata participates in later three-way comparison instead of depending on
-whichever permission bits the host filesystem happens to preserve.  For a
+A record also retains the route's declared kind and portable mode, so the
+metadata a later three-way comparison needs is preserved explicitly instead
+of depending on whichever permission bits the host filesystem happens to
+preserve.  For a
 deployment link, the record stores the link's target string itself as the
 fingerprint; that string is the baseline, and no filesystem snapshot is
 materialized for it.

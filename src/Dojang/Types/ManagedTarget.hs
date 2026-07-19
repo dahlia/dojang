@@ -16,6 +16,7 @@ module Dojang.Types.ManagedTarget
   , classifyOrphan
   , destinationPathIdentity
   , equalDestinationPath
+  , hasMaterializedSnapshot
   , isSafeManagedRelativePath
   , makeCurrentEntries
   , makeCurrentRouteAbsolute
@@ -72,6 +73,15 @@ data TargetFingerprint
     -- links.
     SymlinkFingerprint OsPath
   deriving (Eq, Ord, Show)
+
+
+-- | Whether a fingerprint is backed by a materialized filesystem
+-- baseline.  A deployment link's stored target string is its snapshot, so
+-- no filesystem entry exists at its snapshot path.
+hasMaterializedSnapshot :: ManagedTarget -> Bool
+hasMaterializedSnapshot target = case target.fingerprint of
+  SymlinkFingerprint _ -> False
+  _ -> True
 
 
 -- | The command that most recently synchronized a destination.

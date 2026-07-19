@@ -79,6 +79,7 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , SynchronizationCommand (Applied)
+  , hasMaterializedSnapshot
   , mergeConvergedTargets
   , unreachableSnapshots
   )
@@ -302,11 +303,19 @@ persistConvergedTargets ctx machineState selected =
         )
         ( \updated (transaction, superseded) ->
             let kept =
-                  Set.fromList $
-                    (.snapshotPath) <$> Map.elems updated.targetRecords
+                  Set.fromList
+                    [ record.snapshotPath
+                    | record <- Map.elems updated.targetRecords
+                    , hasMaterializedSnapshot record
+                    ]
             in unreachableSnapshots
                  kept
-                 (transaction : ((.snapshotPath) <$> superseded))
+                 ( transaction
+                     : [ record.snapshotPath
+                       | record <- superseded
+                       , hasMaterializedSnapshot record
+                       ]
+                 )
         )
         (\_ _ -> return ())
         (\_ (transaction, _) -> discardTargetSnapshot transaction)

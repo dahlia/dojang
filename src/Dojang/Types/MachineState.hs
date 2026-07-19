@@ -1430,6 +1430,31 @@ targetFromDocument key target = do
         SymlinkFingerprint
           <$> mapLeft MalformedState (textOsPath linkTargetText)
     other -> Left $ MalformedState $ "Unknown target fingerprint kind: " <> other
+  case (routeKind, fingerprint) of
+    (CopyRoute, SymlinkFingerprint _) ->
+      Left $
+        MalformedState
+          "A copy-kind target cannot carry a symlink fingerprint."
+    (_, SymlinkFingerprint _) -> Right ()
+    (CopyRoute, _) -> Right ()
+    _ ->
+      Left $
+        MalformedState
+          "A symlink-kind target requires a symlink fingerprint."
+  whenEither
+    ( declaredMode /= DefaultMode && case fingerprint of
+        SymlinkFingerprint _ -> True
+        _ -> False
+    )
+    $ MalformedState "A symlink-kind target cannot declare a mode."
+  whenEither
+    ( case (fingerprint, target.targetDocumentFingerprintLinkTarget) of
+        (SymlinkFingerprint _, _) -> False
+        (_, Just _) -> True
+        _ -> False
+    )
+    $ MalformedState
+      "Only a symlink fingerprint may carry fingerprint-link-target."
   command <- case target.targetDocumentUpdatedBy of
     "apply" -> Right Applied
     "reflect" -> Right Reflected
