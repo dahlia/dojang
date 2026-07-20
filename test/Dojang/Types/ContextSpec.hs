@@ -23,10 +23,20 @@ import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map, fromList)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
+import System.Directory qualified
 import System.Directory.OsPath (createDirectoryLink, createFileLink)
 import System.FilePath (combine)
-import System.OsPath (OsPath, encodeFS, (</>))
-import Test.Hspec (Spec, describe, it, runIO, specify, xit)
+import System.OsPath (OsPath, encodeFS, normalise, (</>))
+import Test.Hspec
+  ( Spec
+  , describe
+  , expectationFailure
+  , it
+  , runIO
+  , sequential
+  , specify
+  , xit
+  )
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Test.Hspec.Hedgehog (MonadGen, forAll, hedgehog, (===))
 
@@ -41,18 +51,22 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , ManagedCorrespondence (..)
   , RouteMatch (..)
   , RouteState (..)
   , calculateSpecificity
   , filterBySpecificity
   , findMatchingRoutes
+  , getIgnoredFiles
   , getRouteState
+  , getUnregisteredFiles
   , listFiles
   , makeCorrespond
   , makeCorrespondBetweenThreeDirs
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
   , makeCorrespondWithDestination
+  , makeManagedCorrespond
   , routePaths
   )
 import Dojang.Types.Environment
@@ -62,16 +76,28 @@ import Dojang.Types.Environment
   , OperatingSystem (..)
   , emptyEnvironment
   )
+import Dojang.Types.EnvironmentPredicate
+  ( EnvironmentPredicate (Always)
+  )
 import Dojang.Types.EnvironmentPredicate.Evaluate (EvaluationWarning (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (..), (+/+))
 import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode)
+  , RouteTarget (RouteTarget)
+  , fileRoutePreservingOrder
+  )
 import Dojang.Types.FileRouteSpec (monikerMap)
-import Dojang.Types.Manifest (manifest)
+import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.MonikerName (MonikerName, parseMonikerName)
 import Dojang.Types.Repository
   ( Repository (..)
   , RouteMapWarning (..)
   , RouteResult (..)
+  )
+import Dojang.Types.RouteOwnership
+  ( OwnershipError (DuplicateDestinationOwner)
   )
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 
@@ -168,6 +194,7 @@ observeTransitionBothWays intermediateState currentState =
         (tmpDir </> interDir)
         (tmpDir </> srcDir)
         (tmpDir </> dstDir)
+        []
         []
     let directoryDelta =
           maybe Unchanged (.sourceDelta) $
@@ -304,6 +331,8 @@ spec = do
                      , routeName = bar
                      , destinationPath = tmpDir </> bar
                      , fileType = Dojang.MonadFileSystem.Directory
+                     , mode = DefaultMode
+                     , kind = CopyRoute
                      , routeDefinition = "$BAR"
                      , routeProvenance = mempty
                      }
@@ -312,6 +341,8 @@ spec = do
                      , routeName = foo
                      , destinationPath = tmpDir </> foo
                      , fileType = Dojang.MonadFileSystem.Directory
+                     , mode = DefaultMode
+                     , kind = CopyRoute
                      , routeDefinition = "$FOO"
                      , routeProvenance = mempty
                      }
@@ -359,7 +390,7 @@ spec = do
         ws'' `shouldBe` ws
 
   specify "makeCorrespond" $ withContextFixture $ \ctx tmpDir -> do
-    (corresponds, ws) <- makeCorrespond ctx
+    Right (corresponds, ws) <- makeCorrespond ctx
     ws `shouldBe` [EnvironmentPredicateWarning $ UndefinedMoniker undefined']
     sortOn (.source.path) corresponds
       `shouldBe` [ FileCorrespondence
@@ -431,6 +462,186 @@ spec = do
                      , destinationDelta = Unchanged
                      }
                  ]
+
+  specify "makeManagedCorrespond excludes nested-owned subtrees" $
+    withTempDir $ \tmpDir _ -> do
+      outer <- encodePath "outer"
+      inner <- encodePath "inner"
+      xName <- encodePath "x"
+      yName <- encodePath "y"
+      zName <- encodePath "z"
+      bName <- encodePath "b"
+      cName <- encodePath "c"
+      aName <- encodePath "a"
+      let nestedManifest =
+            manifest
+              monikerMap
+              mempty
+              [ (outer, [(posix, Just $ Substitution "OUTER_DST")])
+              , (inner, [(posix, Just $ Substitution "INNER_DST")])
+              ]
+              mempty
+              mempty
+      createDirectory $ tmpDir </> src
+      createDirectory $ tmpDir </> src </> outer
+      writeFile (tmpDir </> src </> outer </> xName) "x"
+      createDirectory $ tmpDir </> src </> outer </> bName
+      createDirectory $ tmpDir </> src </> outer </> bName </> cName
+      writeFile
+        (tmpDir </> src </> outer </> bName </> cName </> yName)
+        "y"
+      createDirectory $ tmpDir </> src </> inner
+      writeFile (tmpDir </> src </> inner </> zName) "z"
+      let repo =
+            Repository
+              (tmpDir </> src)
+              (tmpDir </> src </> intermediateDir)
+              nestedManifest
+      let ctx = Context
+            repo
+            (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+            $ simpleVariableGetter
+            $ \e ->
+              return $ case e of
+                "OUTER_DST" -> Just $ tmpDir </> aName
+                "INNER_DST" -> Just $ tmpDir </> aName </> bName </> cName
+                _ -> Nothing
+      Right (managed, _) <- makeManagedCorrespond ctx
+      sortOn id [(m.route.routeName, m.relativePath) | m <- managed]
+        `shouldBe` [ (inner, zName)
+                   , (outer, bName)
+                   , (outer, xName)
+                   ]
+
+  -- Mutates the process working directory; must not run concurrently
+  -- with other working-directory users:
+  sequential $
+    specify "makeManagedCorrespond absolutizes deployment-link sources" $
+      withTempDir $ \tmpDir tmpDirFP -> do
+        linked <- encodePath "linked"
+        relativeRepo <- encodePath "relative-repo"
+        let nestedManifest =
+              manifest
+                monikerMap
+                [(linked, [(posix, Just $ Substitution "LINK_DST")])]
+                mempty
+                mempty
+                mempty
+        -- Switch the linked file route to a symlink kind:
+        let linkRoute =
+              fileRoutePreservingOrder
+                (const Nothing)
+                [
+                  ( Always
+                  , Just $
+                      RouteTarget (Substitution "LINK_DST") DefaultMode SymlinkRoute
+                  )
+                ]
+                Dojang.MonadFileSystem.File
+        let manifest'' =
+              nestedManifest{fileRoutes = fromList [(linked, linkRoute)]}
+        createDirectory $ tmpDir </> relativeRepo
+        writeFile (tmpDir </> relativeRepo </> linked) "linked"
+        -- A repository opened through a relative path must still produce an
+        -- absolute link target, because the stored target must stay valid
+        -- regardless of the working directory:
+        System.Directory.withCurrentDirectory tmpDirFP $ do
+          let repo =
+                Repository
+                  relativeRepo
+                  (relativeRepo </> intermediateDir)
+                  manifest''
+          let ctx = Context
+                repo
+                (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+                $ simpleVariableGetter
+                $ \e ->
+                  return $
+                    if e == "LINK_DST" then Just (tmpDir </> bar) else Nothing
+          Right (managed, _) <- makeManagedCorrespond ctx
+          case managed of
+            [m] ->
+              m.correspondence.source.path
+                `shouldBe` normalise (tmpDir </> relativeRepo </> linked)
+            other -> expectationFailure $ "Unexpected: " <> show other
+
+  specify "makeManagedCorrespond rejects duplicate destinations" $
+    withTempDir $ \tmpDir _ -> do
+      outer <- encodePath "outer"
+      inner <- encodePath "inner"
+      aName <- encodePath "a"
+      let clashManifest =
+            manifest
+              monikerMap
+              mempty
+              [ (outer, [(posix, Just $ Substitution "CLASH_DST")])
+              , (inner, [(posix, Just $ Substitution "CLASH_DST")])
+              ]
+              mempty
+              mempty
+      createDirectory $ tmpDir </> src
+      createDirectory $ tmpDir </> src </> outer
+      createDirectory $ tmpDir </> src </> inner
+      let repo =
+            Repository
+              (tmpDir </> src)
+              (tmpDir </> src </> intermediateDir)
+              clashManifest
+      let ctx = Context
+            repo
+            (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+            $ simpleVariableGetter
+            $ \e ->
+              return $ case e of
+                "CLASH_DST" -> Just $ tmpDir </> aName
+                _ -> Nothing
+      result <- makeManagedCorrespond ctx
+      case result of
+        Left (DuplicateDestinationOwner dst' _ _) ->
+          dst' `shouldBe` normalise (tmpDir </> aName)
+        other -> expectationFailure $ "Unexpected result: " <> show other
+
+  symIt "skips deployment-link routes in destination scans" $
+    withTempDir $ \tmpDir _ -> do
+      linked <- encodePath "linked-dir"
+      dstName <- encodePath "deployed"
+      innerName <- encodePath "inner"
+      -- A directory route deployed as a symbolic link is a traversal
+      -- boundary: its destination must not be enumerated, and listing it
+      -- as a directory would throw anyway.
+      let linkRoute =
+            fileRoutePreservingOrder
+              (const Nothing)
+              [
+                ( Always
+                , Just $
+                    RouteTarget (Substitution "LINK_DST") DefaultMode SymlinkRoute
+                )
+              ]
+              Dojang.MonadFileSystem.Directory
+      let manifest'' =
+            (manifest monikerMap mempty mempty mempty mempty)
+              { fileRoutes = fromList [(linked, linkRoute)]
+              , ignorePatterns = fromList [(linked, ["*"])]
+              }
+      createDirectory $ tmpDir </> src
+      createDirectory $ tmpDir </> src </> linked
+      writeFile (tmpDir </> src </> linked </> innerName) "inner"
+      createDirectoryLink (tmpDir </> src </> linked) (tmpDir </> dstName)
+      let repo =
+            Repository
+              (tmpDir </> src)
+              (tmpDir </> src </> intermediateDir)
+              manifest''
+      let ctx = Context
+            repo
+            (emptyEnvironment Linux X86_64 $ Kernel "Linux" "5.10.0-8")
+            $ simpleVariableGetter
+            $ \e ->
+              return $
+                if e == "LINK_DST" then Just (tmpDir </> dstName) else Nothing
+      getIgnoredFiles ctx `shouldReturn` []
+      getUnregisteredFiles ctx `shouldReturn` Right []
 
   describe "listFiles" $ do
     it "lists files recursively" $ withTempDir $ \tmpDir _ -> do
@@ -639,6 +850,7 @@ spec = do
         (tmpDir </> foo </> src)
         (tmpDir </> foo </> dst)
         []
+        []
     sortOn (.source.path) emptyCorresponds `shouldBe` []
 
     unchanged <- encodePath "unchanged"
@@ -757,6 +969,7 @@ spec = do
         (tmpDir </> bar </> src)
         (tmpDir </> bar </> dst)
         ["ignored"]
+        []
     sortOn (.source.path) corresponds
       `shouldBe` [ FileCorrespondence
                      { source = FileEntry added Directory
@@ -1073,6 +1286,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1085,6 +1300,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1097,6 +1314,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1113,6 +1332,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> bar
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1122,6 +1343,8 @@ spec = do
               , routeName = baz
               , destinationPath = tmpDir </> bar </> qux
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1137,6 +1360,8 @@ spec = do
               , routeName = foo
               , destinationPath = tmpDir </> dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }
@@ -1146,6 +1371,8 @@ spec = do
               , routeName = bar
               , destinationPath = tmpDir </> dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }

@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
@@ -12,6 +13,7 @@ import System.OsPath (OsPath, encodeFS, takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, runIO)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
+import Control.Monad.Except (tryError)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -32,10 +34,12 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , FileStat (..)
+  , ManagedCorrespondence (..)
   , RouteState (..)
   )
 import Dojang.Types.Environment.Current (MonadEnvironment (currentEnvironment))
 import Dojang.Types.FilePathExpression.Expansion (simpleVariableGetter)
+import Dojang.Types.FileRoute (RouteKind (CopyRoute, SymlinkRoute))
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
@@ -51,12 +55,19 @@ import Dojang.Types.Reconciliation
   , SyncOp (..)
   , destructiveOperations
   , executeReconciliationPlan
+  , executeReconciliationPlanGuarded
   , executeReconciliationPlanWith
   , executeSyncOp
+  , observeModeDrift
   , observeReconciliationInput
   , planReconciliation
   )
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , RouteMode (DefaultMode, Private, ReadOnly)
+  , portableModeFromBits
+  )
 
 
 data Paths = Paths
@@ -134,10 +145,14 @@ applyModelOperations = foldl' applyOperation
   applyOperation state (PlannedSyncOp _ operation) = case operation of
     RemoveDirs path -> Map.insert path ModelMissing state
     RemoveFile path -> Map.insert path ModelMissing state
+    RemoveLink path -> Map.insert path ModelMissing state
     CopyFile sourcePath destinationPath ->
       Map.insert destinationPath (state Map.! sourcePath) state
     CreateDir path -> Map.insert path ModelDirectory state
     CreateDirs path -> Map.insert path ModelDirectory state
+    SetEntryMode _ _ _ -> state
+    CreateSymlink _ _ _ -> state
+    RemoveDirsExcept path _ -> Map.insert path ModelMissing state
 
 
 swapReplica :: Replica -> Replica
@@ -164,6 +179,11 @@ swapInput input =
           }
     , sourceDestinationComparison = input.sourceDestinationComparison
     , destinationRouteState = input.destinationRouteState
+    , declaredDestinationMode = input.declaredDestinationMode
+    , observedDestinationMode = input.observedDestinationMode
+    , destinationKind = input.destinationKind
+    , routeFileType = input.routeFileType
+    , protectedDestinations = input.protectedDestinations
     }
 
 
@@ -189,6 +209,11 @@ makeInput paths sourceStat intermediateStat destinationStat sourceDelta destinat
           }
     , sourceDestinationComparison = comparison
     , destinationRouteState = routeState
+    , declaredDestinationMode = DefaultMode
+    , observedDestinationMode = Nothing
+    , destinationKind = CopyRoute
+    , routeFileType = FileSystem.File
+    , protectedDestinations = []
     }
 
 
@@ -614,6 +639,562 @@ spec = do
       secondPlan.operations === []
       fmap (.outcome) secondPlan.items === [NoChange]
 
+  describe "RemoveDirsExcept" $ do
+    it "preserves protected subtrees during removal" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        goneName <- encodeFS "gone"
+        keepName <- encodeFS "keep"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        FileSystem.createDirectories $ rootPath </> goneName
+        FileSystem.writeFile (rootPath </> goneName </> fileName') "gone"
+        FileSystem.writeFile (rootPath </> fileName') "gone"
+        FileSystem.createDirectories $ rootPath </> keepName
+        FileSystem.writeFile (rootPath </> keepName </> fileName') "kept"
+        executeSyncOp $
+          RemoveDirsExcept rootPath [rootPath </> keepName]
+        FileSystem.exists (rootPath </> goneName) `shouldReturn` False
+        FileSystem.exists (rootPath </> fileName') `shouldReturn` False
+        FileSystem.readFile (rootPath </> keepName </> fileName')
+          `shouldReturn` "kept"
+
+    it "preserves deeply nested protected roots" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        midName <- encodeFS "mid"
+        keepName <- encodeFS "keep"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        let keepPath = rootPath </> midName </> keepName
+        FileSystem.createDirectories keepPath
+        FileSystem.writeFile (keepPath </> fileName') "kept"
+        FileSystem.writeFile (rootPath </> midName </> fileName') "gone"
+        executeSyncOp $ RemoveDirsExcept rootPath [keepPath]
+        FileSystem.exists (rootPath </> midName </> fileName')
+          `shouldReturn` False
+        FileSystem.readFile (keepPath </> fileName') `shouldReturn` "kept"
+
+    it "removes everything when nothing is protected" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        FileSystem.createDirectories rootPath
+        FileSystem.writeFile (rootPath </> fileName') "gone"
+        executeSyncOp $ RemoveDirsExcept rootPath []
+        FileSystem.exists rootPath `shouldReturn` False
+
+    it "converts ancestor removals to protected removals" $ do
+      let removal =
+            ( makeInput
+                paths
+                Missing
+                Directory
+                Directory
+                Removed
+                Unchanged
+                ReplicasDifferent
+                (Routed route)
+            )
+              { protectedDestinations = [paths.destination </> paths.source]
+              }
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [removal]
+      [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+        `shouldBe` [ RemoveDirsExcept
+                       paths.destination
+                       [paths.destination </> paths.source]
+                   ]
+      -- The intermediate is unaffected by destination protection:
+      [op.syncOp | op <- plan.operations, op.replica == IntermediateReplica]
+        `shouldBe` [RemoveDirs paths.intermediate]
+
+    it "skips replacing a directory that contains protected entries" $ do
+      -- The broad route now wants a file where its destination currently
+      -- holds a directory, but a nested route owns a subtree inside that
+      -- directory.  A protected removal would keep the directory in
+      -- place and the following copy would fail after unprotected
+      -- siblings were already deleted, so the replacement must be
+      -- skipped as a whole:
+      let replacement =
+            ( makeInput
+                paths
+                (File 4)
+                Directory
+                Directory
+                Modified
+                Unchanged
+                ReplicasDifferent
+                (Routed route)
+            )
+              { protectedDestinations = [paths.destination </> paths.source]
+              }
+      let plan =
+            planReconciliation SourceToDestination PreferAuthoritative [replacement]
+      fmap (.outcome) plan.items
+        `shouldBe` [Skipped ProtectedSubtreeReplacement]
+      [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+        `shouldBe` []
+
+  describe "deployment links" $ do
+    let linkInput destinationStat =
+          ( makeInput
+              paths
+              (File 4)
+              Missing
+              destinationStat
+              Unchanged
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+          )
+            { destinationKind = SymlinkRoute
+            , routeFileType = FileSystem.File
+            }
+
+    it "creates a missing deployment link" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput Missing]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       CreateDirs (takeDirectory paths.destination)
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.File
+                   ]
+
+    it "accepts a correctly targeted link even when broken" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput $ Symlink paths.source]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "replaces a link with the wrong target" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput $ Symlink paths.intermediate]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       RemoveLink paths.destination
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.File
+                   ]
+      -- Repairing a drifted link destroys no content, so the plan must
+      -- not require forcing past the accidental-deletion guard:
+      destructiveOperations plan `shouldBe` []
+
+    it "refuses to replace an existing entry without force" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              RefuseConflicts
+              [linkInput $ File 4]
+      ((.outcome) <$> plan.items) `shouldBe` [ConflictDetected]
+      length plan.conflicts `shouldBe` 1
+      plan.operations `shouldBe` []
+
+    it "replaces an existing entry when preferred" $ do
+      let plan =
+            planReconciliation
+              SourceToDestination
+              PreferAuthoritative
+              [linkInput $ File 4]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       RemoveFile paths.destination
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.File
+                   ]
+
+    it "replaces an existing directory when preferred" $ do
+      let input =
+            (linkInput Directory){routeFileType = FileSystem.Directory}
+      let plan =
+            planReconciliation SourceToDestination PreferAuthoritative [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       RemoveDirs paths.destination
+                   , PlannedSyncOp DestinationReplica $
+                       CreateSymlink
+                         paths.source
+                         paths.destination
+                         FileSystem.Directory
+                   ]
+
+    it "never reflects a deployment link" $ do
+      let missingPlan =
+            planReconciliation
+              DestinationToSource
+              RefuseConflicts
+              [linkInput Missing]
+      ((.outcome) <$> missingPlan.items)
+        `shouldBe` [Skipped DeploymentLinkNotReflectable]
+      missingPlan.operations `shouldBe` []
+      -- Even with the authoritative-preference policy (--force):
+      let forcedPlan =
+            planReconciliation
+              DestinationToSource
+              PreferAuthoritative
+              [linkInput $ File 4]
+      ((.outcome) <$> forcedPlan.items)
+        `shouldBe` [Skipped DeploymentLinkNotReflectable]
+      forcedPlan.operations `shouldBe` []
+
+  describe "declared destination modes" $ do
+    let withMode declared observed input =
+          input
+            { declaredDestinationMode = declared
+            , observedDestinationMode = observed
+            }
+    let unchangedFile =
+          makeInput
+            paths
+            (File 1)
+            (File 1)
+            (File 1)
+            Unchanged
+            Unchanged
+            ReplicasEquivalent
+            (Routed route)
+    let observed644 = Just $ portableModeFromBits 0o644
+    let observed600 = Just $ portableModeFromBits 0o600
+
+    it "plans a mode change for metadata-only drift" $ do
+      let input = withMode Private observed644 unchangedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       SetEntryMode paths.destination Private FileSystem.File
+                   ]
+
+    it "plans nothing when the observed mode satisfies the declared one" $ do
+      let input = withMode Private observed600 unchangedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "plans nothing for the default mode" $ do
+      let input = withMode DefaultMode observed644 unchangedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "applies the declared mode after content operations" $ do
+      let changedFile =
+            makeInput
+              paths
+              (File 2)
+              (File 1)
+              (File 1)
+              Modified
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+      let input = withMode Private observed600 changedFile
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      let destinationOps =
+            [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+      case reverse destinationOps of
+        SetEntryMode path mode fileType : _ -> do
+          path `shouldBe` paths.destination
+          mode `shouldBe` Private
+          fileType `shouldBe` FileSystem.File
+        other -> fail $ "Unexpected destination ops: " <> show other
+      -- Content copies precede the mode change:
+      destinationOps
+        `shouldSatisfy` any
+          ( \case
+              CopyFile _ _ -> True
+              _ -> False
+          )
+
+    it "targets the destination even when reflecting" $ do
+      let input = withMode ReadOnly observed644 unchangedFile
+      let plan =
+            planReconciliation DestinationToSource RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       SetEntryMode paths.destination ReadOnly FileSystem.File
+                   ]
+
+    it "plans directory modes with directory semantics" $ do
+      let unchangedDir =
+            makeInput
+              paths
+              Directory
+              Directory
+              Directory
+              Unchanged
+              Unchanged
+              ReplicasEquivalent
+              (Routed route)
+      let input = withMode Private observed644 unchangedDir
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp DestinationReplica $
+                       SetEntryMode
+                         paths.destination
+                         Private
+                         FileSystem.Directory
+                   ]
+
+    it "plans no mode change for removals" $ do
+      let removal =
+            makeInput
+              paths
+              Missing
+              (File 1)
+              (File 1)
+              Removed
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+      let input = withMode Private observed600 removal
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldSatisfy` all
+          ( \op -> case op.syncOp of
+              SetEntryMode{} -> False
+              _ -> True
+          )
+
+    it "suppresses mode changes on ignored destinations" $ do
+      let input =
+            withMode Private observed644 $
+              makeInput
+                paths
+                (File 1)
+                (File 1)
+                (File 1)
+                Unchanged
+                Unchanged
+                ReplicasEquivalent
+                (Ignored route "pattern")
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      ((.outcome) <$> plan.items) `shouldBe` [NoChange]
+      plan.operations `shouldBe` []
+
+    it "plans a mode change for a destination it creates" $ do
+      let creation =
+            makeInput
+              paths
+              (File 1)
+              Missing
+              Missing
+              Added
+              Unchanged
+              ReplicasDifferent
+              (Routed route)
+      let input = withMode Private Nothing creation
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      let destinationOps =
+            [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+      case reverse destinationOps of
+        SetEntryMode path mode fileType : _ -> do
+          path `shouldBe` paths.destination
+          mode `shouldBe` Private
+          fileType `shouldBe` FileSystem.File
+        other -> fail $ "Unexpected destination ops: " <> show other
+
+  windowsCaseProtectionSpec paths route
+
+  describe "executeReconciliationPlanGuarded" $ do
+    restoreFailureReportSpec
+    let manualPlan ops =
+          ReconciliationPlan
+            { direction = SourceToDestination
+            , conflictPolicy = RefuseConflicts
+            , items = []
+            , conflicts = []
+            , operations = PlannedSyncOp DestinationReplica <$> ops
+            }
+
+    it "widens read-only entries and reapplies declared modes" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "guard-source"
+        destinationName <- encodeFS "guard-destination"
+        let sourcePath = tmpDir </> sourceName
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile sourcePath "new contents"
+        FileSystem.writeFile destinationPath "old contents"
+        FileSystem.setPortableWritable destinationPath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
+            manualPlan
+              [ CopyFile sourcePath destinationPath
+              , SetEntryMode destinationPath ReadOnly FileSystem.File
+              ]
+        result `shouldBe` Right ()
+        FileSystem.readFile destinationPath `shouldReturn` "new contents"
+        finalMode <- FileSystem.getPortableMode destinationPath
+        finalMode.writable `shouldBe` False
+        FileSystem.setPortableWritable destinationPath True
+
+    it "leaves recreated entries writable without a declared mode" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "guard-source"
+        destinationName <- encodeFS "guard-destination"
+        let sourcePath = tmpDir </> sourceName
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile sourcePath "new contents"
+        FileSystem.writeFile destinationPath "old contents"
+        FileSystem.setPortableWritable destinationPath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
+            manualPlan [CopyFile sourcePath destinationPath]
+        result `shouldBe` Right ()
+        FileSystem.readFile destinationPath `shouldReturn` "new contents"
+        -- The widened entry is narrowed back to its prior state, since no
+        -- declared mode superseded it:
+        finalMode <- FileSystem.getPortableMode destinationPath
+        finalMode.writable `shouldBe` False
+        FileSystem.setPortableWritable destinationPath True
+
+    it "removes read-only trees" $
+      withTempDir $ \tmpDir _ -> do
+        treeName <- encodeFS "guard-tree"
+        childName <- encodeFS "child"
+        fileName' <- encodeFS "file"
+        let treePath = tmpDir </> treeName
+        let childPath = treePath </> childName
+        FileSystem.createDirectories childPath
+        FileSystem.writeFile (childPath </> fileName') "contents"
+        FileSystem.setPortableWritable (childPath </> fileName') False
+        FileSystem.setPortableWritable childPath False
+        FileSystem.setPortableWritable treePath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
+            manualPlan [RemoveDirs treePath]
+        result `shouldBe` Right ()
+        FileSystem.exists treePath `shouldReturn` False
+
+    it "narrows preserved containers after protected removal" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "guard-tree"
+        midName <- encodeFS "mid"
+        keepName <- encodeFS "keep"
+        goneName <- encodeFS "gone"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        let keepPath = rootPath </> midName </> keepName
+        FileSystem.createDirectories keepPath
+        FileSystem.writeFile (keepPath </> fileName') "kept"
+        FileSystem.createDirectories $ rootPath </> goneName
+        FileSystem.setPortableWritable (rootPath </> midName) False
+        FileSystem.setPortableWritable rootPath False
+        result <-
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
+            manualPlan [RemoveDirsExcept rootPath [keepPath]]
+        result `shouldBe` Right ()
+        FileSystem.exists (rootPath </> goneName) `shouldReturn` False
+        FileSystem.readFile (keepPath </> fileName') `shouldReturn` "kept"
+        -- The surviving root and container are narrowed back:
+        rootMode <- FileSystem.getPortableMode rootPath
+        rootMode.writable `shouldBe` False
+        midMode <- FileSystem.getPortableMode (rootPath </> midName)
+        midMode.writable `shouldBe` False
+        FileSystem.setPortableWritable rootPath True
+        FileSystem.setPortableWritable (rootPath </> midName) True
+
+    it "restores prior modes when execution fails" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "guard-source"
+        destinationName <- encodeFS "guard-destination"
+        missingName <- encodeFS "guard-missing"
+        otherName <- encodeFS "guard-other"
+        let sourcePath = tmpDir </> sourceName
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile sourcePath "new contents"
+        FileSystem.writeFile destinationPath "old contents"
+        FileSystem.setPortableWritable destinationPath False
+        result <-
+          tryError $
+            executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
+              manualPlan
+                [ CopyFile sourcePath destinationPath
+                , CopyFile (tmpDir </> missingName) (tmpDir </> otherName)
+                , SetEntryMode destinationPath ReadOnly FileSystem.File
+                ]
+        result `shouldSatisfy` \case
+          Left _ -> True
+          Right _ -> False
+        -- The widened destination is restored to read-only despite the
+        -- failure happening before the declared mode was applied:
+        finalMode <- FileSystem.getPortableMode destinationPath
+        finalMode.writable `shouldBe` False
+        FileSystem.setPortableWritable destinationPath True
+
+  describe "observeModeDrift" $ do
+    it "reports destinations that violate their declared mode" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "mode-source"
+        destinationName <- encodeFS "mode-destination"
+        intermediateName <- encodeFS "mode-intermediate"
+        routeName <- encodeFS "mode-route"
+        let destinationPath = tmpDir </> destinationName
+        FileSystem.writeFile destinationPath "contents"
+        FileSystem.setPortableWritable destinationPath True
+        let managedWith mode' =
+              ManagedCorrespondence
+                ( RouteResult
+                    (tmpDir </> sourceName)
+                    routeName
+                    destinationPath
+                    FileSystem.File
+                    mode'
+                    CopyRoute
+                    ""
+                    mempty
+                )
+                mempty
+                FileCorrespondence
+                  { source = FileEntry (tmpDir </> sourceName) (File 8)
+                  , sourceDelta = Unchanged
+                  , intermediate =
+                      FileEntry (tmpDir </> intermediateName) (File 8)
+                  , destination = FileEntry destinationPath (File 8)
+                  , destinationDelta = Unchanged
+                  }
+        drifted <- observeModeDrift [managedWith ReadOnly]
+        [m.route.routeName | (m, _) <- drifted] `shouldBe` [routeName]
+        -- A satisfied declaration reports nothing:
+        FileSystem.setPortableWritable destinationPath False
+        satisfied <- observeModeDrift [managedWith ReadOnly]
+        FileSystem.setPortableWritable destinationPath True
+        [m.route.routeName | (m, _) <- satisfied] `shouldBe` []
+        -- The default mode is never reported:
+        defaulted <- observeModeDrift [managedWith DefaultMode]
+        [m.route.routeName | (m, _) <- defaulted] `shouldBe` []
+
   describe "observeReconciliationInput" $ do
     it "compares equal-size files by content" $ withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source-file"
@@ -643,13 +1224,17 @@ spec = do
               , destination = FileEntry destinationPath (File 4)
               , destinationDelta = Modified
               }
-      equalInput <- observeReconciliationInput context correspondence
+      equalInput <- observeReconciliationInput context DefaultMode correspondence
       equalInput.sourceDestinationComparison `shouldBe` ReplicasEquivalent
       equalInput.destinationRouteState `shouldBe` NotRouted
+      equalInput.declaredDestinationMode `shouldBe` DefaultMode
+      ((.writable) <$> equalInput.observedDestinationMode) `shouldBe` Just True
 
       FileSystem.writeFile destinationPath "else"
-      differentInput <- observeReconciliationInput context correspondence
+      differentInput <-
+        observeReconciliationInput context Private correspondence
       differentInput.sourceDestinationComparison `shouldBe` ReplicasDifferent
+      differentInput.declaredDestinationMode `shouldBe` Private
 
   describe "execution" $ do
     it "interprets every synchronization operation" $ withTempDir $ \tmpDir _ -> do
@@ -819,3 +1404,109 @@ spec = do
           `shouldThrow` (\e -> ioeGetFileName e == Just sourcePath)
         FileSystem.readFile failurePaths.intermediate
           `shouldReturn` "recovery"
+
+-- Making the container unreadable is only expressible on POSIX, where a
+-- directory stripped of its execute bit blocks the restoration of the
+-- read-only entry inside it.
+#ifndef mingw32_HOST_OS
+restoreFailureReportSpec :: Spec
+restoreFailureReportSpec =
+  it "reports restoration failures while unwinding" $
+    withTempDir $ \tmpDir _ -> do
+      boxName <- encodeFS "guard-box"
+      sourceName <- encodeFS "guard-source"
+      roName <- encodeFS "ro-file"
+      missingName <- encodeFS "guard-missing"
+      otherName <- encodeFS "guard-other"
+      let boxPath = tmpDir </> boxName
+      let roPath = boxPath </> roName
+      FileSystem.createDirectories boxPath
+      FileSystem.writeFile (tmpDir </> sourceName) "new contents"
+      FileSystem.writeFile roPath "old contents"
+      FileSystem.setPortableWritable roPath False
+      reported <- newIORef ([] :: [IOError])
+      result <-
+        tryError $
+          executeReconciliationPlanGuarded
+            (const $ return ())
+            (\err -> modifyIORef' reported (err :))
+            ReconciliationPlan
+              { direction = SourceToDestination
+              , conflictPolicy = RefuseConflicts
+              , items = []
+              , conflicts = []
+              , operations =
+                  PlannedSyncOp DestinationReplica
+                    <$> [ CopyFile (tmpDir </> sourceName) roPath
+                        , SetEntryMode boxPath ReadOnly FileSystem.File
+                        , CopyFile
+                            (tmpDir </> missingName)
+                            (tmpDir </> otherName)
+                        ]
+              }
+      FileSystem.setPortableMode boxPath 0o755
+      FileSystem.setPortableWritable roPath True
+      -- The original operation error still propagates:
+      result `shouldSatisfy` \case
+        Left _ -> True
+        _ -> False
+      -- The failed restoration is reported rather than swallowed:
+      failures <- readIORef reported
+      failures `shouldSatisfy` (not . null)
+#else
+restoreFailureReportSpec :: Spec
+restoreFailureReportSpec = pure ()
+#endif
+
+
+-- Case-variant containment only differs on Windows, where ownership
+-- selection accepts nesting whose spelling differs from the enumerated
+-- destination paths.
+#ifdef mingw32_HOST_OS
+windowsCaseProtectionSpec :: Paths -> OsPath -> Spec
+windowsCaseProtectionSpec paths route =
+  describe "case-variant protection (Windows)" $ do
+    it "protects case-variant nested destinations in plans" $ do
+      upper <- encodeFS "FILE"
+      nested <- encodeFS "nested"
+      destinationUpper <- encodeFS "DESTINATION"
+      let upperNested = destinationUpper </> upper </> nested
+      let removal =
+            ( makeInput
+                paths
+                Missing
+                Directory
+                Directory
+                Removed
+                Unchanged
+                ReplicasDifferent
+                (Routed route)
+            )
+              { protectedDestinations = [upperNested]
+              }
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [removal]
+      [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+        `shouldBe` [RemoveDirsExcept paths.destination [upperNested]]
+
+    it "preserves case-variant protected subtrees during removal" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        goneName <- encodeFS "gone"
+        keepName <- encodeFS "keep"
+        keepUpper <- encodeFS "KEEP"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        FileSystem.createDirectories $ rootPath </> goneName
+        FileSystem.writeFile (rootPath </> goneName </> fileName') "gone"
+        FileSystem.createDirectories $ rootPath </> keepName
+        FileSystem.writeFile (rootPath </> keepName </> fileName') "kept"
+        executeSyncOp $
+          RemoveDirsExcept rootPath [rootPath </> keepUpper]
+        FileSystem.exists (rootPath </> goneName) `shouldReturn` False
+        FileSystem.readFile (rootPath </> keepName </> fileName')
+          `shouldReturn` "kept"
+#else
+windowsCaseProtectionSpec :: Paths -> OsPath -> Spec
+windowsCaseProtectionSpec _ _ = pure ()
+#endif

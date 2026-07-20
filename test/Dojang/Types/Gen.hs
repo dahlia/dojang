@@ -402,10 +402,45 @@ fileRoute' predicatesNumberRange mm predGen = do
   predicates <-
     nub . map normalizePredicate <$> Gen.list predicatesNumberRange predGen
   let cardinality = Prelude.length predicates
-  paths <-
-    Gen.list (constant cardinality cardinality) $ Gen.maybe filePathExpression
   fileOrDir <- Gen.element [File, Directory]
+  paths <-
+    Gen.list (constant cardinality cardinality) $
+      Gen.maybe $
+        routeTarget fileOrDir filePathExpression
   return $ FileRoute.fileRoute' (`lookup` mm) (predicates `zip` paths) fileOrDir
+
+
+-- | Generates a 'FileRoute.RouteTarget' whose metadata is valid for
+-- the given 'FileType': symlink targets carry no mode, and directory
+-- targets never carry executable modes.
+routeTarget
+  :: (MonadGen m)
+  => FileType
+  -> m FilePathExpression
+  -> m FileRoute.RouteTarget
+routeTarget fileOrDir exprGen = do
+  expr <- exprGen
+  kind <-
+    Gen.frequency
+      [ (4, pure FileRoute.CopyRoute)
+      , (1, pure FileRoute.SymlinkRoute)
+      ]
+  mode <- case kind of
+    FileRoute.SymlinkRoute -> pure FileRoute.DefaultMode
+    FileRoute.CopyRoute ->
+      Gen.frequency $
+        (5, pure FileRoute.DefaultMode)
+          : [ (1, pure mode')
+            | mode' <- case fileOrDir of
+                Directory -> [FileRoute.Private, FileRoute.ReadOnly]
+                _ ->
+                  [ FileRoute.Private
+                  , FileRoute.Executable
+                  , FileRoute.PrivateExecutable
+                  , FileRoute.ReadOnly
+                  ]
+            ]
+  return $ FileRoute.RouteTarget expr mode kind
 
 
 osString :: (MonadGen m) => Range Int -> m Char -> m OsString
@@ -452,10 +487,11 @@ arbitraryFileRouteMap range monikers =
     key <- osPath (singleton 1)
     predicates <- Gen.list (constant 0 5) environmentPredicate
     let cardinality = Prelude.length predicates
+    fileOrDir <- Gen.element [File, Directory]
     paths <-
       Gen.list (constant cardinality cardinality) $
-        Gen.maybe arbitraryFilePathExpression
-    fileOrDir <- Gen.element [File, Directory]
+        Gen.maybe $
+          routeTarget fileOrDir arbitraryFilePathExpression
     let value =
           FileRoute.fileRoute'
             (`lookup` monikers)

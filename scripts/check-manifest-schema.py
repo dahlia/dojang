@@ -86,6 +86,36 @@ valid_manifests = [
             ],
         }
     },
+    {
+        "files": {
+            "id_ed25519": [
+                {
+                    "moniker": "posix",
+                    "path": "~/.ssh/id_ed25519",
+                    "mode": "private",
+                }
+            ],
+            "bin/tool": [
+                {"when": "always", "path": "~/bin/tool", "mode": "executable"}
+            ],
+            "vimrc": [
+                {"when": "always", "path": "~/.vimrc", "kind": "symlink"},
+                {
+                    "moniker": "linux",
+                    "path": "~/.vimrc",
+                    "kind": "symlink",
+                    "mode": "default",
+                },
+            ],
+        },
+        "dirs": {
+            "ssh": [
+                {"when": "always", "path": "~/.ssh", "mode": "private"},
+                {"moniker": "work", "path": "~/.ssh", "mode": "read-only"},
+                {"moniker": "posix", "path": "~/.ssh", "kind": "symlink"},
+            ]
+        },
+    },
 ]
 invalid_manifests = [
     {"repository-id": "not-a-uuid"},
@@ -114,6 +144,34 @@ invalid_manifests = [
     },
     {"vars": {"HOME": [{"when": "always", "value": "$HOME", "x": 1}]}},
     {"unknown": {}},
+    {"files": {"vimrc": [{"when": "always", "path": "~/.vimrc", "mode": "0600"}]}},
+    {"files": {"vimrc": [{"when": "always", "path": "~/.vimrc", "kind": "hardlink"}]}},
+    {"files": {"vimrc": [{"when": "always", "mode": "private"}]}},
+    {"files": {"vimrc": [{"when": "always", "kind": "symlink"}]}},
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
+                    "kind": "symlink",
+                    "mode": "private",
+                }
+            ]
+        }
+    },
+    {"dirs": {"ssh": [{"when": "always", "path": "~/.ssh", "mode": "executable"}]}},
+    {
+        "dirs": {
+            "ssh": [
+                {
+                    "when": "always",
+                    "path": "~/.ssh",
+                    "mode": "private-executable",
+                }
+            ]
+        }
+    },
 ]
 
 for valid_manifest in valid_manifests:

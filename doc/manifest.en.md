@@ -240,6 +240,65 @@ conditions.  Branches are tried in that order, and the first matching branch
 determines the destination.  Compact routes continue to use predicate
 specificity to determine priority.
 
+### Destination modes and kinds
+
+A detailed branch may also declare metadata for its destination through the
+optional `mode` and `kind` fields.  Both require a `path`, so a null route
+cannot carry metadata.  Compact routes cannot declare metadata; use the
+detailed form instead.
+
+The `mode` field declares a portable permission intent for the destination
+from a small closed vocabulary:
+
+| `mode`                 | POSIX file | POSIX directory | Windows             |
+| ---------------------- | ---------- | --------------- | ------------------- |
+| `"default"` (omitted)  | unmanaged  | unmanaged       | unmanaged           |
+| `"private"`            | `0600`     | `0700`          | not enforceable     |
+| `"executable"`         | `0755`     | not applicable  | not enforceable     |
+| `"private-executable"` | `0700`     | not applicable  | not enforceable     |
+| `"read-only"`          | `0444`     | `0555`          | read-only attribute |
+
+~~~~ toml
+[[files."id_ed25519"]]
+moniker = "posix"
+path = "~/.ssh/id_ed25519"
+mode = "private"
+~~~~
+
+The manifest is authoritative for declared modes: `dojang status` reports a
+destination whose permissions do not satisfy its declaration, and
+`dojang apply` reconciles the destination toward the declared mode even when
+its contents are unchanged.  A declared mode is a desired final state rather
+than a precondition, so applying updates to a `read-only` destination widens
+it temporarily and narrows it back afterwards.  Windows can only enforce the
+`read-only` distinction; other declarations produce a warning there instead
+of silently claiming success.  Executable modes are meaningless for directory
+routes and are rejected.
+
+The `kind` field declares whether the destination is an ordinary copied
+entry (`"copy"`, the default) or a **deployment link** (`"symlink"`): a
+symbolic link at the destination pointing back at the absolute path of the
+route's source file in the repository checkout.
+
+~~~~ toml
+[[files.".vimrc"]]
+moniker = "posix"
+path = "~/.vimrc"
+kind = "symlink"
+~~~~
+
+A deployment link is a one-way projection of the repository source.
+`dojang apply` creates a missing link, repairs one whose target no longer
+matches the source (for example after the checkout moved), and refuses to
+replace an existing regular file or directory unless `--force` is given.
+`dojang reflect` never reflects a deployment link, even with `--force` or
+when a path under a linked directory is named explicitly.  A symbolic link
+carries no portable permissions of its own, so a `kind = "symlink"` branch
+cannot declare a non-default `mode`.  Whether a link is created as a file
+link or a directory link on Windows follows from the `files` or `dirs`
+table declaring the route; creating symbolic links on Windows requires
+Developer Mode or administrator privileges.
+
 A route can be named like `home_directory` in the example above,
 which actually refers to the path where the source of config files are located
 within the repository.  If it says `home_directory`, it refers to

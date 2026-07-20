@@ -16,6 +16,7 @@ module Dojang.Types.ManagedTarget
   , classifyOrphan
   , destinationPathIdentity
   , equalDestinationPath
+  , hasMaterializedSnapshot
   , isSafeManagedRelativePath
   , makeCurrentEntries
   , makeCurrentRouteAbsolute
@@ -25,7 +26,6 @@ module Dojang.Types.ManagedTarget
   , unreachableSnapshots
   ) where
 
-import Data.Char (ord, toLower)
 import Data.List (isPrefixOf, sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -34,9 +34,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Time (UTCTime)
-import Data.Word (Word32)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Info (os)
 import System.OsPath
   ( OsPath
   , encodeFS
@@ -44,8 +42,6 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
-  , toChar
-  , unpack
   , (</>)
   )
 
@@ -56,7 +52,12 @@ import Dojang.Types.Context
   , FileStat (Missing)
   , ManagedCorrespondence (..)
   )
+import Dojang.Types.PathIdentity
+  ( destinationPathIdentity
+  , equalDestinationPath
+  )
 import Dojang.Types.Repository (RouteResult (..))
+import Dojang.Types.RouteMetadata (RouteKind (SymlinkRoute), RouteMode)
 
 
 -- | The content identity recorded after a successful synchronization.
@@ -65,7 +66,21 @@ data TargetFingerprint
     FileFingerprint Integer Text
   | -- | The destination was a directory.
     DirectoryFingerprint
+  | -- | The destination was a deployment link with the given stored
+    -- target.  The recorded target string is the snapshot: no filesystem
+    -- entry backs it, so the record works on hosts that cannot create
+    -- links.
+    SymlinkFingerprint OsPath
   deriving (Eq, Ord, Show)
+
+
+-- | Whether a fingerprint is backed by a materialized filesystem
+-- baseline.  A deployment link's stored target string is its snapshot, so
+-- no filesystem entry exists at its snapshot path.
+hasMaterializedSnapshot :: ManagedTarget -> Bool
+hasMaterializedSnapshot target = case target.fingerprint of
+  SymlinkFingerprint _ -> False
+  _ -> True
 
 
 -- | The command that most recently synchronized a destination.
@@ -83,6 +98,13 @@ data ManagedTarget = ManagedTarget
   -- ^ Source entry path relative to the repository root.
   , routeType :: FileSystem.FileType
   -- ^ Whether the producing route managed one file or a directory tree.
+  , routeKind :: RouteKind
+  -- ^ Whether the producing route copies entries or deploys a symbolic
+  -- link.  Records from schema versions before 5 default to 'CopyRoute'.
+  , declaredMode :: RouteMode
+  -- ^ The portable mode the producing route declared, preserved so the
+  -- record can act as a metadata common ancestor.  Records from schema
+  -- versions before 5 default to 'DefaultMode'.
   , destinationPath :: OsPath
   -- ^ Fully expanded destination path.
   , snapshotPath :: OsPath
@@ -111,6 +133,8 @@ data CurrentRoute = CurrentRoute
   -- ^ Canonical selected route definition.
   , fileType :: FileSystem.FileType
   -- ^ Whether this route manages one file or a directory tree.
+  , kind :: RouteKind
+  -- ^ Whether this route copies entries or deploys a symbolic link.
   }
   deriving (Eq, Ord, Show)
 
@@ -143,27 +167,6 @@ data OrphanStatus = OrphanUnchanged | OrphanModified | OrphanMissing
   deriving (Eq, Ord, Show)
 
 
--- | Produces the normalized code units used for native destination identity.
---
--- Windows path identity is case-insensitive.  POSIX path identity preserves
--- case and every surrogate-escaped filesystem byte.
-destinationPathIdentity :: OsPath -> [Word32]
-destinationPathIdentity = fmap canonicalUnit . unpack . normalise
- where
-  canonicalUnit value =
-    fromIntegral $
-      ord $
-        if os == "mingw32"
-          then toLower $ toChar value
-          else toChar value
-
-
--- | Compares two destination paths using the host platform's native semantics.
-equalDestinationPath :: OsPath -> OsPath -> Bool
-equalDestinationPath left right =
-  destinationPathIdentity left == destinationPathIdentity right
-
-
 -- | Determines whether a managed record is orphaned by the current routes.
 classifyOrphan
   :: Map OsPath CurrentRoute
@@ -178,6 +181,7 @@ classifyOrphan routes entries target = case Map.lookup target.routeName routes o
   Nothing -> Just RouteRemoved
   Just route
     | route.fileType /= target.routeType -> Just RouteChanged
+    | route.kind /= target.routeKind -> Just RouteChanged
     | route.routeDefinition /= target.routeDefinition -> Just RouteChanged
     | not $
         equalDestinationPath
@@ -194,13 +198,16 @@ classifyOrphan routes entries target = case Map.lookup target.routeName routes o
 -- they currently represent a deletion.  Directory routes contribute only
 -- entries that still exist in the source tree; intermediate-only paths are
 -- synchronization history rather than entries produced by the current route.
+-- Deployment links always remain present: the link stays deployed (possibly
+-- broken) while its source is absent, so its record is still active.
 makeCurrentEntries :: [ManagedCorrespondence] -> Set CurrentEntry
 makeCurrentEntries =
   Set.fromList . fmap fromCorrespondence . filter isCurrentlyProduced
  where
   isCurrentlyProduced :: ManagedCorrespondence -> Bool
   isCurrentlyProduced managed =
-    managed.route.fileType /= FileSystem.Directory
+    managed.route.kind == SymlinkRoute
+      || managed.route.fileType /= FileSystem.Directory
       || managed.correspondence.source.stat /= Missing
 
   fromCorrespondence :: ManagedCorrespondence -> CurrentEntry
@@ -235,6 +242,7 @@ makeCurrentRouteAbsolute route = do
       (normalise destination)
       route.routeDefinition
       route.fileType
+      route.kind
 
 
 -- | Builds the normalized current-route index used for orphan detection.
@@ -260,6 +268,7 @@ makeCurrentRoutes routes = Map.fromList <$> mapM makeCurrentRoute routes
           route.destinationPath
           route.routeDefinition
           route.fileType
+          route.kind
     return (routeName, absolute)
 
 

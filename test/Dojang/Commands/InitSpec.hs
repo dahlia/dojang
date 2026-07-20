@@ -43,7 +43,12 @@ import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import System.Timeout (timeout)
 import Test.Hspec (Spec, it, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Test.Hspec.Expectations.Pretty
+  ( shouldBe
+  , shouldReturn
+  , shouldSatisfy
+  , shouldThrow
+  )
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 import Prelude hiding (init, readFile, writeFile)
 
@@ -87,6 +92,7 @@ import Dojang.Types.Registry
   , writeRegistry
   )
 import Dojang.Types.RepositoryId (parseRepositoryId)
+import Dojang.Types.RouteMetadata (PortableMode)
 
 
 spec :: Spec
@@ -166,11 +172,12 @@ spec = sequential $ do
             runCoordinatedInitIO gate $
               runAppWithoutLogging appEnv $
                 Init.init [Init.Amd64Linux] True
-      any isSuccessful results `shouldBe` True
-      all
-        (\result -> isSuccessful result || isManifestAlreadyExists result)
-        results
-        `shouldBe` True
+      -- shouldSatisfy shows the collected results on failure, so an
+      -- unexpected loser error stays diagnosable in CI logs:
+      results `shouldSatisfy` any isSuccessful
+      results
+        `shouldSatisfy` all
+          (\result -> isSuccessful result || isManifestAlreadyExists result)
       repositoryStates <- listDirectory $ stateRoot </> repositoriesName
       length repositoryStates `shouldBe` 1
 
@@ -949,6 +956,12 @@ instance MonadFileSystem CoordinatedInitIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 concurrently

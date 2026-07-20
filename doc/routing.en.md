@@ -301,6 +301,55 @@ appears first in the predicate comparison takes priority.
     consider restructuring with `&&` conditions instead.
 
 
+Deployment links
+----------------
+
+A route normally copies its source to the destination, and changes made at
+the destination can be reflected back into the repository.  A route branch
+with `kind = "symlink"` instead deploys a **deployment link**: a symbolic
+link at the destination pointing at the absolute path of the route's source
+inside the repository checkout.
+
+~~~~ toml
+[[dirs.nvim]]
+moniker = "posix"
+path = "$XDG_CONFIG_HOME/nvim"
+kind = "symlink"
+~~~~
+
+A deployment link is intentionally one-way.  Because the destination reads
+through to the repository source, editing the destination *is* editing the
+source, and there is nothing to reflect: `dojang reflect` refuses deployment
+links categorically, including with `--force` and for paths under a linked
+directory.  `dojang apply` creates a missing link, repairs one whose target
+no longer matches the source (for example after the repository checkout
+moved), and treats an existing regular file or directory at the destination
+as a conflict unless `--force` replaces it.
+
+A directory deployed as a link is also a traversal boundary: no other route
+may route into it, and broader routes never read or write through it.
+
+
+Route ownership
+---------------
+
+Every destination entry is owned by exactly one route.  When the
+destinations of two routes nest — for example a directory route for
+*$XDG_CONFIG_HOME* and a more specific route for *$XDG\_CONFIG\_HOME/nvim* —
+the route with the more specific destination owns its subtree, and the
+broader route neither reads nor writes entries inside it, including during
+removals.
+
+Route configurations that cannot provide unambiguous ownership are rejected
+before anything is mutated, with exit code 38:
+
+ -  two active routes expanding to the same destination path, lexically or
+    after resolving symbolic links;
+ -  a route whose destination lies inside another route's deployment link;
+ -  a route whose destination overlaps the repository checkout itself, or
+    aliases its own source through symbolic links.
+
+
 Null routing
 ------------
 

@@ -19,6 +19,7 @@ import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty (toList)
 import qualified Data.List.NonEmpty as NonEmpty
+import Data.Maybe (isJust)
 import Data.String (IsString (fromString))
 import Data.Void (Void)
 import qualified System.FilePath.Windows as Windows
@@ -81,6 +82,9 @@ import Dojang.Types.FilePathExpression
   )
 import Dojang.Types.FileRoute
   ( FileRoute
+  , RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Executable, PrivateExecutable)
+  , RouteTarget (RouteTarget)
   , fileRoute
   , fileRoutePreservingOrder
   )
@@ -108,6 +112,12 @@ import Dojang.Types.ManifestVariable
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
+import Dojang.Types.RouteMetadata
+  ( parseRouteKind
+  , parseRouteMode
+  , renderRouteKind
+  , renderRouteMode
+  )
 
 
 -- | An error made during parsing.
@@ -142,8 +152,21 @@ data DetailedRouteError
     ConflictingRouteConditions
   | -- | The @moniker@ field refers to an undefined moniker.
     UnknownRouteMoniker MonikerName
-  | -- | The branch contains fields other than @moniker@, @when@, and @path@.
+  | -- | The branch contains fields other than @moniker@, @when@, @path@,
+    -- @mode@, and @kind@.
     UnexpectedRouteFields [Text]
+  | -- | The @mode@ field is not part of the closed mode vocabulary.
+    UnknownRouteMode Text
+  | -- | The @kind@ field is not part of the closed kind vocabulary.
+    UnknownRouteKind Text
+  | -- | The @mode@ field declares an executable mode on a directory route.
+    ModeNotApplicableToDirectory RouteMode
+  | -- | The branch declares both @kind = \"symlink\"@ and a non-default
+    -- @mode@; symbolic links carry no portable permissions of their own.
+    SymlinkRouteWithMode
+  | -- | The branch declares @mode@ or @kind@ but no @path@; metadata
+    -- cannot apply to a null route.
+    MetadataOnNullRoute
   deriving (Eq, Show)
 
 
@@ -225,6 +248,30 @@ formatErrors (FileRouteBranchError fileType path index reason) =
     "refers to undefined moniker " <> original name.name <> "."
   formatReason (UnexpectedRouteFields fields) =
     "contains unexpected field(s): " <> intercalate ", " fields <> "."
+  formatReason (UnknownRouteMode mode) =
+    "declares unknown mode "
+      <> mode
+      <> "; expected one of: "
+      <> intercalate
+        ", "
+        [renderRouteMode m | m <- [minBound .. maxBound]]
+      <> "."
+  formatReason (UnknownRouteKind kind) =
+    "declares unknown kind "
+      <> kind
+      <> "; expected one of: "
+      <> intercalate
+        ", "
+        [renderRouteKind k | k <- [minBound .. maxBound]]
+      <> "."
+  formatReason (ModeNotApplicableToDirectory mode) =
+    "declares mode "
+      <> renderRouteMode mode
+      <> ", which is not applicable to directory routes."
+  formatReason SymlinkRouteWithMode =
+    "cannot declare a mode together with kind symlink."
+  formatReason MetadataOnNullRoute =
+    "cannot declare mode or kind without a path."
 formatErrors (ManifestVariableError name branchIndex reason) =
   [ prefix <> formatReason reason
   ]
@@ -565,7 +612,7 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
   mapBranch
     :: Int
     -> FileRouteBranch'
-    -> Either Error (EnvironmentPredicate, Maybe FilePathExpression)
+    -> Either Error (EnvironmentPredicate, Maybe RouteTarget)
   mapBranch index branch
     | not $ null branch.routeUnexpectedFields =
         Left $
@@ -590,7 +637,28 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
                     condition
               )
         path <- traverse parseDetailedPath branch.routePath
-        pure (predicate, path)
+        mode <- case branch.routeMode of
+          Nothing -> pure DefaultMode
+          Just modeText -> case parseRouteMode modeText of
+            Just mode' -> pure mode'
+            Nothing -> branchError index $ UnknownRouteMode modeText
+        kind <- case branch.routeKind of
+          Nothing -> pure CopyRoute
+          Just kindText -> case parseRouteKind kindText of
+            Just kind' -> pure kind'
+            Nothing -> branchError index $ UnknownRouteKind kindText
+        case path of
+          Nothing
+            | isJust branch.routeMode || isJust branch.routeKind ->
+                branchError index MetadataOnNullRoute
+          _ -> pure ()
+        if fileType == Directory && (mode == Executable || mode == PrivateExecutable)
+          then branchError index $ ModeNotApplicableToDirectory mode
+          else pure ()
+        if kind == SymlinkRoute && mode /= DefaultMode
+          then branchError index SymlinkRouteWithMode
+          else pure ()
+        pure (predicate, (\expr -> RouteTarget expr mode kind) <$> path)
    where
     parseDetailedPath "" = Right $ BareComponent ""
     parseDetailedPath expression =

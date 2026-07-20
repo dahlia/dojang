@@ -112,6 +112,24 @@
           "title": "File path expression",
           "description": "A file path expression which represents a destination path.  It can contain expandable variables, and an empty string represents an explicit empty path rather than a null route.",
           "type": "string"
+        },
+        "mode": {
+          "title": "Portable destination mode",
+          "description": "A portable mode the destination should have.  On POSIX, private maps to 0600 (directories: 0700), executable to 0755, private-executable to 0700, and read-only to 0444 (directories: 0555).  Executable modes are not applicable to directory routes, and symlink-kind branches cannot declare a non-default mode.  Requires path.",
+          "type": "string",
+          "enum": [
+            "default",
+            "private",
+            "executable",
+            "private-executable",
+            "read-only"
+          ]
+        },
+        "kind": {
+          "title": "Destination kind",
+          "description": "Whether the destination is an ordinary copied entry (copy) or a symbolic link pointing back at the route's repository source (symlink).  Requires path.",
+          "type": "string",
+          "enum": ["copy", "symlink"]
         }
       },
       "oneOf": [
@@ -122,7 +140,55 @@
           "required": ["when"]
         }
       ],
+      "dependentRequired": {
+        "mode": ["path"],
+        "kind": ["path"]
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "symlink"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "mode": {
+            "const": "default"
+          }
+        }
+      },
       "additionalProperties": false
+    },
+    "dirRouteMap": {
+      "title": "Directory route definitions",
+      "description": "A map of directory route names to their corresponding route definitions.  Directory routes cannot declare executable modes.",
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/compactRoute"
+          },
+          {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/detailedRouteBranch"
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "enum": ["default", "private", "read-only"]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
     },
     "environmentPredicate": {
       "title": "Environment predicate",
@@ -360,7 +426,7 @@
       "$ref": "#/$defs/routeMap"
     },
     "dirs": {
-      "$ref": "#/$defs/routeMap"
+      "$ref": "#/$defs/dirRouteMap"
     },
     "ignores": {
       "title": "Ignore patterns",

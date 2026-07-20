@@ -17,9 +17,17 @@ import Hedgehog.Range (linear)
 import System.Directory.OsPath qualified
 import System.Info (os)
 
+import Control.Monad (when)
+import Control.Monad.Except (catchError)
+import Dojang.Types.ManagedTarget
+  ( TargetFingerprint (SymlinkFingerprint)
+  )
+
 
 #ifndef mingw32_HOST_OS
-import Dojang.Types.ManagedTarget (TargetFingerprint (FileFingerprint))
+import Dojang.Types.ManagedTarget
+  ( TargetFingerprint (FileFingerprint)
+  )
 import System.OsPath (decodeFS)
 import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
@@ -33,7 +41,7 @@ import System.OsPath
   , takeDirectory
   , (</>)
   )
-import Test.Hspec (Spec, describe, it)
+import Test.Hspec (Spec, describe, it, sequential)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldNotBe
@@ -54,6 +62,10 @@ import Dojang.Types.Context
   , FileStat (Directory, File)
   , ManagedCorrespondence (..)
   )
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , OrphanStatus (..)
@@ -73,7 +85,10 @@ import Dojang.Types.TargetTracking
 
 spec :: Spec
 spec = do
-  describe "managed-target construction" $ do
+  symlinkOrphanSpec
+  -- These tests observe or mutate the process working directory, so they
+  -- must not run concurrently with other working-directory users:
+  sequential $ describe "managed-target construction" $ do
     it "persists a relative destination as an absolute path" $
       withTempDir $ \root _ ->
         System.Directory.OsPath.withCurrentDirectory root $ do
@@ -116,6 +131,8 @@ spec = do
               rawRouteName
               canonicalRoute.destinationPath
               canonicalRoute.fileType
+              canonicalRoute.mode
+              canonicalRoute.kind
               canonicalRoute.routeDefinition
               canonicalRoute.routeProvenance
       canonicalId <- managedTargetId repository managed
@@ -133,6 +150,8 @@ spec = do
               route.routeName
               route.destinationPath
               route.fileType
+              route.mode
+              route.kind
               "other-definition"
               route.routeProvenance
       originalId <- managedTargetId repository managed
@@ -152,6 +171,8 @@ spec = do
               route.routeName
               route.destinationPath
               FileSystem.Directory
+              route.mode
+              route.kind
               route.routeDefinition
               route.routeProvenance
       originalId <- managedTargetId repository managed
@@ -190,6 +211,8 @@ spec = do
                       route.routeName
                       route.destinationPath
                       FileSystem.Directory
+                      route.mode
+                      route.kind
                       route.routeDefinition
                       route.routeProvenance
                 , correspondence =
@@ -231,6 +254,8 @@ spec = do
                 route.routeName
                 route.destinationPath
                 route.fileType
+                route.mode
+                route.kind
                 route.routeDefinition
                 route.routeProvenance
         let escaped = managed{route = escapedRoute}
@@ -327,6 +352,8 @@ spec = do
                     routeName
                     destinationRoot
                     FileSystem.Directory
+                    DefaultMode
+                    CopyRoute
                     "definition"
                     Map.empty
                 )
@@ -372,6 +399,8 @@ spec = do
                 routeName
                 routeName
                 FileSystem.Directory
+                CopyRoute
+                DefaultMode
                 destination
                 snapshot
                 "definition"
@@ -445,6 +474,64 @@ posixOrphanStatusSpec = do
         `shouldReturn` Just OrphanModified
 #endif
 
+
+symlinkOrphanSpec :: Spec
+symlinkOrphanSpec =
+  describe "observeOrphanStatus (deployment links)" $ do
+    it "reports an unchanged link with a relative recorded target" $
+      withTempDir $ \root _ -> do
+        sourceName <- encodeFS "linked-source"
+        destinationName <- encodeFS "linked-destination"
+        probeName <- encodeFS "link-probe"
+        writeFile (root </> sourceName) "linked"
+        symlinkAvailable <-
+          ( do
+              createSymbolicLink sourceName (root </> probeName) FileSystem.File
+              return True
+          )
+            `catchError` const (return False)
+        when symlinkAvailable $ do
+          createSymbolicLink
+            sourceName
+            (root </> destinationName)
+            FileSystem.File
+          target <- fixtureLinkOrphan root sourceName destinationName
+          observeOrphanStatus target `shouldReturn` OrphanUnchanged
+          -- A retargeted link is modified, and a removed one missing:
+          removeFile $ root </> destinationName
+          otherName <- encodeFS "other"
+          writeFile (root </> otherName) "other"
+          createSymbolicLink
+            otherName
+            (root </> destinationName)
+            FileSystem.File
+          target' <- fixtureLinkOrphan root sourceName destinationName
+          observeOrphanStatus target' `shouldReturn` OrphanModified
+          removeFile $ root </> destinationName
+          target'' <- fixtureLinkOrphan root sourceName destinationName
+          observeOrphanStatus target'' `shouldReturn` OrphanMissing
+ where
+  fixtureLinkOrphan :: OsPath -> OsPath -> OsPath -> IO ManagedTarget
+  fixtureLinkOrphan root sourceName destinationName = do
+    routeName <- encodeFS "linked"
+    snapshotName <- encodeFS "snapshot/linked"
+    now <- getCurrentTime
+    return $
+      ManagedTarget
+        "link-orphan"
+        routeName
+        routeName
+        FileSystem.File
+        SymlinkRoute
+        DefaultMode
+        (root </> destinationName)
+        (root </> snapshotName)
+        "definition"
+        Map.empty
+        (SymlinkFingerprint sourceName)
+        Applied
+        now
+
 #ifndef mingw32_HOST_OS
 fixtureOrphanTarget :: OsPath -> IO ManagedTarget
 fixtureOrphanTarget root = do
@@ -458,6 +545,8 @@ fixtureOrphanTarget root = do
       routeName
       routeName
       FileSystem.File
+      CopyRoute
+      DefaultMode
       (root </> destinationName)
       (root </> snapshotName)
       "definition"
@@ -480,7 +569,16 @@ fixtureManagedPath destination = do
   let entry path = FileEntry path (File 7)
   return $
     ManagedCorrespondence
-      (RouteResult source routeName destination FileSystem.File "definition" Map.empty)
+      ( RouteResult
+          source
+          routeName
+          destination
+          FileSystem.File
+          DefaultMode
+          CopyRoute
+          "definition"
+          Map.empty
+      )
       mempty
       ( FileCorrespondence
           (entry source)
@@ -503,7 +601,16 @@ fixtureManagedAt root = do
   let entry path = FileEntry path (File 12)
   return $
     ManagedCorrespondence
-      (RouteResult source routeName destination FileSystem.File "definition" Map.empty)
+      ( RouteResult
+          source
+          routeName
+          destination
+          FileSystem.File
+          DefaultMode
+          CopyRoute
+          "definition"
+          Map.empty
+      )
       mempty
       ( FileCorrespondence
           (entry source)

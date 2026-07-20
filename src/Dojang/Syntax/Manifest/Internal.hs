@@ -269,6 +269,8 @@ data FileRouteBranch' = FileRouteBranch'
   { routeMoniker :: Maybe MonikerName
   , routeCondition :: Maybe Text
   , routePath :: Maybe Text
+  , routeMode :: Maybe Text
+  , routeKind :: Maybe Text
   , routeUnexpectedFields :: [Text]
   }
   deriving (Eq, Show)
@@ -279,9 +281,12 @@ instance FromValue FileRouteBranch' where
     moniker <- optKey "moniker"
     condition <- optKey "when"
     path <- optKey "path"
+    mode <- optKey "mode"
+    kind <- optKey "kind"
     unexpectedFields <- fmap pack . Map.keys <$> getTable
     setTable Map.empty
-    return $ FileRouteBranch' moniker condition path unexpectedFields
+    return $
+      FileRouteBranch' moniker condition path mode kind unexpectedFields
 
 
 instance ToValue FileRouteBranch' where
@@ -294,6 +299,8 @@ instance ToTable FileRouteBranch' where
       maybeField "moniker" branch.routeMoniker
         ++ maybeField "when" branch.routeCondition
         ++ maybeField "path" branch.routePath
+        ++ maybeField "mode" branch.routeMode
+        ++ maybeField "kind" branch.routeKind
    where
     maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
     maybeField key (Just value) = [(key, toValue value)]

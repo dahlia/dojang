@@ -64,7 +64,11 @@ timestamps, an optional facts-file association, declared machine facts, and
 typed sections for managed targets, hook execution history, and lifecycle
 records.  A new generation UUID is issued whenever a forgotten
 repository record is recreated, even when its timestamps match an earlier
-record.  Schema version 4 stores machine facts and their file association;
+record.  Schema version 5 adds the declared route kind and portable mode to
+managed-target records and stores a deployment link's target string as its
+fingerprint; version 4 documents remain readable, with the new fields
+defaulting to a copied route without a declared mode.  Schema version 4
+stores machine facts and their file association;
 schema version 3 introduced successful `once` and `on-change` hook executions
 by event and stable hook identity.  Schema versions 1 through 3 are upgraded in
 memory, and their opaque hook data is preserved.  A successful
@@ -262,6 +266,13 @@ entry that actually converged.  A record contains the producing route, whether
 that route manages a file or directory, the source entry, the absolute expanded
 destination, an immutable baseline, its kind and SHA-256 fingerprint, the
 command and time that updated it, and the environment facts used for routing.
+A record also retains the route's declared kind and portable mode, so the
+metadata a later three-way comparison needs is preserved explicitly instead
+of depending on whichever permission bits the host filesystem happens to
+preserve.  For a
+deployment link, the record stores the link's target string itself as the
+fingerprint; that string is the baseline, and no filesystem snapshot is
+materialized for it.
 Target identifiers preserve platform-native path identity even when a path is
 not valid Unicode.  Destination identity follows native filesystem
 equality.  Paths that differ only in casing share one identity on Windows, but

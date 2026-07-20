@@ -3,6 +3,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 
 module Dojang.MonadFileSystem
   ( DryRunIO
@@ -17,10 +18,11 @@ module Dojang.MonadFileSystem
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
-import GHC.IO.Exception (IOErrorType (InappropriateType))
+import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( alreadyExistsErrorType
@@ -59,6 +61,11 @@ import System.Directory.OsPath
   )
 import System.Directory.OsPath qualified as OsDirectory
 import System.FileLock qualified as FileLock
+
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , portableModeFromBits
+  )
 
 
 #ifndef mingw32_HOST_OS
@@ -323,6 +330,47 @@ class (MonadError IOError m) => MonadFileSystem m where
   getFileSize :: (HasCallStack) => OsPath -> m Integer
 
 
+  -- | Observes the portable permission state of a filesystem entry without
+  -- following symbolic links.  Throws an 'IOError' when the entry does not
+  -- exist.  Fields the platform cannot observe are 'Nothing'.
+  getPortableMode :: (HasCallStack) => OsPath -> m PortableMode
+
+
+  -- | Applies exact POSIX permission bits to a filesystem entry.  On
+  -- platforms without POSIX permission bits (Windows), only the writable
+  -- distinction is applied via the read-only attribute; callers that need
+  -- a stronger guarantee must warn or fail themselves rather than assume
+  -- the whole mode was enforced.  Throws an 'IOError' when the entry does
+  -- not exist.
+  setPortableMode :: (HasCallStack) => OsPath -> Word -> m ()
+
+
+  -- | Sets or clears only the owner-write permission (the read-only
+  -- attribute on Windows), leaving every other permission bit unchanged.
+  -- This is the primitive used to temporarily widen a read-only entry
+  -- before mutating it and to restore the previous state afterwards.
+  -- Throws an 'IOError' when the entry does not exist.
+  setPortableWritable :: (HasCallStack) => OsPath -> Bool -> m ()
+
+
+  -- | Creates a symbolic link.  The target may be absolute or relative;
+  -- a relative target is resolved from the directory containing the link.
+  -- The 'FileType' selects the intrinsic link type on Windows (file link
+  -- or directory link) and is ignored on POSIX.  Throws an 'IOError' when
+  -- the link path already exists, including when it is a broken symbolic
+  -- link.
+  createSymbolicLink
+    :: (HasCallStack)
+    => OsPath
+    -- ^ The path the link points at.
+    -> OsPath
+    -- ^ The path of the symbolic link to create.
+    -> FileType
+    -- ^ The intrinsic link type ('Directory' for a directory link;
+    -- everything else creates a file link).
+    -> m ()
+
+
 -- | Writes a sibling temporary file and atomically replaces the destination.
 writeFileAtomically
   :: (HasCallStack, MonadFileSystem m)
@@ -409,6 +457,28 @@ copyFilePermissionsIO source destination = do
 isRegularFileIO :: OsPath -> IO Bool
 isRegularFileIO path =
   (&&) <$> doesFileExist path <*> (not <$> isSymlink path)
+
+
+getPortableModeIO :: OsPath -> IO PortableMode
+getPortableModeIO path = do
+  permissions <- OsDirectory.getPermissions path
+  return
+    PortableMode
+      { posixBits = Nothing
+      , writable = Directory.writable permissions
+      }
+
+
+setPortableModeIO :: OsPath -> Word -> IO ()
+setPortableModeIO path bits =
+  setPortableWritableIO path $ bits .&. 0o200 /= 0
+
+
+setPortableWritableIO :: OsPath -> Bool -> IO ()
+setPortableWritableIO path writable' = do
+  permissions <- OsDirectory.getPermissions path
+  OsDirectory.setPermissions path $
+    Directory.setOwnerWritable writable' permissions
 #else
 replaceFileIO :: OsPath -> OsPath -> IO ()
 replaceFileIO = OsDirectory.renameFile
@@ -428,6 +498,29 @@ isRegularFileIO path = do
   (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus path')
     `catchError` \err ->
       if isDoesNotExistError err then return False else throwError err
+
+
+getPortableModeIO :: OsPath -> IO PortableMode
+getPortableModeIO path = do
+  path' <- decodeFS path
+  status <- Posix.getSymbolicLinkStatus path'
+  return $ portableModeFromBits $ fromIntegral $ Posix.fileMode status .&. 0o777
+
+
+setPortableModeIO :: OsPath -> Word -> IO ()
+setPortableModeIO path bits = do
+  path' <- decodeFS path
+  Posix.setFileMode path' $ fromIntegral bits
+
+
+setPortableWritableIO :: OsPath -> Bool -> IO ()
+setPortableWritableIO path writable' = do
+  path' <- decodeFS path
+  mode <- Posix.fileMode <$> Posix.getFileStatus path'
+  Posix.setFileMode path' $
+    if writable'
+      then mode .|. 0o200
+      else mode .&. complement 0o200
 #endif
 
 
@@ -563,6 +656,21 @@ instance MonadFileSystem IO where
   copyFile = OsDirectory.copyFile
 
 
+  getPortableMode = getPortableModeIO
+
+
+  setPortableMode = setPortableModeIO
+
+
+  setPortableWritable = setPortableWritableIO
+
+
+  createSymbolicLink target link Directory =
+    OsDirectory.createDirectoryLink target link
+  createSymbolicLink target link _ =
+    OsDirectory.createFileLink target link
+
+
 type SeqNo = Int
 
 
@@ -576,7 +684,53 @@ data OverlaidFile
     Gone
   | -- | A file that was copied from the given path.
     Copied OsPath
+  | -- | A symbolic link pointing at the given target, together with its
+    -- intrinsic link type.
+    SymlinkTo OsPath FileType
   deriving (Eq, Show)
+
+
+-- | Resolves a symbolic-link target from the directory containing the link.
+resolveLinkTarget :: OsPath -> OsPath -> OsPath
+resolveLinkTarget link target
+  | isAbsolute target = normalise target
+  | otherwise = normalise $ takeDirectory link </> target
+
+
+-- | Follows chains of overlaid symbolic links until a non-link overlay (or
+-- no overlay) is reached, as of the current sequence number.  Throws an
+-- ELOOP-style 'IOError' after too many hops so overlaid link cycles fail
+-- instead of looping forever.
+chaseOverlaidLinks :: String -> OsPath -> DryRunIO OsPath
+chaseOverlaidLinks location path = do
+  seqNo <- gets currentSequenceNumber
+  chaseOverlaidLinksAt location seqNo path
+
+
+-- | Like 'chaseOverlaidLinks', but observes the overlay as of the given
+-- sequence number, so historical reads (e.g. through 'Copied' events) see
+-- the link targets that were in effect at that time.
+chaseOverlaidLinksAt :: String -> SeqNo -> OsPath -> DryRunIO OsPath
+chaseOverlaidLinksAt location seqOffset = go (0 :: Int)
+ where
+  go :: Int -> OsPath -> DryRunIO OsPath
+  go depth path
+    | depth > 40 = do
+        path' <- decodePath path
+        throwError $
+          mkIOError InvalidArgument location Nothing (Just path')
+            `ioeSetErrorString` "too many levels of symbolic links"
+    | otherwise = do
+        oFiles <- gets overlaidFiles
+        let changes =
+              [ change
+              | (no, change) <- maybe [] toList $ oFiles !? normalise path
+              , no <= seqOffset
+              ]
+        case changes of
+          SymlinkTo target _ : _ ->
+            go (depth + 1) $ resolveLinkTarget path target
+          _ -> return path
 
 
 -- | Internal state of 'DryRun'.
@@ -585,6 +739,11 @@ data DryRunState = DryRunState
   -- ^ The overlaid files and their list of changes.  Each change is a pair
   -- of the global sequence number and the new event that occurred.  The latest
   -- change comes first and the oldest change comes last.
+  , overlaidModes :: Map OsPath (NonEmpty (SeqNo, PortableMode))
+  -- ^ The overlaid portable modes and their list of changes, newest first.
+  -- A mode change is only effective while no 'Gone' change with a greater
+  -- sequence number exists for the same path, since removing and recreating
+  -- an entry resets its permissions.
   , nextSequenceNumber :: SeqNo
   }
 
@@ -623,6 +782,82 @@ addChangeToFile path change = modify' $ \state ->
   appendChange seqNo Nothing = Just $ singleton (seqNo, change)
 
 
+addModeToFile :: OsPath -> PortableMode -> DryRunIO ()
+addModeToFile path mode = modify' $ \state ->
+  let oModes = overlaidModes state
+      nextSeqNo = nextSequenceNumber state
+      newOModes = alter (appendChange nextSeqNo) (normalise path) oModes
+  in state{overlaidModes = newOModes, nextSequenceNumber = nextSeqNo + 1}
+ where
+  appendChange
+    :: SeqNo
+    -> Maybe (NonEmpty (SeqNo, PortableMode))
+    -> Maybe (NonEmpty (SeqNo, PortableMode))
+  appendChange seqNo (Just changes) = Just $ (seqNo, mode) :| toList changes
+  appendChange seqNo Nothing = Just $ singleton (seqNo, mode)
+
+
+-- | Observes an overlaid entry's portable mode as of the given sequence
+-- number, so historical reads (e.g. through 'Copied' events) see the mode
+-- that was in effect at that time rather than the source's current state.
+getPortableModeAt :: SeqNo -> OsPath -> DryRunIO PortableMode
+getPortableModeAt seqOffset path = do
+  oFiles <- gets overlaidFiles
+  oModes <- gets overlaidModes
+  path' <- decodePath path
+  let path'' = normalise path
+  let changes =
+        [ (no, change)
+        | (no, change) <- maybe [] toList $ oFiles !? path''
+        , no <= seqOffset
+        ]
+  case changes of
+    (_, Gone) : _ ->
+      throwError $
+        mkIOError doesNotExistErrorType "getPortableMode" Nothing (Just path')
+          `ioeSetErrorString` "no such file"
+    _ -> do
+      let goneSeq = case [no | (no, Gone) <- changes] of
+            no : _ -> Just no
+            [] -> Nothing
+      let modeEvents =
+            [ (no, mode)
+            | (no, mode) <- maybe [] toList $ oModes !? path''
+            , no <= seqOffset
+            ]
+      let activeModes =
+            [m | (no, m) <- modeEvents, maybe True (no >) goneSeq]
+      case activeModes of
+        m : _ -> return m
+        [] -> case changes of
+          (no, Copied src) : _ -> getPortableModeAt no src
+          (_, SymlinkTo _ _) : _ ->
+            return $ PortableMode Nothing True
+          (_, change) : rest -> do
+            let recreated = not $ null [no | (no, Gone) <- rest]
+            let fileType = case change of
+                  Directory' -> Directory
+                  _ -> File
+            if recreated
+              then return $ defaultCreatedMode fileType
+              else do
+                realExists <- liftIO $ doesPathExist path
+                if realExists
+                  then liftIO $ getPortableModeIO path
+                  else return $ defaultCreatedMode fileType
+          [] ->
+            liftIO (getPortableModeIO path)
+              `mapError` (`ioePrependLocation` "getPortableMode")
+
+
+-- | The permissions a freshly created overlay entry is assumed to have.
+-- This approximates the common @umask 022@ default; dry-run runs cannot
+-- know the umask a real run would use without mutating the filesystem.
+defaultCreatedMode :: FileType -> PortableMode
+defaultCreatedMode Directory = portableModeFromBits 0o755
+defaultCreatedMode _ = portableModeFromBits 0o644
+
+
 readFileFromDryRunIO :: SeqNo -> OsPath -> DryRunIO ByteString
 readFileFromDryRunIO seqOffset src = do
   oFiles <- gets overlaidFiles
@@ -635,6 +870,11 @@ readFileFromDryRunIO seqOffset src = do
            (_, Contents contents) : _ -> return contents
            (seqNo, Copied src') : _ ->
              readFileFromDryRunIO seqNo src'
+           (_, SymlinkTo target _) : _ -> do
+             resolved <-
+               chaseOverlaidLinksAt "readFile" seqOffset $
+                 resolveLinkTarget src target
+             readFileFromDryRunIO seqOffset resolved
            (_, Gone) : _ -> do
              src' <- decodePath src
              throwError $
@@ -673,6 +913,8 @@ instance MonadFileSystem DryRunIO where
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> return False
+      Just ((_, SymlinkTo target _) :| _) ->
+        chaseOverlaidLinks "exists" (resolveLinkTarget path target) >>= exists
       Just (_ :| _) -> return True
       Nothing -> liftIO $ doesPathExist path
 
@@ -682,6 +924,9 @@ instance MonadFileSystem DryRunIO where
     case oFiles !? normalise path of
       Just ((_, Contents _) :| _) -> return True
       Just ((_, Copied _) :| _) -> return True
+      Just ((_, SymlinkTo target _) :| _) ->
+        chaseOverlaidLinks "isFile" (resolveLinkTarget path target)
+          >>= isFile
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesFileExist path
 
@@ -699,6 +944,9 @@ instance MonadFileSystem DryRunIO where
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
       Just ((_, Directory') :| _) -> return True
+      Just ((_, SymlinkTo target _) :| _) ->
+        chaseOverlaidLinks "isDirectory" (resolveLinkTarget path target)
+          >>= isDirectory
       Just (_ :| _) -> return False
       Nothing -> liftIO $ doesDirectoryExist path
 
@@ -706,6 +954,7 @@ instance MonadFileSystem DryRunIO where
   isSymlink path = do
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
+      Just ((_, SymlinkTo _ _) :| _) -> return True
       Just _ -> return False
       Nothing ->
         liftIO (pathIsSymbolicLink path)
@@ -733,6 +982,14 @@ instance MonadFileSystem DryRunIO where
       (Nothing, _) | not dstDirExists -> throwError $ notInsideDirError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dirError dst'
       (_, Nothing) | dstIsDir -> throwError $ dirError dst'
+      (Just ((_, SymlinkTo target _) :| _), _) -> do
+        resolved <-
+          chaseOverlaidLinks "writeFile" $ resolveLinkTarget dstDir target
+        writeFile (resolved </> takeFileName dst) contents
+      (_, Just ((_, SymlinkTo target _) :| _)) -> do
+        resolved <-
+          chaseOverlaidLinks "writeFile" $ resolveLinkTarget dst target
+        writeFile resolved contents
       _ -> do
         addChangeToFile dst $ Contents contents
         return ()
@@ -774,6 +1031,7 @@ instance MonadFileSystem DryRunIO where
   readSymlinkTarget path = do
     oFiles <- gets overlaidFiles
     case oFiles !? normalise path of
+      Just ((_, SymlinkTo target _) :| _) -> return target
       Just ((_, Gone) :| _) -> do
         path' <- decodePath path
         throwError $
@@ -805,6 +1063,10 @@ instance MonadFileSystem DryRunIO where
     dst' <- decodePath dst
     dstIsDir <- liftIO $ doesDirectoryExist dst
     case oFiles !? normalise src of
+      Just ((_, SymlinkTo target _) :| _) -> do
+        resolved <-
+          chaseOverlaidLinks "copyFile" $ resolveLinkTarget src target
+        copyFile resolved dst
       Just ((_, Gone) :| _) -> throwError $ noSrcFileError src'
       Nothing | not srcExists -> throwError $ noSrcFileError src'
       Just ((_, Directory') :| _) -> throwError $ srcIsDirError src'
@@ -817,6 +1079,14 @@ instance MonadFileSystem DryRunIO where
         (Nothing, _) | not dstDirIsDir -> throwError $ notInsideDirError dst'
         (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
         (_, Nothing) | dstIsDir -> throwError $ dstIsDirError dst'
+        (Just ((_, SymlinkTo target _) :| _), _) -> do
+          resolved <-
+            chaseOverlaidLinks "copyFile" $ resolveLinkTarget dstDir target
+          copyFile src $ resolved </> takeFileName dst
+        (_, Just ((_, SymlinkTo target _) :| _)) -> do
+          resolved <-
+            chaseOverlaidLinks "copyFile" $ resolveLinkTarget dst target
+          copyFile src resolved
         _ -> do
           addChangeToFile dst $ Copied src
           return ()
@@ -864,6 +1134,7 @@ instance MonadFileSystem DryRunIO where
       (Nothing, _) | not parentIsDir -> throwError $ notInsideDirError dst'
       (_, Just ((_, Contents _) :| _)) -> throwError $ dstIsFileError dst'
       (_, Just ((_, Copied _) :| _)) -> throwError $ dstIsFileError dst'
+      (_, Just ((_, SymlinkTo _ _) :| _)) -> throwError $ dstIsFileError dst'
       (_, Nothing) | isFile' -> throwError $ dstIsFileError dst'
       (_, Just ((_, Directory') :| _)) -> throwError $ dstIsDirError dst'
       (_, Nothing) | isDir && not isSymlink' -> throwError $ dstIsDirError dst'
@@ -937,6 +1208,8 @@ instance MonadFileSystem DryRunIO where
         throwError $ nonDirError path'
       Just ((_, Copied _) :| _) ->
         throwError $ nonDirError path'
+      Just ((_, SymlinkTo _ _) :| _) ->
+        throwError $ nonDirError path'
       Nothing
         | not isDir ->
             throwError $ nonDirError path'
@@ -972,6 +1245,9 @@ instance MonadFileSystem DryRunIO where
         throwError $ nonDirError pathFP
       Just ((_, Copied _) :| _) ->
         throwError $ nonDirError pathFP
+      Just ((_, SymlinkTo target _) :| _) ->
+        chaseOverlaidLinks "listDirectory" (resolveLinkTarget path target)
+          >>= listDirectory
       Just ((_, Directory') :| _) ->
         return $ map takeFileName $ keys $ directOChildren oFiles
       Nothing -> do
@@ -1034,6 +1310,76 @@ instance MonadFileSystem DryRunIO where
         `ioeSetErrorString` "not a directory"
 
 
+  getPortableMode path = do
+    seqNo <- gets currentSequenceNumber
+    getPortableModeAt seqNo path
+
+
+  setPortableMode path bits = do
+    exists' <- exists path
+    unless exists' $ do
+      path' <- decodePath path
+      throwError $
+        mkIOError doesNotExistErrorType "setPortableMode" Nothing (Just path')
+          `ioeSetErrorString` "no such file"
+    addModeToFile path $ portableModeFromBits bits
+
+
+  setPortableWritable path writable' = do
+    current <-
+      getPortableMode path
+        `mapError` (`ioePrependLocation` "setPortableWritable")
+    let adjustedBits = case current.posixBits of
+          Nothing -> Nothing
+          Just bits
+            | writable' -> Just $ bits .|. 0o200
+            | otherwise -> Just $ bits .&. complement 0o200
+    addModeToFile path $
+      PortableMode
+        { posixBits = adjustedBits
+        , writable = writable'
+        }
+
+
+  createSymbolicLink target link fileType = do
+    oFiles <- gets overlaidFiles
+    link' <- decodePath link
+    let linkDir = normalise $ takeDirectory link
+    parentExists <- liftIO $ doesPathExist linkDir
+    parentIsDir <- liftIO $ doesDirectoryExist linkDir
+    realEntryExists <- liftIO $ do
+      pathExists <- doesPathExist link
+      linkIsSym <-
+        pathIsSymbolicLink link `catchError` \e ->
+          if isDoesNotExistError e then return False else throwError e
+      return $ pathExists || linkIsSym
+    case (oFiles !? linkDir, oFiles !? normalise link) of
+      (Just ((_, Gone) :| _), _) -> throwError $ noParentDirError link'
+      (Nothing, _) | not parentExists -> throwError $ noParentDirError link'
+      (Just ((_, Contents _) :| _), _) -> throwError $ notInsideDirError link'
+      (Just ((_, Copied _) :| _), _) -> throwError $ notInsideDirError link'
+      (Nothing, _) | not parentIsDir -> throwError $ notInsideDirError link'
+      (_, Just ((_, Gone) :| _)) -> create
+      (_, Just _) -> throwError $ existsError link'
+      (_, Nothing) | realEntryExists -> throwError $ existsError link'
+      _ -> create
+   where
+    create :: DryRunIO ()
+    create = addChangeToFile link $ SymlinkTo target fileType
+    noParentDirError :: FilePath -> IOError
+    noParentDirError link' =
+      mkIOError doesNotExistErrorType "createSymbolicLink" Nothing (Just link')
+        `ioeSetErrorString` "no parent directory"
+    notInsideDirError :: FilePath -> IOError
+    notInsideDirError link' =
+      mkIOError InappropriateType "createSymbolicLink" Nothing (Just link')
+        `ioeSetErrorString` "not inside a directory"
+    existsError :: FilePath -> IOError
+    existsError link' =
+      mkIOError alreadyExistsErrorType "createSymbolicLink" Nothing (Just link')
+        `ioeSetErrorString` "link path already exists"
+
+
   getFileSize path = do
     oFiles <- gets overlaidFiles
     path' <- decodePath path
@@ -1085,7 +1431,12 @@ dryRunIO' action = do
   (value, state) <- runStateT (unDryRunIO action) initialState
   return (value, nextSequenceNumber state)
  where
-  initialState = DryRunState{overlaidFiles = mempty, nextSequenceNumber = 0}
+  initialState =
+    DryRunState
+      { overlaidFiles = mempty
+      , overlaidModes = mempty
+      , nextSequenceNumber = 0
+      }
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns either the result

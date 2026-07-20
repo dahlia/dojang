@@ -30,6 +30,7 @@ import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
   , die'
+  , ensureRouteOwnership
   , pathStyleFor
   , printStderr'
   )
@@ -66,6 +67,7 @@ import Dojang.Types.ManagedTarget
   , OrphanStatus (..)
   , classifyOrphan
   , equalDestinationPath
+  , hasMaterializedSnapshot
   , makeCurrentEntries
   , makeCurrentRoutes
   , selectOrphanRecords
@@ -139,7 +141,7 @@ unmanageCore routeSelector destinations force = do
         <> "' to inspect orphan records."
   (routes, _) <- routePaths ctx
   current <- makeCurrentRoutes routes
-  (managed, _) <- makeManagedCorrespond ctx
+  (managed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   let entries = makeCurrentEntries managed
   let selected =
         filter ((/= Nothing) . classifyOrphan current entries) matched
@@ -175,7 +177,8 @@ unmanageCore routeSelector destinations force = do
       ( \currentRecords -> do
           (lockedRoutes, _) <- routePaths ctx
           lockedCurrent <- makeCurrentRoutes lockedRoutes
-          (lockedManaged, _) <- makeManagedCorrespond ctx
+          (lockedManaged, _) <-
+            makeManagedCorrespond ctx >>= ensureRouteOwnership
           let lockedEntries = makeCurrentEntries lockedManaged
           removed <- case selectOrphanRecords
             lockedCurrent
@@ -202,9 +205,18 @@ unmanageCore routeSelector destinations force = do
       )
       ( \updated (removed, currentEntrySources) ->
           let keptSnapshots =
-                Set.fromList $ (.snapshotPath) <$> Map.elems updated.targetRecords
+                Set.fromList
+                  [ record.snapshotPath
+                  | record <- Map.elems updated.targetRecords
+                  , hasMaterializedSnapshot record
+                  ]
               baselineCandidates =
-                unreachableSnapshots keptSnapshots $ (.snapshotPath) <$> removed
+                unreachableSnapshots
+                  keptSnapshots
+                  [ record.snapshotPath
+                  | record <- removed
+                  , hasMaterializedSnapshot record
+                  ]
               keptIntermediate =
                 Set.fromList
                   [ updated.intermediatePath </> target.sourcePath

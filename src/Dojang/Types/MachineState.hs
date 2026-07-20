@@ -150,11 +150,19 @@ import Dojang.Types.RepositoryId
   , parseRepositoryId
   , repositoryIdText
   )
+import Dojang.Types.RouteMetadata
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  , parseRouteKind
+  , parseRouteMode
+  , renderRouteKind
+  , renderRouteMode
+  )
 
 
 -- | The on-disk schema version understood by this release.
 schemaVersion :: Integer
-schemaVersion = 4
+schemaVersion = 5
 
 
 -- | A stable identifier for the local machine-state store.
@@ -746,6 +754,8 @@ data TargetDocument = TargetDocument
   , targetDocumentRouteName :: Text
   , targetDocumentSourcePath :: Text
   , targetDocumentRouteType :: Text
+  , targetDocumentRouteKind :: Maybe Text
+  , targetDocumentDeclaredMode :: Maybe Text
   , targetDocumentDestinationPath :: Text
   , targetDocumentSnapshotPath :: Text
   , targetDocumentRouteDefinition :: Text
@@ -753,6 +763,7 @@ data TargetDocument = TargetDocument
   , targetDocumentFingerprintKind :: Text
   , targetDocumentFingerprintSize :: Integer
   , targetDocumentFingerprintDigest :: Text
+  , targetDocumentFingerprintLinkTarget :: Maybe Text
   , targetDocumentUpdatedBy :: Text
   , targetDocumentUpdatedTime :: Text
   }
@@ -804,6 +815,8 @@ instance FromValue TargetDocument where
         <*> reqKey "route-name"
         <*> reqKey "source-path"
         <*> reqKey "route-type"
+        <*> optKey "route-kind"
+        <*> optKey "declared-mode"
         <*> reqKey "destination-path"
         <*> reqKey "snapshot-path"
         <*> reqKey "route-definition"
@@ -811,6 +824,7 @@ instance FromValue TargetDocument where
         <*> reqKey "fingerprint-kind"
         <*> reqKey "fingerprint-size"
         <*> reqKey "fingerprint-digest"
+        <*> optKey "fingerprint-link-target"
         <*> reqKey "updated-by"
         <*> reqKey "updated-at"
 
@@ -821,7 +835,7 @@ instance ToValue TargetDocument where
 
 instance ToTable TargetDocument where
   toTable target =
-    table
+    table $
       [ "id" .= target.targetDocumentId
       , "route-name" .= target.targetDocumentRouteName
       , "source-path" .= target.targetDocumentSourcePath
@@ -836,6 +850,13 @@ instance ToTable TargetDocument where
       , "updated-by" .= target.targetDocumentUpdatedBy
       , "updated-at" .= target.targetDocumentUpdatedTime
       ]
+        ++ maybeField "route-kind" target.targetDocumentRouteKind
+        ++ maybeField "declared-mode" target.targetDocumentDeclaredMode
+        ++ maybeField
+          "fingerprint-link-target"
+          target.targetDocumentFingerprintLinkTarget
+   where
+    maybeField key = maybe [] (\value -> [key .= value])
 
 
 newtype SchemaDocument = SchemaDocument
@@ -1038,6 +1059,9 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
     1 -> upgradeLegacyDocument expectedTargetRoot source
     2 -> upgradeV2Document source
     3 -> upgradeV3Document source
+    -- Version 4 documents decode with the current decoder: version 5 only
+    -- adds optional keys whose absence means the former defaults.
+    4 -> decodeCurrentDocument source
     version
       | version == schemaVersion -> decodeCurrentDocument source
       | otherwise -> Left $ UnsupportedSchemaVersion version
@@ -1271,6 +1295,14 @@ targetToDocument target =
         Directory -> "directory"
         Symlink -> "symlink"
     )
+    ( case target.routeKind of
+        CopyRoute -> Nothing
+        kind -> Just $ renderRouteKind kind
+    )
+    ( case target.declaredMode of
+        DefaultMode -> Nothing
+        mode -> Just $ renderRouteMode mode
+    )
     (osPathText target.destinationPath)
     (osPathText target.snapshotPath)
     target.routeDefinition
@@ -1278,13 +1310,16 @@ targetToDocument target =
     fingerprintKind
     fingerprintSize
     fingerprintDigest
+    fingerprintLinkTarget
     (case target.updatedBy of Applied -> "apply"; Reflected -> "reflect")
     (timeText target.updatedTime)
  where
-  (fingerprintKind, fingerprintSize, fingerprintDigest) =
+  (fingerprintKind, fingerprintSize, fingerprintDigest, fingerprintLinkTarget) =
     case target.fingerprint of
-      FileFingerprint size digest -> ("file", size, digest)
-      DirectoryFingerprint -> ("directory", 0, "")
+      FileFingerprint size digest -> ("file", size, digest, Nothing)
+      DirectoryFingerprint -> ("directory", 0, "", Nothing)
+      SymlinkFingerprint linkTarget ->
+        ("symlink", 0, "", Just $ osPathText linkTarget)
 
 
 hookExecutionToDocument
@@ -1368,6 +1403,17 @@ targetFromDocument key target = do
     MalformedState "A managed target destination-path must be absolute."
   whenEither (not $ isAbsolute snapshot) $
     MalformedState "A managed target snapshot-path must be absolute."
+  routeKind <- case target.targetDocumentRouteKind of
+    Nothing -> Right CopyRoute
+    Just kindText -> case parseRouteKind kindText of
+      Just kind -> Right kind
+      Nothing -> Left $ MalformedState $ "Unknown target route kind: " <> kindText
+  declaredMode <- case target.targetDocumentDeclaredMode of
+    Nothing -> Right DefaultMode
+    Just modeText -> case parseRouteMode modeText of
+      Just mode -> Right mode
+      Nothing ->
+        Left $ MalformedState $ "Unknown target declared mode: " <> modeText
   fingerprint <- case target.targetDocumentFingerprintKind of
     "file" ->
       Right $
@@ -1375,7 +1421,40 @@ targetFromDocument key target = do
           target.targetDocumentFingerprintSize
           target.targetDocumentFingerprintDigest
     "directory" -> Right DirectoryFingerprint
+    "symlink" -> case target.targetDocumentFingerprintLinkTarget of
+      Nothing ->
+        Left $
+          MalformedState
+            "A symlink fingerprint requires fingerprint-link-target."
+      Just linkTargetText ->
+        SymlinkFingerprint
+          <$> mapLeft MalformedState (textOsPath linkTargetText)
     other -> Left $ MalformedState $ "Unknown target fingerprint kind: " <> other
+  case (routeKind, fingerprint) of
+    (CopyRoute, SymlinkFingerprint _) ->
+      Left $
+        MalformedState
+          "A copy-kind target cannot carry a symlink fingerprint."
+    (_, SymlinkFingerprint _) -> Right ()
+    (CopyRoute, _) -> Right ()
+    _ ->
+      Left $
+        MalformedState
+          "A symlink-kind target requires a symlink fingerprint."
+  whenEither
+    ( declaredMode /= DefaultMode && case fingerprint of
+        SymlinkFingerprint _ -> True
+        _ -> False
+    )
+    $ MalformedState "A symlink-kind target cannot declare a mode."
+  whenEither
+    ( case (fingerprint, target.targetDocumentFingerprintLinkTarget) of
+        (SymlinkFingerprint _, _) -> False
+        (_, Just _) -> True
+        _ -> False
+    )
+    $ MalformedState
+      "Only a symlink fingerprint may carry fingerprint-link-target."
   command <- case target.targetDocumentUpdatedBy of
     "apply" -> Right Applied
     "reflect" -> Right Reflected
@@ -1387,6 +1466,8 @@ targetFromDocument key target = do
       route
       source
       routeType
+      routeKind
+      declaredMode
       destination
       snapshot
       target.targetDocumentRouteDefinition

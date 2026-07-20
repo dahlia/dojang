@@ -26,8 +26,12 @@ import Dojang.Types.Context
   ( FileCorrespondence (..)
   , FileDeltaKind (Unchanged)
   , FileEntry (..)
-  , FileStat (File, Missing)
+  , FileStat (File, Missing, Symlink)
   , ManagedCorrespondence (..)
+  )
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode)
   )
 import Dojang.Types.ManagedTarget
   ( CurrentEntry (..)
@@ -66,6 +70,8 @@ spec = do
               rawRouteName
               destination
               FileSystem.File
+              DefaultMode
+              CopyRoute
               "definition"
               Map.empty
       routes <- makeCurrentRoutes [route]
@@ -95,6 +101,8 @@ spec = do
                   routeName
                   destinationRoot
                   fileType
+                  DefaultMode
+                  CopyRoute
                   "route-definition"
                   Map.empty
               )
@@ -104,6 +112,38 @@ spec = do
         [ managed FileSystem.Directory entryName
         , managed FileSystem.File mempty
         ]
+        `shouldBe` Set.singleton (CurrentEntry routeName routeName)
+
+    it "keeps deployment-link routes whose source is absent" $ do
+      routeName <- encodeFS "linked-dir"
+      sourceRoot <- fixturePath "repository/linked-dir"
+      intermediateRoot <- fixturePath "intermediate/linked-dir"
+      destinationRoot <- fixturePath "destination"
+      -- A directory deployment link stays deployed (possibly as a broken
+      -- link) while its source is absent, so its record must remain an
+      -- active entry rather than becoming an EntryRemoved orphan:
+      let correspondence =
+            FileCorrespondence
+              (FileEntry sourceRoot Missing)
+              Unchanged
+              (FileEntry intermediateRoot Missing)
+              (FileEntry destinationRoot $ Symlink sourceRoot)
+              Unchanged
+      let managed =
+            ManagedCorrespondence
+              ( Repository.RouteResult
+                  sourceRoot
+                  routeName
+                  destinationRoot
+                  FileSystem.Directory
+                  DefaultMode
+                  SymlinkRoute
+                  "route-definition"
+                  Map.empty
+              )
+              mempty
+              correspondence
+      makeCurrentEntries [managed]
         `shouldBe` Set.singleton (CurrentEntry routeName routeName)
 
   describe "classifyOrphan" $ do
@@ -125,8 +165,18 @@ spec = do
               destinationRoot
               "route-definition"
               FileSystem.Directory
+              CopyRoute
       classifyOrphan (Map.singleton routeName route) Set.empty nestedTarget
         `shouldBe` Just EntryRemoved
+
+    it "treats a route kind change as a route change" $ do
+      target <- fixtureTarget "route-definition" "destination"
+      route <- fixtureRoute "route-definition" "destination"
+      classifyOrphan
+        (Map.singleton target.routeName route{kind = SymlinkRoute})
+        (Set.singleton $ CurrentEntry target.routeName target.sourcePath)
+        target
+        `shouldBe` Just RouteChanged
 
     it "uses native destination equality when classifying a route" $ do
       upper <- encodeFS "C:/Users/Alice/App"
@@ -138,6 +188,8 @@ spec = do
               target.routeName
               target.sourcePath
               target.routeType
+              CopyRoute
+              DefaultMode
               upper
               target.snapshotPath
               target.routeDefinition
@@ -151,6 +203,7 @@ spec = do
               lower
               target.routeDefinition
               target.routeType
+              CopyRoute
       classifyOrphan
         (Map.singleton target.routeName route)
         (activeEntry target')
@@ -196,6 +249,7 @@ spec = do
               destinationRoot
               "route-definition"
               FileSystem.Directory
+              CopyRoute
       classifyOrphan
         (Map.singleton routeName route)
         (activeEntry nestedTarget)
@@ -218,6 +272,7 @@ spec = do
               destination
               "route-definition"
               FileSystem.Directory
+              CopyRoute
       classifyOrphan
         (Map.singleton routeName directoryRoute)
         (activeEntry fileTarget)
@@ -319,6 +374,8 @@ fixtureTarget definition destinationName = do
       , routeName = route
       , sourcePath = source
       , routeType = FileSystem.File
+      , routeKind = CopyRoute
+      , declaredMode = DefaultMode
       , destinationPath = destination
       , snapshotPath = snapshot
       , routeDefinition = definition
@@ -339,6 +396,7 @@ fixtureRoute definition destinationName = do
       , destinationPath = destination
       , routeDefinition = definition
       , fileType = FileSystem.File
+      , kind = CopyRoute
       }
 
 

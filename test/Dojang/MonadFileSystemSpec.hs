@@ -1,18 +1,21 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.MonadFileSystemSpec (spec) where
 
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (sort, sortOn)
-import GHC.IO.Exception (IOErrorType (InappropriateType))
+import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
   , ioeGetErrorType
   , ioeGetFileName
   , ioeGetLocation
+  , isAlreadyExistsError
   , isDoesNotExistError
   )
 import Prelude hiding (readFile, writeFile)
@@ -34,13 +37,23 @@ import System.FilePath (combine)
 
 
 #ifndef mingw32_HOST_OS
+import Data.Bits ((.&.))
 import System.Posix.Files qualified as Posix
 import System.OsPath (decodeFS)
 import System.Timeout (timeout)
 #endif
 
 import System.OsPath (OsPath, dropFileName, encodeFS, normalise, (</>))
-import Test.Hspec (Spec, describe, it, runIO, specify, xit, xspecify)
+import Test.Hspec
+  ( Spec
+  , describe
+  , expectationFailure
+  , it
+  , runIO
+  , specify
+  , xit
+  , xspecify
+  )
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldContain
@@ -58,6 +71,10 @@ import Dojang.MonadFileSystem
   , tryDryRunIO
   )
 import Dojang.TestUtils (withTempDir)
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , portableModeFromBits
+  )
 
 
 packageYamlFP :: FilePath
@@ -82,6 +99,14 @@ posixRegularFileSpec = pure ()
 
 posixLockFileSpec :: Spec
 posixLockFileSpec = pure ()
+
+
+posixPortableModeSpec :: Spec
+posixPortableModeSpec = pure ()
+
+
+posixDryRunPortableModeSpec :: Spec
+posixDryRunPortableModeSpec = pure ()
 #else
 posixRegularFileSpec :: Spec
 posixRegularFileSpec =
@@ -108,6 +133,71 @@ posixLockFileSpec =
         Just (Left err) -> ioeGetErrorType err `shouldBe` InappropriateType
         Just (Right ()) -> fail "withFileLock accepted a named pipe."
         Nothing -> fail "withFileLock blocked while opening a named pipe."
+
+
+posixPortableModeSpec :: Spec
+posixPortableModeSpec = do
+  specify "getPortableMode observes exact POSIX bits" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      fooName <- encodeFS "posix-mode-probe"
+      let fooFP = tmpDir' `combine` "posix-mode-probe"
+      Prelude.writeFile fooFP ""
+      Posix.setFileMode fooFP 0o600
+      getPortableMode (tmpDir </> fooName)
+        `shouldReturn` portableModeFromBits 0o600
+      Posix.setFileMode fooFP 0o755
+      getPortableMode (tmpDir </> fooName)
+        `shouldReturn` portableModeFromBits 0o755
+      Posix.setFileMode fooFP 0o444
+      getPortableMode (tmpDir </> fooName)
+        `shouldReturn` portableModeFromBits 0o444
+
+  specify "setPortableMode applies exact POSIX bits" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      fooName <- encodeFS "posix-mode-probe"
+      let fooFP = tmpDir' `combine` "posix-mode-probe"
+      Prelude.writeFile fooFP ""
+      setPortableMode (tmpDir </> fooName) 0o600 :: IO ()
+      mode <- Posix.fileMode <$> Posix.getFileStatus fooFP
+      (mode .&. 0o777) `shouldBe` 0o600
+
+  specify "setPortableWritable touches only the owner-write bit" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      fooName <- encodeFS "posix-mode-probe"
+      let fooFP = tmpDir' `combine` "posix-mode-probe"
+      Prelude.writeFile fooFP ""
+      Posix.setFileMode fooFP 0o444
+      setPortableWritable (tmpDir </> fooName) True :: IO ()
+      mode <- Posix.fileMode <$> Posix.getFileStatus fooFP
+      (mode .&. 0o777) `shouldBe` 0o644
+      setPortableWritable (tmpDir </> fooName) False
+      mode' <- Posix.fileMode <$> Posix.getFileStatus fooFP
+      (mode' .&. 0o777) `shouldBe` 0o444
+
+
+posixDryRunPortableModeSpec :: Spec
+posixDryRunPortableModeSpec = do
+  specify "getPortableMode reads exact bits through the overlay" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      fooName <- encodeFS "posix-mode-probe"
+      let fooFP = tmpDir' `combine` "posix-mode-probe"
+      Prelude.writeFile fooFP ""
+      Posix.setFileMode fooFP 0o600
+      dryRunIO (getPortableMode $ tmpDir </> fooName)
+        `shouldReturn` portableModeFromBits 0o600
+
+  specify "setPortableMode does not touch the disk" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      fooName <- encodeFS "posix-mode-probe"
+      let fooFP = tmpDir' `combine` "posix-mode-probe"
+      Prelude.writeFile fooFP ""
+      Posix.setFileMode fooFP 0o644
+      observed <- dryRunIO $ do
+        () <- setPortableMode (tmpDir </> fooName) 0o600
+        getPortableMode $ tmpDir </> fooName
+      observed `shouldBe` portableModeFromBits 0o600
+      mode <- Posix.fileMode <$> Posix.getFileStatus fooFP
+      (mode .&. 0o777) `shouldBe` 0o644
 #endif
 
 
@@ -1142,3 +1232,274 @@ spec = do
         ioeGetFileName e' `shouldBe` Just nonExistentFP
         ioeGetLocation e' `shouldBe` "getFileSize"
         show e' `shouldContain` "not a regular file, but a directory"
+
+  describe "createSymbolicLink (IO)" $ do
+    symSpecify "creates a file link" $ withTempDir $ \tmpDir tmpDir' -> do
+      Prelude.writeFile (tmpDir' `combine` "foo") "linked contents"
+      createSymbolicLink foo (tmpDir </> bar) File :: IO ()
+      isSymlink (tmpDir </> bar) `shouldReturn` True
+      readSymlinkTarget (tmpDir </> bar) `shouldReturn` foo
+      readFile (tmpDir </> bar) `shouldReturn` "linked contents"
+
+    symSpecify "creates a directory link" $ withTempDir $ \tmpDir _ -> do
+      OsDirectory.createDirectory $ tmpDir </> baz
+      createSymbolicLink (tmpDir </> baz) (tmpDir </> bar) Directory :: IO ()
+      isSymlink (tmpDir </> bar) `shouldReturn` True
+      isDirectory (tmpDir </> bar) `shouldReturn` True
+
+    symSpecify "leaves a broken link that is still a symlink" $
+      withTempDir $ \tmpDir _ -> do
+        createSymbolicLink nonExistentP (tmpDir </> bar) File :: IO ()
+        isSymlink (tmpDir </> bar) `shouldReturn` True
+        exists (tmpDir </> bar) `shouldReturn` False
+        isRegularFile (tmpDir </> bar) `shouldReturn` False
+        readSymlinkTarget (tmpDir </> bar) `shouldReturn` nonExistentP
+
+    symSpecify "fails when the link path already exists" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        Left e <-
+          tryError (createSymbolicLink bar (tmpDir </> foo) File :: IO ())
+        e `shouldSatisfy` isAlreadyExistsError
+
+  describe "createSymbolicLink (DryRunIO)" $ do
+    symSpecify "overlays a symlink without touching the disk" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "real contents"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          (,,,)
+            <$> isSymlink (tmpDir </> bar)
+            <*> readSymlinkTarget (tmpDir </> bar)
+            <*> readFile (tmpDir </> bar)
+            <*> isRegularFile (tmpDir </> bar)
+        observed `shouldBe` (True, foo, "real contents", False)
+        doesPathExist (tmpDir </> bar) `shouldReturn` False
+
+    symSpecify "keeps a broken overlaid link observable as a symlink" $
+      withTempDir $ \tmpDir _ -> do
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink nonExistentP (tmpDir </> bar) File
+          (,,)
+            <$> isSymlink (tmpDir </> bar)
+            <*> exists (tmpDir </> bar)
+            <*> isFile (tmpDir </> bar)
+        observed `shouldBe` (True, False, False)
+
+    symSpecify "follows overlaid links to overlaid targets" $
+      withTempDir $ \tmpDir _ -> do
+        observed <- dryRunIO $ do
+          () <- writeFile (tmpDir </> foo) "overlaid contents"
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          (,,)
+            <$> exists (tmpDir </> bar)
+            <*> isFile (tmpDir </> bar)
+            <*> readFile (tmpDir </> bar)
+        observed `shouldBe` (True, True, "overlaid contents")
+
+    symSpecify "follows overlaid directory links" $
+      withTempDir $ \tmpDir _ -> do
+        observed <- dryRunIO $ do
+          () <- createDirectory (tmpDir </> baz)
+          () <- writeFile (tmpDir </> baz </> foo) "inside"
+          () <- createSymbolicLink (tmpDir </> baz) (tmpDir </> bar) Directory
+          (,)
+            <$> isDirectory (tmpDir </> bar)
+            <*> listDirectory (tmpDir </> bar)
+        observed `shouldBe` (True, [foo])
+
+    symSpecify "removes an overlaid symlink without following it" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "kept"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- removeFile (tmpDir </> bar)
+          (,) <$> isSymlink (tmpDir </> bar) <*> exists (tmpDir </> foo)
+        observed `shouldBe` (False, True)
+        Prelude.readFile (tmpDir' `combine` "foo") `shouldReturn` "kept"
+
+    symSpecify "fails when the link path already exists" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        Left e <-
+          tryDryRunIO $ createSymbolicLink bar (tmpDir </> foo) File
+        e `shouldSatisfy` isAlreadyExistsError
+        Left e' <- tryDryRunIO $ do
+          () <- writeFile (tmpDir </> baz) "occupied"
+          createSymbolicLink bar (tmpDir </> baz) File
+        e' `shouldSatisfy` isAlreadyExistsError
+
+    symSpecify "sees target writes made after link creation" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "old"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- writeFile (tmpDir </> foo) "new"
+          readFile (tmpDir </> bar)
+        observed `shouldBe` "new"
+
+    symSpecify "fails on overlaid link cycles instead of looping" $
+      withTempDir $ \tmpDir _ -> do
+        Left e <- tryDryRunIO $ do
+          () <- createSymbolicLink bar (tmpDir </> foo) File
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          readFile (tmpDir </> foo)
+        ioeGetErrorType e `shouldBe` InvalidArgument
+        Left e' <- tryDryRunIO $ do
+          () <- createSymbolicLink bar (tmpDir </> foo) File
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          exists (tmpDir </> foo)
+        ioeGetErrorType e' `shouldBe` InvalidArgument
+
+    symSpecify "copies through an overlaid source link" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "linked"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- copyFile (tmpDir </> bar) (tmpDir </> baz)
+          readFile (tmpDir </> baz)
+        observed `shouldBe` "linked"
+
+    symSpecify "rejects copying a broken overlaid source link" $
+      withTempDir $ \tmpDir _ -> do
+        Left e <- tryDryRunIO $ do
+          () <- createSymbolicLink nonExistentP (tmpDir </> bar) File
+          copyFile (tmpDir </> bar) (tmpDir </> baz)
+        e `shouldSatisfy` isDoesNotExistError
+
+    symSpecify "keeps historical copies of retargeted links" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "original"
+        Prelude.writeFile (tmpDir' `combine` "qux") "retargeted"
+        observed <- dryRunIO $ do
+          () <- createSymbolicLink foo (tmpDir </> bar) File
+          () <- copyFile (tmpDir </> bar) (tmpDir </> baz)
+          () <- removeFile (tmpDir </> bar)
+          () <- createSymbolicLink qux (tmpDir </> bar) File
+          (,) <$> readFile (tmpDir </> baz) <*> readFile (tmpDir </> bar)
+        observed `shouldBe` ("original", "retargeted")
+
+    symSpecify "allows re-creating a link after removal" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") "real"
+        observed <- dryRunIO $ do
+          () <- writeFile (tmpDir </> baz) "occupied"
+          () <- removeFile (tmpDir </> baz)
+          () <- createSymbolicLink foo (tmpDir </> baz) File
+          (,) <$> isSymlink (tmpDir </> baz) <*> readFile (tmpDir </> baz)
+        observed `shouldBe` (True, "real")
+  describe "portable modes (IO)" $ do
+    specify "getPortableMode observes writability" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- getPortableMode (tmpDir </> foo) :: IO PortableMode
+        observed.writable `shouldBe` True
+
+    specify "getPortableMode fails on a missing path" $
+      withTempDir $ \tmpDir _ ->
+        tryError (getPortableMode (tmpDir </> nonExistentP) :: IO PortableMode)
+          >>= \case
+            Left e -> e `shouldSatisfy` isDoesNotExistError
+            Right mode -> expectationFailure $ "Unexpected mode: " <> show mode
+
+    specify "setPortableWritable widens and narrows writability" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        setPortableWritable (tmpDir </> foo) False :: IO ()
+        narrowed <- getPortableMode (tmpDir </> foo) :: IO PortableMode
+        narrowed.writable `shouldBe` False
+        setPortableWritable (tmpDir </> foo) True
+        widened <- getPortableMode (tmpDir </> foo) :: IO PortableMode
+        widened.writable `shouldBe` True
+
+    posixPortableModeSpec
+
+  describe "portable modes (DryRunIO)" $ do
+    specify "getPortableMode reads through to the real filesystem" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ getPortableMode $ tmpDir </> foo
+        observed.writable `shouldBe` True
+
+    specify "setPortableMode overlays a mode" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          getPortableMode $ tmpDir </> foo
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "setPortableMode fails on a missing path" $
+      withTempDir $ \tmpDir _ -> do
+        Left e <- tryDryRunIO $ setPortableMode (tmpDir </> nonExistentP) 0o600
+        e `shouldSatisfy` isDoesNotExistError
+
+    specify "setPortableWritable overlays only writability" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- setPortableWritable (tmpDir </> foo) False
+          getPortableMode $ tmpDir </> foo
+        observed `shouldBe` portableModeFromBits 0o400
+
+    specify "getPortableMode keeps a written file's prior mode" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- writeFile (tmpDir </> foo) "rewritten"
+          getPortableMode $ tmpDir </> foo
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "getPortableMode resets overlaid modes after removal" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- removeFile (tmpDir </> foo)
+          () <- writeFile (tmpDir </> foo) "recreated"
+          getPortableMode $ tmpDir </> foo
+        observed `shouldBe` portableModeFromBits 0o644
+
+    specify "getPortableMode follows Copied overlays" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
+          getPortableMode $ tmpDir </> bar
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "getPortableMode keeps historical modes of copies" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
+          -- Later source changes must not affect the copy:
+          () <- setPortableMode (tmpDir </> foo) 0o444
+          getPortableMode $ tmpDir </> bar
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "getPortableMode survives removal of a copy's source" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        observed <- dryRunIO $ do
+          () <- setPortableMode (tmpDir </> foo) 0o600
+          () <- copyFile (tmpDir </> foo) (tmpDir </> bar)
+          () <- removeFile (tmpDir </> foo)
+          getPortableMode $ tmpDir </> bar
+        observed `shouldBe` portableModeFromBits 0o600
+
+    specify "getPortableMode fails on removed or missing paths" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "foo") ""
+        Left e <- tryDryRunIO $ do
+          () <- removeFile (tmpDir </> foo)
+          getPortableMode $ tmpDir </> foo
+        e `shouldSatisfy` isDoesNotExistError
+        Left e' <- tryDryRunIO $ getPortableMode $ tmpDir </> nonExistentP
+        e' `shouldSatisfy` isDoesNotExistError
+
+    posixDryRunPortableModeSpec

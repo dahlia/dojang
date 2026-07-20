@@ -31,12 +31,17 @@ module Dojang.Types.Context
   , makeCorrespondBetweenThreeFiles
   , makeCorrespondBetweenTwoDirs
   , makeCorrespondWithDestination
+  , observeFileStat
+  , projectExpectedState
+  , resolveTargetFrom
   , routePaths
   ) where
 
 import Control.Monad (forM, when)
 import Control.Monad.IO.Class (MonadIO)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sortOn)
+import Data.Ord (Down (Down))
+import Data.Word (Word32)
 import GHC.IO.Exception (IOErrorType (InappropriateType))
 import GHC.Stack (HasCallStack)
 import System.IO.Error
@@ -49,6 +54,7 @@ import Prelude hiding (readFile)
 import Control.Monad.Except (MonadError (..))
 import Data.Map.Strict
   ( Map
+  , elems
   , filter
   , findWithDefault
   , fromList
@@ -63,23 +69,38 @@ import System.OsPath
   , makeRelative
   , normalise
   , splitDirectories
+  , takeDirectory
   , (</>)
   )
+import System.OsPath qualified
 
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NE
-import Data.Set (toList, union)
+import Data.Set (filter, toList, union)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.FilePathExpression.Expansion (VariableGetter)
+import Dojang.Types.FileRoute
+  ( RouteKind (SymlinkRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.PathIdentity (pathIdentityComponents)
 import Dojang.Types.Repository
   ( Repository (..)
   , RouteMapWarning
   , RouteResult (..)
   )
 import Dojang.Types.Repository qualified (routePathsWithVariables)
+import Dojang.Types.RouteOwnership
+  ( ExpectedState (..)
+  , OwnershipError
+  , ownedExclusions
+  , ownerOf
+  , selectOwnership
+  , verifyResolvedIdentities
+  )
 
 
 -- | The context in which repository operations are performed.
@@ -147,6 +168,14 @@ data ManagedCorrespondence = ManagedCorrespondence
 -- | The kind of change that was made to a file.
 data FileDeltaKind = Unchanged | Added | Removed | Modified
   deriving (Eq, Ord, Show)
+
+
+-- | Resolves a symbolic-link target from the directory containing the
+-- link.
+resolveTargetFrom :: OsPath -> OsPath -> OsPath
+resolveTargetFrom link target
+  | System.OsPath.isAbsolute target = normalise target
+  | otherwise = normalise $ takeDirectory link </> target
 
 
 -- | Observes the state of a filesystem entry without following symbolic links.
@@ -287,6 +316,27 @@ makeCorrespondWithDestination ctx dstPath = do
     makeCorrespondBetweenThreeFiles interPath srcPath dstPath
 
 
+-- | Projects the expected per-destination route policy for the current
+-- environment: which route owns each destination, which destinations are
+-- traversal boundaries, and which owned subtrees are nested inside broader
+-- routes.  Commands should consume this shared projection instead of
+-- reconstructing route policy from matching paths.
+projectExpectedState
+  :: (MonadFileSystem m)
+  => Context m
+  -- ^ The context whose routes are projected.
+  -> m (Either OwnershipError ExpectedState, [RouteMapWarning])
+  -- ^ The expected state, or the ownership error that makes the route
+  -- configuration unsafe, along with any routing warnings.
+projectExpectedState ctx = do
+  (paths, warnings) <- routePaths ctx
+  case selectOwnership ctx.repository.sourcePath paths of
+    Left err -> return (Left err, warnings)
+    Right state -> do
+      verified <- verifyResolvedIdentities ctx.repository.sourcePath state
+      return (state <$ verified, warnings)
+
+
 -- | Creates a list of file correspondences between the source files, the
 -- intermediate files, and the destination files.  Throws an 'IOError' if any of
 -- the files cannot be read.
@@ -294,64 +344,126 @@ makeCorrespond
   :: (HasCallStack, MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform file correspondence.
-  -> m ([FileCorrespondence], [RouteMapWarning])
+  -> m (Either OwnershipError ([FileCorrespondence], [RouteMapWarning]))
   -- ^ The file correspondences, along with a list of warnings that occurred
-  -- during path routing (if any).  The file paths in the returned
+  -- during path routing (if any), or the ownership error that makes the
+  -- route configuration unsafe.  The file paths in the returned
   -- 'FileCorrespondence' values are absolute, or relative to the current
   -- working directory at least.
 makeCorrespond ctx = do
-  (managed, warnings) <- makeManagedCorrespond ctx
-  return ((.correspondence) <$> managed, warnings)
+  result <- makeManagedCorrespond ctx
+  return $ do
+    (managed, warnings) <- result
+    return ((.correspondence) <$> managed, warnings)
 
 
 -- | Makes correspondences while retaining their producing route metadata.
+-- Entries owned by routes nested inside a broader route are excluded from
+-- the broader route's own correspondences, so every destination entry has
+-- exactly one producing route.
 makeManagedCorrespond
   :: (HasCallStack, MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform path routing.
-  -> m ([ManagedCorrespondence], [RouteMapWarning])
-  -- ^ Managed correspondences and route warnings.
+  -> m (Either OwnershipError ([ManagedCorrespondence], [RouteMapWarning]))
+  -- ^ Managed correspondences and route warnings, or the ownership error
+  -- that makes the route configuration unsafe.
 makeManagedCorrespond ctx = do
-  (paths, warnings) <- routePaths ctx
-  files <- forM paths $ \expanded -> do
-    let interAbsPath = repo.intermediatePath </> expanded.routeName
-    case expanded.fileType of
-      Dojang.MonadFileSystem.Directory -> do
-        fs <-
-          makeCorrespondBetweenThreeDirs
-            interAbsPath
-            expanded.sourcePath
-            expanded.destinationPath
-            (findWithDefault [] (normalise expanded.routeName) ignorePatterns)
-        return
-          [ ManagedCorrespondence
-              expanded
-              correspond.source.path
-              correspond
-                { source =
-                    correspond.source
-                      { path = expanded.sourcePath </> correspond.source.path
-                      }
-                , intermediate =
-                    correspond.intermediate
-                      { path = interAbsPath </> correspond.intermediate.path
-                      }
-                , destination =
-                    correspond.destination
-                      { path =
-                          expanded.destinationPath </> correspond.destination.path
-                      }
-                }
-          | correspond <- fs
-          ]
-      _ -> do
-        f <-
-          makeCorrespondBetweenThreeFiles
-            interAbsPath
-            expanded.sourcePath
-            expanded.destinationPath
-        return [ManagedCorrespondence expanded mempty f]
-  return (concat files, warnings)
+  (ownership, warnings) <- projectExpectedState ctx
+  case ownership of
+    Left err -> return $ Left err
+    Right state -> do
+      files <- forM (elems state.owners) $ \expanded -> do
+        let interAbsPath = repo.intermediatePath </> expanded.routeName
+        case expanded.fileType of
+          _ | expanded.kind == SymlinkRoute -> do
+            -- A deployment link is a single one-way entry: the destination
+            -- is never enumerated (it is a traversal boundary), and no
+            -- intermediate snapshot participates.  The source is
+            -- absolutized because it becomes the stored link target, which
+            -- must stay valid regardless of the working directory.  The
+            -- destination delta reports whether the link still projects
+            -- the source, so status and selection can see missing or
+            -- diverged links.
+            absoluteSource <- makeAbsolute expanded.sourcePath
+            sourceStat <- observeFileStat absoluteSource
+            destinationStat <- observeFileStat expanded.destinationPath
+            let converged = case destinationStat of
+                  Symlink target ->
+                    resolveTargetFrom expanded.destinationPath target
+                      == absoluteSource
+                  _ -> False
+            return
+              [ ManagedCorrespondence
+                  expanded
+                  mempty
+                  FileCorrespondence
+                    { source = FileEntry absoluteSource sourceStat
+                    , sourceDelta = Unchanged
+                    , intermediate = FileEntry interAbsPath Missing
+                    , destination =
+                        FileEntry expanded.destinationPath destinationStat
+                    , destinationDelta =
+                        if converged then Unchanged else Modified
+                    }
+              ]
+          Dojang.MonadFileSystem.Directory -> do
+            fs <-
+              makeCorrespondBetweenThreeDirs
+                interAbsPath
+                expanded.sourcePath
+                expanded.destinationPath
+                (findWithDefault [] (normalise expanded.routeName) ignorePatterns)
+                (ownedExclusions state expanded.destinationPath)
+            -- A declared directory mode applies to the route's destination
+            -- root itself, not only to the entries inside it, so the root
+            -- needs its own correspondence.  Routes without a declared
+            -- mode keep their previous entry-only enumeration, and a
+            -- missing source directory stays a no-op rather than becoming
+            -- a removal:
+            sourceRootStat <- observeFileStat expanded.sourcePath
+            rootEntries <-
+              if expanded.mode == DefaultMode
+                || sourceRootStat /= Directory
+                then return []
+                else do
+                  rootCorrespondence <-
+                    makeCorrespondBetweenThreeFiles
+                      interAbsPath
+                      expanded.sourcePath
+                      expanded.destinationPath
+                  return [ManagedCorrespondence expanded mempty rootCorrespondence]
+            return $
+              rootEntries
+                ++ [ ManagedCorrespondence
+                       expanded
+                       correspond.source.path
+                       correspond
+                         { source =
+                             correspond.source
+                               { path = expanded.sourcePath </> correspond.source.path
+                               }
+                         , intermediate =
+                             correspond.intermediate
+                               { path = interAbsPath </> correspond.intermediate.path
+                               }
+                         , destination =
+                             correspond.destination
+                               { path =
+                                   expanded.destinationPath
+                                     </> correspond.destination.path
+                               }
+                         }
+                   | correspond <- fs
+                   ]
+          _ -> do
+            f <-
+              makeCorrespondBetweenThreeFiles
+                interAbsPath
+                expanded.sourcePath
+                expanded.destinationPath
+            return [ManagedCorrespondence expanded mempty f]
+      return $ Right (concat files, warnings)
  where
   repo :: Repository
   repo = ctx.repository
@@ -392,12 +504,17 @@ makeCorrespondBetweenThreeDirs
   -> OsPath
   -> OsPath
   -> [FilePattern]
+  -> [OsPath]
+  -- ^ Relative subtree roots owned by nested routes; entries at or under
+  -- these roots are excluded from the correspondence.
   -> m [FileCorrespondence]
-makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
+makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores exclusions = do
   srcEntries <- makeCorrespondBetweenTwoDirs intermediatePath srcPath []
   dstEntries <-
     makeCorrespondBetweenTwoDirs intermediatePath dstPath ignores
-  let paths = keysSet srcEntries `union` keysSet dstEntries
+  let paths =
+        Data.Set.filter (not . excluded) $
+          keysSet srcEntries `union` keysSet dstEntries
   forM (Data.Set.toList paths) $ \path -> do
     let missing = FileEntry path Missing
     (interEntry, srcEntry, srcDelta) <- case srcEntries !? path of
@@ -430,6 +547,11 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores = do
         , destinationDelta = dstDelta'
         }
  where
+  exclusionIdentities :: [[[Word32]]]
+  exclusionIdentities = pathIdentityComponents <$> exclusions
+  excluded :: OsPath -> Bool
+  excluded path =
+    any (`isPrefixOf` pathIdentityComponents path) exclusionIdentities
   getDelta
     :: OsPath
     -- \^ The relative path to the file.
@@ -676,22 +798,27 @@ getRouteState ctx path = do
   absPath <- makeAbsolute path
   let dirs = splitDirectories absPath
   (routes, ws) <- routePaths ctx
-  states <- forM routes $ \route -> do
+  matches <- forM routes $ \route -> do
     dstPath <- makeAbsolute route.destinationPath
     let prefix = splitDirectories dstPath
-    if prefix `isPrefixOf` dirs
-      then do
-        let ignores =
-              findWithDefault
-                []
-                (normalise route.routeName)
-                ignorePatterns
-        relPath <- decodePath $ joinPath $ drop (length prefix) dirs
-        case matchMany [(i, i) | i <- ignores] [((), relPath)] of
-          (pattern, _, _) : _ -> return $ Ignored route.routeName pattern
-          _ -> return $ Routed route.routeName
-      else return NotRouted
-  return (if null states then NotRouted else minimum states, ws)
+    return $
+      if prefix `isPrefixOf` dirs
+        then Just (length prefix, route, drop (length prefix) dirs)
+        else Nothing
+  -- The most-specific containing route owns the path; broader routes must
+  -- not override its routing or ignore rules:
+  case sortOn (\(specificity', _, _) -> Down specificity') [m | Just m <- matches] of
+    [] -> return (NotRouted, ws)
+    (_, route, relDirs) : _ -> do
+      let ignores =
+            findWithDefault
+              []
+              (normalise route.routeName)
+              ignorePatterns
+      relPath <- decodePath $ joinPath relDirs
+      case matchMany [(i, i) | i <- ignores] [((), relPath)] of
+        (pattern, _, _) : _ -> return (Ignored route.routeName pattern, ws)
+        _ -> return (Routed route.routeName, ws)
  where
   ignorePatterns :: Map OsPath [FilePattern]
   ignorePatterns = ctx.repository.manifest.ignorePatterns
@@ -709,15 +836,32 @@ getIgnoredFiles
   -- ^ The list of ignored files.
 getIgnoredFiles ctx = do
   (routes, _) <- routePaths ctx
+  let ownership = selectOwnership ctx.repository.sourcePath routes
+  let exclusionsFor :: RouteResult -> [OsPath]
+      exclusionsFor route =
+        case ownership of
+          Right state -> ownedExclusions state route.destinationPath
+          Left _ -> []
   ignoredLists <- forM routes $ \route ->
     case route.fileType of
-      Dojang.MonadFileSystem.Directory -> do
+      -- A deployment link is a traversal boundary; its destination is the
+      -- link itself, never a directory to enumerate:
+      Dojang.MonadFileSystem.Directory | route.kind /= SymlinkRoute -> do
         let ignores = findWithDefault [] (normalise route.routeName) ignorePatterns
         if null ignores
           then return []
           else do
-            -- List all files (including those that would be ignored)
-            allFiles <- listFiles route.destinationPath []
+            -- List all files (including those that would be ignored),
+            -- except entries owned by routes nested inside this one:
+            let nestedRoots = exclusionsFor route
+            let nestedRootIdentities = pathIdentityComponents <$> nestedRoots
+            let owned :: FileEntry -> Bool
+                owned entry =
+                  not $
+                    any
+                      (`isPrefixOf` pathIdentityComponents entry.path)
+                      nestedRootIdentities
+            allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
             -- Find which files match ignore patterns
             forM allFiles $ \entry -> do
               relPath <- decodePath entry.path
@@ -757,23 +901,52 @@ getUnregisteredFiles
    . (HasCallStack, MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform the operation.
-  -> m [UnregisteredFile]
-  -- ^ The list of unregistered files.
+  -> m (Either OwnershipError [UnregisteredFile])
+  -- ^ The list of unregistered files, or the ownership error that makes
+  -- the route configuration unsafe.
 getUnregisteredFiles ctx = do
+  correspondResult <- makeCorrespond ctx
+  case correspondResult of
+    Left err -> return $ Left err
+    Right (registeredCorrespondences, _) ->
+      Right <$> getUnregisteredFiles' ctx registeredCorrespondences
+
+
+getUnregisteredFiles'
+  :: forall m
+   . (MonadFileSystem m)
+  => Context m
+  -> [FileCorrespondence]
+  -> m [UnregisteredFile]
+getUnregisteredFiles' ctx registeredCorrespondences = do
   (routes, _) <- routePaths ctx
-  -- Get all files from makeCorrespond (these are registered)
-  (registeredCorrespondences, _) <- makeCorrespond ctx
   let registeredPaths =
         [ normalise c.destination.path
         | c <- registeredCorrespondences
         , c.destination.stat /= Missing
         ]
+  let ownership = selectOwnership ctx.repository.sourcePath routes
+  let exclusionsFor :: RouteResult -> [OsPath]
+      exclusionsFor route = case ownership of
+        Right state -> ownedExclusions state route.destinationPath
+        Left _ -> []
 
-  -- For each directory route, find files not in the registered set
+  -- For each directory route, find files not in the registered set;
+  -- entries owned by nested routes belong to those routes alone:
   unregisteredLists <- forM routes $ \route ->
     case route.fileType of
-      Dojang.MonadFileSystem.Directory -> do
-        allFiles <- listFiles route.destinationPath []
+      -- A deployment link is a traversal boundary; everything behind it
+      -- belongs to the repository already:
+      Dojang.MonadFileSystem.Directory | route.kind /= SymlinkRoute -> do
+        let nestedRoots = exclusionsFor route
+        let nestedRootIdentities = pathIdentityComponents <$> nestedRoots
+        let owned :: FileEntry -> Bool
+            owned entry =
+              not $
+                any
+                  (`isPrefixOf` pathIdentityComponents entry.path)
+                  nestedRootIdentities
+        allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
         let unregistered =
               [ f
               | f <- allFiles
@@ -806,11 +979,19 @@ findCandidateRoutesFor
   -- ^ The list of candidate routes.
 findCandidateRoutesFor ctx filePath = do
   (routes, _) <- routePaths ctx
-  let fileDirs = splitDirectories $ normalise filePath
-  return
-    [ route
-    | route <- routes
-    , route.fileType == Dojang.MonadFileSystem.Directory
-    , let routeDirs = splitDirectories $ normalise route.destinationPath
-    , routeDirs `isPrefixOf` fileDirs
-    ]
+  let containing =
+        [ route
+        | route <- routes
+        , route.fileType == Dojang.MonadFileSystem.Directory
+        , let routeDirs = splitDirectories $ normalise route.destinationPath
+        , routeDirs `isPrefixOf` splitDirectories (normalise filePath)
+        ]
+  -- The most-specific containing route owns the path; broader routes are
+  -- not candidates for entries inside a nested route's subtree:
+  return $ case selectOwnership ctx.repository.sourcePath routes of
+    Right state ->
+      [ owner
+      | Just owner <- [ownerOf state filePath]
+      , owner.fileType == Dojang.MonadFileSystem.Directory
+      ]
+    Left _ -> containing

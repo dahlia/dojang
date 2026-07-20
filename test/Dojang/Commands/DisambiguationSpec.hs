@@ -18,6 +18,10 @@ import Dojang.Commands.Disambiguation
   )
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Types.Context (CandidateRoute (..))
+import Dojang.Types.FileRoute
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  )
 import Dojang.Types.Repository (RouteResult (..))
 
 
@@ -70,6 +74,8 @@ spec = do
               , routeName = foo
               , destinationPath = dst
               , fileType = Dojang.MonadFileSystem.Directory
+              , mode = DefaultMode
+              , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
               }

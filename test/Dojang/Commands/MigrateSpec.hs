@@ -64,6 +64,7 @@ import Dojang.Commands.Migrate (migrate)
 import Dojang.ExitCodes (machineStateError, manifestReadError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.TestUtils (withHome, withTempDir)
+import Dojang.Types.RouteMetadata (PortableMode)
 
 
 spec :: Spec
@@ -576,6 +577,12 @@ instance MonadFileSystem CoordinatedMigrationIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 concurrently
@@ -664,3 +671,9 @@ instance MonadFileSystem FailingManifestWriteIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())

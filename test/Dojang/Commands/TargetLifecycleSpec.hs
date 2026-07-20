@@ -799,3 +799,9 @@ instance MonadFileSystem IsolatedHomeIO where
   removeDirectory = liftIO . FileSystem.removeDirectory
   listDirectory = liftIO . FileSystem.listDirectory
   getFileSize = liftIO . FileSystem.getFileSize
+  getPortableMode = liftIO . FileSystem.getPortableMode
+  setPortableMode path = liftIO . FileSystem.setPortableMode path
+  setPortableWritable path =
+    liftIO . FileSystem.setPortableWritable path
+  createSymbolicLink target link =
+    liftIO . FileSystem.createSymbolicLink target link

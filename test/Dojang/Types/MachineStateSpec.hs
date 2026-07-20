@@ -116,12 +116,17 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , SynchronizationCommand (Applied)
-  , TargetFingerprint (FileFingerprint)
+  , TargetFingerprint (FileFingerprint, SymlinkFingerprint)
   )
 import Dojang.Types.RepositoryId
   ( RepositoryId
   , parseRepositoryId
   , repositoryIdText
+  )
+import Dojang.Types.RouteMetadata
+  ( PortableMode
+  , RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode)
   )
 
 
@@ -325,10 +330,10 @@ spec = do
     it "upgrades schema-version 3 with empty machine facts" $ do
       current <- fixtureState
       let currentDocument = encodeMachineState current
-      Text.isInfixOf "schema-version = 4" currentDocument `shouldBe` True
+      Text.isInfixOf "schema-version = 5" currentDocument `shouldBe` True
       let legacyDocument =
             Text.replace
-              "schema-version = 4"
+              "schema-version = 5"
               "schema-version = 3"
               currentDocument
       Text.isInfixOf "schema-version = 3" legacyDocument `shouldBe` True
@@ -352,6 +357,8 @@ spec = do
               route
               source
               Directory
+              CopyRoute
+              DefaultMode
               destination
               snapshot
               "always => $HOME/.config/app.toml"
@@ -378,6 +385,75 @@ spec = do
         populated.repositoryId
         populated.machineId
         (encodeMachineState populated)
+        `shouldBe` Right populated
+
+    it "round-trips a deployment-link target record" $ do
+      state <- fixtureState
+      route <- encodeFS "linked"
+      source <- encodeFS "linked"
+      destination <-
+        System.Directory.OsPath.makeAbsolute =<< encodeFS "target/linked"
+      linkTarget <-
+        System.Directory.OsPath.makeAbsolute =<< encodeFS "checkout/linked"
+      snapshotName <- encodeFS "linked"
+      let snapshot = state.targetSnapshotRoot </> snapshotName
+      let target =
+            ManagedTarget
+              "link-id"
+              route
+              source
+              File
+              SymlinkRoute
+              DefaultMode
+              destination
+              snapshot
+              "always => $HOME/.linked"
+              Map.empty
+              (SymlinkFingerprint linkTarget)
+              Applied
+              fixtureTime
+      let populated = state{targetRecords = Map.singleton target.targetId target}
+      let encoded = encodeMachineState populated
+      Text.isInfixOf "route-kind = \"symlink\"" encoded `shouldBe` True
+      Text.isInfixOf "fingerprint-link-target" encoded `shouldBe` True
+      decodeMachineState populated.repositoryId populated.machineId encoded
+        `shouldBe` Right populated
+
+    it "reads schema-version 4 records with default metadata" $ do
+      state <- fixtureState
+      route <- encodeFS "config/app.toml"
+      source <- encodeFS "config/app.toml"
+      destination <-
+        System.Directory.OsPath.makeAbsolute =<< encodeFS "target/app.toml"
+      snapshotName <- encodeFS "config/app.toml"
+      let snapshot = state.targetSnapshotRoot </> snapshotName
+      let target =
+            ManagedTarget
+              "target-id"
+              route
+              source
+              Directory
+              CopyRoute
+              DefaultMode
+              destination
+              snapshot
+              "always => $HOME/.config/app.toml"
+              Map.empty
+              (FileFingerprint 7 "sha256")
+              Applied
+              fixtureTime
+      let populated = state{targetRecords = Map.singleton target.targetId target}
+      -- A record with default metadata encodes without the version-5 keys,
+      -- so downgrading only the schema-version field produces a faithful
+      -- version-4 document:
+      let v4Document =
+            Text.replace
+              "schema-version = 5"
+              "schema-version = 4"
+              (encodeMachineState populated)
+      Text.isInfixOf "route-kind" v4Document `shouldBe` False
+      Text.isInfixOf "declared-mode" v4Document `shouldBe` False
+      decodeMachineState populated.repositoryId populated.machineId v4Document
         `shouldBe` Right populated
 
     it "persists a successful hook execution through the repository lock" $
@@ -677,14 +753,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 4" "schema-version = 5" encoded
+          Text.replace "schema-version = 5" "schema-version = 6" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 5)
+        `shouldBe` Left (UnsupportedSchemaVersion 6)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 5\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 5)
+        "schema-version = 6\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 6)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -3114,7 +3190,7 @@ fixtureState = do
   let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      4
+      5
       repositoryId'
       machineId'
       generationId
@@ -3145,6 +3221,8 @@ fixtureManagedTarget state identifier = do
       route
       source
       File
+      CopyRoute
+      DefaultMode
       (state.checkoutPath </> destination)
       (state.targetSnapshotRoot </> snapshotName)
       "definition"
@@ -3303,6 +3381,12 @@ instance MonadFileSystem FailingReplaceIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 newtype FailingCopyIO a
@@ -3351,6 +3435,12 @@ instance MonadFileSystem FailingCopyIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
 
 
 newtype FailingRemoveIO a
@@ -3403,3 +3493,9 @@ instance MonadFileSystem FailingRemoveIO where
       else liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path bits = liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable' =
+    liftIO (setPortableWritable path writable' :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())

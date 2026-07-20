@@ -69,6 +69,9 @@ import Dojang.Types.FilePathExpression.Expansion
   )
 import Dojang.Types.FileRoute
   ( FileRoute (..)
+  , RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  , RouteTarget (..)
   , RouteWarning
   , dispatch
   , routePathWithVariables
@@ -100,6 +103,10 @@ data RouteResult = RouteResult
   -- ^ The destination path.   It is either absolute or relative to
   -- the current working directory.
   , fileType :: FileType
+  , mode :: RouteMode
+  -- ^ The portable mode declared by the selected route branch.
+  , kind :: RouteKind
+  -- ^ The destination kind declared by the selected route branch.
   , routeDefinition :: Text
   -- ^ Canonical selected destination expression.
   , routeProvenance :: Map Text Text
@@ -171,14 +178,25 @@ routePathsWithVariables repo env lookupVariable = do
     (dstPath, warnings, expansionProvenance) <-
       routePathWithVariables route env lookupVariable
     let selected = case fst $ dispatch env route of
-          Just expression : _ -> Just expression
+          Just target : _ -> Just target
           _ -> Nothing
     let provenance = environmentProvenance <> expansionProvenance
-    let definition = maybe "" toPathText selected
-    return (src, dstPath, route.fileType, definition, provenance, warnings)
+    let definition = maybe "" (toPathText . (.expression)) selected
+    let mode' = maybe DefaultMode (.mode) selected
+    let kind' = maybe CopyRoute (.kind) selected
+    return
+      (src, dstPath, route.fileType, mode', kind', definition, provenance, warnings)
   let paths' =
-        [ RouteResult (repo.sourcePath </> src) src dst' ft definition provenance
-        | (src, Just dst', ft, definition, provenance, _) <- paths
+        [ RouteResult
+            (repo.sourcePath </> src)
+            src
+            dst'
+            ft
+            mode'
+            kind'
+            definition
+            provenance
+        | (src, Just dst', ft, mode', kind', definition, provenance, _) <- paths
         ]
   overlappingRoutes <-
     forM (Data.Map.Strict.toList $ findOverlappingRouteResults paths') $
@@ -188,7 +206,7 @@ routePathsWithVariables repo env lookupVariable = do
         filtered <- filterIgnoredPathsFromOverlaps dst ignorePatterns overlaps'
         return ((name, dst), filtered)
   let warnings =
-        [translateWarning w | (_, _, _, _, _, ws) <- paths, w <- ws]
+        [translateWarning w | (_, _, _, _, _, _, _, ws) <- paths, w <- ws]
           ++ [ OverlapDestinationPathsWarning name dst (o :| overlaps')
              | ((name, dst), o : overlaps') <- overlappingRoutes
              ]

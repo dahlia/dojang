@@ -10,7 +10,6 @@ import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
-import Data.Text (Text, pack)
 import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
@@ -24,6 +23,7 @@ import Data.Set qualified as Set
 import System.OsPath
   ( OsPath
   , addTrailingPathSeparator
+  , normalise
   )
 
 import Dojang.App
@@ -37,7 +37,10 @@ import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
   , die'
+  , ensureRouteOwnership
   , pathStyleFor
+  , printModeRestoreFailure
+  , printSkippedReconciliation
   , printStderr
   , printStderr'
   )
@@ -46,7 +49,12 @@ import Dojang.Commands.Hook
   , executeHooks
   , makeHookEnv
   )
-import Dojang.Commands.Status (defaultStatusOptions, printWarnings, statusCore)
+import Dojang.Commands.Status
+  ( defaultStatusOptions
+  , printUnsupportedModeWarnings
+  , printWarnings
+  , statusCore
+  )
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
   , conflictError
@@ -61,6 +69,7 @@ import Dojang.Types.Context
   , ManagedCorrespondence (..)
   , RouteState (..)
   , makeManagedCorrespond
+  , projectExpectedState
   )
 import Dojang.Types.Hook (HookType (..))
 import Dojang.Types.MachineState
@@ -71,6 +80,7 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , SynchronizationCommand (Applied)
+  , hasMaterializedSnapshot
   , mergeConvergedTargets
   , unreachableSnapshots
   )
@@ -83,15 +93,16 @@ import Dojang.Types.Reconciliation
   , ReconciliationItem (..)
   , ReconciliationOutcome (..)
   , ReconciliationPlan (..)
-  , ReconciliationSkipReason (..)
   , Replica (..)
   , SyncOp (..)
   , destructiveOperations
-  , executeReconciliationPlanWith
+  , executeReconciliationPlanGuarded
   , observeReconciliationInput
   , planReconciliation
   )
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata (renderRouteMode)
+import Dojang.Types.RouteOwnership (ExpectedState (..))
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
@@ -116,7 +127,9 @@ apply force filePaths = do
     $(logDebug) "Running pre-first-apply hooks..."
     executeHooks hookEnv ctx PreFirstApply
 
-  (allManaged, ws) <- makeManagedCorrespond ctx
+  (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  (ownership, _) <- projectExpectedState ctx
+  expectedState <- ensureRouteOwnership ownership
   fileMap <- fmap fromList $ forM allManaged $ \managed -> do
     srcAbsPath <- makeAbsolute managed.correspondence.source.path
     return (srcAbsPath, managed)
@@ -139,7 +152,9 @@ apply force filePaths = do
             ]
   let files = (.correspondence) <$> managed
   $(logDebugSH) files
-  inputs <- mapM (observeSelectedReconciliationInput ctx) files
+  printUnsupportedModeWarnings managed
+  inputs <-
+    mapM (observeSelectedReconciliationInput ctx expectedState) managed
   let conflictPolicy =
         if force then PreferAuthoritative else RefuseConflicts
   let plan =
@@ -147,7 +162,12 @@ apply force filePaths = do
   let conflicts = plan.conflicts
   codeStyle <- codeStyleFor stderr
   forM_ plan.items $ \item -> case item.outcome of
-    Skipped reason -> printSkippedReconciliation pathStyle item.correspondence reason
+    Skipped reason ->
+      printSkippedReconciliation
+        pathStyle
+        item.correspondence.source.path
+        item.correspondence.destination.path
+        reason
     _ -> return ()
   unless (null conflicts) $ do
     forM_ conflicts $ \conflict -> do
@@ -182,6 +202,20 @@ apply force filePaths = do
               "Cancelled applying because "
                 <> pathStyle path'
                 <> " (and its children) would be deleted."
+      RemoveDirsExcept path _ -> do
+        let path' = addTrailingPathSeparator path
+        if force
+          then
+            printStderr' Warning $
+              "Would delete "
+                <> pathStyle path'
+                <> " (except entries owned by nested routes)."
+          else
+            printStderr' Error $
+              "Cancelled applying because "
+                <> pathStyle path'
+                <> " (except entries owned by nested routes) would be"
+                <> " deleted."
       RemoveFile path -> do
         if force
           then printStderr' Warning ("Would delete " <> pathStyle path <> ".")
@@ -216,8 +250,9 @@ apply force filePaths = do
   when debug' (void $ statusCore defaultStatusOptions)
   let persist = persistConvergedTargets ctx machineState managed
   void
-    ( executeReconciliationPlanWith
+    ( executeReconciliationPlanGuarded
         (printSyncOp . (.syncOp))
+        printModeRestoreFailure
         plan
         `catchError` \err -> persist >> throwError err
     )
@@ -274,11 +309,19 @@ persistConvergedTargets ctx machineState selected =
         )
         ( \updated (transaction, superseded) ->
             let kept =
-                  Set.fromList $
-                    (.snapshotPath) <$> Map.elems updated.targetRecords
+                  Set.fromList
+                    [ record.snapshotPath
+                    | record <- Map.elems updated.targetRecords
+                    , hasMaterializedSnapshot record
+                    ]
             in unreachableSnapshots
                  kept
-                 (transaction : ((.snapshotPath) <$> superseded))
+                 ( transaction
+                     : [ record.snapshotPath
+                       | record <- superseded
+                       , hasMaterializedSnapshot record
+                       ]
+                 )
         )
         (\_ _ -> return ())
         (\_ (transaction, _) -> discardTargetSnapshot transaction)
@@ -293,35 +336,26 @@ persistConvergedTargets ctx machineState selected =
 observeSelectedReconciliationInput
   :: (MonadFileSystem i, MonadIO i)
   => Context i
-  -> FileCorrespondence
+  -> ExpectedState
+  -> ManagedCorrespondence
   -> i ReconciliationInput
-observeSelectedReconciliationInput ctx correspondence = do
-  input <- observeReconciliationInput ctx correspondence
-  return $ case input.destinationRouteState of
-    Ignored route _ -> input{destinationRouteState = Routed route}
-    _ -> input
-
-
-printSkippedReconciliation
-  :: (MonadIO i)
-  => (OsPath -> Text)
-  -> FileCorrespondence
-  -> ReconciliationSkipReason
-  -> App i ()
-printSkippedReconciliation pathStyle correspondence reason =
-  case reason of
-    IgnoredDestination _ pattern ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because it is ignored by pattern "
-          <> pack (show pattern)
-          <> "."
-    UnsupportedSymlink ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.source.path
-          <> " because symbolic link synchronization is not supported."
+observeSelectedReconciliationInput ctx expectedState managed = do
+  input <-
+    observeReconciliationInput ctx managed.route.mode managed.correspondence
+  let protected =
+        Map.findWithDefault
+          []
+          (normalise managed.route.destinationPath)
+          expectedState.nestedUnder
+  let input' =
+        input
+          { destinationKind = managed.route.kind
+          , routeFileType = managed.route.fileType
+          , protectedDestinations = protected
+          }
+  return $ case input'.destinationRouteState of
+    Ignored route _ -> input'{destinationRouteState = Routed route}
+    _ -> input'
 
 
 printSyncOp :: (MonadIO i) => SyncOp -> App i ()
@@ -329,6 +363,17 @@ printSyncOp (RemoveDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Remove " <> pathStyle path' <> " (and its children)...")
+printSyncOp (RemoveDirsExcept path _) = do
+  pathStyle <- pathStyleFor stderr
+  let path' = addTrailingPathSeparator path
+  printStderr
+    ( "Remove "
+        <> pathStyle path'
+        <> " (preserving entries owned by nested routes)..."
+    )
+printSyncOp (RemoveLink path) = do
+  pathStyle <- pathStyleFor stderr
+  printStderr ("Remove link " <> pathStyle path <> "...")
 printSyncOp (RemoveFile path) = do
   pathStyle <- pathStyleFor stderr
   printStderr ("Remove " <> pathStyle path <> "...")
@@ -344,3 +389,17 @@ printSyncOp (CreateDirs path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
+printSyncOp (CreateSymlink target link _) = do
+  pathStyle <- pathStyleFor stderr
+  printStderr
+    ("Link " <> pathStyle link <> " to " <> pathStyle target <> "...")
+printSyncOp (SetEntryMode path mode _) = do
+  pathStyle <- pathStyleFor stderr
+  codeStyle <- codeStyleFor stderr
+  printStderr
+    ( "Set mode of "
+        <> pathStyle path
+        <> " to "
+        <> codeStyle (renderRouteMode mode)
+        <> "..."
+    )

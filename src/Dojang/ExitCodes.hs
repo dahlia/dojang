@@ -89,5 +89,10 @@ lifecycleSelectionError :: ExitCode
 lifecycleSelectionError = ExitFailure 37
 
 
+-- | The route configuration cannot give every destination one owner.
+routeOwnershipError :: ExitCode
+routeOwnershipError = ExitFailure 38
+
+
 hookFailedError :: ExitCode
 hookFailedError = ExitFailure 40

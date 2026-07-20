@@ -59,7 +59,12 @@ import Dojang.Types.EnvironmentPredicate
   , normalizePredicate
   )
 import Dojang.Types.FilePathExpression (FilePathExpression, toPathText)
-import Dojang.Types.FileRoute (FileRoute (..))
+import Dojang.Types.FileRoute
+  ( FileRoute (..)
+  , RouteKind (CopyRoute, SymlinkRoute)
+  , RouteMode (DefaultMode, Executable, PrivateExecutable)
+  , RouteTarget (..)
+  )
 import qualified Dojang.Types.FileRoute as FileRoute
 import Dojang.Types.FileRouteMap (FileRouteMap)
 import Dojang.Types.Hook
@@ -84,6 +89,7 @@ import Dojang.Types.ManifestVariable
 import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.MonikerName (MonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
+import Dojang.Types.RouteMetadata (renderRouteKind, renderRouteMode)
 
 
 schema :: Text
@@ -98,6 +104,12 @@ data WriteError
     DuplicateStatefulHookId HookType HookId
   | -- | A variable resolves a moniker differently from the manifest table.
     UnrepresentableVariableMoniker ManifestVariableName MonikerName
+  | -- | A directory route declares an executable mode, which the manifest
+    -- syntax rejects.
+    ExecutableModeOnDirectoryRoute OsPath RouteMode
+  | -- | A symlink-kind route target declares a non-default mode, which the
+    -- manifest syntax rejects.
+    ModeOnSymlinkRoute OsPath RouteMode
   deriving (Eq, Show)
 
 
@@ -122,6 +134,18 @@ formatWriteError (UnrepresentableVariableMoniker variable moniker) =
     <> " resolves moniker "
     <> original moniker.name
     <> " differently from the manifest moniker table."
+formatWriteError (ExecutableModeOnDirectoryRoute route mode) =
+  "Directory route "
+    <> pack (decodePath route)
+    <> " declares mode "
+    <> renderRouteMode mode
+    <> ", which is not applicable to directory routes."
+formatWriteError (ModeOnSymlinkRoute route mode) =
+  "Route "
+    <> pack (decodePath route)
+    <> " declares mode "
+    <> renderRouteMode mode
+    <> " on a symlink-kind target, which cannot carry a mode."
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -157,6 +181,7 @@ writeManifest
 writeManifest manifest = do
   validateVariables manifest.monikers manifest.variables
   validateHooks manifest.hooks
+  validateRouteMetadata manifest.fileRoutes
   pure $
     "#:schema "
       <> schema
@@ -193,6 +218,23 @@ writeManifest manifest = do
       Nothing -> Right ()
       Just moniker ->
         Left $ UnrepresentableVariableMoniker variableName moniker
+  validateRouteMetadata :: FileRouteMap -> Either WriteError ()
+  validateRouteMetadata routes =
+    sequence_
+      [ validateTarget routeName route.fileType target
+      | (routeName, route) <- Data.Map.Strict.toAscList routes
+      , (_, Just target) <- route.predicates
+      ]
+  validateTarget
+    :: OsPath -> FileType -> RouteTarget -> Either WriteError ()
+  validateTarget routeName fileType' target
+    | target.kind == SymlinkRoute
+    , target.mode /= DefaultMode =
+        Left $ ModeOnSymlinkRoute routeName target.mode
+    | fileType' == Directory
+    , target.mode == Executable || target.mode == PrivateExecutable =
+        Left $ ExecutableModeOnDirectoryRoute routeName target.mode
+    | otherwise = Right ()
 
 
 -- | Writes a 'Manifest' file to the given path.  Throws an 'IOError' if the
@@ -326,28 +368,28 @@ mapFileRoute' monikers fileRoute =
     _ -> DetailedFileRoute $ mapDetailedPredicate <$> routePredicates
  where
   routePredicates
-    :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+    :: [(EnvironmentPredicate, Maybe RouteTarget)]
   routePredicates = fileRoute.predicates
   compactPredicates
-    :: [(EnvironmentPredicate, Maybe FilePathExpression)]
+    :: [(EnvironmentPredicate, Maybe RouteTarget)]
   compactPredicates =
     ( FileRoute.fileRoute
         monikers
-        [ (name, path)
-        | (Moniker name, path) <- routePredicates
+        [ (name, (.expression) <$> target)
+        | (Moniker name, target) <- routePredicates
         ]
         fileRoute.fileType
     ).predicates
   mapCompactPredicate
-    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    :: (EnvironmentPredicate, Maybe RouteTarget)
     -> Maybe (MonikerName, Text)
   mapCompactPredicate (Moniker name, Nothing) = Just (name, "")
-  mapCompactPredicate (Moniker name, Just path)
-    | toPathText path == "" = Nothing
-    | otherwise = Just (name, toPathText path)
+  mapCompactPredicate (Moniker name, Just target)
+    | toPathText target.expression == "" = Nothing
+    | otherwise = Just (name, toPathText target.expression)
   mapCompactPredicate _ = Nothing
   mapDetailedPredicate
-    :: (EnvironmentPredicate, Maybe FilePathExpression)
+    :: (EnvironmentPredicate, Maybe RouteTarget)
     -> FileRouteBranch'
   mapDetailedPredicate (predicate, filePath) =
     FileRouteBranch'
@@ -357,7 +399,17 @@ mapFileRoute' monikers fileRoute =
       , Internal.routeCondition = case predicate of
           Moniker name | Data.HashMap.Strict.member name monikers -> Nothing
           _ -> Just $ writeEnvironmentPredicate predicate
-      , Internal.routePath = toPathText <$> filePath
+      , Internal.routePath = toPathText . (.expression) <$> filePath
+      , Internal.routeMode = case filePath of
+          Just target
+            | target.mode /= DefaultMode ->
+                Just $ renderRouteMode target.mode
+          _ -> Nothing
+      , Internal.routeKind = case filePath of
+          Just target
+            | target.kind /= CopyRoute ->
+                Just $ renderRouteKind target.kind
+          _ -> Nothing
       , Internal.routeUnexpectedFields = []
       }
 

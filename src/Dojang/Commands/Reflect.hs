@@ -9,9 +9,10 @@ module Dojang.Commands.Reflect (reflect) where
 import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (isPrefixOf, nub)
+import Data.List (isPrefixOf, nub, sortOn)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
+import Data.Ord (Down (Down))
 import Data.Set qualified as Set
 import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
@@ -20,7 +21,7 @@ import System.IO (hIsTerminalDevice, stderr, stdin)
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (Text, pack)
+import Data.Text (pack)
 import FortyTwo.Prompts.Confirm (confirm)
 import FortyTwo.Prompts.Select (select)
 import System.OsPath
@@ -42,7 +43,10 @@ import Dojang.Commands
   , codeStyleFor
   , die'
   , dieWithErrors
+  , ensureRouteOwnership
   , pathStyleFor
+  , printModeRestoreFailure
+  , printSkippedReconciliation
   , printStderr
   , printStderr'
   )
@@ -54,7 +58,7 @@ import Dojang.Commands.Hook
   ( disambiguatedHookScopePaths
   , withCommandHooks
   )
-import Dojang.Commands.Status (printWarnings)
+import Dojang.Commands.Status (printUnsupportedModeWarnings, printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
   , conflictError
@@ -65,7 +69,7 @@ import Dojang.ExitCodes
   , sourceCannotBeTargetError
   , userCancelledError
   )
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileType (File), MonadFileSystem (..))
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
@@ -82,7 +86,6 @@ import Dojang.Types.Context
   , getIgnoredFiles
   , getRouteState
   , getUnregisteredFiles
-  , makeCorrespond
   , makeCorrespondBetweenThreeFiles
   , makeManagedCorrespond
   )
@@ -95,6 +98,7 @@ import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
   , SynchronizationCommand (Reflected)
   , destinationPathIdentity
+  , hasMaterializedSnapshot
   , mergeConvergedTargets
   , unreachableSnapshots
   )
@@ -107,13 +111,18 @@ import Dojang.Types.Reconciliation
   , ReconciliationItem (..)
   , ReconciliationOutcome (..)
   , ReconciliationPlan (..)
-  , ReconciliationSkipReason (..)
   , SyncOp (..)
-  , executeReconciliationPlanWith
+  , executeReconciliationPlanGuarded
+  , observeModeDrift
   , observeReconciliationInput
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata
+  ( RouteKind (CopyRoute)
+  , RouteMode (DefaultMode)
+  , renderRouteMode
+  )
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
@@ -154,8 +163,17 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
-  (allFiles, ws) <- makeCorrespond ctx
-  let changedFiles = filter isChanged allFiles
+  (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  let allFiles = (.correspondence) <$> allManaged
+  -- Metadata-only drift also needs reconciliation, even when contents
+  -- converged:
+  drifted <- observeModeDrift allManaged
+  let driftedFiles =
+        [ m.correspondence
+        | (m, _) <- drifted
+        , not $ isChanged m.correspondence
+        ]
+  let changedFiles = filter isChanged allFiles ++ driftedFiles
   printWarnings ws
 
   -- Get ignored files and warn about them
@@ -218,7 +236,7 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
   unregisteredCorrespondences <-
     if includeUnregistered
       then do
-        unregisteredFiles <- getUnregisteredFiles ctx
+        unregisteredFiles <- getUnregisteredFiles ctx >>= ensureRouteOwnership
         if null unregisteredFiles
           then return []
           else do
@@ -284,7 +302,7 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
     then do
       printStderr "No changed files to reflect."
       machineState <- prepareMachineState ctx.repository.manifest
-      (managed, _) <- makeManagedCorrespond ctx
+      (managed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
       persistConvergedTargets ctx machineState managed
       return ExitSuccess
     else do
@@ -349,9 +367,16 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
     if null dirPaths
       then return []
       else do
-        (allFiles, ws) <- makeCorrespond ctx
+        (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+        let allFiles = (.correspondence) <$> allManaged
         printWarnings ws
-        let changedFiles = filter isChanged allFiles
+        drifted <- observeModeDrift allManaged
+        let driftedFiles =
+              [ m.correspondence
+              | (m, _) <- drifted
+              , not $ isChanged m.correspondence
+              ]
+        let changedFiles = filter isChanged allFiles ++ driftedFiles
         -- Filter files within the directories
         filterFilesInDirs dirPaths changedFiles
   -- For files: process as before
@@ -525,7 +550,7 @@ reflectCorrespondences
   -> App i ()
 reflectCorrespondences ctx force persistAll selectedCorrespondences = do
   machineState <- prepareMachineState ctx.repository.manifest
-  (initialManaged, _) <- makeManagedCorrespond ctx
+  (initialManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   let selectedFiles = snd <$> selectedCorrespondences
   let matchesSelection :: ManagedCorrespondence -> Bool
       matchesSelection managed =
@@ -539,9 +564,40 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
           selectedFiles
   let initialSelectedManaged = filter matchesSelection initialManaged
   pathStyle <- pathStyleFor stderr
+  let ownerFor :: FileCorrespondence -> Maybe ManagedCorrespondence
+      ownerFor file =
+        case sortOn
+          ( Down
+              . length
+              . splitDirectories
+              . normalise
+              . (.route.destinationPath)
+          )
+          [ m
+          | m <- initialManaged
+          , -- Compare by native identity so case-variant Windows
+          -- destinations still find their owning route:
+          fmap
+            destinationPathIdentity
+            (splitDirectories $ normalise m.route.destinationPath)
+            `isPrefixOf` fmap
+              destinationPathIdentity
+              (splitDirectories $ normalise file.destination.path)
+          ] of
+          m : _ -> Just m
+          [] -> Nothing
+  -- Reflection still reconciles declared modes toward the destination, so
+  -- unenforceable declarations must be surfaced here too:
+  printUnsupportedModeWarnings $ mapMaybe ownerFor selectedFiles
   inputs <-
     mapM
-      (uncurry $ observeSelectedReconciliationInput ctx)
+      ( \(allowIgnored, file) ->
+          observeSelectedReconciliationInput
+            ctx
+            allowIgnored
+            (ownerFor file)
+            file
+      )
       selectedCorrespondences
   let policy = if force then PreferAuthoritative else RefuseConflicts
   let plan = planReconciliation DestinationToSource policy inputs
@@ -577,9 +633,14 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
             <> pathStyle c.source.path
             <> "..."
       ConflictDetected -> return ()
-      Skipped reason -> printSkippedReconciliation pathStyle c reason
+      Skipped reason ->
+        printSkippedReconciliation
+          pathStyle
+          c.destination.path
+          c.destination.path
+          reason
   let persist = do
-        (refreshedManaged, _) <- makeManagedCorrespond ctx
+        (refreshedManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
         let selectedManaged =
               nub $
                 (if persistAll then initialManaged else initialSelectedManaged)
@@ -588,8 +649,9 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
                     else filter matchesSelection refreshedManaged
         persistConvergedTargets ctx machineState selectedManaged
   void
-    ( executeReconciliationPlanWith
+    ( executeReconciliationPlanGuarded
         (logSyncOp . (.syncOp))
+        printModeRestoreFailure
         plan
         `catchError` \err -> persist >> throwError err
     )
@@ -635,11 +697,19 @@ persistConvergedTargets ctx machineState selected =
         )
         ( \updated (transaction, superseded) ->
             let kept =
-                  Set.fromList $
-                    (.snapshotPath) <$> Map.elems updated.targetRecords
+                  Set.fromList
+                    [ record.snapshotPath
+                    | record <- Map.elems updated.targetRecords
+                    , hasMaterializedSnapshot record
+                    ]
             in unreachableSnapshots
                  kept
-                 (transaction : ((.snapshotPath) <$> superseded))
+                 ( transaction
+                     : [ record.snapshotPath
+                       | record <- superseded
+                       , hasMaterializedSnapshot record
+                       ]
+                 )
         )
         (\_ _ -> return ())
         (\_ (transaction, _) -> discardTargetSnapshot transaction)
@@ -655,47 +725,47 @@ observeSelectedReconciliationInput
   => Context (App i)
   -> Bool
   -- ^ Whether command-level selection explicitly admitted an ignored path.
+  -> Maybe ManagedCorrespondence
+  -- ^ The most-specific managed route owning the destination, if any.
+  -- Descendants of a deployment link resolve to the link route, so
+  -- reflection can never reach through a deployed link.
   -> FileCorrespondence
   -> App i ReconciliationInput
-observeSelectedReconciliationInput ctx allowIgnored correspondence = do
-  input <- observeReconciliationInput ctx correspondence
+observeSelectedReconciliationInput ctx allowIgnored owner correspondence = do
+  input <-
+    observeReconciliationInput
+      ctx
+      (maybe DefaultMode (.route.mode) owner)
+      correspondence
+  let input' =
+        input
+          { destinationKind = maybe CopyRoute (.route.kind) owner
+          , routeFileType =
+              maybe File (.route.fileType) owner
+          }
   return $
     if allowIgnored
-      then case input.destinationRouteState of
-        Ignored route _ -> input{destinationRouteState = Routed route}
-        _ -> input
-      else input
-
-
-printSkippedReconciliation
-  :: (MonadIO i)
-  => (OsPath -> Text)
-  -> FileCorrespondence
-  -> ReconciliationSkipReason
-  -> App i ()
-printSkippedReconciliation pathStyle correspondence reason =
-  case reason of
-    IgnoredDestination _ pattern ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because it is ignored by pattern "
-          <> pack (show pattern)
-          <> "."
-    UnsupportedSymlink ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because symbolic link synchronization is not supported."
+      then case input'.destinationRouteState of
+        Ignored route _ -> input'{destinationRouteState = Routed route}
+        _ -> input'
+      else input'
 
 
 logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
 logSyncOp (RemoveDirs path) = do
   path' <- decodePath path
   $(logDebug) $ "Remove directory recursively: " <> pack path'
+logSyncOp (RemoveDirsExcept path _) = do
+  path' <- decodePath path
+  $(logDebug) $
+    "Remove directory recursively (preserving nested-owned entries): "
+      <> pack path'
 logSyncOp (RemoveFile path) = do
   path' <- decodePath path
   $(logDebug) $ "Remove file: " <> pack path'
+logSyncOp (RemoveLink path) = do
+  path' <- decodePath path
+  $(logDebug) $ "Remove link: " <> pack path'
 logSyncOp (CopyFile source destination) = do
   source' <- decodePath source
   destination' <- decodePath destination
@@ -706,6 +776,15 @@ logSyncOp (CreateDir path) = do
 logSyncOp (CreateDirs path) = do
   path' <- decodePath path
   $(logDebug) $ "Create directory recursively: " <> pack path'
+logSyncOp (CreateSymlink target link _) = do
+  target' <- decodePath target
+  link' <- decodePath link
+  $(logDebug) $
+    "Create symbolic link: " <> pack link' <> " -> " <> pack target'
+logSyncOp (SetEntryMode path mode _) = do
+  path' <- decodePath path
+  $(logDebug) $
+    "Set mode of " <> pack path' <> " to " <> renderRouteMode mode <> "."
 
 
 -- | Create a 'FileCorrespondence' from a route result and destination path.
