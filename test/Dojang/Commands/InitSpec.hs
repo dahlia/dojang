@@ -43,7 +43,12 @@ import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 import System.Timeout (timeout)
 import Test.Hspec (Spec, it, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Test.Hspec.Expectations.Pretty
+  ( shouldBe
+  , shouldReturn
+  , shouldSatisfy
+  , shouldThrow
+  )
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 import Prelude hiding (init, readFile, writeFile)
 
@@ -167,11 +172,12 @@ spec = sequential $ do
             runCoordinatedInitIO gate $
               runAppWithoutLogging appEnv $
                 Init.init [Init.Amd64Linux] True
-      any isSuccessful results `shouldBe` True
-      all
-        (\result -> isSuccessful result || isManifestAlreadyExists result)
-        results
-        `shouldBe` True
+      -- shouldSatisfy shows the collected results on failure, so an
+      -- unexpected loser error stays diagnosable in CI logs:
+      results `shouldSatisfy` any isSuccessful
+      results
+        `shouldSatisfy` all
+          (\result -> isSuccessful result || isManifestAlreadyExists result)
       repositoryStates <- listDirectory $ stateRoot </> repositoriesName
       length repositoryStates `shouldBe` 1
 
