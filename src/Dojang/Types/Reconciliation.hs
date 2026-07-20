@@ -203,6 +203,10 @@ data SyncOp
     RemoveDirsExcept OsPath [OsPath]
   | -- | Remove a regular file or symbolic link.
     RemoveFile OsPath
+  | -- | Remove a symbolic link so it can be recreated with the correct
+    -- target.  Replacing a drifted link destroys no content, so unlike
+    -- 'RemoveFile' this is not a destructive operation.
+    RemoveLink OsPath
   | -- | Copy a regular file from the first path to the second path.
     CopyFile OsPath OsPath
   | -- | Create one directory whose parent already exists.
@@ -222,6 +226,7 @@ data SyncOp
 
 syncOpOrdKey :: SyncOp -> (OsPath, Int, OsPath)
 syncOpOrdKey (RemoveFile path) = (takeDirectory path, 1, path)
+syncOpOrdKey (RemoveLink path) = (takeDirectory path, 1, path)
 syncOpOrdKey (RemoveDirs path) = (path, 2, path)
 syncOpOrdKey (RemoveDirsExcept path _) = (path, 2, path)
 syncOpOrdKey (CreateDir path) = (path, 3, path)
@@ -450,7 +455,7 @@ planDeploymentLink SourceToDestination policy input =
           converged
     Missing ->
       reconciled [CreateDirs $ takeDirectory destination.path, createLink]
-    Symlink _ -> reconciled [RemoveFile destination.path, createLink]
+    Symlink _ -> reconciled [RemoveLink destination.path, createLink]
     _
       | policy == PreferAuthoritative ->
           reconciled $ removeEntry destination ++ [createLink]
@@ -768,6 +773,7 @@ operationKey operation =
     RemoveDirs _ -> (0, negate depth)
     RemoveDirsExcept _ _ -> (0, negate depth)
     RemoveFile _ -> (0, negate depth)
+    RemoveLink _ -> (0, negate depth)
     CreateDir _ -> (1, depth)
     CreateDirs _ -> (1, depth)
     CopyFile _ _ -> (2, depth)
@@ -779,6 +785,7 @@ syncOpTarget :: SyncOp -> OsPath
 syncOpTarget (RemoveDirs path) = path
 syncOpTarget (RemoveDirsExcept path _) = path
 syncOpTarget (RemoveFile path) = path
+syncOpTarget (RemoveLink path) = path
 syncOpTarget (CopyFile _ destination) = destination
 syncOpTarget (CreateDir path) = path
 syncOpTarget (CreateDirs path) = path
@@ -819,6 +826,7 @@ executeSyncOp (RemoveDirs path) = removeDirectoryRecursively path
 executeSyncOp (RemoveDirsExcept path protected) =
   removeDirsExcept path protected
 executeSyncOp (RemoveFile path) = removeFile path
+executeSyncOp (RemoveLink path) = removeFile path
 executeSyncOp (CopyFile source destination) = copyFile source destination
 executeSyncOp (CreateDir path) = createDirectory path
 executeSyncOp (CreateDirs path) = createDirectories path
@@ -943,6 +951,7 @@ executeReconciliationPlanGuarded observe reportRestoreFailure plan =
     let widened'' = case operation.syncOp of
           SetEntryMode path _ _ -> filter (/= normalise path) widened'
           RemoveFile path -> dropUnder path widened'
+          RemoveLink path -> dropUnder path widened'
           RemoveDirs path -> dropUnder path widened'
           RemoveDirsExcept path protected ->
             -- The root and the containers leading to protected subtrees
@@ -994,6 +1003,8 @@ executeReconciliationPlanGuarded observe reportRestoreFailure plan =
       [ widenIfReadOnly path
       , widenIfReadOnly $ takeDirectory path
       ]
+  widenForSyncOp (RemoveLink path) =
+    widenIfReadOnly $ takeDirectory path
   widenForSyncOp (RemoveDirs path) =
     widenMany
       [ widenIfReadOnly $ takeDirectory path

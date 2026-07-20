@@ -763,6 +763,9 @@ logSyncOp (RemoveDirsExcept path _) = do
 logSyncOp (RemoveFile path) = do
   path' <- decodePath path
   $(logDebug) $ "Remove file: " <> pack path'
+logSyncOp (RemoveLink path) = do
+  path' <- decodePath path
+  $(logDebug) $ "Remove link: " <> pack path'
 logSyncOp (CopyFile source destination) = do
   source' <- decodePath source
   destination' <- decodePath destination

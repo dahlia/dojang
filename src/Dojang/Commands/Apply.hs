@@ -371,6 +371,9 @@ printSyncOp (RemoveDirsExcept path _) = do
         <> pathStyle path'
         <> " (preserving entries owned by nested routes)..."
     )
+printSyncOp (RemoveLink path) = do
+  pathStyle <- pathStyleFor stderr
+  printStderr ("Remove link " <> pathStyle path <> "...")
 printSyncOp (RemoveFile path) = do
   pathStyle <- pathStyleFor stderr
   printStderr ("Remove " <> pathStyle path <> "...")

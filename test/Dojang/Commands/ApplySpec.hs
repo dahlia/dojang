@@ -174,7 +174,8 @@ spec = sequential $ do
           return $ Map.elems state.targetRecords
         [record.fingerprint | record <- records]
           `shouldBe` [SymlinkFingerprint source]
-        -- A link with the wrong target is repaired:
+        -- A link with the wrong target is repaired even without force,
+        -- since replacing a drifted link destroys no content:
         (result', target') <- dryRunIO $ do
           wrongName <- encodePath "wrong-target"
           () <- writeFile (appEnv.sourceDirectory </> wrongName) "wrong"
@@ -183,7 +184,7 @@ spec = sequential $ do
               (appEnv.sourceDirectory </> wrongName)
               destination
               File
-          result' <- runAppWithoutLogging appEnv (apply True [])
+          result' <- runAppWithoutLogging appEnv (apply False [])
           target' <- readSymlinkTarget destination
           return (result', target')
         result' `shouldBe` ExitSuccess

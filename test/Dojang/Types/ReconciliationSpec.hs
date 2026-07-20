@@ -145,6 +145,7 @@ applyModelOperations = foldl' applyOperation
   applyOperation state (PlannedSyncOp _ operation) = case operation of
     RemoveDirs path -> Map.insert path ModelMissing state
     RemoveFile path -> Map.insert path ModelMissing state
+    RemoveLink path -> Map.insert path ModelMissing state
     CopyFile sourcePath destinationPath ->
       Map.insert destinationPath (state Map.! sourcePath) state
     CreateDir path -> Map.insert path ModelDirectory state
@@ -787,13 +788,16 @@ spec = do
       ((.outcome) <$> plan.items) `shouldBe` [WillReconcile]
       plan.operations
         `shouldBe` [ PlannedSyncOp DestinationReplica $
-                       RemoveFile paths.destination
+                       RemoveLink paths.destination
                    , PlannedSyncOp DestinationReplica $
                        CreateSymlink
                          paths.source
                          paths.destination
                          FileSystem.File
                    ]
+      -- Repairing a drifted link destroys no content, so the plan must
+      -- not require forcing past the accidental-deletion guard:
+      destructiveOperations plan `shouldBe` []
 
     it "refuses to replace an existing entry without force" $ do
       let plan =
