@@ -26,7 +26,7 @@ import Dojang.Types.Context
   ( FileCorrespondence (..)
   , FileDeltaKind (Unchanged)
   , FileEntry (..)
-  , FileStat (File, Missing)
+  , FileStat (File, Missing, Symlink)
   , ManagedCorrespondence (..)
   )
 import Dojang.Types.FileRoute
@@ -112,6 +112,38 @@ spec = do
         [ managed FileSystem.Directory entryName
         , managed FileSystem.File mempty
         ]
+        `shouldBe` Set.singleton (CurrentEntry routeName routeName)
+
+    it "keeps deployment-link routes whose source is absent" $ do
+      routeName <- encodeFS "linked-dir"
+      sourceRoot <- fixturePath "repository/linked-dir"
+      intermediateRoot <- fixturePath "intermediate/linked-dir"
+      destinationRoot <- fixturePath "destination"
+      -- A directory deployment link stays deployed (possibly as a broken
+      -- link) while its source is absent, so its record must remain an
+      -- active entry rather than becoming an EntryRemoved orphan:
+      let correspondence =
+            FileCorrespondence
+              (FileEntry sourceRoot Missing)
+              Unchanged
+              (FileEntry intermediateRoot Missing)
+              (FileEntry destinationRoot $ Symlink sourceRoot)
+              Unchanged
+      let managed =
+            ManagedCorrespondence
+              ( Repository.RouteResult
+                  sourceRoot
+                  routeName
+                  destinationRoot
+                  FileSystem.Directory
+                  DefaultMode
+                  SymlinkRoute
+                  "route-definition"
+                  Map.empty
+              )
+              mempty
+              correspondence
+      makeCurrentEntries [managed]
         `shouldBe` Set.singleton (CurrentEntry routeName routeName)
 
   describe "classifyOrphan" $ do

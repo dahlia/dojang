@@ -57,7 +57,7 @@ import Dojang.Types.PathIdentity
   , equalDestinationPath
   )
 import Dojang.Types.Repository (RouteResult (..))
-import Dojang.Types.RouteMetadata (RouteKind, RouteMode)
+import Dojang.Types.RouteMetadata (RouteKind (SymlinkRoute), RouteMode)
 
 
 -- | The content identity recorded after a successful synchronization.
@@ -198,13 +198,16 @@ classifyOrphan routes entries target = case Map.lookup target.routeName routes o
 -- they currently represent a deletion.  Directory routes contribute only
 -- entries that still exist in the source tree; intermediate-only paths are
 -- synchronization history rather than entries produced by the current route.
+-- Deployment links always remain present: the link stays deployed (possibly
+-- broken) while its source is absent, so its record is still active.
 makeCurrentEntries :: [ManagedCorrespondence] -> Set CurrentEntry
 makeCurrentEntries =
   Set.fromList . fmap fromCorrespondence . filter isCurrentlyProduced
  where
   isCurrentlyProduced :: ManagedCorrespondence -> Bool
   isCurrentlyProduced managed =
-    managed.route.fileType /= FileSystem.Directory
+    managed.route.kind == SymlinkRoute
+      || managed.route.fileType /= FileSystem.Directory
       || managed.correspondence.source.stat /= Missing
 
   fromCorrespondence :: ManagedCorrespondence -> CurrentEntry
