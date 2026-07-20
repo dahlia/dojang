@@ -181,7 +181,8 @@ resolveTargetFrom link target
 -- | Splits a path into components compared by their native identity
 -- (case-insensitive on Windows), for prefix tests against owned roots.
 identityComponents :: OsPath -> [[Word32]]
-identityComponents path = destinationPathIdentity <$> splitDirectories path
+identityComponents path =
+  destinationPathIdentity <$> splitDirectories (normalise path)
 
 
 -- | Observes the state of a filesystem entry without following symbolic links.
@@ -553,11 +554,11 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores exclusio
         , destinationDelta = dstDelta'
         }
  where
+  exclusionIdentities :: [[[Word32]]]
+  exclusionIdentities = identityComponents <$> exclusions
   excluded :: OsPath -> Bool
   excluded path =
-    any
-      (\root -> identityComponents root `isPrefixOf` identityComponents path)
-      exclusions
+    any (`isPrefixOf` identityComponents path) exclusionIdentities
   getDelta
     :: OsPath
     -- \^ The relative path to the file.
@@ -860,15 +861,13 @@ getIgnoredFiles ctx = do
             -- List all files (including those that would be ignored),
             -- except entries owned by routes nested inside this one:
             let nestedRoots = exclusionsFor route
+            let nestedRootIdentities = identityComponents <$> nestedRoots
             let owned :: FileEntry -> Bool
                 owned entry =
                   not $
                     any
-                      ( \root ->
-                          identityComponents root
-                            `isPrefixOf` identityComponents entry.path
-                      )
-                      nestedRoots
+                      (`isPrefixOf` identityComponents entry.path)
+                      nestedRootIdentities
             allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
             -- Find which files match ignore patterns
             forM allFiles $ \entry -> do
@@ -947,15 +946,13 @@ getUnregisteredFiles' ctx registeredCorrespondences = do
       -- belongs to the repository already:
       Dojang.MonadFileSystem.Directory | route.kind /= SymlinkRoute -> do
         let nestedRoots = exclusionsFor route
+        let nestedRootIdentities = identityComponents <$> nestedRoots
         let owned :: FileEntry -> Bool
             owned entry =
               not $
                 any
-                  ( \root ->
-                      identityComponents root
-                        `isPrefixOf` identityComponents entry.path
-                  )
-                  nestedRoots
+                  (`isPrefixOf` identityComponents entry.path)
+                  nestedRootIdentities
         allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
         let unregistered =
               [ f
