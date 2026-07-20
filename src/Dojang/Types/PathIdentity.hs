@@ -7,12 +7,13 @@
 module Dojang.Types.PathIdentity
   ( destinationPathIdentity
   , equalDestinationPath
+  , pathIdentityComponents
   ) where
 
 import Data.Char (ord, toLower)
 import Data.Word (Word32)
 import System.Info (os)
-import System.OsPath (OsPath, normalise, toChar, unpack)
+import System.OsPath (OsPath, normalise, splitDirectories, toChar, unpack)
 
 
 -- | Produces the normalized code units used for native destination identity.
@@ -34,3 +35,10 @@ destinationPathIdentity = fmap canonicalUnit . unpack . normalise
 equalDestinationPath :: OsPath -> OsPath -> Bool
 equalDestinationPath left right =
   destinationPathIdentity left == destinationPathIdentity right
+
+
+-- | Splits a normalized path into components carrying their native
+-- identity, for containment tests between destination paths.
+pathIdentityComponents :: OsPath -> [[Word32]]
+pathIdentityComponents path =
+  destinationPathIdentity <$> splitDirectories (normalise path)

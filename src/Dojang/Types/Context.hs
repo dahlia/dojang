@@ -86,7 +86,7 @@ import Dojang.Types.FileRoute
   , RouteMode (DefaultMode)
   )
 import Dojang.Types.Manifest (Manifest (..))
-import Dojang.Types.PathIdentity (destinationPathIdentity)
+import Dojang.Types.PathIdentity (pathIdentityComponents)
 import Dojang.Types.Repository
   ( Repository (..)
   , RouteMapWarning
@@ -176,13 +176,6 @@ resolveTargetFrom :: OsPath -> OsPath -> OsPath
 resolveTargetFrom link target
   | System.OsPath.isAbsolute target = normalise target
   | otherwise = normalise $ takeDirectory link </> target
-
-
--- | Splits a path into components compared by their native identity
--- (case-insensitive on Windows), for prefix tests against owned roots.
-identityComponents :: OsPath -> [[Word32]]
-identityComponents path =
-  destinationPathIdentity <$> splitDirectories (normalise path)
 
 
 -- | Observes the state of a filesystem entry without following symbolic links.
@@ -555,10 +548,10 @@ makeCorrespondBetweenThreeDirs intermediatePath srcPath dstPath ignores exclusio
         }
  where
   exclusionIdentities :: [[[Word32]]]
-  exclusionIdentities = identityComponents <$> exclusions
+  exclusionIdentities = pathIdentityComponents <$> exclusions
   excluded :: OsPath -> Bool
   excluded path =
-    any (`isPrefixOf` identityComponents path) exclusionIdentities
+    any (`isPrefixOf` pathIdentityComponents path) exclusionIdentities
   getDelta
     :: OsPath
     -- \^ The relative path to the file.
@@ -861,12 +854,12 @@ getIgnoredFiles ctx = do
             -- List all files (including those that would be ignored),
             -- except entries owned by routes nested inside this one:
             let nestedRoots = exclusionsFor route
-            let nestedRootIdentities = identityComponents <$> nestedRoots
+            let nestedRootIdentities = pathIdentityComponents <$> nestedRoots
             let owned :: FileEntry -> Bool
                 owned entry =
                   not $
                     any
-                      (`isPrefixOf` identityComponents entry.path)
+                      (`isPrefixOf` pathIdentityComponents entry.path)
                       nestedRootIdentities
             allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
             -- Find which files match ignore patterns
@@ -946,12 +939,12 @@ getUnregisteredFiles' ctx registeredCorrespondences = do
       -- belongs to the repository already:
       Dojang.MonadFileSystem.Directory | route.kind /= SymlinkRoute -> do
         let nestedRoots = exclusionsFor route
-        let nestedRootIdentities = identityComponents <$> nestedRoots
+        let nestedRootIdentities = pathIdentityComponents <$> nestedRoots
         let owned :: FileEntry -> Bool
             owned entry =
               not $
                 any
-                  (`isPrefixOf` identityComponents entry.path)
+                  (`isPrefixOf` pathIdentityComponents entry.path)
                   nestedRootIdentities
         allFiles <- Prelude.filter owned <$> listFiles route.destinationPath []
         let unregistered =

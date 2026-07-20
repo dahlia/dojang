@@ -59,6 +59,7 @@ import Dojang.Types.Context
   , calculateFileDelta
   , getRouteState
   )
+import Dojang.Types.PathIdentity (pathIdentityComponents)
 import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
@@ -673,13 +674,15 @@ protectRemovals input replica operations
   protect operation = operation
 
 
--- | Protected destination roots lying at or below the given path.
+-- | Protected destination roots lying at or below the given path,
+-- compared by their native identity so case-variant nesting accepted by
+-- ownership selection stays protected on Windows.
 protectedWithin :: ReconciliationInput -> OsPath -> [OsPath]
 protectedWithin input path =
   [ protected
   | protected <- input.protectedDestinations
-  , splitDirectories (normalise path)
-      `isPrefixOf` splitDirectories (normalise protected)
+  , pathIdentityComponents path
+      `isPrefixOf` pathIdentityComponents protected
   ]
 
 
@@ -744,8 +747,8 @@ shadowedByRecursiveRemoval operations operation =
 
 strictlyContains :: OsPath -> OsPath -> Bool
 strictlyContains parent child =
-  let parentParts = splitDirectories $ normalise parent
-      childParts = splitDirectories $ normalise child
+  let parentParts = pathIdentityComponents parent
+      childParts = pathIdentityComponents child
   in length parentParts < length childParts
        && parentParts `isPrefixOf` childParts
 
@@ -855,17 +858,12 @@ removeDirsExcept
   -> m ()
 removeDirsExcept root protected = go root
  where
-  protected' = fmap normalise protected
+  protected' = fmap pathIdentityComponents protected
   isProtectedRoot :: OsPath -> Bool
-  isProtectedRoot path = normalise path `elem` protected'
+  isProtectedRoot path = pathIdentityComponents path `elem` protected'
   containsProtected :: OsPath -> Bool
   containsProtected path =
-    any (\p -> path' `isPrefixOf'` p) protected'
-   where
-    path' = normalise path
-  isPrefixOf' :: OsPath -> OsPath -> Bool
-  isPrefixOf' ancestor path =
-    splitDirectories ancestor `isPrefixOf` splitDirectories path
+    any (pathIdentityComponents path `isPrefixOf`) protected'
   go :: OsPath -> m ()
   go path
     | isProtectedRoot path = return ()
@@ -962,9 +960,8 @@ executeReconciliationPlanGuarded observe reportRestoreFailure plan =
                   not (underRoot path widenedPath)
                     || any
                       ( \protectedRoot ->
-                          splitDirectories widenedPath
-                            `isPrefixOf` splitDirectories
-                              (normalise protectedRoot)
+                          pathIdentityComponents widenedPath
+                            `isPrefixOf` pathIdentityComponents protectedRoot
                       )
                       protected
               )
@@ -973,7 +970,7 @@ executeReconciliationPlanGuarded observe reportRestoreFailure plan =
     go widened'' rest
   underRoot :: OsPath -> OsPath -> Bool
   underRoot root path =
-    splitDirectories (normalise root) `isPrefixOf` splitDirectories path
+    pathIdentityComponents root `isPrefixOf` pathIdentityComponents path
   dropUnder :: OsPath -> [OsPath] -> [OsPath]
   dropUnder root = filter $ not . underRoot root
   -- Restores prior read-only states while unwinding an operation

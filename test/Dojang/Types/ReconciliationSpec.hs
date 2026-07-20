@@ -1025,6 +1025,8 @@ spec = do
           fileType `shouldBe` FileSystem.File
         other -> fail $ "Unexpected destination ops: " <> show other
 
+  windowsCaseProtectionSpec paths route
+
   describe "executeReconciliationPlanGuarded" $ do
     restoreFailureReportSpec
     let manualPlan ops =
@@ -1454,4 +1456,57 @@ restoreFailureReportSpec =
 #else
 restoreFailureReportSpec :: Spec
 restoreFailureReportSpec = pure ()
+#endif
+
+
+-- Case-variant containment only differs on Windows, where ownership
+-- selection accepts nesting whose spelling differs from the enumerated
+-- destination paths.
+#ifdef mingw32_HOST_OS
+windowsCaseProtectionSpec :: Paths -> OsPath -> Spec
+windowsCaseProtectionSpec paths route =
+  describe "case-variant protection (Windows)" $ do
+    it "protects case-variant nested destinations in plans" $ do
+      upper <- encodeFS "FILE"
+      nested <- encodeFS "nested"
+      destinationUpper <- encodeFS "DESTINATION"
+      let upperNested = destinationUpper </> upper </> nested
+      let removal =
+            ( makeInput
+                paths
+                Missing
+                Directory
+                Directory
+                Removed
+                Unchanged
+                ReplicasDifferent
+                (Routed route)
+            )
+              { protectedDestinations = [upperNested]
+              }
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [removal]
+      [op.syncOp | op <- plan.operations, op.replica == DestinationReplica]
+        `shouldBe` [RemoveDirsExcept paths.destination [upperNested]]
+
+    it "preserves case-variant protected subtrees during removal" $
+      withTempDir $ \tmpDir _ -> do
+        rootName <- encodeFS "except-root"
+        goneName <- encodeFS "gone"
+        keepName <- encodeFS "keep"
+        keepUpper <- encodeFS "KEEP"
+        fileName' <- encodeFS "file"
+        let rootPath = tmpDir </> rootName
+        FileSystem.createDirectories $ rootPath </> goneName
+        FileSystem.writeFile (rootPath </> goneName </> fileName') "gone"
+        FileSystem.createDirectories $ rootPath </> keepName
+        FileSystem.writeFile (rootPath </> keepName </> fileName') "kept"
+        executeSyncOp $
+          RemoveDirsExcept rootPath [rootPath </> keepUpper]
+        FileSystem.exists (rootPath </> goneName) `shouldReturn` False
+        FileSystem.readFile (rootPath </> keepName </> fileName')
+          `shouldReturn` "kept"
+#else
+windowsCaseProtectionSpec :: Paths -> OsPath -> Spec
+windowsCaseProtectionSpec _ _ = pure ()
 #endif
