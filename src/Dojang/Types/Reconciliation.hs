@@ -901,17 +901,21 @@ executeReconciliationPlan = executeReconciliationPlanWith $ const $ return ()
 -- entries whose declared mode was not reapplied by a 'SetEntryMode'
 -- operation are narrowed back; if any operation fails, every widened entry
 -- that still exists is restored in reverse order before the error is
--- rethrown.
+-- rethrown, and restorations that fail themselves are reported through
+-- the given action so the original error still propagates.
 executeReconciliationPlanGuarded
   :: forall m
    . (MonadFileSystem m)
   => (PlannedSyncOp -> m ())
   -- ^ An action invoked immediately before each operation is executed.
+  -> (IOError -> m ())
+  -- ^ An action invoked for each prior-mode restoration that fails while
+  -- unwinding a failed operation.
   -> ReconciliationPlan
   -- ^ The plan to execute.
   -> m (Either (NonEmpty ReconciliationConflict) ())
   -- ^ Refused conflicts, or success after all ordered operations complete.
-executeReconciliationPlanGuarded observe plan =
+executeReconciliationPlanGuarded observe reportRestoreFailure plan =
   case (plan.conflictPolicy, NE.nonEmpty plan.conflicts) of
     (RefuseConflicts, Just conflicts) -> return $ Left conflicts
     _ -> do
@@ -964,12 +968,12 @@ executeReconciliationPlanGuarded observe plan =
   dropUnder :: OsPath -> [OsPath] -> [OsPath]
   dropUnder root = filter $ not . underRoot root
   -- Restores prior read-only states while unwinding an operation
-  -- failure; restoration failures are swallowed so the original error
-  -- survives:
+  -- failure; restoration failures are reported instead of thrown so the
+  -- original error survives:
   restoreAll :: [OsPath] -> m ()
   restoreAll paths = do
-    _ <- restoreAll' paths
-    return ()
+    failures <- restoreAll' paths
+    forM_ failures reportRestoreFailure
   -- Attempts every restoration and reports the failures, so a
   -- successful plan does not silently leave entries writable:
   restoreAll' :: [OsPath] -> m [IOError]

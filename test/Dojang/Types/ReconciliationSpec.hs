@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
@@ -1021,6 +1022,7 @@ spec = do
         other -> fail $ "Unexpected destination ops: " <> show other
 
   describe "executeReconciliationPlanGuarded" $ do
+    restoreFailureReportSpec
     let manualPlan ops =
           ReconciliationPlan
             { direction = SourceToDestination
@@ -1040,7 +1042,7 @@ spec = do
         FileSystem.writeFile destinationPath "old contents"
         FileSystem.setPortableWritable destinationPath False
         result <-
-          executeReconciliationPlanGuarded (const $ return ()) $
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
             manualPlan
               [ CopyFile sourcePath destinationPath
               , SetEntryMode destinationPath ReadOnly FileSystem.File
@@ -1061,7 +1063,7 @@ spec = do
         FileSystem.writeFile destinationPath "old contents"
         FileSystem.setPortableWritable destinationPath False
         result <-
-          executeReconciliationPlanGuarded (const $ return ()) $
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
             manualPlan [CopyFile sourcePath destinationPath]
         result `shouldBe` Right ()
         FileSystem.readFile destinationPath `shouldReturn` "new contents"
@@ -1084,7 +1086,7 @@ spec = do
         FileSystem.setPortableWritable childPath False
         FileSystem.setPortableWritable treePath False
         result <-
-          executeReconciliationPlanGuarded (const $ return ()) $
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
             manualPlan [RemoveDirs treePath]
         result `shouldBe` Right ()
         FileSystem.exists treePath `shouldReturn` False
@@ -1104,7 +1106,7 @@ spec = do
         FileSystem.setPortableWritable (rootPath </> midName) False
         FileSystem.setPortableWritable rootPath False
         result <-
-          executeReconciliationPlanGuarded (const $ return ()) $
+          executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
             manualPlan [RemoveDirsExcept rootPath [keepPath]]
         result `shouldBe` Right ()
         FileSystem.exists (rootPath </> goneName) `shouldReturn` False
@@ -1130,7 +1132,7 @@ spec = do
         FileSystem.setPortableWritable destinationPath False
         result <-
           tryError $
-            executeReconciliationPlanGuarded (const $ return ()) $
+            executeReconciliationPlanGuarded (const $ return ()) (const $ return ()) $
               manualPlan
                 [ CopyFile sourcePath destinationPath
                 , CopyFile (tmpDir </> missingName) (tmpDir </> otherName)
@@ -1396,3 +1398,56 @@ spec = do
           `shouldThrow` (\e -> ioeGetFileName e == Just sourcePath)
         FileSystem.readFile failurePaths.intermediate
           `shouldReturn` "recovery"
+
+-- Making the container unreadable is only expressible on POSIX, where a
+-- directory stripped of its execute bit blocks the restoration of the
+-- read-only entry inside it.
+#ifndef mingw32_HOST_OS
+restoreFailureReportSpec :: Spec
+restoreFailureReportSpec =
+  it "reports restoration failures while unwinding" $
+    withTempDir $ \tmpDir _ -> do
+      boxName <- encodeFS "guard-box"
+      sourceName <- encodeFS "guard-source"
+      roName <- encodeFS "ro-file"
+      missingName <- encodeFS "guard-missing"
+      otherName <- encodeFS "guard-other"
+      let boxPath = tmpDir </> boxName
+      let roPath = boxPath </> roName
+      FileSystem.createDirectories boxPath
+      FileSystem.writeFile (tmpDir </> sourceName) "new contents"
+      FileSystem.writeFile roPath "old contents"
+      FileSystem.setPortableWritable roPath False
+      reported <- newIORef ([] :: [IOError])
+      result <-
+        tryError $
+          executeReconciliationPlanGuarded
+            (const $ return ())
+            (\err -> modifyIORef' reported (err :))
+            ReconciliationPlan
+              { direction = SourceToDestination
+              , conflictPolicy = RefuseConflicts
+              , items = []
+              , conflicts = []
+              , operations =
+                  PlannedSyncOp DestinationReplica
+                    <$> [ CopyFile (tmpDir </> sourceName) roPath
+                        , SetEntryMode boxPath ReadOnly FileSystem.File
+                        , CopyFile
+                            (tmpDir </> missingName)
+                            (tmpDir </> otherName)
+                        ]
+              }
+      FileSystem.setPortableMode boxPath 0o755
+      FileSystem.setPortableWritable roPath True
+      -- The original operation error still propagates:
+      result `shouldSatisfy` \case
+        Left _ -> True
+        _ -> False
+      -- The failed restoration is reported rather than swallowed:
+      failures <- readIORef reported
+      failures `shouldSatisfy` (not . null)
+#else
+restoreFailureReportSpec :: Spec
+restoreFailureReportSpec = pure ()
+#endif

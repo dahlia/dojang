@@ -12,6 +12,8 @@ module Dojang.Commands
   , ensureRouteOwnership
   , pathStyleFor
   , pathStyleFor'
+  , printModeRestoreFailure
+  , printSkippedReconciliation
   , printStderr
   , printStderr'
   , printTable
@@ -39,6 +41,7 @@ import System.Console.Pretty qualified (color)
 import System.OsPath (OsPath, decodeFS)
 
 import Dojang.ExitCodes (routeOwnershipError)
+import Dojang.Types.Reconciliation (ReconciliationSkipReason (..))
 import Dojang.Types.RouteOwnership
   ( OwnershipError
   , formatOwnershipError
@@ -174,3 +177,54 @@ printTable headers rows = do
   putLn = liftIO $ putStrLn mempty
   putLnStderr :: m ()
   putLnStderr = liftIO $ hPutStrLn stderr mempty
+
+
+-- | Explains why one planned correspondence was skipped.  The first path
+-- names the authoritative side of the correspondence for unsupported
+-- symbolic links, which differs between apply and reflect; every other
+-- reason names the destination path.
+printSkippedReconciliation
+  :: (MonadIO m)
+  => (OsPath -> Text)
+  -- ^ Path renderer.
+  -> OsPath
+  -- ^ Authoritative path named for 'UnsupportedSymlink'.
+  -> OsPath
+  -- ^ Destination path named for the other reasons.
+  -> ReconciliationSkipReason
+  -- ^ Why the correspondence was skipped.
+  -> m ()
+printSkippedReconciliation pathStyle authoritativePath destinationPath reason =
+  case reason of
+    IgnoredDestination _ pattern ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle destinationPath
+          <> " because it is ignored by pattern "
+          <> pack (show pattern)
+          <> "."
+    UnsupportedSymlink ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle authoritativePath
+          <> " because symbolic link synchronization is not supported."
+    DeploymentLinkNotReflectable ->
+      printStderr' Note $
+        "Skipping "
+          <> pathStyle destinationPath
+          <> " because deployment links are never reflected."
+    ProtectedSubtreeReplacement ->
+      printStderr' Warning $
+        "Skipping "
+          <> pathStyle destinationPath
+          <> " because entries inside it are owned by nested routes."
+
+
+-- | Warns that a prior read-only mode could not be restored while a
+-- failed reconciliation plan was being undone.
+printModeRestoreFailure :: (MonadIO m) => IOError -> m ()
+printModeRestoreFailure err =
+  printStderr' Warning $
+    "Failed to restore a prior mode while undoing changes: "
+      <> pack (show err)
+      <> "."

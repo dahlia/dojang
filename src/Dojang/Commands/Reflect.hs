@@ -21,7 +21,7 @@ import System.IO (hIsTerminalDevice, stderr, stdin)
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (Text, pack)
+import Data.Text (pack)
 import FortyTwo.Prompts.Confirm (confirm)
 import FortyTwo.Prompts.Select (select)
 import System.OsPath
@@ -45,6 +45,8 @@ import Dojang.Commands
   , dieWithErrors
   , ensureRouteOwnership
   , pathStyleFor
+  , printModeRestoreFailure
+  , printSkippedReconciliation
   , printStderr
   , printStderr'
   )
@@ -109,7 +111,6 @@ import Dojang.Types.Reconciliation
   , ReconciliationItem (..)
   , ReconciliationOutcome (..)
   , ReconciliationPlan (..)
-  , ReconciliationSkipReason (..)
   , SyncOp (..)
   , executeReconciliationPlanGuarded
   , observeModeDrift
@@ -632,7 +633,12 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
             <> pathStyle c.source.path
             <> "..."
       ConflictDetected -> return ()
-      Skipped reason -> printSkippedReconciliation pathStyle c reason
+      Skipped reason ->
+        printSkippedReconciliation
+          pathStyle
+          c.destination.path
+          c.destination.path
+          reason
   let persist = do
         (refreshedManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
         let selectedManaged =
@@ -645,6 +651,7 @@ reflectCorrespondences ctx force persistAll selectedCorrespondences = do
   void
     ( executeReconciliationPlanGuarded
         (logSyncOp . (.syncOp))
+        printModeRestoreFailure
         plan
         `catchError` \err -> persist >> throwError err
     )
@@ -742,38 +749,6 @@ observeSelectedReconciliationInput ctx allowIgnored owner correspondence = do
         Ignored route _ -> input'{destinationRouteState = Routed route}
         _ -> input'
       else input'
-
-
-printSkippedReconciliation
-  :: (MonadIO i)
-  => (OsPath -> Text)
-  -> FileCorrespondence
-  -> ReconciliationSkipReason
-  -> App i ()
-printSkippedReconciliation pathStyle correspondence reason =
-  case reason of
-    IgnoredDestination _ pattern ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because it is ignored by pattern "
-          <> pack (show pattern)
-          <> "."
-    UnsupportedSymlink ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because symbolic link synchronization is not supported."
-    DeploymentLinkNotReflectable ->
-      printStderr' Note $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because deployment links are never reflected."
-    ProtectedSubtreeReplacement ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because entries inside it are owned by nested routes."
 
 
 logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()

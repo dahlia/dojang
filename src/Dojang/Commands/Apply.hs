@@ -10,7 +10,6 @@ import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
-import Data.Text (Text, pack)
 import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
@@ -40,6 +39,8 @@ import Dojang.Commands
   , die'
   , ensureRouteOwnership
   , pathStyleFor
+  , printModeRestoreFailure
+  , printSkippedReconciliation
   , printStderr
   , printStderr'
   )
@@ -92,7 +93,6 @@ import Dojang.Types.Reconciliation
   , ReconciliationItem (..)
   , ReconciliationOutcome (..)
   , ReconciliationPlan (..)
-  , ReconciliationSkipReason (..)
   , Replica (..)
   , SyncOp (..)
   , destructiveOperations
@@ -162,7 +162,12 @@ apply force filePaths = do
   let conflicts = plan.conflicts
   codeStyle <- codeStyleFor stderr
   forM_ plan.items $ \item -> case item.outcome of
-    Skipped reason -> printSkippedReconciliation pathStyle item.correspondence reason
+    Skipped reason ->
+      printSkippedReconciliation
+        pathStyle
+        item.correspondence.source.path
+        item.correspondence.destination.path
+        reason
     _ -> return ()
   unless (null conflicts) $ do
     forM_ conflicts $ \conflict -> do
@@ -247,6 +252,7 @@ apply force filePaths = do
   void
     ( executeReconciliationPlanGuarded
         (printSyncOp . (.syncOp))
+        printModeRestoreFailure
         plan
         `catchError` \err -> persist >> throwError err
     )
@@ -350,38 +356,6 @@ observeSelectedReconciliationInput ctx expectedState managed = do
   return $ case input'.destinationRouteState of
     Ignored route _ -> input'{destinationRouteState = Routed route}
     _ -> input'
-
-
-printSkippedReconciliation
-  :: (MonadIO i)
-  => (OsPath -> Text)
-  -> FileCorrespondence
-  -> ReconciliationSkipReason
-  -> App i ()
-printSkippedReconciliation pathStyle correspondence reason =
-  case reason of
-    IgnoredDestination _ pattern ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because it is ignored by pattern "
-          <> pack (show pattern)
-          <> "."
-    UnsupportedSymlink ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.source.path
-          <> " because symbolic link synchronization is not supported."
-    DeploymentLinkNotReflectable ->
-      printStderr' Note $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because deployment links are never reflected."
-    ProtectedSubtreeReplacement ->
-      printStderr' Warning $
-        "Skipping "
-          <> pathStyle correspondence.destination.path
-          <> " because entries inside it are owned by nested routes."
 
 
 printSyncOp :: (MonadIO i) => SyncOp -> App i ()
