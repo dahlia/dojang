@@ -202,7 +202,22 @@ data CodecEvaluationRequest = CodecEvaluationRequest
   , variables :: Map Text ByteString
   -- ^ Manifest variables available to the selected route as native bytes.
   }
-  deriving (Eq, Show)
+  deriving (Eq)
+
+
+instance Show CodecEvaluationRequest where
+  show request =
+    "CodecEvaluationRequest { routeName = "
+      <> show request.routeName
+      <> ", codec = "
+      <> show request.codec
+      <> ", rawSource = "
+      <> show request.rawSource
+      <> ", facts = <redacted: "
+      <> show (Map.size request.facts)
+      <> ">, variables = <redacted: "
+      <> show (Map.size request.variables)
+      <> "> }"
 
 
 -- | A cache record whose bytes come from the current intermediate snapshot.

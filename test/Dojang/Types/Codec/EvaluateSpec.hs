@@ -270,7 +270,15 @@ spec = do
                 (failingRuntime $ Text.pack $ ByteString.Char8.unpack secret)
                 (evaluationRequest testSpec secret $ Map.singleton "class" "work")
                 Nothing
+          requestWithInputs =
+            CodecEvaluationRequest
+              "route"
+              testSpec
+              (opaqueBytes secret)
+              (Map.singleton "sensitive-fact" $ Text.pack $ ByteString.Char8.unpack secret)
+              (Map.singleton "SENSITIVE_VARIABLE" secret)
           rendered = show $ opaqueBytes secret
+      show requestWithInputs `shouldNotContain` ByteString.Char8.unpack secret
       show result `shouldNotContain` ByteString.Char8.unpack secret
       show failingResult `shouldNotContain` ByteString.Char8.unpack secret
       rendered `shouldNotContain` ByteString.Char8.unpack secret
