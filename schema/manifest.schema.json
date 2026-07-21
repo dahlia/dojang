@@ -137,7 +137,22 @@
               }
             }
           },
-          "additionalProperties": false
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "name": { "const": "template" }
+                },
+                "required": ["name"]
+              },
+              "then": {
+                "properties": {
+                  "config": { "maxProperties": 0 }
+                }
+              }
+            }
+          ]
         }
       ]
     },

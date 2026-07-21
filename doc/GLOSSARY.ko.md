@@ -83,6 +83,7 @@
 | route name                   | 경로 규칙 이름             |                                                                                              |
 | route ownership              | 경로 규칙 소유권           | 문맥에 따라 “소유 경로 규칙”, “소유하다”처럼 씁니다.                                         |
 | routing                      | 경로 지정                  |                                                                                              |
+| secret codec                 | 비밀 값 코덱               | 비밀 값을 조회하거나 복호화하는 코덱을 뜻합니다.                                             |
 | snapshot                     | 스냅샷                     |                                                                                              |
 | socket                       | 소켓                       |                                                                                              |
 | source, source file          | 원본, 원본 파일            | 사용자 문서에서는 “소스”를 쓰지 않습니다.                                                    |

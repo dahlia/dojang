@@ -191,6 +191,20 @@ invalid_manifests = [
             ]
         }
     },
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "x",
+                    "codec": {
+                        "name": "template",
+                        "config": {"unexpected": True},
+                    },
+                }
+            ]
+        }
+    },
     {"files": {"vimrc": [{"when": "always", "path": "x", "codec": ""}]}},
     {
         "files": {
