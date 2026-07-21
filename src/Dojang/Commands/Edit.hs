@@ -73,6 +73,7 @@ import Dojang.MonadFileSystem qualified as FS
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
   , loadCodecCacheEntries
   )
 import Dojang.Types.Codec.Evaluate
@@ -238,7 +239,7 @@ editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered
     Right value -> return value
   let allFiles = (.managed.correspondence) <$> evaluated
   let changedFiles = filter isChanged allFiles
-  printWarnings ws
+  printWarnings $ nub $ ws <> evaluationWarnings evaluated
 
   -- Get ignored files and warn about them
   ignoredFiles <- getIgnoredFiles ctx
@@ -291,6 +292,7 @@ editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered
   evaluatedIgnored <- case evaluatedIgnoredResult of
     Left err -> die' codecError $ formatCodecError err
     Right value -> return value
+  printWarnings $ evaluationWarnings evaluatedIgnored
   let changedIgnored =
         filter isChanged $ (.managed.correspondence) <$> evaluatedIgnored
 

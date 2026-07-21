@@ -9,7 +9,7 @@
 
 module Dojang.Commands.ApplySpec (spec) where
 
-import Control.Exception (bracket_)
+import Control.Exception (bracket, bracket_)
 import Control.Monad.Except (catchError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString qualified as ByteString
@@ -17,8 +17,11 @@ import Data.HashMap.Strict (singleton)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Time (getCurrentTime)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
+import System.IO (SeekMode (AbsoluteSeek), hClose, hFlush, hSeek, stderr)
+import System.IO.Temp (withSystemTempFile)
 import System.Info (os)
 import System.OsPath (OsPath, encodeFS, (</>))
 
@@ -36,7 +39,12 @@ import Test.Hspec
   , sequential
   , xit
   )
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
+import Test.Hspec.Expectations.Pretty
+  ( shouldBe
+  , shouldReturn
+  , shouldSatisfy
+  , shouldThrow
+  )
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.App (App, AppEnv (..), runAppWithoutLogging)
@@ -93,6 +101,11 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.Manifest qualified as Manifest
+import Dojang.Types.ManifestVariable
+  ( ManifestVariableMap
+  , manifestVariable
+  , parseManifestVariableName
+  )
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
 import Dojang.Types.RouteMetadata
@@ -251,6 +264,47 @@ spec = sequential $ do
             runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
               `shouldReturn` ExitSuccess
           readFile destination `shouldReturn` rawValue
+
+    it "prints warnings from codec manifest variables" $ do
+      let variableName = "TOKEN"
+          Right declaredName = parseManifestVariableName variableName
+          variables =
+            Map.singleton declaredName $
+              manifestVariable mempty $
+                Substitution "MISSING_TOKEN"
+      withEnvVars [("MISSING_TOKEN", Nothing)] $
+        withCodecFileWithVariables variables $ \appEnv _ _ _ spec' -> do
+          let CodecSpec name _ = spec'
+              implementation =
+                CodecImplementation
+                  (CodecDefinition name "test-1" ReflectReject)
+                  ( const $
+                      Right $
+                        CodecRequirements mempty [variableName] []
+                  )
+                  ( \inputs ->
+                      Right $
+                        Map.findWithDefault
+                          mempty
+                          variableName
+                          inputs.variables
+                  )
+                  Nothing
+                  PersistentCache
+                  EvaluatePurely
+              runtime =
+                CodecRuntime
+                  (codecRegistry [implementation])
+                  NormalEvaluation
+                  (const $ return $ Left "unexpected external input")
+          (output, result) <-
+            captureStderr $
+              runAppWithoutLogging appEnv $
+                applyWithCodecRuntime runtime True []
+          result `shouldBe` ExitSuccess
+          output
+            `shouldSatisfy` ByteString.isInfixOf
+              "Reference to an undefined environment variable: MISSING_TOKEN."
 
     it "reuses a persisted codec cache in dry-run status" $
       withCodecFile $ \appEnv _ _ _ spec' -> do
@@ -855,7 +909,14 @@ sharedSourceRuntime dryRunPolicy mode specs =
 withCodecFile
   :: (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
   -> IO a
-withCodecFile action = withTempDir $ \tmpDir _ -> do
+withCodecFile = withCodecFileWithVariables mempty
+
+
+withCodecFileWithVariables
+  :: ManifestVariableMap
+  -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withCodecFileWithVariables manifestVariables action = withTempDir $ \tmpDir _ -> do
   sourceDir <- encodeFS "source"
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
@@ -891,7 +952,7 @@ withCodecFile action = withTempDir $ \tmpDir _ -> do
         Manifest
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
-          , variables = mempty
+          , variables = manifestVariables
           , fileRoutes = Map.singleton routeName route
           , ignorePatterns = mempty
           , hooks = mempty
@@ -916,6 +977,22 @@ withCodecFile action = withTempDir $ \tmpDir _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action appEnv source intermediate destination codecSpec
+
+
+captureStderr :: IO a -> IO (ByteString.ByteString, a)
+captureStderr action =
+  withSystemTempFile "dojang-apply-spec-stderr" $ \_ captureHandle ->
+    bracket (hDuplicate stderr) restore $ \_ -> do
+      hDuplicateTo captureHandle stderr
+      result <- action
+      hFlush stderr
+      hSeek captureHandle AbsoluteSeek 0
+      output <- ByteString.hGetContents captureHandle
+      return (output, result)
+ where
+  restore originalHandle = do
+    hDuplicateTo originalHandle stderr
+    hClose originalHandle
 
 
 testCodecRuntime

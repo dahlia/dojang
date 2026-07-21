@@ -82,6 +82,7 @@ import Dojang.Types.Codec
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
   , loadCodecCacheEntries
   , managedCodecStateFor
   , rawSourceDigestFor
@@ -647,7 +648,9 @@ evaluateManaged runtime ctx managed = do
     evaluateManagedCorrespondencesWithCache runtime ctx cache managed
   case result of
     Left err -> die' codecError $ formatCodecError err
-    Right evaluated -> return evaluated
+    Right evaluated -> do
+      printWarnings $ evaluationWarnings evaluated
+      return evaluated
 
 
 -- | Partition paths into directories and files.
@@ -1010,6 +1013,7 @@ reflectCorrespondences
                                  { managed = managed
                                  , codecResult = evaluated.codecResult
                                  , rawSourceDigest = evaluated.rawSourceDigest
+                                 , warnings = evaluated.warnings
                                  }
                   )
                   selectedRaw
@@ -1056,7 +1060,8 @@ reflectCorrespondences
                       deployed
                   case result of
                     Left err -> die' codecError $ formatCodecError err
-                    Right (source, snapshot) ->
+                    Right (source, snapshot, warnings) -> do
+                      printWarnings warnings
                       return $
                         Just
                           (

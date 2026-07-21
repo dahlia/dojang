@@ -49,6 +49,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
   , loadCodecCacheEntries
   )
 import Dojang.Types.Codec.Evaluate
@@ -211,7 +212,7 @@ statusCoreWithEvaluated ctx machineState ws allManaged evaluated options = do
     rows
   printOrphans ctx allManaged machineState
   printModeNotes managed
-  printWarnings ws
+  printWarnings $ nub $ ws <> evaluationWarnings evaluated
   return ExitSuccess
 
 

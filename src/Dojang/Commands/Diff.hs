@@ -61,6 +61,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
   , loadCodecCacheEntries
   , renderedSourceFor
   )
@@ -169,6 +170,7 @@ diffCore runtime mode diffProgram files = do
       evaluated <- case evaluatedResult of
         Left err -> die' codecError $ formatCodecError err
         Right value -> return value
+      printWarnings $ evaluationWarnings evaluated
       return
         [ (item.managed.correspondence, renderedSourceFor item)
         | item <- evaluated

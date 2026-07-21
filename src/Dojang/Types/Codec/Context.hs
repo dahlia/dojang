@@ -11,6 +11,7 @@ module Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondences
   , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
   , loadCodecCacheEntries
   , managedCodecStateFor
   , rawSourceDigestFor
@@ -25,6 +26,7 @@ import Control.Monad (foldM, forM)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as ByteString
 import Data.Char (ord)
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -83,7 +85,10 @@ import Dojang.Types.ManagedTarget
   , ManagedTarget (..)
   , TargetFingerprint (FileFingerprint)
   )
-import Dojang.Types.Repository (RouteResult (..))
+import Dojang.Types.Repository
+  ( RouteMapWarning (FilePathExpressionWarning)
+  , RouteResult (..)
+  )
 import Dojang.Types.TargetTracking (managedTargetId)
 
 
@@ -95,6 +100,8 @@ data EvaluatedManagedCorrespondence = EvaluatedManagedCorrespondence
   -- ^ Evaluation result for a regular source file.
   , rawSourceDigest :: Maybe ByteString.ByteString
   -- ^ SHA-256 of the exact raw bytes supplied to the codec.
+  , warnings :: [RouteMapWarning]
+  -- ^ Warnings produced while resolving declared codec inputs.
   }
   deriving (Eq, Show)
 
@@ -176,7 +183,7 @@ evaluateManagedCorrespondencesWithCache runtime context cache managed =
     | correspondence.route.codec == identityCodecSpec =
         return $
           Right $
-            EvaluatedManagedCorrespondence correspondence Nothing Nothing
+            EvaluatedManagedCorrespondence correspondence Nothing Nothing []
     | otherwise = do
         routeName <- Text.pack <$> decodePath correspondence.route.routeName
         case codecRequirements runtime routeName correspondence.route.codec of
@@ -201,10 +208,10 @@ evaluateManagedCorrespondencesWithCache runtime context cache managed =
             _ ->
               return $
                 Right $
-                  EvaluatedManagedCorrespondence correspondence Nothing Nothing
+                  EvaluatedManagedCorrespondence correspondence Nothing Nothing []
   evaluateFile routeName requirements correspondence = do
     source <- readFile correspondence.correspondence.source.path
-    variables <- resolveRequiredVariables context requirements
+    (variables, warnings) <- resolveRequiredVariables context requirements
     identifier <- managedTargetId context.repository correspondence
     result <-
       evaluateCodec
@@ -224,6 +231,7 @@ evaluateManagedCorrespondencesWithCache runtime context cache managed =
           <$> finishEvaluation
             correspondence
             (Just $ SHA256.hash source)
+            warnings
             evaluated
   availableFacts = contextFacts context
 
@@ -261,6 +269,7 @@ reevaluateManagedCorrespondence runtime context correspondence previous = do
             <$> finishEvaluation
               correspondence
               (Just $ SHA256.hash source)
+              []
               evaluated
     Directory ->
       return $
@@ -280,9 +289,10 @@ finishEvaluation
   :: (MonadFileSystem m)
   => ManagedCorrespondence
   -> Maybe ByteString.ByteString
+  -> [RouteMapWarning]
   -> EvaluatedCodec
   -> m EvaluatedManagedCorrespondence
-finishEvaluation correspondence rawDigest evaluated = do
+finishEvaluation correspondence rawDigest warnings evaluated = do
   sourceDelta <-
     calculateRenderedDelta
       evaluated.renderedBytes
@@ -308,6 +318,7 @@ finishEvaluation correspondence rawDigest evaluated = do
       updated
       (Just evaluated)
       rawDigest
+      warnings
 
 
 -- | Rebinds a command-scoped codec evaluation to a freshly observed
@@ -325,7 +336,14 @@ reuseEvaluatedManagedCorrespondence correspondence previous =
       finishEvaluation
         correspondence
         previous.rawSourceDigest
+        previous.warnings
         evaluated
+
+
+-- | Collects and deduplicates warnings from codec input resolution.
+evaluationWarnings
+  :: [EvaluatedManagedCorrespondence] -> [RouteMapWarning]
+evaluationWarnings = nub . concatMap (.warnings)
 
 
 -- | Returns codec-produced bytes only for non-identity regular files.
@@ -395,7 +413,7 @@ reflectManagedCorrespondence
   -> Maybe EvaluatedCodec
   -- ^ Command-scoped evaluation whose resolved inputs should be reused.
   -> OpaqueBytes
-  -> m (Either CodecError (OpaqueBytes, Maybe EvaluatedCodec))
+  -> m (Either CodecError (OpaqueBytes, Maybe EvaluatedCodec, [RouteMapWarning]))
 reflectManagedCorrespondence runtime context managed evaluated deployed = do
   routeName <- Text.pack <$> decodePath managed.route.routeName
   case codecRequirements runtime routeName managed.route.codec of
@@ -412,45 +430,53 @@ reflectManagedCorrespondence runtime context managed evaluated deployed = do
       sourceStat -> do
         case evaluated of
           Just snapshot ->
-            reflectEvaluatedCodecWithEvaluation
-              runtime
-              ( CodecEvaluationRequest
-                  routeName
-                  managed.route.codec
-                  snapshot.resolvedInputs.rawSource
-                  (contextFacts context)
-                  Map.empty
-              )
-              snapshot
-              deployed
+            fmap (\(raw, reflected) -> (raw, reflected, []))
+              <$> reflectEvaluatedCodecWithEvaluation
+                runtime
+                ( CodecEvaluationRequest
+                    routeName
+                    managed.route.codec
+                    snapshot.resolvedInputs.rawSource
+                    (contextFacts context)
+                    Map.empty
+                )
+                snapshot
+                deployed
           Nothing -> do
             source <- case sourceStat of
               File _ -> readFile managed.correspondence.source.path
               Missing -> return ByteString.empty
-            variables <- resolveRequiredVariables context requirements
-            reflectCodecWithEvaluation
-              runtime
-              ( CodecEvaluationRequest
-                  routeName
-                  managed.route.codec
-                  (opaqueBytes source)
-                  (contextFacts context)
-                  variables
-              )
-              deployed
+            (variables, warnings) <- resolveRequiredVariables context requirements
+            fmap (\(raw, snapshot) -> (raw, snapshot, warnings))
+              <$> reflectCodecWithEvaluation
+                runtime
+                ( CodecEvaluationRequest
+                    routeName
+                    managed.route.codec
+                    (opaqueBytes source)
+                    (contextFacts context)
+                    variables
+                )
+                deployed
 
 
 resolveRequiredVariables
   :: (MonadFileSystem m)
   => Context m
   -> CodecRequirements
-  -> m (Map Text.Text ByteString.ByteString)
+  -> m (Map Text.Text ByteString.ByteString, [RouteMapWarning])
 resolveRequiredVariables context (CodecRequirements _ requiredVariables _) = do
-  pairs <- forM (Set.toAscList requiredVariables) $ \name -> do
+  resolved <- forM (Set.toAscList requiredVariables) $ \name -> do
     lookupResult <- context.variableGetter name
     let value = osStringBytes <$> lookupResult.value
-    return $ (,) name <$> value
-  return $ Map.fromList [pair | Just pair <- pairs]
+    return
+      ( (,) name <$> value
+      , FilePathExpressionWarning <$> lookupResult.warnings
+      )
+  return
+    ( Map.fromList [pair | (Just pair, _) <- resolved]
+    , nub $ concatMap snd resolved
+    )
 
 
 osStringBytes :: OsString.OsString -> ByteString.ByteString

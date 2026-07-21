@@ -11,6 +11,7 @@ import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
+import Data.List (nub)
 import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
@@ -67,6 +68,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
   , loadCodecCacheEntries
   , managedCodecStateFor
   , rawSourceDigestFor
@@ -334,7 +336,7 @@ applyWithCodecRuntime codecRuntime force filePaths = do
         refreshedManaged
         refreshedEvaluated
         defaultStatusOptions
-  printWarnings ws
+  printWarnings $ nub $ ws <> evaluationWarnings evaluated
 
   -- Run post-apply hooks
   when isFirstApply $ do
