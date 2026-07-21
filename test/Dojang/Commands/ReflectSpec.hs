@@ -339,6 +339,31 @@ spec = sequential $ do
         readFile sourceA `shouldReturn` "first"
         readFile sourceB `shouldReturn` "changed second"
 
+    it "cleans the baseline after deleting a directory-route child" $
+      withDirectoryChildren $ \appEnv _ _ destinationB -> do
+        runAppWithoutLogging
+          appEnv
+          (reflect False True False Nothing [destinationB])
+          `shouldReturn` ExitSuccess
+        let AppEnv _ _ _ stateDirectory' _ _ _ _ = appEnv
+        Right (Just machineId) <- readMachineId stateDirectory'
+        let Right repositoryId =
+              parseRepositoryId "623e4567-e89b-42d3-a456-426614174000"
+        Right (Just before) <-
+          readRepositoryState stateDirectory' repositoryId machineId
+        target <- case Map.elems before.targetRecords of
+          [one] -> return one
+          records -> fail $ "Unexpected managed targets: " <> show records
+        removeFile destinationB
+        runAppWithoutLogging
+          appEnv
+          (reflect False True False Nothing [destinationB])
+          `shouldReturn` ExitSuccess
+        Right (Just after) <-
+          readRepositoryState stateDirectory' repositoryId machineId
+        after.targetRecords `shouldBe` Map.empty
+        exists target.snapshotPath `shouldReturn` False
+
     it "preserves codec policy for an ownerless ignored destination" $
       withOwnerlessIgnoredRejectDestination $
         \appEnv source destination codecSpec -> do

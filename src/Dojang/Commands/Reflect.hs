@@ -942,10 +942,22 @@ reflectCorrespondences
             reason
     let persist = do
           (rawRefreshed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
-          let selectedRaw =
-                if persistAll
-                  then rawRefreshed
-                  else filter matchesSelection rawRefreshed
+          let refreshedIdentities =
+                Set.fromList $
+                  correspondenceIdentity . (.correspondence) <$> rawRefreshed
+              disappearedSelected =
+                [ managed
+                | (_allowIgnored, _file, managed, _rendered, _codecSnapshot) <-
+                    selectedOwned
+                , correspondenceIdentity managed.correspondence
+                    `Set.notMember` refreshedIdentities
+                ]
+              selectedRaw =
+                ( if persistAll
+                    then rawRefreshed
+                    else filter matchesSelection rawRefreshed
+                )
+                  <> disappearedSelected
               writtenSources =
                 Set.fromList
                   [ normalise $ syncOpTargetPath operation.syncOp
