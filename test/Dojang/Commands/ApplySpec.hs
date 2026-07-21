@@ -63,6 +63,7 @@ import Dojang.Types.Codec
   ( CodecConfiguration (CodecConfiguration)
   , CodecDefinition (CodecDefinition)
   , CodecSpec (CodecSpec)
+  , CodecValue (CodecBoolean)
   , ReflectPolicy (ReflectReject)
   , identityCodecSpec
   , parseCodecName
@@ -78,9 +79,12 @@ import Dojang.Types.Codec.Evaluate
   , ExternalInput (ExternalInput)
   , ExternalInputRequest (ExternalInputRequest)
   , codecRegistry
+  , noCodecInputs
   , opaqueBytes
+  , requiredCodecInputs
   , revealBytes
   )
+import Dojang.Types.Codec.Template (templateCodecSpec)
 import Dojang.Types.Environment
   ( Architecture (X86_64)
   , Kernel (Kernel)
@@ -89,7 +93,9 @@ import Dojang.Types.Environment
   , withFacts
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
-import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent, Substitution)
+  )
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode, Private)
@@ -145,7 +151,7 @@ spec = sequential $ do
             implementation =
               CodecImplementation
                 (CodecDefinition name "test-1" ReflectReject)
-                (const $ Right $ CodecRequirements mempty mempty [])
+                (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
                 (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
                 Nothing
                 PersistentCache
@@ -181,7 +187,7 @@ spec = sequential $ do
                 (CodecDefinition name "test-1" ReflectReject)
                 ( const $
                     Right $
-                      CodecRequirements mempty mempty [inputRequest]
+                      CodecRequirements noCodecInputs noCodecInputs [inputRequest]
                 )
                 (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
                 Nothing
@@ -212,8 +218,8 @@ spec = sequential $ do
                 ( const $
                     Right $
                       CodecRequirements
-                        ["os", "arch", "kernel", "kernel-release"]
-                        mempty
+                        (requiredCodecInputs ["os", "arch", "kernel", "kernel-release"])
+                        noCodecInputs
                         []
                 )
                 (\inputs -> Right $ revealBytes inputs.rawSource)
@@ -239,7 +245,10 @@ spec = sequential $ do
             implementation =
               CodecImplementation
                 (CodecDefinition name "test-1" ReflectReject)
-                (const $ Right $ CodecRequirements ["team"] mempty [])
+                ( const $
+                    Right $
+                      CodecRequirements (requiredCodecInputs ["team"]) noCodecInputs []
+                )
                 ( \inputs -> case Map.lookup "team" inputs.facts of
                     Just value -> Right value
                     Nothing -> Left "missing case-insensitive fact"
@@ -272,6 +281,73 @@ spec = sequential $ do
           `shouldReturn` ExitSuccess
         readFile destinationA `shouldReturn` "source a"
 
+    it "validates an unknown codec before deleting a missing source" $
+      withCodecFile $ \appEnv source _ destination _ -> do
+        let runtime =
+              CodecRuntime
+                mempty
+                NormalEvaluation
+                (const $ return $ Left "unexpected external input")
+        removeFile source
+        writeFile destination "preserve"
+        runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+          `shouldThrow` (== codecError)
+        readFile destination `shouldReturn` "preserve"
+
+    it "validates codec configuration before deleting a missing source" $ do
+      let Just codecName = parseCodecName "test-codec"
+          invalidSpec =
+            CodecSpec codecName $
+              CodecConfiguration $
+                Map.singleton "unexpected" $
+                  CodecBoolean True
+      withCodecFileWithSpec mempty invalidSpec $
+        \appEnv source _ destination _ -> do
+          let implementation =
+                CodecImplementation
+                  (CodecDefinition codecName "test-1" ReflectReject)
+                  ( \configuration ->
+                      if configuration == CodecConfiguration mempty
+                        then Right $ CodecRequirements noCodecInputs noCodecInputs []
+                        else Left "unexpected configuration"
+                  )
+                  (Right . revealBytes . (.rawSource))
+                  Nothing
+                  PersistentCache
+                  EvaluatePurely
+              runtime =
+                CodecRuntime
+                  (codecRegistry [implementation])
+                  NormalEvaluation
+                  (const $ return $ Left "unexpected external input")
+          removeFile source
+          writeFile destination "preserve"
+          runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+            `shouldThrow` (== codecError)
+          readFile destination `shouldReturn` "preserve"
+
+    it "renders the built-in template codec with manifest variables" $ do
+      let Right variableName = parseManifestVariableName "NAME"
+          variables =
+            Map.singleton variableName $
+              manifestVariable mempty $
+                BareComponent "Ada"
+      withTemplateFile variables $ \appEnv source intermediate destination _ -> do
+        writeFile source "name = {{ vars.NAME }}\n"
+        runAppWithoutLogging appEnv (apply True []) `shouldReturn` ExitSuccess
+        readFile intermediate `shouldReturn` "name = Ada\n"
+        readFile destination `shouldReturn` "name = Ada\n"
+
+    it "does not expose inherited environment variables to templates" $
+      withTemplateFile mempty $ \appEnv source intermediate destination _ -> do
+        inherited <- encodeFS "private"
+        writeFile source "{{ vars.INHERITED_ONLY }}"
+        withEnvVars [("INHERITED_ONLY", Just inherited)] $
+          runAppWithoutLogging appEnv (apply True [])
+            `shouldThrow` (== codecError)
+        exists intermediate `shouldReturn` False
+        exists destination `shouldReturn` False
+
     it "preserves native non-UTF-8 variable bytes for codecs" $
       if os == "mingw32"
         then pendingWith "POSIX environment values are native byte strings."
@@ -284,7 +360,7 @@ spec = sequential $ do
                   (CodecDefinition name "test-1" ReflectReject)
                   ( const $
                       Right $
-                        CodecRequirements mempty [variableName] []
+                        CodecRequirements noCodecInputs (requiredCodecInputs [variableName]) []
                   )
                   ( \inputs -> case Map.lookup variableName inputs.variables of
                       Just value -> Right value
@@ -318,7 +394,7 @@ spec = sequential $ do
                   (CodecDefinition name "test-1" ReflectReject)
                   ( const $
                       Right $
-                        CodecRequirements mempty [variableName] []
+                        CodecRequirements noCodecInputs (requiredCodecInputs [variableName]) []
                   )
                   ( \inputs ->
                       Right $
@@ -831,7 +907,7 @@ countingApplyRuntime resolutionCount spec' =
       (CodecDefinition name "test-1" ReflectReject)
       ( const $
           Right $
-            CodecRequirements mempty mempty [counterInput]
+            CodecRequirements noCodecInputs noCodecInputs [counterInput]
       )
       (Right . revealBytes . (.rawSource))
       Nothing
@@ -937,7 +1013,7 @@ sharedSourceRuntime dryRunPolicy mode specs =
     let CodecSpec name _ = spec'
     in CodecImplementation
          (CodecDefinition name "test-1" ReflectReject)
-         (const $ Right $ CodecRequirements mempty mempty [])
+         (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
          (Right . revealBytes . (.rawSource))
          Nothing
          PersistentCache
@@ -954,7 +1030,27 @@ withCodecFileWithVariables
   :: ManifestVariableMap
   -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
   -> IO a
-withCodecFileWithVariables manifestVariables action = withTempDir $ \tmpDir _ -> do
+withCodecFileWithVariables manifestVariables =
+  withCodecFileWithSpec manifestVariables testCodecSpec
+ where
+  Just codecName = parseCodecName "test-codec"
+  testCodecSpec = CodecSpec codecName $ CodecConfiguration mempty
+
+
+withTemplateFile
+  :: ManifestVariableMap
+  -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withTemplateFile manifestVariables =
+  withCodecFileWithSpec manifestVariables templateCodecSpec
+
+
+withCodecFileWithSpec
+  :: ManifestVariableMap
+  -> CodecSpec
+  -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withCodecFileWithSpec manifestVariables codecSpec action = withTempDir $ \tmpDir _ -> do
   sourceDir <- encodeFS "source"
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
@@ -968,8 +1064,6 @@ withCodecFileWithVariables manifestVariables action = withTempDir $ \tmpDir _ ->
       intermediate = repository </> intermediateDir </> routeName
       destination = tmpDir </> destinationName
       home = tmpDir </> homeName
-      Just codecName = parseCodecName "test-codec"
-      codecSpec = CodecSpec codecName $ CodecConfiguration mempty
       Right repositoryId' =
         parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
       route =
@@ -1048,7 +1142,7 @@ testCodecRuntime dryRunPolicy mode spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReject)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache

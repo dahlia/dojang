@@ -65,6 +65,7 @@ import Dojang.ExitCodes
   , machineStateError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.Types.Codec.BuiltIn (builtInCodecRuntime)
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
@@ -80,7 +81,6 @@ import Dojang.Types.Codec.Evaluate
   ( CodecRuntime
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , formatCodecError
-  , identityCodecRuntime
   )
 import Dojang.Types.Context
   ( Context (..)
@@ -134,7 +134,7 @@ apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
 apply force filePaths = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
-  applyWithCodecRuntime (identityCodecRuntime mode) force filePaths
+  applyWithCodecRuntime (builtInCodecRuntime mode) force filePaths
 
 
 -- | Applies selected routes using an explicit codec runtime.

@@ -306,6 +306,8 @@ deployment.  The string form names an unconfigured codec; the object form has
 `name` and `config` fields.  The default `identity` codec preserves bytes, so
 existing compact and detailed routes keep their previous behavior.  Codec
 metadata requires `path`, and a deployment link accepts only `identity`.
+The built-in `template` codec has no configuration and renders UTF-8 source
+with manifest variables under `vars` and machine facts under `facts`.
 
 See [route codecs] for configuration values, caching, dry-run behavior, and
 reflection policies.

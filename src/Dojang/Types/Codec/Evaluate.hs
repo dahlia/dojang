@@ -2,6 +2,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- | Controlled evaluation of declarative route codecs.
@@ -11,28 +12,45 @@ module Dojang.Types.Codec.Evaluate
   , CodecDryRunPolicy (..)
   , CodecError
   , CodecEvaluationRequest (..)
-  , CodecImplementation (..)
+  , CodecFailure (..)
+  , CodecFailureCategory (..)
+  , CodecImplementation
+    ( CodecImplementation
+    , cacheScope
+    , definition
+    , dryRunPolicy
+    , forward
+    , requirementsForSource
+    , reverse
+    , validateConfiguration
+    )
+  , CodecInputPresence (..)
+  , CodecInputSelection (..)
   , CodecInputs (..)
   , CodecRequirements (..)
   , CodecRuntime (..)
+  , CodecSourcePosition (..)
   , EvaluationMode (..)
   , EvaluatedCodec (..)
   , ExternalInput (..)
   , ExternalInputRequest (..)
   , OpaqueBytes
   , codecRegistry
+  , codecImplementationWithSourceRequirements
   , codecRequirements
   , codecReflectPolicy
   , codecSourceTypeError
   , evaluateCodec
   , formatCodecError
   , identityCodecRuntime
+  , noCodecInputs
   , opaqueBytes
   , reevaluateCodec
   , reflectCodec
   , reflectCodecWithEvaluation
   , reflectEvaluatedCodec
   , reflectEvaluatedCodecWithEvaluation
+  , requiredCodecInputs
   , revealBytes
   ) where
 
@@ -40,10 +58,10 @@ import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.CaseInsensitive (foldCase)
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Set (Set)
-import Data.Set qualified as Set
+import Data.String (IsString (fromString))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
@@ -97,6 +115,50 @@ data EvaluationMode = NormalEvaluation | DryRunEvaluation
   deriving (Eq, Ord, Show)
 
 
+-- | One-based location in a codec's repository source.
+data CodecSourcePosition = CodecSourcePosition
+  { line :: Int
+  -- ^ One-based line number.
+  , column :: Int
+  -- ^ One-based column number.
+  }
+  deriving (Eq, Ord, Show)
+
+
+-- | Safe category for a source-aware codec failure.
+data CodecFailureCategory
+  = InvalidSourceEncoding
+  | InvalidSourceSyntax
+  | UnsupportedSourceSyntax
+  | MissingSourceInput Text
+  | SourceEvaluationFailure
+  deriving (Eq, Ord, Show)
+
+
+-- | Failure returned by a codec implementation.
+--
+-- Opaque details are retained for equality and debugging boundaries but never
+-- rendered by 'formatCodecError'.  A structured failure exposes only a safe
+-- category and source position.
+data CodecFailure
+  = OpaqueCodecFailure Text
+  | CodecFailureAt CodecFailureCategory CodecSourcePosition
+  | CodecInputEncodingFailure Text
+  deriving (Eq)
+
+
+instance Show CodecFailure where
+  show (OpaqueCodecFailure _) = "OpaqueCodecFailure <redacted>"
+  show (CodecFailureAt category position) =
+    "CodecFailureAt " <> show category <> " " <> show position
+  show (CodecInputEncodingFailure _) =
+    "CodecInputEncodingFailure <redacted>"
+
+
+instance IsString CodecFailure where
+  fromString = OpaqueCodecFailure . Text.pack
+
+
 -- | A controlled external input declared by a codec.
 newtype ExternalInputRequest = ExternalInputRequest Text
   deriving (Eq, Ord, Show)
@@ -112,11 +174,44 @@ data ExternalInput = ExternalInput
   deriving (Eq, Show)
 
 
+-- | How a named codec input handles absence.
+data CodecInputPresence
+  = RequiredInput
+  | DeferredInput
+  deriving (Eq, Ord, Show)
+
+
+-- | Named inputs and optional whole-namespace selection for one namespace.
+data CodecInputSelection = CodecInputSelection
+  { namedInputs :: Map Text CodecInputPresence
+  -- ^ Statically referenced names and their missing-input behavior.
+  , includeAllInputs :: Bool
+  -- ^ Whether every currently available member belongs to the dependency set.
+  , manifestInputsOnly :: Bool
+  -- ^ Whether variables must come from active manifest declarations.
+  }
+  deriving (Eq, Show)
+
+
+-- | Selects no values from a codec input namespace.
+noCodecInputs :: CodecInputSelection
+noCodecInputs = CodecInputSelection Map.empty False False
+
+
+-- | Selects named inputs and requires every selected value to be present.
+requiredCodecInputs :: [Text] -> CodecInputSelection
+requiredCodecInputs names =
+  CodecInputSelection
+    (Map.fromList [(name, RequiredInput) | name <- names])
+    False
+    False
+
+
 -- | Inputs a codec declares before it is evaluated.
 data CodecRequirements = CodecRequirements
-  { facts :: Set Text
+  { facts :: CodecInputSelection
   -- ^ Machine facts the codec reads.
-  , variables :: Set Text
+  , variables :: CodecInputSelection
   -- ^ Manifest variables the codec reads.
   , externalInputs :: [ExternalInputRequest]
   -- ^ External inputs resolved through 'CodecRuntime'.
@@ -160,21 +255,78 @@ instance Show CodecInputs where
 -- Implementations receive the validated route configuration and only resolved,
 -- declared inputs.  Effects belong to 'CodecRuntime.resolveExternalInput', so
 -- transformations cannot bypass the runtime's capability boundary.
-data CodecImplementation = CodecImplementation
+data CodecImplementation = CodecImplementationWithSourceRequirements
   { definition :: CodecDefinition
   -- ^ Stable identity, version, and reflect policy.
   , validateConfiguration
-      :: CodecConfiguration -> Either Text CodecRequirements
+      :: CodecConfiguration -> Either CodecFailure CodecRequirements
   -- ^ Validates configuration and declares every allowed input.
-  , forward :: CodecInputs -> Either Text ByteString
+  , requirementsForSource
+      :: CodecConfiguration -> OpaqueBytes -> Either CodecFailure CodecRequirements
+  -- ^ Validates raw source and declares inputs referenced by that source.
+  , forward :: CodecInputs -> Either CodecFailure ByteString
   -- ^ Renders repository representation into deployed bytes.
-  , reverse :: Maybe (CodecInputs -> OpaqueBytes -> Either Text ByteString)
+  , reverse :: Maybe (CodecInputs -> OpaqueBytes -> Either CodecFailure ByteString)
   -- ^ Reconstructs repository representation for a re-add codec.
   , cacheScope :: CacheScope
   -- ^ Whether machine state may persist cache metadata.
   , dryRunPolicy :: CodecDryRunPolicy
   -- ^ Whether an uncached dry-run may evaluate this codec.
   }
+
+
+-- | Constructs a codec whose input requirements depend only on configuration.
+--
+-- This compatibility constructor supplies no source-derived requirements.
+pattern CodecImplementation
+  :: CodecDefinition
+  -> (CodecConfiguration -> Either CodecFailure CodecRequirements)
+  -> (CodecInputs -> Either CodecFailure ByteString)
+  -> Maybe (CodecInputs -> OpaqueBytes -> Either CodecFailure ByteString)
+  -> CacheScope
+  -> CodecDryRunPolicy
+  -> CodecImplementation
+pattern CodecImplementation
+  definition
+  validateConfiguration
+  forward
+  reverseImplementation
+  cacheScope
+  dryRunPolicy <-
+  CodecImplementationWithSourceRequirements
+    definition
+    validateConfiguration
+    _
+    forward
+    reverseImplementation
+    cacheScope
+    dryRunPolicy
+ where
+  CodecImplementation definition validateConfiguration forward reverseImplementation cacheScope dryRunPolicy =
+    CodecImplementationWithSourceRequirements
+      definition
+      validateConfiguration
+      (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      forward
+      reverseImplementation
+      cacheScope
+      dryRunPolicy
+
+
+{-# COMPLETE CodecImplementation #-}
+
+
+-- | Constructs a codec with configuration- and source-derived requirements.
+codecImplementationWithSourceRequirements
+  :: CodecDefinition
+  -> (CodecConfiguration -> Either CodecFailure CodecRequirements)
+  -> (CodecConfiguration -> OpaqueBytes -> Either CodecFailure CodecRequirements)
+  -> (CodecInputs -> Either CodecFailure ByteString)
+  -> Maybe (CodecInputs -> OpaqueBytes -> Either CodecFailure ByteString)
+  -> CacheScope
+  -> CodecDryRunPolicy
+  -> CodecImplementation
+codecImplementationWithSourceRequirements = CodecImplementationWithSourceRequirements
 
 
 -- | Runtime capabilities supplied explicitly to codec evaluation.
@@ -242,6 +394,8 @@ data EvaluatedCodec = EvaluatedCodec
   -- ^ Permitted cache lifetime.
   , resolvedInputs :: CodecInputs
   -- ^ Exact command-scoped inputs used to produce 'renderedBytes'.
+  , requirements :: CodecRequirements
+  -- ^ Source-derived input selection used for this evaluation.
   }
   deriving (Eq)
 
@@ -258,20 +412,23 @@ instance Show EvaluatedCodec where
       <> show evaluated.definition
       <> ", cacheScope = "
       <> show evaluated.cacheScope
-      <> ", resolvedInputs = <redacted> }"
+      <> ", resolvedInputs = <redacted>, requirements = "
+      <> show evaluated.requirements
+      <> " }"
 
 
 data CodecErrorKind
   = UnknownCodec
-  | InvalidConfiguration Text
+  | InvalidConfiguration CodecFailure
+  | InvalidSource CodecFailure
   | MissingInput Text
   | ExternalInputFailure Text Text
-  | EvaluationFailure Text
+  | EvaluationFailure CodecFailure
   | DryRunCacheRequired
   | UnsupportedSourceType Text
   | ReflectionRejected
   | ReverseUnavailable
-  | ReverseFailure Text
+  | ReverseFailure CodecFailure
   | ReverseValidationFailure
   deriving (Eq, Show)
 
@@ -290,8 +447,10 @@ codecRegistry
   :: [CodecImplementation] -> Map CodecName CodecImplementation
 codecRegistry = Map.fromList . fmap entry
  where
-  entry implementation@(CodecImplementation (CodecDefinition name _ _) _ _ _ _ _) =
-    (name, implementation)
+  entry :: CodecImplementation -> (CodecName, CodecImplementation)
+  entry implementation =
+    let CodecDefinition name _ _ = implementation.definition
+    in (name, implementation)
 
 
 -- | Runtime containing only the built-in identity codec.
@@ -309,17 +468,63 @@ identityCodecRuntime mode =
     }
  where
   identityImplementation =
-    CodecImplementation
-      { definition = identityCodecDefinition
-      , validateConfiguration = \configuration ->
+    codecImplementationWithSourceRequirements
+      identityCodecDefinition
+      ( \configuration ->
           if configuration == CodecConfiguration Map.empty
-            then Right $ CodecRequirements Set.empty Set.empty []
+            then Right $ CodecRequirements noCodecInputs noCodecInputs []
             else Left "identity does not accept configuration"
-      , forward = Right . revealBytes . (.rawSource)
-      , reverse = Just $ \_ deployed -> Right $ revealBytes deployed
-      , cacheScope = PersistentCache
-      , dryRunPolicy = EvaluatePurely
+      )
+      (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      (Right . revealBytes . (.rawSource))
+      (Just $ \_ deployed -> Right $ revealBytes deployed)
+      PersistentCache
+      EvaluatePurely
+
+
+requirementsForImplementation
+  :: CodecEvaluationRequest
+  -> CodecImplementation
+  -> Either CodecError CodecRequirements
+requirementsForImplementation request implementation = do
+  base <- case implementation.validateConfiguration configuration of
+    Left failure ->
+      Left $ CodecError request.routeName codecName $ InvalidConfiguration failure
+    Right requirements -> Right requirements
+  source <- case implementation.requirementsForSource configuration request.rawSource of
+    Left failure -> Left $ CodecError request.routeName codecName $ InvalidSource failure
+    Right requirements -> Right requirements
+  return $ mergeCodecRequirements base source
+ where
+  CodecSpec codecName configuration = request.codec
+
+
+mergeCodecRequirements
+  :: CodecRequirements -> CodecRequirements -> CodecRequirements
+mergeCodecRequirements left right =
+  CodecRequirements
+    { facts = mergeSelection left.facts right.facts
+    , variables = mergeSelection left.variables right.variables
+    , externalInputs = nub $ left.externalInputs <> right.externalInputs
+    }
+ where
+  mergeSelection
+    :: CodecInputSelection -> CodecInputSelection -> CodecInputSelection
+  mergeSelection first second =
+    CodecInputSelection
+      { namedInputs =
+          Map.unionWith
+            mergePresence
+            first.namedInputs
+            second.namedInputs
+      , includeAllInputs = first.includeAllInputs || second.includeAllInputs
+      , -- The stricter source-isolation requirement must win when either side
+        -- declares it; an empty selection is neutral during requirement merging.
+        manifestInputsOnly = first.manifestInputsOnly || second.manifestInputsOnly
       }
+  mergePresence RequiredInput _ = RequiredInput
+  mergePresence _ RequiredInput = RequiredInput
+  mergePresence DeferredInput DeferredInput = DeferredInput
 
 
 -- | Evaluates a selected route codec or reuses an exact cache entry.
@@ -335,12 +540,8 @@ evaluateCodec
   -- ^ A redacted codec error or the rendered bytes and cache metadata.
 evaluateCodec runtime request cached = case Map.lookup codecName runtime.registry of
   Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
-  Just implementation -> case implementation.validateConfiguration configuration of
-    Left reason ->
-      return $
-        Left $
-          CodecError request.routeName codecName $
-            InvalidConfiguration reason
+  Just implementation -> case requirementsForImplementation request implementation of
+    Left err -> return $ Left err
     Right _
       | runtime.mode == DryRunEvaluation
       , implementation.dryRunPolicy == CachedOnly
@@ -370,6 +571,7 @@ evaluateCodec runtime request cached = case Map.lookup codecName runtime.registr
                   implementation.definition
                   implementation.cacheScope
                   inputs
+                  requirements
           case cached of
             Just entry | entry.cacheKey == key -> return $ Right $ makeResult entry.renderedBytes
             _
@@ -386,7 +588,7 @@ evaluateCodec runtime request cached = case Map.lookup codecName runtime.registr
                           EvaluationFailure reason
                     Right bytes -> Right $ makeResult $ opaqueBytes bytes
  where
-  CodecSpec codecName configuration = request.codec
+  CodecSpec codecName _ = request.codec
   rawSource = revealBytes request.rawSource
 
 
@@ -406,19 +608,15 @@ reevaluateCodec runtime request previous =
   case Map.lookup codecName runtime.registry of
     Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
     Just implementation ->
-      case implementation.validateConfiguration configuration of
-        Left reason ->
-          return $
-            Left $
-              CodecError request.routeName codecName $
-                InvalidConfiguration reason
+      case requirementsForImplementation request implementation of
+        Left err -> return $ Left err
         Right _
           | runtime.mode == DryRunEvaluation
           , implementation.dryRunPolicy == CachedOnly ->
               return $
                 Left $
                   CodecError request.routeName codecName DryRunCacheRequired
-        Right _
+        Right requirements
           | implementation.definition /= previous.definition ->
               return $
                 Left $
@@ -431,6 +629,12 @@ reevaluateCodec runtime request previous =
                   CodecError request.routeName codecName $
                     InvalidConfiguration
                       "command-scoped evaluation does not match the configuration"
+          | requirements /= previous.requirements ->
+              return $
+                Left $
+                  CodecError request.routeName codecName $
+                    InvalidConfiguration
+                      "source input requirements changed during evaluation"
           | otherwise ->
               let CodecDefinition _ version _ = implementation.definition
                   previousInputs = previous.resolvedInputs
@@ -455,6 +659,7 @@ reevaluateCodec runtime request previous =
                       implementation.definition
                       implementation.cacheScope
                       inputs
+                      requirements
               in return $ case implementation.forward inputs of
                    Left reason ->
                      Left $
@@ -493,7 +698,7 @@ reflectCodecWithEvaluation runtime request deployed = case Map.lookup codecName 
         Left $
           CodecError request.routeName codecName $
             InvalidConfiguration reason
-    Right requirements -> case implementation.definition of
+    Right baseRequirements -> case implementation.definition of
       CodecDefinition _ _ ReflectIdentity -> return $ Right (deployed, Nothing)
       CodecDefinition _ _ ReflectReject ->
         return $ Left $ CodecError request.routeName codecName ReflectionRejected
@@ -502,18 +707,25 @@ reflectCodecWithEvaluation runtime request deployed = case Map.lookup codecName 
         , implementation.dryRunPolicy == CachedOnly ->
             return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
       CodecDefinition _ _ ReflectReAdd -> do
-        resolved <- resolveInputs runtime request requirements
-        case resolved of
-          Left err -> return $ Left err
-          Right (inputs, dependencies) ->
-            return $
-              fmap (\(source, evaluated) -> (source, Just evaluated)) $
-                reverseWithInputs
-                  request
-                  implementation
-                  inputs
-                  dependencies
-                  deployed
+        case implementation.requirementsForSource configuration request.rawSource of
+          Left failure ->
+            return $ Left $ CodecError request.routeName codecName $ InvalidSource failure
+          Right sourceRequirements -> do
+            let requirements =
+                  mergeCodecRequirements baseRequirements sourceRequirements
+            resolved <- resolveInputs runtime request requirements
+            case resolved of
+              Left err -> return $ Left err
+              Right (inputs, dependencies) ->
+                return $
+                  fmap (\(source, evaluated) -> (source, Just evaluated)) $
+                    reverseWithInputs
+                      request
+                      implementation
+                      requirements
+                      inputs
+                      dependencies
+                      deployed
  where
   CodecSpec codecName configuration = request.codec
 
@@ -559,22 +771,31 @@ reflectEvaluatedCodecWithEvaluation runtime request evaluated deployed =
           , implementation.dryRunPolicy == CachedOnly ->
               return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
         CodecDefinition _ _ ReflectReAdd ->
-          if evaluated.resolvedInputs.configuration /= configuration
-            then
-              return $
-                Left $
-                  CodecError request.routeName codecName $
-                    InvalidConfiguration
-                      "command-scoped evaluation does not match the configuration"
-            else
-              return $
-                fmap (\(source, result) -> (source, Just result)) $
-                  reverseWithInputs
-                    request
-                    implementation
-                    evaluated.resolvedInputs
-                    evaluated.dependencies
-                    deployed
+          case requirementsForImplementation request implementation of
+            Left err -> return $ Left err
+            Right requirements
+              | evaluated.resolvedInputs.configuration /= configuration ->
+                  return $
+                    Left $
+                      CodecError request.routeName codecName $
+                        InvalidConfiguration
+                          "command-scoped evaluation does not match the configuration"
+              | requirements /= evaluated.requirements ->
+                  return $
+                    Left $
+                      CodecError request.routeName codecName $
+                        InvalidConfiguration
+                          "source input requirements changed during evaluation"
+              | otherwise ->
+                  return $
+                    fmap (\(source, result) -> (source, Just result)) $
+                      reverseWithInputs
+                        request
+                        implementation
+                        requirements
+                        evaluated.resolvedInputs
+                        evaluated.dependencies
+                        deployed
  where
   CodecSpec codecName configuration = request.codec
 
@@ -582,11 +803,12 @@ reflectEvaluatedCodecWithEvaluation runtime request evaluated deployed =
 reverseWithInputs
   :: CodecEvaluationRequest
   -> CodecImplementation
+  -> CodecRequirements
   -> CodecInputs
   -> [CodecDependency]
   -> OpaqueBytes
   -> Either CodecError (OpaqueBytes, EvaluatedCodec)
-reverseWithInputs request implementation inputs dependencies deployed =
+reverseWithInputs request implementation requirements inputs dependencies deployed =
   case implementation.reverse of
     Nothing -> Left $ CodecError request.routeName codecName ReverseUnavailable
     Just reverseCodec -> case reverseCodec inputs deployed of
@@ -604,34 +826,54 @@ reverseWithInputs request implementation inputs dependencies deployed =
                 inputs.facts
                 inputs.variables
                 inputs.externalInputs
-        in case implementation.forward candidateInputs of
-             Left reason ->
-               Left $ CodecError request.routeName codecName $ EvaluationFailure reason
-             Right bytes
-               | bytes == revealBytes deployed ->
-                   let CodecDefinition _ version _ = implementation.definition
-                       key =
-                         codecCacheKey
-                           request.codec
-                           version
-                           source
-                           dependencies
-                   in Right
-                        ( source'
-                        , EvaluatedCodec
-                            deployed
-                            key
-                            dependencies
-                            implementation.definition
-                            implementation.cacheScope
-                            candidateInputs
-                        )
-               | otherwise ->
+            candidateRequest :: CodecEvaluationRequest
+            candidateRequest =
+              CodecEvaluationRequest
+                request.routeName
+                request.codec
+                source'
+                request.facts
+                request.variables
+        in do
+             candidateRequirements <-
+               requirementsForImplementation candidateRequest implementation
+             if candidateRequirements /= requirements
+               then
+                 Left $
+                   CodecError request.routeName codecName $
+                     InvalidConfiguration
+                       "source input requirements changed during reverse validation"
+               else case implementation.forward candidateInputs of
+                 Left reason ->
                    Left $
-                     CodecError
-                       request.routeName
-                       codecName
-                       ReverseValidationFailure
+                     CodecError request.routeName codecName $
+                       EvaluationFailure reason
+                 Right bytes
+                   | bytes == revealBytes deployed ->
+                       let CodecDefinition _ version _ = implementation.definition
+                           key =
+                             codecCacheKey
+                               request.codec
+                               version
+                               source
+                               dependencies
+                       in Right
+                            ( source'
+                            , EvaluatedCodec
+                                deployed
+                                key
+                                dependencies
+                                implementation.definition
+                                implementation.cacheScope
+                                candidateInputs
+                                requirements
+                            )
+                   | otherwise ->
+                       Left $
+                         CodecError
+                           request.routeName
+                           codecName
+                           ReverseValidationFailure
  where
   CodecSpec codecName _ = request.codec
 
@@ -645,16 +887,18 @@ codecRequirements
   -- ^ Route name used to scope any validation error.
   -> CodecSpec
   -- ^ Codec name and configuration to validate.
+  -> OpaqueBytes
+  -- ^ Raw source whose referenced inputs should be discovered.
   -> Either CodecError CodecRequirements
   -- ^ A redacted validation error or the codec's declared inputs.
-codecRequirements runtime routeName spec = case Map.lookup name runtime.registry of
+codecRequirements runtime routeName spec rawSource = case Map.lookup name runtime.registry of
   Nothing -> Left $ CodecError routeName name UnknownCodec
-  Just implementation -> case implementation.validateConfiguration configuration of
-    Left reason ->
-      Left $ CodecError routeName name $ InvalidConfiguration reason
-    Right requirements -> Right requirements
+  Just implementation ->
+    requirementsForImplementation
+      (CodecEvaluationRequest routeName spec rawSource Map.empty Map.empty)
+      implementation
  where
-  CodecSpec name configuration = spec
+  CodecSpec name _ = spec
 
 
 -- | Returns the validated reflection policy for a registered codec.
@@ -669,12 +913,14 @@ codecReflectPolicy
   -- ^ A redacted validation error or the codec's reflection policy.
 codecReflectPolicy _ _ spec
   | spec == identityCodecSpec = Right ReflectIdentity
-codecReflectPolicy runtime routeName spec@(CodecSpec name _) = do
-  _ <- codecRequirements runtime routeName spec
+codecReflectPolicy runtime routeName (CodecSpec name configuration) =
   case Map.lookup name runtime.registry of
     Nothing -> Left $ CodecError routeName name UnknownCodec
-    Just implementation -> case implementation.definition of
-      CodecDefinition _ _ policy -> Right policy
+    Just implementation -> case implementation.validateConfiguration configuration of
+      Left failure ->
+        Left $ CodecError routeName name $ InvalidConfiguration failure
+      Right _ -> case implementation.definition of
+        CodecDefinition _ _ policy -> Right policy
 
 
 -- | Constructs a redacted error for a source entry a codec cannot render.
@@ -723,10 +969,17 @@ resolveInputs runtime request requirements = case selectTextInputs of
   CodecSpec codecName configuration = request.codec
   selectTextInputs = do
     (facts, factDependencies) <-
-      selectInputs "fact" codecName request.routeName requirements.facts request.facts
+      selectInputs
+        "fact"
+        foldCase
+        codecName
+        request.routeName
+        requirements.facts
+        (encodeUtf8 <$> request.facts)
     (variables, variableDependencies) <-
-      selectByteInputs
+      selectInputs
         "variable"
+        id
         codecName
         request.routeName
         requirements.variables
@@ -751,52 +1004,60 @@ resolveInputs runtime request requirements = case selectTextInputs of
 
 selectInputs
   :: Text
+  -> (Text -> Text)
   -> CodecName
   -> Text
-  -> Set Text
-  -> Map Text Text
-  -> Either CodecError (Map Text ByteString, [CodecDependency])
-selectInputs namespace codecName routeName required available = do
-  pairs <- traverse select $ Set.toAscList required
-  return (Map.fromList $ fst <$> pairs, snd <$> pairs)
- where
-  canonicalAvailable = Map.mapKeys foldCase available
-  select name = case Map.lookup (foldCase name) canonicalAvailable of
-    Nothing ->
-      Left $
-        CodecError routeName codecName $
-          MissingInput $
-            namespace <> ":" <> name
-    Just value ->
-      let bytes = encodeUtf8 value
-      in Right
-           ( (name, bytes)
-           , CodecDependency (namespace <> ":" <> name) $ digestText bytes
-           )
-
-
-selectByteInputs
-  :: Text
-  -> CodecName
-  -> Text
-  -> Set Text
+  -> CodecInputSelection
   -> Map Text ByteString
   -> Either CodecError (Map Text ByteString, [CodecDependency])
-selectByteInputs namespace codecName routeName required available = do
-  pairs <- traverse select $ Set.toAscList required
-  return (Map.fromList $ fst <$> pairs, snd <$> pairs)
+selectInputs namespace canonicalize codecName routeName selection available = do
+  selected <- traverse selectNamed $ Map.toAscList selection.namedInputs
+  let namedValues =
+        Map.fromList
+          [ (name, bytes)
+          | (name, Just bytes, _) <- selected
+          ]
+      namedDependencies =
+        Map.fromList
+          [ (identity, dependency)
+          | (_, _, dependency@(CodecDependency identity _)) <- selected
+          ]
+      allValues = if selection.includeAllInputs then canonicalAvailable else Map.empty
+      allDependencies =
+        if selection.includeAllInputs
+          then Map.mapWithKey makeDependency canonicalAvailable
+          else Map.empty
+  return
+    ( Map.union namedValues allValues
+    , Map.elems $ Map.union namedDependencies allDependencies
+    )
  where
-  select name = case Map.lookup name available of
-    Nothing ->
-      Left $
-        CodecError routeName codecName $
-          MissingInput $
-            namespace <> ":" <> name
-    Just bytes ->
-      Right
-        ( (name, bytes)
-        , CodecDependency (namespace <> ":" <> name) $ digestText bytes
-        )
+  canonicalAvailable = Map.mapKeys canonicalize available
+  selectNamed (name, presence) =
+    let canonicalName = canonicalize name
+        dependency value = CodecDependency (namespace <> ":" <> canonicalName) value
+    in case Map.lookup canonicalName canonicalAvailable of
+         Nothing ->
+           case presence of
+             RequiredInput ->
+               Left $
+                 CodecError routeName codecName $
+                   MissingInput $
+                     namespace <> ":" <> name
+             DeferredInput ->
+               Right
+                 ( name
+                 , Nothing
+                 , dependency "missing"
+                 )
+         Just bytes ->
+           Right
+             ( name
+             , Just bytes
+             , dependency $ digestText bytes
+             )
+  makeDependency name bytes =
+    CodecDependency (namespace <> ":" <> name) $ digestText bytes
 
 
 requestName :: ExternalInputRequest -> Text
@@ -813,10 +1074,11 @@ formatCodecError (CodecError routeName codecName kind) =
   "Route " <> routeName <> " codec " <> renderCodecName codecName <> case kind of
     UnknownCodec -> " is not registered."
     InvalidConfiguration _ -> " has invalid configuration."
+    InvalidSource failure -> formatSourceFailure failure
     MissingInput dependency -> " is missing declared input " <> dependency <> "."
     ExternalInputFailure dependency _ ->
       " could not resolve declared input " <> dependency <> "."
-    EvaluationFailure _ -> " failed while rendering."
+    EvaluationFailure failure -> formatEvaluationFailure failure
     DryRunCacheRequired -> " cannot run during dry-run without a valid cache."
     UnsupportedSourceType sourceType ->
       " cannot render source entry type " <> sourceType <> "."
@@ -824,6 +1086,31 @@ formatCodecError (CodecError routeName codecName kind) =
     ReverseUnavailable -> " has no reverse implementation."
     ReverseFailure _ -> " failed while reversing."
     ReverseValidationFailure -> " failed reverse validation."
+ where
+  at :: CodecSourcePosition -> Text
+  at position =
+    " at line "
+      <> Text.pack (show position.line)
+      <> ", column "
+      <> Text.pack (show position.column)
+      <> "."
+  formatSourceFailure (OpaqueCodecFailure _) = " has invalid source."
+  formatSourceFailure (CodecInputEncodingFailure dependency) =
+    " has template input " <> dependency <> " with invalid platform text."
+  formatSourceFailure (CodecFailureAt category position) = case category of
+    InvalidSourceEncoding -> " has source that is not valid UTF-8" <> at position
+    InvalidSourceSyntax -> " has invalid source syntax" <> at position
+    UnsupportedSourceSyntax -> " uses unsupported source syntax" <> at position
+    MissingSourceInput dependency ->
+      " is missing template input " <> dependency <> at position
+    SourceEvaluationFailure -> " failed while validating source" <> at position
+  formatEvaluationFailure (OpaqueCodecFailure _) = " failed while rendering."
+  formatEvaluationFailure (CodecInputEncodingFailure dependency) =
+    " has template input " <> dependency <> " with invalid platform text."
+  formatEvaluationFailure (CodecFailureAt category position) = case category of
+    MissingSourceInput dependency ->
+      " is missing template input " <> dependency <> at position
+    _ -> " failed while rendering" <> at position
 
 
 digestText :: ByteString -> Text

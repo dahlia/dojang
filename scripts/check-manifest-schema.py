@@ -114,6 +114,11 @@ valid_manifests = [
                 {
                     "when": "always",
                     "path": "~/.vimrc",
+                    "codec": "template",
+                },
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
                     "codec": {
                         "name": "example",
                         "config": {"profile": "work", "strict": True},

@@ -9,20 +9,37 @@ To be released.
 ### Command-line interface
 
  -  Detailed route branches can declare a byte-oriented `codec`.  The default
-    `identity` codec preserves all existing behavior; this release provides the
-    codec interpreter and test injection points but no template or secret
-    codec.  Applying a route writes its rendered bytes through the intermediate
-    snapshot, while status, diff, edit, and reflection use the same rendered
-    source view.  Registered codecs declare their inputs, dry-run behavior,
+    `identity` codec preserves all existing behavior.  Applying a route writes
+    its rendered bytes through the intermediate snapshot, while status, diff,
+    edit, and reflection use the same rendered source view.  Registered codecs
+    declare their inputs, dry-run behavior,
     cache scope, and `identity`, `reject`, or validated `re-add` reflection
     policy.  `--force` cannot bypass a codec's reflection policy.  Codec
     diagnostics and plans redact source and rendered contents.  The built-in
     diff reports non-UTF-8 rendered output as binary.  File routes using a
     non-identity codec reject directory or symbolic-link destinations before
-    changing repository files.  Before writing a buffered codec result, Dojang
-    verifies that its authoritative input has not changed since evaluation.
-    Cache-only dry runs reject codecs with external inputs before invoking
-    their resolver.  Codec failures use exit code 39.  [[#43], [#70]]
+    changing repository files.  Codec registration and configuration are
+    validated even when the selected source is missing, before a forced
+    operation can delete its destination.  Before writing a buffered codec
+    result, Dojang verifies that its authoritative input has not changed since
+    evaluation.  Cache-only dry runs reject codecs with external inputs before
+    invoking their resolver.  Codec failures use exit code 39.  [[#43], [#70]]
+
+ -  Added the built-in, deterministic `template` codec.  UTF-8 repository
+    sources can use a pure Ginger/Jinja subset with `vars` for active manifest
+    variables and case-insensitive `facts` for machine facts.  Template
+    variables never fall back to the process environment.  Input dependencies
+    are derived from each source so unrelated values do not invalidate its
+    persistent cache; missing values fail only along the branch that executes.
+    Diagnostics retain the missing input namespace and include source line and
+    column while redacting contents; runtime-derived lookup keys are reported
+    as `<dynamic>`, and invalid platform text identifies only the affected
+    variable name.  Partial Ginger arithmetic, formatting, and
+    text-transformation operations are rejected before evaluation instead of
+    terminating the process.  Local bindings are validated in execution order
+    and across every possible branch, and every valid Ginger script opener,
+    including comment-prefixed forms, is rejected.  Template reflection is
+    rejected even with `--force`.  [[#44], [#71]]
 
  -  Machine-state schema version 6 records only redacted codec metadata: the
     implementation name and version, configuration digest, cache key, and
@@ -194,6 +211,7 @@ To be released.
 [#41]: https://github.com/dahlia/dojang/issues/41
 [#42]: https://github.com/dahlia/dojang/issues/42
 [#43]: https://github.com/dahlia/dojang/issues/43
+[#44]: https://github.com/dahlia/dojang/issues/44
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
@@ -204,6 +222,7 @@ To be released.
 [#68]: https://github.com/dahlia/dojang/pull/68
 [#69]: https://github.com/dahlia/dojang/pull/69
 [#70]: https://github.com/dahlia/dojang/pull/70
+[#71]: https://github.com/dahlia/dojang/pull/71
 
 ### Haskell API
 
@@ -219,6 +238,15 @@ To be released.
     operating-system bytes rather than a lossy `Text` conversion.  Convergence
     publication rechecks the raw source.  `CodecEvaluationRequest.variables`
     therefore now uses `Map Text ByteString`.  [[#43], [#70]]
+
+ -  Added source-derived codec requirements and structured, source-positioned
+    codec failures, plus `builtInCodecRuntime` and the built-in template codec
+    specification and definition.  The positional `CodecImplementation`
+    constructor keeps its six arguments, while callbacks now return
+    `CodecFailure` and `CodecRequirements` uses `CodecInputSelection`; replace
+    input sets with `requiredCodecInputs` or `noCodecInputs`.  Embeddings can
+    opt into source analysis with `codecImplementationWithSourceRequirements`.
+    `codecRequirements` now also accepts the raw source bytes. [[#44], [#71]]
 
  -  `FileRoute` branches now carry a `RouteTarget`, which combines a path
     expression with `RouteMode` and `RouteKind`, instead of a bare

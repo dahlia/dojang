@@ -52,6 +52,7 @@ import Dojang.Types.Codec
 import Dojang.Types.Codec.Evaluate
   ( CacheScope (PersistentCache)
   , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
+  , CodecFailure (OpaqueCodecFailure)
   , CodecImplementation (CodecImplementation)
   , CodecInputs (..)
   , CodecRequirements (CodecRequirements)
@@ -60,7 +61,9 @@ import Dojang.Types.Codec.Evaluate
   , ExternalInput (..)
   , ExternalInputRequest (ExternalInputRequest)
   , codecRegistry
+  , noCodecInputs
   , opaqueBytes
+  , requiredCodecInputs
   , revealBytes
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
@@ -801,7 +804,7 @@ withConvergedIgnoredCodecFile action =
         implementation =
           CodecImplementation
             (CodecDefinition codecName "test-1" ReflectReject)
-            (const $ Right $ CodecRequirements mempty mempty [])
+            (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
             (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
             Nothing
             PersistentCache
@@ -1506,7 +1509,7 @@ reAddRuntimeWith dryRunPolicy mode spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReAdd)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       ( Just $ \_ deployed ->
           maybe
@@ -1529,7 +1532,7 @@ rejectRuntime spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReject)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache
@@ -1547,7 +1550,7 @@ identityReflectRuntime spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectIdentity)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache
@@ -1566,7 +1569,7 @@ countingRejectRuntime count spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReject)
-      (const $ Right $ CodecRequirements mempty mempty [counterInput])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [counterInput])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache
@@ -1590,7 +1593,7 @@ countingReAddRuntime count spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReAdd)
-      (const $ Right $ CodecRequirements mempty mempty [counterInput])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [counterInput])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       (Just $ \_ deployed -> Right $ revealBytes deployed)
       PersistentCache
@@ -1614,7 +1617,10 @@ rotatingReAddRuntime resolutionCount spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReAdd)
-      (const $ Right $ CodecRequirements ["os"] mempty [keyInput])
+      ( const $
+          Right $
+            CodecRequirements (requiredCodecInputs ["os"]) noCodecInputs [keyInput]
+      )
       ( \inputs -> do
           key <- inputKey inputs
           Right $ key <> ":" <> revealBytes inputs.rawSource
@@ -1628,11 +1634,11 @@ rotatingReAddRuntime resolutionCount spec' =
       )
       PersistentCache
       EvaluatePurely
-  inputKey :: CodecInputs -> Either Text.Text ByteString
+  inputKey :: CodecInputs -> Either CodecFailure ByteString
   inputKey inputs =
     case Map.lookup keyInput inputs.externalInputs of
       Just input -> Right $ revealBytes input.value
-      Nothing -> Left "missing key"
+      Nothing -> Left $ OpaqueCodecFailure "missing key"
   resolve request
     | request == keyInput = do
         count <- liftIO $ readIORef resolutionCount

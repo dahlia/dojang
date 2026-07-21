@@ -46,6 +46,7 @@ import Dojang.Commands
 import Dojang.Commands.Hook (withCommandHooks)
 import Dojang.ExitCodes (codecError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.Types.Codec.BuiltIn (builtInCodecRuntime)
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
@@ -56,7 +57,6 @@ import Dojang.Types.Codec.Evaluate
   ( CodecRuntime
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , formatCodecError
-  , identityCodecRuntime
   )
 import Dojang.Types.Context
   ( Context (..)
@@ -116,7 +116,7 @@ status :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
 status options = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
-  statusWithCodecRuntime (identityCodecRuntime mode) options
+  statusWithCodecRuntime (builtInCodecRuntime mode) options
 
 
 -- | Runs status reporting with an explicit codec runtime.
@@ -134,7 +134,7 @@ statusCore :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
 statusCore options = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
-  statusCoreWithCodecRuntime (identityCodecRuntime mode) options
+  statusCoreWithCodecRuntime (builtInCodecRuntime mode) options
 
 
 -- | Runs hook-free status reporting with an explicit codec runtime.

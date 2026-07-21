@@ -116,7 +116,7 @@
     },
     "codec": {
       "title": "Route codec",
-      "description": "The codec that renders repository bytes into deployed bytes. A string selects a codec with no configuration.",
+      "description": "The codec that renders repository bytes into deployed bytes. A string selects a codec with no configuration. Built-ins are identity and template.",
       "oneOf": [
         {
           "type": "string",

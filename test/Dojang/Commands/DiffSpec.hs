@@ -52,6 +52,7 @@ import Dojang.Types.Codec.Evaluate
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , codecRegistry
   , identityCodecRuntime
+  , noCodecInputs
   , revealBytes
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
@@ -187,7 +188,7 @@ testRuntime dryRunPolicy mode codecSpec render =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReject)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ render $ TestInputs $ revealBytes inputs.rawSource)
       Nothing
       PersistentCache

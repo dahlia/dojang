@@ -58,6 +58,7 @@ import Dojang.ExitCodes
   , fileNotRoutedError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.Types.Codec.BuiltIn (builtInCodecRuntime)
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
@@ -70,7 +71,6 @@ import Dojang.Types.Codec.Evaluate
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , OpaqueBytes
   , formatCodecError
-  , identityCodecRuntime
   , revealBytes
   )
 import Dojang.Types.Context
@@ -99,7 +99,7 @@ diff mode diffProgram files =
     dryRun' <- asks (.dryRun)
     let evaluationMode = if dryRun' then DryRunEvaluation else NormalEvaluation
     diffWithCodecRuntime
-      (identityCodecRuntime evaluationMode)
+      (builtInCodecRuntime evaluationMode)
       mode
       diffProgram
       files
