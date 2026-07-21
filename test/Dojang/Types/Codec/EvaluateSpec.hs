@@ -152,8 +152,10 @@ spec = do
         Right evaluated -> revealBytes evaluated.renderedBytes === deployed
       (revealBytes <$> reflectedResult) === Right source
 
-    specify "reuses a valid cache entry without rendering again" $ do
-      let runtime = testRuntime EvaluatePurely NormalEvaluation
+    specify "reuses a valid cache entry without rendering again" $ hedgehog $ do
+      cachedSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+      let cachedBytes = "cached:" <> cachedSuffix
+          runtime = testRuntime EvaluatePurely NormalEvaluation
           request = evaluationRequest testSpec "source" $ Map.singleton "class" "work"
           action = do
             first <- evaluateCodec runtime request Nothing
@@ -163,9 +165,12 @@ spec = do
                 evaluateCodec
                   runtime
                   request
-                  (Just $ CodecCacheEntry evaluated.cacheKey evaluated.renderedBytes)
+                  ( Just $
+                      CodecCacheEntry evaluated.cacheKey $
+                        opaqueBytes cachedBytes
+                  )
           (result, _resolverCount) = runState action 0
-      revealBytes . (.renderedBytes) <$> result `shouldBe` Right "source:work"
+      (revealBytes . (.renderedBytes) <$> result) === Right cachedBytes
 
     specify "requires a cache for cached-only dry runs" $ do
       let runtime = testRuntime CachedOnly DryRunEvaluation
@@ -175,8 +180,10 @@ spec = do
         `shouldBe` "Route route codec test cannot run during dry-run without a valid cache."
       renderCount `shouldBe` 0
 
-    specify "reuses a dry-run cache when no external input is declared" $ do
-      let request =
+    specify "reuses a dry-run cache when no external input is declared" $ hedgehog $ do
+      cachedSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+      let cachedBytes = "dry-run-cache:" <> cachedSuffix
+          request =
             evaluationRequest testSpec "source" $
               Map.singleton "class" "work"
           (normalResult, _) =
@@ -190,7 +197,7 @@ spec = do
       evaluated <- case normalResult of
         Left err -> fail $ Text.unpack $ formatCodecError err
         Right value -> return value
-      let cache = CodecCacheEntry evaluated.cacheKey evaluated.renderedBytes
+      let cache = CodecCacheEntry evaluated.cacheKey $ opaqueBytes cachedBytes
           (dryRunResult, _) =
             runState
               ( evaluateCodec
@@ -199,8 +206,7 @@ spec = do
                   (Just cache)
               )
               0
-      revealBytes . (.renderedBytes) <$> dryRunResult
-        `shouldBe` Right "source:work"
+      (revealBytes . (.renderedBytes) <$> dryRunResult) === Right cachedBytes
 
     specify "does not resolve external inputs without a dry-run cache" $ do
       let request = evaluationRequest reversibleSpec "source" Map.empty
