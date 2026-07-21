@@ -22,6 +22,7 @@ import Test.Hspec.Expectations.Pretty (shouldBe)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem qualified as FileSystem
+import Dojang.Types.Codec (identityCodecSpec)
 import Dojang.Types.Context
   ( FileCorrespondence (..)
   , FileDeltaKind (Unchanged)
@@ -74,6 +75,7 @@ spec = do
               CopyRoute
               "definition"
               Map.empty
+              identityCodecSpec
       routes <- makeCurrentRoutes [route]
       let normalizedRouteName = normalise rawRouteName
       case Map.lookup normalizedRouteName routes of
@@ -105,6 +107,7 @@ spec = do
                   CopyRoute
                   "route-definition"
                   Map.empty
+                  identityCodecSpec
               )
               relative
               (correspondence relative)
@@ -140,6 +143,7 @@ spec = do
                   SymlinkRoute
                   "route-definition"
                   Map.empty
+                  identityCodecSpec
               )
               mempty
               correspondence
@@ -194,6 +198,7 @@ spec = do
               target.snapshotPath
               target.routeDefinition
               target.routeProvenance
+              target.codecState
               target.fingerprint
               target.updatedBy
               target.updatedTime
@@ -380,6 +385,7 @@ fixtureTarget definition destinationName = do
       , snapshotPath = snapshot
       , routeDefinition = definition
       , routeProvenance = Map.empty
+      , codecState = Nothing
       , fingerprint = FileFingerprint 3 "abc"
       , updatedBy = Applied
       , updatedTime = timestamp

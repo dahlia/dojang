@@ -21,6 +21,13 @@ import Dojang.Syntax.Manifest.Parser
   , formatErrors
   , readManifest
   )
+import Dojang.Types.Codec
+  ( CodecConfiguration (CodecConfiguration)
+  , CodecSpec (CodecSpec)
+  , CodecValue (CodecBoolean, CodecString)
+  , identityCodecSpec
+  , parseCodecName
+  )
 import Dojang.Types.Environment (Kernel (Kernel), emptyEnvironment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression
@@ -110,6 +117,35 @@ spec = do
   gitconfig <- runIO $ encodeFS ".gitconfig"
   foo <- runIO $ encodeFS "foo"
   let Right posix = parseMonikerName "posix"
+
+  specify "reads string and configured route codecs" $ do
+    let Just identityName = parseCodecName "identity"
+        Just exampleName = parseCodecName "example"
+        stringManifest =
+          detailedManifest
+            "{ when = \"always\", path = \"target\", codec = \"identity\" }"
+        configuredManifest =
+          detailedManifest
+            "{ when = \"always\", path = \"target\", codec = { name = \"example\", config = { profile = \"work\", strict = true } } }"
+        Right (stringParsed, _) = readManifest stringManifest
+        Just stringRoute = Map.lookup foo stringParsed.fileRoutes
+        Right (configuredParsed, _) = readManifest configuredManifest
+        Just configuredRoute = Map.lookup foo configuredParsed.fileRoutes
+        codecSpecs :: FileRoute -> [Maybe CodecSpec]
+        codecSpecs route = fmap (fmap (.codec) . snd) route.predicates
+    codecSpecs stringRoute
+      `shouldBe` [Just $ CodecSpec identityName $ CodecConfiguration Map.empty]
+    codecSpecs configuredRoute
+      `shouldBe` [ Just $
+                     CodecSpec
+                       exampleName
+                       ( CodecConfiguration $
+                           Map.fromList
+                             [ ("profile", CodecString "work")
+                             , ("strict", CodecBoolean True)
+                             ]
+                       )
+                 ]
 
   specify "reads compact and conditional manifest variables" $ do
     let toml =
@@ -500,7 +536,11 @@ spec = do
           `shouldBe` [
                        ( Moniker known
                        , Just $
-                           RouteTarget (BareComponent "target") Private CopyRoute
+                           RouteTarget
+                             (BareComponent "target")
+                             Private
+                             CopyRoute
+                             identityCodecSpec
                        )
                      ]
 
@@ -521,6 +561,7 @@ spec = do
                              (BareComponent "target")
                              DefaultMode
                              SymlinkRoute
+                             identityCodecSpec
                        )
                      ]
 
@@ -579,6 +620,29 @@ spec = do
           \, kind = \"symlink\", mode = \"private\" }"
       )
 
+  specify "rejects a codec on a null or symlink-kind branch" $ do
+    expectDetailedRouteError
+      foo
+      MetadataOnNullRoute
+      (detailedManifest "{ when = \"always\", codec = \"identity\" }")
+    expectDetailedRouteError
+      foo
+      CodecOnSymlinkRoute
+      ( detailedManifest
+          "{ when = \"always\", path = \"target\", kind = \"symlink\", codec = \"example\" }"
+      )
+
+  specify "rejects unsupported codec configuration values" $ do
+    let invalid =
+          [ "{ when = \"always\", path = \"target\", codec = { name = \"example\", config = { ratio = 1.5 } } }"
+          , "{ when = \"always\", path = \"target\", codec = { name = \"\" } }"
+          , "{ when = \"always\", path = \"target\", codec = { name = \"example\", extra = true } }"
+          ]
+    forM_ invalid $ \branch ->
+      case readManifest $ detailedManifest branch of
+        Left _ -> return ()
+        Right _ -> expectationFailure $ "Expected rejection: " <> unpack branch
+
   specify "accepts an explicit default mode on a symlink-kind branch" $ do
     let result =
           readManifest $
@@ -597,6 +661,7 @@ spec = do
                              (BareComponent "target")
                              DefaultMode
                              SymlinkRoute
+                             identityCodecSpec
                        )
                      ]
 

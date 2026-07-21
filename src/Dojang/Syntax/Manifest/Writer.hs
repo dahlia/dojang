@@ -54,6 +54,11 @@ import Dojang.Syntax.Manifest.Internal
   , always
   )
 import qualified Dojang.Syntax.Manifest.Internal as Internal
+import Dojang.Types.Codec
+  ( CodecSpec (..)
+  , identityCodecSpec
+  , renderCodecName
+  )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -110,6 +115,8 @@ data WriteError
   | -- | A symlink-kind route target declares a non-default mode, which the
     -- manifest syntax rejects.
     ModeOnSymlinkRoute OsPath RouteMode
+  | -- | A symlink-kind route target declares a non-identity codec.
+    CodecOnSymlinkRoute OsPath Text
   deriving (Eq, Show)
 
 
@@ -146,6 +153,12 @@ formatWriteError (ModeOnSymlinkRoute route mode) =
     <> " declares mode "
     <> renderRouteMode mode
     <> " on a symlink-kind target, which cannot carry a mode."
+formatWriteError (CodecOnSymlinkRoute route codec) =
+  "Route "
+    <> pack (decodePath route)
+    <> " declares codec "
+    <> codec
+    <> " on a symlink-kind target, which cannot render repository bytes."
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -231,6 +244,9 @@ writeManifest manifest = do
     | target.kind == SymlinkRoute
     , target.mode /= DefaultMode =
         Left $ ModeOnSymlinkRoute routeName target.mode
+    | target.kind == SymlinkRoute
+    , target.codec /= identityCodecSpec =
+        Left $ CodecOnSymlinkRoute routeName $ renderCodecName target.codec.name
     | fileType' == Directory
     , target.mode == Executable || target.mode == PrivateExecutable =
         Left $ ExecutableModeOnDirectoryRoute routeName target.mode
@@ -409,6 +425,10 @@ mapFileRoute' monikers fileRoute =
           Just target
             | target.kind /= CopyRoute ->
                 Just $ renderRouteKind target.kind
+          _ -> Nothing
+      , Internal.routeCodec = case filePath of
+          Just target
+            | target.codec /= identityCodecSpec -> Just target.codec
           _ -> Nothing
       , Internal.routeUnexpectedFields = []
       }

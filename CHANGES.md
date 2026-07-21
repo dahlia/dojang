@@ -8,6 +8,29 @@ To be released.
 
 ### Command-line interface
 
+ -  Detailed route branches can declare a byte-oriented `codec`.  The default
+    `identity` codec preserves all existing behavior; this release provides the
+    codec interpreter and test injection points but no template or secret
+    codec.  Applying a route writes its rendered bytes through the intermediate
+    snapshot, while status, diff, edit, and reflection use the same rendered
+    source view.  Registered codecs declare their inputs, dry-run behavior,
+    cache scope, and `identity`, `reject`, or validated `re-add` reflection
+    policy.  `--force` cannot bypass a codec's reflection policy.  Codec
+    diagnostics and plans redact source and rendered contents.  The built-in
+    diff reports non-UTF-8 rendered output as binary.  File routes using a
+    non-identity codec reject directory or symbolic-link destinations before
+    changing repository files.  Before writing a buffered codec result, Dojang
+    verifies that its authoritative input has not changed since evaluation.
+    Cache-only dry runs reject codecs with external inputs before invoking
+    their resolver.  Codec failures use exit code 39.  [[#43], [#70]]
+
+ -  Machine-state schema version 6 records only redacted codec metadata: the
+    implementation name and version, configuration digest, cache key, and
+    dependency fingerprints.  Rendered bytes remain in the intermediate
+    snapshot instead of being duplicated in state.  A cached result is reused
+    only when its deterministic key and recorded file fingerprint still match.
+    Schema versions 1 through 5 remain readable.  [[#43], [#70]]
+
  -  Detailed `[files]` and `[dirs]` route branches can declare portable
     destination modes.  The available modes are `private` (files `0600`,
     directories `0700`), `executable` (`0755`),
@@ -170,6 +193,7 @@ To be released.
 [#40]: https://github.com/dahlia/dojang/issues/40
 [#41]: https://github.com/dahlia/dojang/issues/41
 [#42]: https://github.com/dahlia/dojang/issues/42
+[#43]: https://github.com/dahlia/dojang/issues/43
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
@@ -179,8 +203,22 @@ To be released.
 [#67]: https://github.com/dahlia/dojang/pull/67
 [#68]: https://github.com/dahlia/dojang/pull/68
 [#69]: https://github.com/dahlia/dojang/pull/69
+[#70]: https://github.com/dahlia/dojang/pull/70
 
 ### Haskell API
+
+ -  Added declarative codec types, deterministic cache keys, a controlled
+    effect interpreter, typed redacted failures, and explicit runtime injection
+    for apply, status, diff, edit, and reflect commands.  `CodecImplementation`
+    transformations are now pure rather than monadic; embedding applications
+    must move filesystem, process, or secret lookup effects into the declared
+    external-input resolver.  Command-scoped evaluations are reused while the
+    raw source remains stable.  Forward and reverse transformations receive the
+    validated route configuration.  Their resolved inputs are frozen for
+    re-add reflection, and manifest variables reach codecs as native
+    operating-system bytes rather than a lossy `Text` conversion.  Convergence
+    publication rechecks the raw source.  `CodecEvaluationRequest.variables`
+    therefore now uses `Map Text ByteString`.  [[#43], [#70]]
 
  -  `FileRoute` branches now carry a `RouteTarget`, which combines a path
     expression with `RouteMode` and `RouteKind`, instead of a bare

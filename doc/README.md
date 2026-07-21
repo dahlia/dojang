@@ -25,6 +25,7 @@ There are also reference docs for various topics:
  -  [Machine state](machine-state.en.md)
  -  [Hooks](hooks.en.md)
  -  [Routing](routing.en.md)
+ -  [Route codecs](codecs.en.md)
  -  [Environment](environment.en.md)
  -  [Machine facts](machine-facts.en.md)
  -  [Environment predicate](environment-predicate.en.md)

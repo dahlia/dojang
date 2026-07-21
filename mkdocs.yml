@@ -24,6 +24,7 @@ plugins:
       nav_translations:
         Home: 홈
         References: 참조
+        Codecs: 코덱
         Cookbook: 레시피 책
         Changelog: 변경 내역 (英)
     reconfigure_material: true
@@ -37,6 +38,7 @@ nav:
   - machine-state.md
   - hooks.md
   - routing.md
+  - codecs.md
   - environment.md
   - machine-facts.md
   - environment-predicate.md

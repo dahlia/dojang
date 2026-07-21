@@ -8,6 +8,7 @@ import Data.List (nub)
 import Test.Hspec (Spec, describe, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
+import Dojang.Types.Codec (identityCodecSpec)
 import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
@@ -128,7 +129,9 @@ spec = do
   describe "RouteTarget" $ do
     specify "routeTarget defaults to a plain copied route" $ do
       let expr = BareComponent "foo"
-      routeTarget expr `shouldBe` RouteTarget expr DefaultMode CopyRoute
+      routeTarget expr
+        `shouldBe` RouteTarget expr DefaultMode CopyRoute identityCodecSpec
       (routeTarget expr).expression `shouldBe` expr
       (routeTarget expr).mode `shouldBe` DefaultMode
       (routeTarget expr).kind `shouldBe` CopyRoute
+      (routeTarget expr).codec `shouldBe` identityCodecSpec

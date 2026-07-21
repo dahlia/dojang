@@ -9,13 +9,18 @@
 module Dojang.Commands.Edit
   ( defaultEditor
   , edit
+  , editWithCodecRuntime
   , getEditor
   , runEditor
   ) where
 
 import Control.Monad (filterM, foldM, forM, forM_, unless, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.Reader (asks)
 import Data.List (isPrefixOf, nub)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
+import Data.Word (Word32)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (hIsTerminalDevice, stderr, stdin)
@@ -29,7 +34,12 @@ import FortyTwo.Prompts.Select (select)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
 import TextShow (showt)
 
-import Dojang.App (App, ensureContext)
+import Dojang.App
+  ( App
+  , AppEnv (dryRun)
+  , ensureContext
+  , prepareMachineState
+  )
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -40,7 +50,7 @@ import Dojang.Commands
   , printStderr
   , printStderr'
   )
-import Dojang.Commands.Apply qualified (apply)
+import Dojang.Commands.Apply qualified (applyWithCodecRuntime)
 import Dojang.Commands.Disambiguation
   ( disambiguateRoutes
   , getAutoSelectMode
@@ -52,6 +62,7 @@ import Dojang.Commands.Hook
 import Dojang.Commands.Status (printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
+  , codecError
   , externalProgramNonZeroExit
   , fileNotRoutedError
   , sourceCannotBeTargetError
@@ -59,6 +70,17 @@ import Dojang.ExitCodes
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified as FS
+import Dojang.Types.Codec.Context
+  ( EvaluatedManagedCorrespondence (..)
+  , evaluateManagedCorrespondencesWithCache
+  , loadCodecCacheEntries
+  )
+import Dojang.Types.Codec.Evaluate
+  ( CodecRuntime
+  , EvaluationMode (DryRunEvaluation, NormalEvaluation)
+  , formatCodecError
+  , identityCodecRuntime
+  )
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
@@ -66,14 +88,17 @@ import Dojang.Types.Context
   , FileDeltaKind (..)
   , FileEntry (..)
   , IgnoredFile (..)
+  , ManagedCorrespondence (..)
   , RouteMatch (..)
   , findCandidateRoutesFor
   , findMatchingRoutes
   , getIgnoredFiles
-  , makeCorrespond
   , makeCorrespondBetweenThreeFiles
+  , makeManagedCorrespond
   , projectExpectedState
+  , routePaths
   )
+import Dojang.Types.PathIdentity (destinationPathIdentity)
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 
 
@@ -131,24 +156,27 @@ edit
   -- ^ The target file paths to edit (may be empty for all changed files).
   -> App i ExitCode
 edit editorOpt noApply force sequential allFlag includeUnregistered explicitSource paths =
-  withCommandHooks
-    "edit"
-    (disambiguatedHookScopePaths explicitSource paths)
-    ( editCore
-        editorOpt
-        noApply
-        force
-        sequential
-        allFlag
-        includeUnregistered
-        explicitSource
-        paths
-    )
+  do
+    dryRun' <- asks (.dryRun)
+    let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
+    editWithCodecRuntime
+      (identityCodecRuntime mode)
+      editorOpt
+      noApply
+      force
+      sequential
+      allFlag
+      includeUnregistered
+      explicitSource
+      paths
 
 
-editCore
+-- | Opens selected source files and applies them with an explicit codec
+-- runtime.
+editWithCodecRuntime
   :: (MonadFileSystem i, MonadIO i)
-  => Maybe String
+  => CodecRuntime (App i)
+  -> Maybe String
   -> Bool
   -> Bool
   -> Bool
@@ -157,12 +185,58 @@ editCore
   -> Maybe OsPath
   -> [OsPath]
   -> App i ExitCode
-editCore editorOpt noApply force sequential allFlag _includeUnregistered _explicitSource [] = do
+editWithCodecRuntime
+  runtime
+  editorOpt
+  noApply
+  force
+  sequential
+  allFlag
+  includeUnregistered
+  explicitSource
+  paths =
+    withCommandHooks
+      "edit"
+      (disambiguatedHookScopePaths explicitSource paths)
+      ( editCore
+          runtime
+          editorOpt
+          noApply
+          force
+          sequential
+          allFlag
+          includeUnregistered
+          explicitSource
+          paths
+      )
+
+
+editCore
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> Maybe String
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Maybe OsPath
+  -> [OsPath]
+  -> App i ExitCode
+editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered _explicitSource [] = do
   -- No arguments: edit source files of all changed files
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
-  (allFiles, ws) <- makeCorrespond ctx >>= ensureRouteOwnership
+  machineState <- prepareMachineState ctx.repository.manifest
+  (rawManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  cache <- loadCodecCacheEntries ctx machineState rawManaged
+  evaluatedResult <-
+    evaluateManagedCorrespondencesWithCache runtime ctx cache rawManaged
+  evaluated <- case evaluatedResult of
+    Left err -> die' codecError $ formatCodecError err
+    Right value -> return value
+  let allFiles = (.managed.correspondence) <$> evaluated
   let changedFiles = filter isChanged allFiles
   printWarnings ws
 
@@ -186,7 +260,39 @@ editCore editorOpt noApply force sequential allFlag _includeUnregistered _explic
             ignored.sourcePath
             ignored.destinationPath
       else return []
-  let changedIgnored = filter isChanged ignoredCorrespondences
+  (routes, _) <- routePaths ctx
+  let routesByName =
+        Map.fromList [(normalise route.routeName, route) | route <- routes]
+      managedIdentities = Set.fromList $ correspondenceIdentity <$> allFiles
+  ignoredManaged <-
+    fmap concat $
+      forM (zip existingIgnored ignoredCorrespondences) $
+        \(ignored, correspondence) ->
+          case Map.lookup (normalise ignored.routeName) routesByName of
+            Nothing -> return []
+            Just route ->
+              let managed =
+                    ManagedCorrespondence
+                      route
+                      (makeRelative route.sourcePath correspondence.source.path)
+                      correspondence
+              in return
+                   [ managed
+                   | correspondenceIdentity correspondence
+                       `Set.notMember` managedIdentities
+                   ]
+  ignoredCache <- loadCodecCacheEntries ctx machineState ignoredManaged
+  evaluatedIgnoredResult <-
+    evaluateManagedCorrespondencesWithCache
+      runtime
+      ctx
+      ignoredCache
+      ignoredManaged
+  evaluatedIgnored <- case evaluatedIgnoredResult of
+    Left err -> die' codecError $ formatCodecError err
+    Right value -> return value
+  let changedIgnored =
+        filter isChanged $ (.managed.correspondence) <$> evaluatedIgnored
 
   -- Print warnings for ignored files
   unless (null existingIgnored) $ do
@@ -247,11 +353,18 @@ editCore editorOpt noApply force sequential allFlag _includeUnregistered _explic
       if proceed
         then do
           let sourceFiles = map (.source.path) allChangedFiles
-          runEditorOnFiles editorOpt noApply force sequential sourceFiles
+          runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles
         else do
           printStderr "Cancelled."
           liftIO $ exitWith userCancelledError
-editCore editorOpt noApply force sequential _allFlag _includeUnregistered explicitSource paths = do
+ where
+  correspondenceIdentity
+    :: FileCorrespondence -> ([Word32], [Word32])
+  correspondenceIdentity correspondence =
+    ( destinationPathIdentity correspondence.source.path
+    , destinationPathIdentity correspondence.destination.path
+    )
+editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
@@ -375,7 +488,7 @@ editCore editorOpt noApply force sequential _allFlag _includeUnregistered explic
             return srcPath
 
   let sourceFiles = existingSourceFiles ++ newSourceFiles
-  runEditorOnFiles editorOpt noApply force sequential sourceFiles
+  runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles
 
 
 -- | Check if a file correspondence has changes.
@@ -386,7 +499,8 @@ isChanged fc = fc.sourceDelta /= Unchanged || fc.destinationDelta /= Unchanged
 -- | Run the editor on the given source files.
 runEditorOnFiles
   :: (MonadFileSystem i, MonadIO i)
-  => Maybe String
+  => CodecRuntime (App i)
+  -> Maybe String
   -- ^ The @--editor@ option.
   -> Bool
   -- ^ The @--no-apply@ flag.
@@ -397,7 +511,7 @@ runEditorOnFiles
   -> [OsPath]
   -- ^ The source file paths to edit.
   -> App i ExitCode
-runEditorOnFiles editorOpt noApply force sequential sourceFiles = do
+runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles = do
   pathStyle <- pathStyleFor stderr
 
   -- Get the editor to use.
@@ -427,7 +541,7 @@ runEditorOnFiles editorOpt noApply force sequential sourceFiles = do
             -- Apply after each file if not disabled.
             unless noApply $ do
               printStderr "Applying changes..."
-              _ <- Dojang.Commands.Apply.apply force []
+              _ <- Dojang.Commands.Apply.applyWithCodecRuntime runtime force []
               return ()
         else do
           -- Concurrent mode: open all files at once.
@@ -438,7 +552,7 @@ runEditorOnFiles editorOpt noApply force sequential sourceFiles = do
           -- Apply changes if not disabled.
           unless noApply $ do
             printStderr "Applying changes..."
-            _ <- Dojang.Commands.Apply.apply force []
+            _ <- Dojang.Commands.Apply.applyWithCodecRuntime runtime force []
             return ()
       return ExitSuccess
 

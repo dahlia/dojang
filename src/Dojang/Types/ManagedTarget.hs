@@ -8,6 +8,7 @@
 module Dojang.Types.ManagedTarget
   ( CurrentEntry (..)
   , CurrentRoute (..)
+  , ManagedCodecState (..)
   , ManagedTarget (..)
   , OrphanReason (..)
   , OrphanStatus (..)
@@ -88,6 +89,22 @@ data SynchronizationCommand = Applied | Reflected
   deriving (Eq, Ord, Show)
 
 
+-- | Redacted codec metadata stored with a converged target.
+data ManagedCodecState = ManagedCodecState
+  { name :: Text
+  -- ^ Exact codec name.
+  , version :: Text
+  -- ^ Codec implementation version.
+  , configurationDigest :: Text
+  -- ^ Digest of normalized declarative configuration.
+  , cacheKey :: Text
+  -- ^ Exact deterministic evaluation cache key.
+  , dependencies :: Map Text Text
+  -- ^ Declared input identities and their fingerprints.
+  }
+  deriving (Eq, Ord, Show)
+
+
 -- | One successfully synchronized destination entry.
 data ManagedTarget = ManagedTarget
   { targetId :: Text
@@ -113,6 +130,8 @@ data ManagedTarget = ManagedTarget
   -- ^ Canonical selected route definition.
   , routeProvenance :: Map Text Text
   -- ^ Environment facts and privacy-preserving input fingerprints.
+  , codecState :: Maybe ManagedCodecState
+  -- ^ Redacted codec evaluation metadata.  Legacy and identity records omit it.
   , fingerprint :: TargetFingerprint
   -- ^ Destination identity after the synchronization.
   , updatedBy :: SynchronizationCommand

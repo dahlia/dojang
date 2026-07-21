@@ -33,7 +33,8 @@ import qualified Dojang.MonadFileSystem as FileSystem
 import Dojang.Syntax.Manifest.Parser (formatErrors, readManifest)
 import Dojang.Syntax.Manifest.Writer
   ( WriteError
-      ( DuplicateStatefulHookId
+      ( CodecOnSymlinkRoute
+      , DuplicateStatefulHookId
       , ExecutableModeOnDirectoryRoute
       , InvalidHookConfiguration
       , ModeOnSymlinkRoute
@@ -44,6 +45,13 @@ import Dojang.Syntax.Manifest.Writer
   , writeManifestFile
   )
 import Dojang.TestUtils (withTempDir)
+import Dojang.Types.Codec
+  ( CodecConfiguration (CodecConfiguration)
+  , CodecSpec (CodecSpec)
+  , CodecValue (CodecBoolean, CodecString)
+  , identityCodecSpec
+  , parseCodecName
+  )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Always, Architecture, Moniker, OperatingSystem, Or)
   , normalizePredicate
@@ -334,7 +342,12 @@ spec = do
             (`HashMap.lookup` monikers)
             [
               ( Moniker alpha
-              , Just $ RouteTarget (BareComponent "target") Private CopyRoute
+              , Just $
+                  RouteTarget
+                    (BareComponent "target")
+                    Private
+                    CopyRoute
+                    identityCodecSpec
               )
             ]
             File
@@ -359,7 +372,11 @@ spec = do
             [
               ( Always
               , Just $
-                  RouteTarget (BareComponent "target") DefaultMode SymlinkRoute
+                  RouteTarget
+                    (BareComponent "target")
+                    DefaultMode
+                    SymlinkRoute
+                    identityCodecSpec
               )
             ]
             File
@@ -395,8 +412,80 @@ spec = do
         toml = writeValidManifest manifest'
     toml `shouldSatisfy` (not . isInfixOf "mode =")
     toml `shouldSatisfy` (not . isInfixOf "kind =")
+    toml `shouldSatisfy` (not . isInfixOf "codec =")
     let Right (parsed, _) = readManifest toml
     parsed `shouldBe` manifest'
+
+  specify "writes configured route codecs losslessly" $ do
+    let Just codecName = parseCodecName "example"
+        codec =
+          CodecSpec
+            codecName
+            ( CodecConfiguration $
+                Map.fromList
+                  [ ("profile", CodecString "work")
+                  , ("strict", CodecBoolean True)
+                  ]
+            )
+        route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget
+                    (BareComponent "target")
+                    DefaultMode
+                    CopyRoute
+                    codec
+              )
+            ]
+            File
+        manifest' =
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+        toml = writeValidManifest manifest'
+    -- The parser accepts the compact inline spelling; toml-parser writes the
+    -- equivalent nested tables as its canonical representation.
+    toml `shouldSatisfy` isInfixOf "[files.foo.codec]"
+    toml `shouldSatisfy` isInfixOf "[files.foo.codec.config]"
+    toml `shouldSatisfy` isInfixOf "name = \"example\""
+    toml `shouldSatisfy` isInfixOf "profile = \"work\""
+    let Right (parsed, _) = readManifest toml
+    parsed `shouldBe` manifest'
+
+  specify "refuses to write a codec on a symlink route" $ do
+    let Just codecName = parseCodecName "example"
+        codec = CodecSpec codecName $ CodecConfiguration Map.empty
+        route =
+          fileRoutePreservingOrder
+            (const Nothing)
+            [
+              ( Always
+              , Just $
+                  RouteTarget
+                    (BareComponent "target")
+                    DefaultMode
+                    SymlinkRoute
+                    codec
+              )
+            ]
+            File
+        manifest' =
+          Manifest
+            Nothing
+            HashMap.empty
+            Map.empty
+            (Map.singleton path route)
+            Map.empty
+            Map.empty
+    writeManifest manifest'
+      `shouldBe` Left (CodecOnSymlinkRoute path "example")
 
   specify "refuses to write executable modes on directory routes" $ do
     let route =
@@ -405,7 +494,11 @@ spec = do
             [
               ( Always
               , Just $
-                  RouteTarget (BareComponent "target") Executable CopyRoute
+                  RouteTarget
+                    (BareComponent "target")
+                    Executable
+                    CopyRoute
+                    identityCodecSpec
               )
             ]
             Directory
@@ -427,7 +520,11 @@ spec = do
             [
               ( Always
               , Just $
-                  RouteTarget (BareComponent "target") Private SymlinkRoute
+                  RouteTarget
+                    (BareComponent "target")
+                    Private
+                    SymlinkRoute
+                    identityCodecSpec
               )
             ]
             File
