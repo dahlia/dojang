@@ -60,6 +60,7 @@ import Dojang.Types.Codec.Evaluate
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , ExternalInput (..)
   , ExternalInputRequest (ExternalInputRequest)
+  , codecImplementationWithSourceRequirements
   , codecRegistry
   , noCodecInputs
   , opaqueBytes
@@ -548,6 +549,22 @@ spec = sequential $ do
             `shouldReturn` ExitSuccess
           readFile source `shouldReturn` "new"
           readIORef resolutionCount `shouldReturn` 1
+
+    it "analyzes a reconstructed source after missing-source re-add" $
+      withMissingRotatingReAddFile $
+        \appEnv source destination codecSpec -> do
+          runAppWithoutLogging
+            appEnv
+            ( reflectWithCodecRuntime
+                (sourceAwareReAddRuntime codecSpec)
+                False
+                True
+                False
+                Nothing
+                [destination]
+            )
+            `shouldReturn` ExitSuccess
+          readFile source `shouldReturn` "new"
 
     it "rejects ambiguous reflection of routes sharing a source" $
       withSharedSourceReAddRoutes $
@@ -1646,6 +1663,34 @@ rotatingReAddRuntime resolutionCount spec' =
         let key = if count == 0 then "A" else "B"
         return $ Right $ ExternalInput (opaqueBytes key) (Text.pack $ show key)
     | otherwise = return $ Left "unexpected external input"
+
+
+sourceAwareReAddRuntime :: CodecSpec -> CodecRuntime (App IO)
+sourceAwareReAddRuntime spec' =
+  CodecRuntime
+    (codecRegistry [implementation])
+    NormalEvaluation
+    (const $ return $ Left "unexpected external input")
+ where
+  CodecSpec name _ = spec'
+  implementation =
+    codecImplementationWithSourceRequirements
+      (CodecDefinition name "test-1" ReflectReAdd)
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      ( \_ source ->
+          if revealBytes source == ""
+            then Left "source must not be empty"
+            else Right $ CodecRequirements noCodecInputs noCodecInputs []
+      )
+      (\inputs -> Right $ "A:" <> revealBytes inputs.rawSource)
+      ( Just $ \_ deployed ->
+          maybe
+            (Left "deployed bytes use another key")
+            Right
+            (ByteString.stripPrefix "A:" $ revealBytes deployed)
+      )
+      PersistentCache
+      EvaluatePurely
 
 
 withReflectRepository

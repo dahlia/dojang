@@ -36,6 +36,7 @@ module Dojang.Types.Codec.Evaluate
   , ExternalInputRequest (..)
   , OpaqueBytes
   , codecRegistry
+  , codecConfigurationRequirements
   , codecImplementationWithSourceRequirements
   , codecRequirements
   , codecReflectPolicy
@@ -47,6 +48,7 @@ module Dojang.Types.Codec.Evaluate
   , opaqueBytes
   , reevaluateCodec
   , reflectCodec
+  , reflectCodecWithoutSourceWithEvaluation
   , reflectCodecWithEvaluation
   , reflectEvaluatedCodec
   , reflectEvaluatedCodecWithEvaluation
@@ -690,7 +692,32 @@ reflectCodecWithEvaluation
   -> CodecEvaluationRequest
   -> OpaqueBytes
   -> m (Either CodecError (OpaqueBytes, Maybe EvaluatedCodec))
-reflectCodecWithEvaluation runtime request deployed = case Map.lookup codecName runtime.registry of
+reflectCodecWithEvaluation = reflectCodecUsingSourceRequirements True
+
+
+-- | Reconstructs repository bytes when the repository source is missing.
+--
+-- Only configuration requirements are resolved before reversal.  The
+-- reconstructed source is then analyzed and evaluated by the normal
+-- round-trip validation, so a missing source is never represented to a codec
+-- as a real empty source.
+reflectCodecWithoutSourceWithEvaluation
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
+  -> OpaqueBytes
+  -> m (Either CodecError (OpaqueBytes, Maybe EvaluatedCodec))
+reflectCodecWithoutSourceWithEvaluation = reflectCodecUsingSourceRequirements False
+
+
+reflectCodecUsingSourceRequirements
+  :: (Monad m)
+  => Bool
+  -> CodecRuntime m
+  -> CodecEvaluationRequest
+  -> OpaqueBytes
+  -> m (Either CodecError (OpaqueBytes, Maybe EvaluatedCodec))
+reflectCodecUsingSourceRequirements analyzeSource runtime request deployed = case Map.lookup codecName runtime.registry of
   Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
   Just implementation -> case implementation.validateConfiguration configuration of
     Left reason ->
@@ -707,7 +734,14 @@ reflectCodecWithEvaluation runtime request deployed = case Map.lookup codecName 
         , implementation.dryRunPolicy == CachedOnly ->
             return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
       CodecDefinition _ _ ReflectReAdd -> do
-        case implementation.requirementsForSource configuration request.rawSource of
+        let sourceRequirementsResult =
+              if analyzeSource
+                then
+                  implementation.requirementsForSource
+                    configuration
+                    request.rawSource
+                else Right $ CodecRequirements noCodecInputs noCodecInputs []
+        case sourceRequirementsResult of
           Left failure ->
             return $ Left $ CodecError request.routeName codecName $ InvalidSource failure
           Right sourceRequirements -> do
@@ -878,8 +912,29 @@ reverseWithInputs request implementation requirements inputs dependencies deploy
   CodecSpec codecName _ = request.codec
 
 
--- | Validates a codec configuration and returns its declared inputs without
--- resolving or evaluating any of them.
+-- | Validates a codec configuration and returns its configuration-declared
+-- inputs without inspecting source bytes or resolving any input.
+codecConfigurationRequirements
+  :: CodecRuntime m
+  -- ^ Runtime containing the codec registry.
+  -> Text
+  -- ^ Route name used to scope any validation error.
+  -> CodecSpec
+  -- ^ Codec name and configuration to validate.
+  -> Either CodecError CodecRequirements
+  -- ^ A redacted validation error or the configuration-declared inputs.
+codecConfigurationRequirements runtime routeName (CodecSpec name configuration) =
+  case Map.lookup name runtime.registry of
+    Nothing -> Left $ CodecError routeName name UnknownCodec
+    Just implementation ->
+      case implementation.validateConfiguration configuration of
+        Left failure ->
+          Left $ CodecError routeName name $ InvalidConfiguration failure
+        Right requirements -> Right requirements
+
+
+-- | Validates a codec configuration and source, returning all declared inputs
+-- without resolving or evaluating any of them.
 codecRequirements
   :: CodecRuntime m
   -- ^ Runtime containing the codec registry.

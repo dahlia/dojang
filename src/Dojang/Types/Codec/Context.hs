@@ -59,6 +59,7 @@ import Dojang.Types.Codec.Evaluate
   , CodecRuntime
   , EvaluatedCodec (..)
   , OpaqueBytes
+  , codecConfigurationRequirements
   , codecReflectPolicy
   , codecRequirements
   , codecSourceTypeError
@@ -66,6 +67,7 @@ import Dojang.Types.Codec.Evaluate
   , opaqueBytes
   , reevaluateCodec
   , reflectCodecWithEvaluation
+  , reflectCodecWithoutSourceWithEvaluation
   , reflectEvaluatedCodecWithEvaluation
   , revealBytes
   )
@@ -460,16 +462,27 @@ reflectManagedCorrespondence runtime context managed evaluated deployed = do
         source <- case sourceStat of
           File _ -> readFile managed.correspondence.source.path
           Missing -> return ByteString.empty
-        case codecRequirements
-          runtime
-          routeName
-          managed.route.codec
-          (opaqueBytes source) of
+        let requirementsResult = case sourceStat of
+              File _ ->
+                codecRequirements
+                  runtime
+                  routeName
+                  managed.route.codec
+                  (opaqueBytes source)
+              Missing ->
+                codecConfigurationRequirements
+                  runtime
+                  routeName
+                  managed.route.codec
+        case requirementsResult of
           Left err -> return $ Left err
           Right requirements -> do
             (variables, warnings) <- resolveRequiredVariables context requirements
+            let reflect = case sourceStat of
+                  File _ -> reflectCodecWithEvaluation
+                  Missing -> reflectCodecWithoutSourceWithEvaluation
             fmap (\(raw, snapshot) -> (raw, snapshot, warnings))
-              <$> reflectCodecWithEvaluation
+              <$> reflect
                 runtime
                 ( CodecEvaluationRequest
                     routeName

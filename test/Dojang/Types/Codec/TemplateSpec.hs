@@ -295,7 +295,8 @@ spec = describe "template codec" $ do
               (builtInCodecRuntime NormalEvaluation)
               request
               (opaqueBytes "Grace")
-    fmap revealBytes result `shouldSatisfy` either (const True) (const False)
+    either formatCodecError (const "unexpected success") result
+      `shouldBe` "Route git/config codec template rejects reflection."
 
 
 render
