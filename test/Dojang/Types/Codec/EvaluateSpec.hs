@@ -87,6 +87,40 @@ spec = do
       first.cacheKey `shouldBe` second.cacheKey
       first.cacheKey `shouldNotBe` third.cacheKey
 
+    specify "matches declared fact keys case-insensitively" $ hedgehog $ do
+      requiredName <-
+        forAll $ Gen.element ["class", "Class", "CLASS", "cLaSs"]
+      availableName <-
+        forAll $ Gen.element ["class", "Class", "CLASS", "cLaSs"]
+      let implementation =
+            CodecImplementation
+              (CodecDefinition testName "1" ReflectReject)
+              ( const $
+                  Right $
+                    CodecRequirements (Set.singleton requiredName) Set.empty []
+              )
+              ( \inputs -> case Map.lookup requiredName inputs.facts of
+                  Just value -> Right value
+                  Nothing -> Left "missing case-insensitive fact"
+              )
+              Nothing
+              PersistentCache
+              EvaluatePurely
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              NormalEvaluation
+              (const $ pure $ Left "unexpected external input")
+          request =
+            evaluationRequest
+              testSpec
+              "source"
+              (Map.singleton availableName "work")
+          result = runIdentity $ evaluateCodec runtime request Nothing
+      case result of
+        Left err -> fail $ Text.unpack $ formatCodecError err
+        Right evaluated -> revealBytes evaluated.renderedBytes === "work"
+
     specify "preserves arbitrary declared variable bytes" $ hedgehog $ do
       variable <- forAll $ Gen.bytes $ Range.linear 0 4096
       let request =

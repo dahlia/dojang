@@ -39,6 +39,7 @@ module Dojang.Types.Codec.Evaluate
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.CaseInsensitive (foldCase)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -712,7 +713,8 @@ selectInputs namespace codecName routeName required available = do
   pairs <- traverse select $ Set.toAscList required
   return (Map.fromList $ fst <$> pairs, snd <$> pairs)
  where
-  select name = case Map.lookup name available of
+  canonicalAvailable = Map.mapKeys foldCase available
+  select name = case Map.lookup (foldCase name) canonicalAvailable of
     Nothing ->
       Left $
         CodecError routeName codecName $

@@ -56,6 +56,7 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , dryRunIO
   )
+import Dojang.Syntax.Env (writeEnvFile)
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Codec
@@ -79,6 +80,13 @@ import Dojang.Types.Codec.Evaluate
   , codecRegistry
   , opaqueBytes
   , revealBytes
+  )
+import Dojang.Types.Environment
+  ( Architecture (X86_64)
+  , Kernel (Kernel)
+  , OperatingSystem (Linux)
+  , emptyEnvironment
+  , withFacts
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
@@ -220,6 +228,36 @@ spec = sequential $ do
         runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
           `shouldReturn` ExitSuccess
         readFile destination `shouldReturn` "raw"
+
+    it "looks up codec machine facts case-insensitively" $
+      withCodecFile $ \appEnv _ _ destination spec' -> do
+        let CodecSpec name _ = spec'
+            environment =
+              withFacts
+                (Map.singleton "Team" "platform")
+                (emptyEnvironment Linux X86_64 $ Kernel "Linux" "6.0")
+            implementation =
+              CodecImplementation
+                (CodecDefinition name "test-1" ReflectReject)
+                (const $ Right $ CodecRequirements ["team"] mempty [])
+                ( \inputs -> case Map.lookup "team" inputs.facts of
+                    Just value -> Right value
+                    Nothing -> Left "missing case-insensitive fact"
+                )
+                Nothing
+                PersistentCache
+                EvaluatePurely
+            runtime =
+              CodecRuntime
+                (codecRegistry [implementation])
+                NormalEvaluation
+                (const $ return $ Left "unexpected external input")
+        writeEnvFile
+          environment
+          (appEnv.sourceDirectory </> appEnv.envFile)
+        runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+          `shouldReturn` ExitSuccess
+        readFile destination `shouldReturn` "platform"
 
     it "does not evaluate the default identity codec" $
       withTwoManagedFiles $ \appEnv sourceA destinationA _ -> do
