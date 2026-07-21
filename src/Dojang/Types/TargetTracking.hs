@@ -242,13 +242,21 @@ observeConvergedManagedTarget repository snapshotRoot command now managed =
 observeConvergedManagedTargetWithRenderedSource
   :: (MonadFileSystem m)
   => Repository
+  -- ^ Repository whose source root owns the managed entry.
   -> OsPath
+  -- ^ Caller-owned transaction root for any new baseline.
   -> SynchronizationCommand
+  -- ^ Command responsible for the synchronization.
   -> UTCTime
+  -- ^ Time recorded on a newly observed target.
   -> Maybe OpaqueBytes
+  -- ^ Codec-rendered source bytes, when source observation requires them.
   -> Maybe ByteString.ByteString
+  -- ^ Digest of the raw source used to produce the rendered bytes.
   -> ManagedCorrespondence
+  -- ^ Selected correspondence to re-observe.
   -> m (Maybe (Text, Maybe ManagedTarget))
+  -- ^ No update, a successful deletion, or a new managed record.
 observeConvergedManagedTargetWithRenderedSource
   repository
   snapshotRoot

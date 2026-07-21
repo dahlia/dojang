@@ -295,7 +295,12 @@ codecRegistry = Map.fromList . fmap entry
 
 
 -- | Runtime containing only the built-in identity codec.
-identityCodecRuntime :: (Applicative m) => EvaluationMode -> CodecRuntime m
+identityCodecRuntime
+  :: (Applicative m)
+  => EvaluationMode
+  -- ^ Whether transformations may run or must obey dry-run policy.
+  -> CodecRuntime m
+  -- ^ Runtime with the identity codec and no external-input resolver.
 identityCodecRuntime mode =
   CodecRuntime
     { registry = codecRegistry [identityImplementation]
@@ -321,9 +326,13 @@ identityCodecRuntime mode =
 evaluateCodec
   :: (Monad m)
   => CodecRuntime m
+  -- ^ Registry, evaluation mode, and external-input resolver to use.
   -> CodecEvaluationRequest
+  -- ^ Route, codec specification, source bytes, and available inputs.
   -> Maybe CodecCacheEntry
+  -- ^ Previously rendered entry to reuse when its key still matches.
   -> m (Either CodecError EvaluatedCodec)
+  -- ^ A redacted codec error or the rendered bytes and cache metadata.
 evaluateCodec runtime request cached = case Map.lookup codecName runtime.registry of
   Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
   Just implementation -> case implementation.validateConfiguration configuration of
@@ -631,9 +640,13 @@ reverseWithInputs request implementation inputs dependencies deployed =
 -- resolving or evaluating any of them.
 codecRequirements
   :: CodecRuntime m
+  -- ^ Runtime containing the codec registry.
   -> Text
+  -- ^ Route name used to scope any validation error.
   -> CodecSpec
+  -- ^ Codec name and configuration to validate.
   -> Either CodecError CodecRequirements
+  -- ^ A redacted validation error or the codec's declared inputs.
 codecRequirements runtime routeName spec = case Map.lookup name runtime.registry of
   Nothing -> Left $ CodecError routeName name UnknownCodec
   Just implementation -> case implementation.validateConfiguration configuration of
@@ -647,9 +660,13 @@ codecRequirements runtime routeName spec = case Map.lookup name runtime.registry
 -- | Returns the validated reflection policy for a registered codec.
 codecReflectPolicy
   :: CodecRuntime m
+  -- ^ Runtime containing the codec registry.
   -> Text
+  -- ^ Route name used to scope any validation error.
   -> CodecSpec
+  -- ^ Codec name and configuration whose policy is requested.
   -> Either CodecError ReflectPolicy
+  -- ^ A redacted validation error or the codec's reflection policy.
 codecReflectPolicy _ _ spec
   | spec == identityCodecSpec = Right ReflectIdentity
 codecReflectPolicy runtime routeName spec@(CodecSpec name _) = do
@@ -661,7 +678,15 @@ codecReflectPolicy runtime routeName spec@(CodecSpec name _) = do
 
 
 -- | Constructs a redacted error for a source entry a codec cannot render.
-codecSourceTypeError :: Text -> CodecSpec -> Text -> CodecError
+codecSourceTypeError
+  :: Text
+  -- ^ Route name used to scope the error.
+  -> CodecSpec
+  -- ^ Codec specification associated with the route.
+  -> Text
+  -- ^ Human-readable name of the unsupported source entry type.
+  -> CodecError
+  -- ^ A redacted unsupported-source error.
 codecSourceTypeError routeName (CodecSpec name _) sourceType =
   CodecError routeName name $ UnsupportedSourceType sourceType
 
@@ -779,7 +804,11 @@ requestName (ExternalInputRequest name) = name
 
 
 -- | Formats a redacted, route-scoped codec error.
-formatCodecError :: CodecError -> Text
+formatCodecError
+  :: CodecError
+  -- ^ Typed codec error whose sensitive details must remain hidden.
+  -> Text
+  -- ^ User-facing error text safe to log or display.
 formatCodecError (CodecError routeName codecName kind) =
   "Route " <> routeName <> " codec " <> renderCodecName codecName <> case kind of
     UnknownCodec -> " is not registered."
