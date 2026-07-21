@@ -45,7 +45,7 @@ import Dojang.Types.Codec.Evaluate
   , CodecRuntime (CodecRuntime)
   , EvaluatedCodec (..)
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
-  , ExternalInput
+  , ExternalInput (ExternalInput)
   , ExternalInputRequest (ExternalInputRequest)
   , codecRegistry
   , evaluateCodec
@@ -211,6 +211,38 @@ spec = do
       either formatCodecError (const "unexpected success") result
         `shouldBe` "Route route codec reversible cannot run during dry-run without a valid cache."
       resolutionCount `shouldBe` 0
+
+    specify "stops resolving external inputs after the first failure" $ do
+      let first = ExternalInputRequest "first"
+          second = ExternalInputRequest "second"
+          implementation =
+            CodecImplementation
+              (CodecDefinition testName "1" ReflectReject)
+              ( const $
+                  Right $
+                    CodecRequirements Set.empty Set.empty [first, second]
+              )
+              (Right . revealBytes . (.rawSource))
+              Nothing
+              PersistentCache
+              EvaluatePurely
+          resolve
+            :: ExternalInputRequest
+            -> State [ExternalInputRequest] (Either Text ExternalInput)
+          resolve externalRequest = do
+            previousRequests <- get
+            put $ previousRequests <> [externalRequest]
+            return $
+              if externalRequest == first
+                then Left "unavailable"
+                else Right $ ExternalInput (opaqueBytes "value") "stable"
+          runtime = CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+          request = evaluationRequest testSpec "source" Map.empty
+          (result, resolvedRequests) =
+            runState (evaluateCodec runtime request Nothing) []
+      either formatCodecError (const "unexpected success") result
+        `shouldBe` "Route route codec test could not resolve declared input first."
+      resolvedRequests `shouldBe` [first]
 
     specify "does not resolve external inputs to validate a dry-run cache" $ hedgehog $ do
       cacheKey <- forAll $ Gen.bytes $ Range.linear 0 256

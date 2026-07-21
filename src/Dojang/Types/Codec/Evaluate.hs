@@ -675,9 +675,9 @@ resolveInputs
 resolveInputs runtime request requirements = case selectTextInputs of
   Left err -> return $ Left err
   Right (facts, variables, dependencies) -> do
-    external <- traverse resolveExternal requirements.externalInputs
+    externalResult <- resolveExternals requirements.externalInputs
     return $ do
-      resolvedExternal <- sequence external
+      resolvedExternal <- externalResult
       let externalMap = Map.fromList resolvedExternal
           externalDependencies =
             [ CodecDependency
@@ -715,6 +715,13 @@ resolveInputs runtime request requirements = case selectTextInputs of
           CodecError request.routeName codecName $
             ExternalInputFailure (requestName externalRequest) reason
       Right input -> Right (externalRequest, input)
+  resolveExternals [] = return $ Right []
+  resolveExternals (externalRequest : externalRequests) = do
+    result <- resolveExternal externalRequest
+    case result of
+      Left err -> return $ Left err
+      Right resolved ->
+        fmap (resolved :) <$> resolveExternals externalRequests
 
 
 selectInputs
