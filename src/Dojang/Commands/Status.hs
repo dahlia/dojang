@@ -10,11 +10,15 @@ module Dojang.Commands.Status
   , printUnsupportedModeWarnings
   , printWarnings
   , status
+  , statusCoreWithEvaluated
+  , statusCoreWithCodecRuntime
   , statusCore
+  , statusWithCodecRuntime
   ) where
 
 import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.Reader (asks)
 import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import Data.Map.Strict qualified as Map
@@ -29,17 +33,31 @@ import System.Console.Pretty (Color (..))
 import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
-import Dojang.App (App, ensureContext, prepareMachineState)
+import Dojang.App (App, AppEnv (dryRun), ensureContext, prepareMachineState)
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
+  , die'
   , ensureRouteOwnership
   , pathStyleFor
   , printStderr'
   , printTable
   )
 import Dojang.Commands.Hook (withCommandHooks)
+import Dojang.ExitCodes (codecError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.Types.Codec.Context
+  ( EvaluatedManagedCorrespondence (..)
+  , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
+  , loadCodecCacheEntries
+  )
+import Dojang.Types.Codec.Evaluate
+  ( CodecRuntime
+  , EvaluationMode (DryRunEvaluation, NormalEvaluation)
+  , formatCodecError
+  , identityCodecRuntime
+  )
 import Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
@@ -95,16 +113,69 @@ defaultStatusOptions =
 
 
 status :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
-status options =
-  withCommandHooks "status" [] $ statusCore options
+status options = do
+  dryRun' <- asks (.dryRun)
+  let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
+  statusWithCodecRuntime (identityCodecRuntime mode) options
+
+
+-- | Runs status reporting with an explicit codec runtime.
+statusWithCodecRuntime
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> StatusOptions
+  -> App i ExitCode
+statusWithCodecRuntime runtime options =
+  withCommandHooks "status" [] $ statusCoreWithCodecRuntime runtime options
 
 
 -- | Runs status reporting without lifecycle hooks for command-internal use.
 statusCore :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
 statusCore options = do
+  dryRun' <- asks (.dryRun)
+  let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
+  statusCoreWithCodecRuntime (identityCodecRuntime mode) options
+
+
+-- | Runs hook-free status reporting with an explicit codec runtime.
+statusCoreWithCodecRuntime
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> StatusOptions
+  -> App i ExitCode
+statusCoreWithCodecRuntime runtime options = do
   ctx <- ensureContext
   machineState <- prepareMachineState ctx.repository.manifest
-  (managed, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  (rawManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  cache <- loadCodecCacheEntries ctx machineState rawManaged
+  evaluatedResult <-
+    evaluateManagedCorrespondencesWithCache runtime ctx cache rawManaged
+  evaluated <- case evaluatedResult of
+    Left err -> die' codecError $ formatCodecError err
+    Right value -> return value
+  statusCoreWithEvaluated
+    ctx
+    machineState
+    ws
+    rawManaged
+    evaluated
+    options
+
+
+-- | Prints status from codec evaluations already prepared by the enclosing
+-- command.  The complete raw correspondence list is used only for orphan
+-- classification; rows and mode notes are limited to the evaluated selection.
+statusCoreWithEvaluated
+  :: (MonadFileSystem i, MonadIO i)
+  => Context (App i)
+  -> MachineState
+  -> [RouteMapWarning]
+  -> [ManagedCorrespondence]
+  -> [EvaluatedManagedCorrespondence]
+  -> StatusOptions
+  -> App i ExitCode
+statusCoreWithEvaluated ctx machineState ws allManaged evaluated options = do
+  let managed = (.managed) <$> evaluated
   let files = (.correspondence) <$> managed
   let files' = if options.onlyChanges then filter isChanged files else files
   sourcePath <- makeAbsolute ctx.repository.sourcePath
@@ -139,9 +210,9 @@ statusCore options = do
     , if options.showDestinationPath then "Destination File" else "Source File"
     ]
     rows
-  printOrphans ctx managed machineState
+  printOrphans ctx allManaged machineState
   printModeNotes managed
-  printWarnings ws
+  printWarnings $ nub $ ws <> evaluationWarnings evaluated
   return ExitSuccess
 
 

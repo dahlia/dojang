@@ -2,14 +2,16 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Dojang.Commands.Apply (apply) where
+module Dojang.Commands.Apply (apply, applyWithCodecRuntime) where
 
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
+import Data.List (nub)
 import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
@@ -18,7 +20,7 @@ import Prelude hiding (readFile)
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Data.Map.Strict (fromList, notMember, toList)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set qualified as Set
 import System.OsPath
   ( OsPath
@@ -28,7 +30,7 @@ import System.OsPath
 
 import Dojang.App
   ( App
-  , AppEnv (debug, manifestFile, stateDirectory)
+  , AppEnv (debug, dryRun, manifestFile, stateDirectory)
   , ensureContext
   , markMachineStateApplied
   , prepareMachineState
@@ -53,15 +55,33 @@ import Dojang.Commands.Status
   ( defaultStatusOptions
   , printUnsupportedModeWarnings
   , printWarnings
-  , statusCore
+  , statusCoreWithEvaluated
   )
 import Dojang.ExitCodes
   ( accidentalDeletionWarning
+  , codecError
   , conflictError
   , fileNotRoutedError
   , machineStateError
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.Types.Codec.Context
+  ( EvaluatedManagedCorrespondence (..)
+  , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
+  , loadCodecCacheEntries
+  , managedCodecStateFor
+  , rawSourceDigestFor
+  , rawSourceFor
+  , renderedSourceFor
+  , reuseEvaluatedManagedCorrespondence
+  )
+import Dojang.Types.Codec.Evaluate
+  ( CodecRuntime
+  , EvaluationMode (DryRunEvaluation, NormalEvaluation)
+  , formatCodecError
+  , identityCodecRuntime
+  )
 import Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
@@ -97,7 +117,7 @@ import Dojang.Types.Reconciliation
   , SyncOp (..)
   , destructiveOperations
   , executeReconciliationPlanGuarded
-  , observeReconciliationInput
+  , observeReconciliationInputWithRenderedSourceGuard
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
@@ -106,12 +126,25 @@ import Dojang.Types.RouteOwnership (ExpectedState (..))
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
-  , observeConvergedManagedTarget
+  , observeConvergedManagedTargetWithRenderedSource
   )
 
 
 apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
 apply force filePaths = do
+  dryRun' <- asks (.dryRun)
+  let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
+  applyWithCodecRuntime (identityCodecRuntime mode) force filePaths
+
+
+-- | Applies selected routes using an explicit codec runtime.
+applyWithCodecRuntime
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> Bool
+  -> [OsPath]
+  -> App i ExitCode
+applyWithCodecRuntime codecRuntime force filePaths = do
   ctx <- ensureContext
   machineState <- prepareMachineState ctx.repository.manifest
   let isFirstApply = not machineState.firstApplied
@@ -150,11 +183,20 @@ apply force filePaths = do
             | (srcAbsPath, f) <- toList fileMap
             , srcAbsPath `elem` filePaths'
             ]
-  let files = (.correspondence) <$> managed
+  cache <- loadCodecCacheEntries ctx machineState managed
+  evaluatedResult <-
+    evaluateManagedCorrespondencesWithCache codecRuntime ctx cache managed
+  evaluated <- case evaluatedResult of
+    Left err -> die' codecError $ formatCodecError err
+    Right value -> return value
+  let managed' = (.managed) <$> evaluated
+  let files = (.correspondence) <$> managed'
   $(logDebugSH) files
-  printUnsupportedModeWarnings managed
+  printUnsupportedModeWarnings managed'
   inputs <-
-    mapM (observeSelectedReconciliationInput ctx expectedState) managed
+    mapM
+      (observeSelectedReconciliationInput ctx expectedState)
+      evaluated
   let conflictPolicy =
         if force then PreferAuthoritative else RefuseConflicts
   let plan =
@@ -247,8 +289,18 @@ apply force filePaths = do
             else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
-  when debug' (void $ statusCore defaultStatusOptions)
-  let persist = persistConvergedTargets ctx machineState managed
+  when
+    debug'
+    ( void $
+        statusCoreWithEvaluated
+          ctx
+          machineState
+          ws
+          allManaged
+          evaluated
+          defaultStatusOptions
+    )
+  let persist = persistConvergedTargets ctx machineState evaluated
   void
     ( executeReconciliationPlanGuarded
         (printSyncOp . (.syncOp))
@@ -257,8 +309,34 @@ apply force filePaths = do
         `catchError` \err -> persist >> throwError err
     )
   persist
-  when debug' (void $ statusCore defaultStatusOptions)
-  printWarnings ws
+  when debug' $ do
+    refreshedMachineState <- prepareMachineState ctx.repository.manifest
+    (refreshedManaged, refreshedWarnings) <-
+      makeManagedCorrespond ctx >>= ensureRouteOwnership
+    let evaluationByPath =
+          Map.fromList
+            [ (correspondenceIdentity item.managed, item)
+            | item <- evaluated
+            ]
+        selectedRefreshed =
+          mapMaybe
+            ( \refreshed -> do
+                previous <- Map.lookup (correspondenceIdentity refreshed) evaluationByPath
+                return (refreshed, previous)
+            )
+            refreshedManaged
+    refreshedEvaluated <-
+      forM selectedRefreshed $ \(refreshed, previous) ->
+        reuseEvaluatedManagedCorrespondence refreshed previous
+    void $
+      statusCoreWithEvaluated
+        ctx
+        refreshedMachineState
+        refreshedWarnings
+        refreshedManaged
+        refreshedEvaluated
+        defaultStatusOptions
+  printWarnings $ nub $ ws <> evaluationWarnings evaluated
 
   -- Run post-apply hooks
   when isFirstApply $ do
@@ -268,13 +346,19 @@ apply force filePaths = do
   executeHooks hookEnv ctx PostApply
   when isFirstApply $ markMachineStateApplied machineState
   return ExitSuccess
+ where
+  correspondenceIdentity :: ManagedCorrespondence -> (OsPath, OsPath)
+  correspondenceIdentity managed =
+    ( normalise managed.correspondence.source.path
+    , normalise managed.correspondence.destination.path
+    )
 
 
 persistConvergedTargets
   :: (MonadFileSystem i, MonadIO i)
   => Context (App i)
   -> MachineState
-  -> [ManagedCorrespondence]
+  -> [EvaluatedManagedCorrespondence]
   -> App i ()
 persistConvergedTargets ctx machineState selected =
   unless (null selected) $ do
@@ -291,12 +375,7 @@ persistConvergedTargets ctx machineState selected =
             observations <-
               ( catMaybes
                   <$> mapM
-                    ( observeConvergedManagedTarget
-                        ctx.repository
-                        transaction
-                        Applied
-                        now
-                    )
+                    (observeWithCodecState transaction now)
                     selected
               )
                 `catchError` \err -> do
@@ -328,6 +407,22 @@ persistConvergedTargets ctx machineState selected =
     case result of
       Left err -> die' machineStateError $ formatStateError err
       Right _ -> return ()
+ where
+  observeWithCodecState transaction now evaluated = do
+    observation <-
+      observeConvergedManagedTargetWithRenderedSource
+        ctx.repository
+        transaction
+        Applied
+        now
+        (renderedSourceFor evaluated)
+        (rawSourceDigestFor evaluated)
+        evaluated.managed
+    let codecState' = managedCodecStateFor evaluated
+    return $ case observation of
+      Just (identifier, Just target) ->
+        Just (identifier, Just target{codecState = codecState'})
+      _ -> observation
 
 
 -- | Observes a correspondence that the command has already selected.  A
@@ -337,11 +432,17 @@ observeSelectedReconciliationInput
   :: (MonadFileSystem i, MonadIO i)
   => Context i
   -> ExpectedState
-  -> ManagedCorrespondence
+  -> EvaluatedManagedCorrespondence
   -> i ReconciliationInput
-observeSelectedReconciliationInput ctx expectedState managed = do
+observeSelectedReconciliationInput ctx expectedState evaluated = do
+  let managed = evaluated.managed
   input <-
-    observeReconciliationInput ctx managed.route.mode managed.correspondence
+    observeReconciliationInputWithRenderedSourceGuard
+      ctx
+      managed.route.mode
+      managed.correspondence
+      (renderedSourceFor evaluated)
+      (rawSourceFor evaluated)
   let protected =
         Map.findWithDefault
           []
@@ -381,6 +482,12 @@ printSyncOp (CopyFile src dst) = do
   pathStyle <- pathStyleFor stderr
   printStderr
     ("Copy " <> pathStyle src <> " to " <> pathStyle dst <> "...")
+printSyncOp (WriteContent _ dst) = do
+  pathStyle <- pathStyleFor stderr
+  printStderr ("Write rendered content to " <> pathStyle dst <> "...")
+printSyncOp (WriteContentGuarded _ _ dst) = do
+  pathStyle <- pathStyleFor stderr
+  printStderr ("Write rendered content to " <> pathStyle dst <> "...")
 printSyncOp (CreateDir path) = do
   pathStyle <- pathStyleFor stderr
   let path' = addTrailingPathSeparator path

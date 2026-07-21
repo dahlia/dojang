@@ -24,6 +24,7 @@ Dojang, 크로스플랫폼 닷파일 관리자
  -  [머신 상태](machine-state.ko.md)
  -  [훅](hooks.ko.md)
  -  [경로 지정](routing.ko.md)
+ -  [경로 규칙 코덱](codecs.ko.md)
  -  [환경](environment.ko.md)
  -  [머신 정보](machine-facts.ko.md)
  -  [환경 서술어](environment-predicate.ko.md)

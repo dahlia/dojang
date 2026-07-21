@@ -106,6 +106,19 @@ valid_manifests = [
                     "kind": "symlink",
                     "mode": "default",
                 },
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
+                    "codec": "identity",
+                },
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
+                    "codec": {
+                        "name": "example",
+                        "config": {"profile": "work", "strict": True},
+                    },
+                },
             ],
         },
         "dirs": {
@@ -148,6 +161,54 @@ invalid_manifests = [
     {"files": {"vimrc": [{"when": "always", "path": "~/.vimrc", "kind": "hardlink"}]}},
     {"files": {"vimrc": [{"when": "always", "mode": "private"}]}},
     {"files": {"vimrc": [{"when": "always", "kind": "symlink"}]}},
+    {"files": {"vimrc": [{"when": "always", "codec": "identity"}]}},
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
+                    "kind": "symlink",
+                    "codec": "example",
+                }
+            ]
+        }
+    },
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
+                    "kind": "symlink",
+                    "codec": {"name": "identity", "config": {"unexpected": True}},
+                }
+            ]
+        }
+    },
+    {"files": {"vimrc": [{"when": "always", "path": "x", "codec": ""}]}},
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "x",
+                    "codec": {"name": "example", "extra": True},
+                }
+            ]
+        }
+    },
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "x",
+                    "codec": {"name": "example", "config": {"ratio": 1.5}},
+                }
+            ]
+        }
+    },
     {
         "files": {
             "vimrc": [
@@ -156,6 +217,7 @@ invalid_manifests = [
                     "path": "~/.vimrc",
                     "kind": "symlink",
                     "mode": "private",
+                    "codec": "example",
                 }
             ]
         }

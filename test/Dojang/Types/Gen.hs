@@ -6,6 +6,7 @@ module Dojang.Types.Gen
   ( arbitraryManifest
   , architecture
   , ciText
+  , codecSpec
   , fileRoute
   , fileRoute'
   , fileRouteMap
@@ -57,6 +58,13 @@ import Test.Hspec.Hedgehog (MonadGen)
 
 import Data.Map.Strict qualified as Map
 import Dojang.MonadFileSystem (FileType (..))
+import Dojang.Types.Codec
+  ( CodecConfiguration (CodecConfiguration)
+  , CodecSpec (CodecSpec)
+  , CodecValue (..)
+  , identityCodecSpec
+  , parseCodecName
+  )
 import Dojang.Types.Environment
   ( Architecture (..)
   , Environment
@@ -440,7 +448,38 @@ routeTarget fileOrDir exprGen = do
                   , FileRoute.ReadOnly
                   ]
             ]
-  return $ FileRoute.RouteTarget expr mode kind
+  codec <- case kind of
+    FileRoute.SymlinkRoute -> pure identityCodecSpec
+    FileRoute.CopyRoute -> Gen.frequency [(5, pure identityCodecSpec), (2, codecSpec)]
+  return $ FileRoute.RouteTarget expr mode kind codec
+
+
+-- | Generates normalized declarative codec metadata.
+codecSpec :: (MonadGen m) => m CodecSpec
+codecSpec = do
+  nameText <- Gen.element ["test", "Template", "codec-v2"]
+  let Just name = parseCodecName $ pack nameText
+  CodecSpec name . CodecConfiguration <$> codecTable (2 :: Int)
+ where
+  codecTable depth = do
+    pairs <-
+      Gen.list (constant 0 4) $
+        (,)
+          <$> Gen.text (constantFrom 1 1 12) Gen.alphaNum
+          <*> codecValue depth
+    return $ Map.fromList pairs
+  codecValue depth =
+    Gen.choice $
+      [ CodecString <$> Gen.text (constant 0 32) Gen.unicode
+      , CodecInteger <$> Gen.integral (constant (-1000) 1000)
+      , CodecBoolean <$> Gen.bool
+      ]
+        <> if depth > 0
+          then
+            [ CodecArray <$> Gen.list (constant 0 4) (codecValue $ depth - 1)
+            , CodecTable <$> codecTable (depth - 1)
+            ]
+          else []
 
 
 osString :: (MonadGen m) => Range Int -> m Char -> m OsString

@@ -37,6 +37,7 @@ import Data.Map.Strict (Map, findWithDefault, fromListWith, toList)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding (decodeUtf8)
 import Numeric (showHex)
 import System.FilePattern (FilePattern, matchMany)
 import System.OsPath
@@ -51,6 +52,12 @@ import System.OsPath
   )
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
+import Dojang.Types.Codec
+  ( CodecSpec (..)
+  , codecSpecDigest
+  , identityCodecSpec
+  , renderCodecName
+  )
 import Dojang.Types.Environment
   ( Environment (..)
   , Kernel (..)
@@ -111,6 +118,8 @@ data RouteResult = RouteResult
   -- ^ Canonical selected destination expression.
   , routeProvenance :: Map Text Text
   -- ^ Environment facts and privacy-preserving input fingerprints.
+  , codec :: CodecSpec
+  -- ^ Codec selected by the dispatched route branch.
   }
   deriving (Eq, Show)
 
@@ -181,11 +190,30 @@ routePathsWithVariables repo env lookupVariable = do
           Just target : _ -> Just target
           _ -> Nothing
     let provenance = environmentProvenance <> expansionProvenance
-    let definition = maybe "" (toPathText . (.expression)) selected
+    let selectedCodec = maybe identityCodecSpec (.codec) selected
+    let definition =
+          maybe "" (toPathText . (.expression)) selected
+            <> if selectedCodec == identityCodecSpec
+              then ""
+              else
+                "\ncodec:"
+                  <> renderCodecName selectedCodec.name
+                  <> ":"
+                  <> decodeUtf8 (codecSpecDigest selectedCodec)
     let mode' = maybe DefaultMode (.mode) selected
     let kind' = maybe CopyRoute (.kind) selected
+    let codec' = selectedCodec
     return
-      (src, dstPath, route.fileType, mode', kind', definition, provenance, warnings)
+      ( src
+      , dstPath
+      , route.fileType
+      , mode'
+      , kind'
+      , definition
+      , provenance
+      , codec'
+      , warnings
+      )
   let paths' =
         [ RouteResult
             (repo.sourcePath </> src)
@@ -196,7 +224,8 @@ routePathsWithVariables repo env lookupVariable = do
             kind'
             definition
             provenance
-        | (src, Just dst', ft, mode', kind', definition, provenance, _) <- paths
+            codec'
+        | (src, Just dst', ft, mode', kind', definition, provenance, codec', _) <- paths
         ]
   overlappingRoutes <-
     forM (Data.Map.Strict.toList $ findOverlappingRouteResults paths') $
@@ -206,7 +235,7 @@ routePathsWithVariables repo env lookupVariable = do
         filtered <- filterIgnoredPathsFromOverlaps dst ignorePatterns overlaps'
         return ((name, dst), filtered)
   let warnings =
-        [translateWarning w | (_, _, _, _, _, _, _, ws) <- paths, w <- ws]
+        [translateWarning w | (_, _, _, _, _, _, _, _, ws) <- paths, w <- ws]
           ++ [ OverlapDestinationPathsWarning name dst (o :| overlaps')
              | ((name, dst), o : overlaps') <- overlappingRoutes
              ]

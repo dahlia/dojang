@@ -24,6 +24,12 @@ import Test.Hspec.Expectations.Pretty
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (..))
+import Dojang.Types.Codec
+  ( CodecConfiguration (CodecConfiguration)
+  , CodecSpec (CodecSpec)
+  , identityCodecSpec
+  , parseCodecName
+  )
 import Dojang.Types.Environment
   ( Kernel (..)
   , emptyEnvironment
@@ -142,6 +148,7 @@ spec = do
                            CopyRoute
                            (if win then "C:\\dst\\foo\\bar" else "/dst/foo/bar")
                            provenance
+                           identityCodecSpec
                        , RouteResult
                            (root </> src </> baz)
                            baz
@@ -154,6 +161,7 @@ spec = do
                                else "/dst/foo/bar/baz"
                            )
                            provenance
+                           identityCodecSpec
                        , RouteResult
                            (root </> src </> foo)
                            foo
@@ -163,6 +171,7 @@ spec = do
                            CopyRoute
                            (if win then "C:\\dst\\foo" else "/dst/foo")
                            provenance
+                           identityCodecSpec
                        , RouteResult
                            (root </> src </> qux)
                            qux
@@ -172,6 +181,7 @@ spec = do
                            CopyRoute
                            (if win then "C:\\dst\\foo\\qux" else "/dst/foo/qux")
                            provenance
+                           identityCodecSpec
                        ]
                      ,
                        [ OverlapDestinationPathsWarning
@@ -231,7 +241,9 @@ spec = do
           _ -> expectationFailure $ "Unexpected routes: " <> show routes
 
   specify "routePaths carries selected route metadata" $ do
-    let privateRoute =
+    let Just codecName = parseCodecName "example"
+        testCodec = CodecSpec codecName $ CodecConfiguration Map.empty
+        privateRoute =
           fileRoutePreservingOrder
             (const Nothing)
             [
@@ -241,6 +253,7 @@ spec = do
                     (PathSeparator (Substitution "DEST") (BareComponent "a"))
                     Private
                     CopyRoute
+                    testCodec
               )
             ]
             File
@@ -254,6 +267,7 @@ spec = do
                     (PathSeparator (Substitution "DEST") (BareComponent "b"))
                     DefaultMode
                     SymlinkRoute
+                    identityCodecSpec
               )
             ]
             Directory
@@ -272,8 +286,10 @@ spec = do
       routePaths repo env $ \variable ->
         return $ if variable == "DEST" then Just (root </> dst) else Nothing
     warnings `shouldBe` []
-    [(r.routeName, r.mode, r.kind) | r <- routes]
-      `shouldBe` [(bar, DefaultMode, SymlinkRoute), (foo, Private, CopyRoute)]
+    [(r.routeName, r.mode, r.kind, r.codec) | r <- routes]
+      `shouldBe` [ (bar, DefaultMode, SymlinkRoute, identityCodecSpec)
+                 , (foo, Private, CopyRoute, testCodec)
+                 ]
 
   specify "routePaths keeps only provenance used during expansion" $ do
     let route =
@@ -361,8 +377,8 @@ spec = do
         (secondRoutes, _) <-
           liftIO $ routePaths repo env (const $ return $ Just secondValue)
         case (firstRoutes, secondRoutes) of
-          ( [RouteResult _ _ _ _ _ _ _ firstProvenance]
-            , [RouteResult _ _ _ _ _ _ _ secondProvenance]
+          ( [RouteResult _ _ _ _ _ _ _ firstProvenance _]
+            , [RouteResult _ _ _ _ _ _ _ secondProvenance _]
             ) ->
               (firstProvenance == secondProvenance) === False
           _ ->
@@ -379,6 +395,7 @@ spec = do
           CopyRoute
           ""
           mempty
+          identityCodecSpec
       , RouteResult
           (root </> src </> bar)
           bar
@@ -388,6 +405,7 @@ spec = do
           CopyRoute
           ""
           mempty
+          identityCodecSpec
       , RouteResult
           (root </> src </> baz)
           baz
@@ -397,6 +415,7 @@ spec = do
           CopyRoute
           ""
           mempty
+          identityCodecSpec
       , RouteResult
           (root </> src </> qux)
           qux
@@ -406,6 +425,7 @@ spec = do
           CopyRoute
           ""
           mempty
+          identityCodecSpec
       ]
       `shouldBe` [
                    ( (baz, root </> foo </> baz)

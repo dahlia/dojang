@@ -4,24 +4,26 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-module Dojang.Commands.Reflect (reflect) where
+module Dojang.Commands.Reflect (reflect, reflectWithCodecRuntime) where
 
 import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (isPrefixOf, nub, sortOn)
+import Data.List (isPrefixOf, nub, nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Ord (Down (Down))
 import Data.Set qualified as Set
 import Data.Time (getCurrentTime)
+import Data.Word (Word32)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (hIsTerminalDevice, stderr, stdin)
+import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (pack)
+import Data.Text (Text, pack)
 import FortyTwo.Prompts.Confirm (confirm)
 import FortyTwo.Prompts.Select (select)
 import System.OsPath
@@ -34,7 +36,7 @@ import System.OsPath
 
 import Dojang.App
   ( App
-  , AppEnv (manifestFile, stateDirectory)
+  , AppEnv (dryRun, manifestFile, stateDirectory)
   , ensureContext
   , prepareMachineState
   )
@@ -61,6 +63,7 @@ import Dojang.Commands.Hook
 import Dojang.Commands.Status (printUnsupportedModeWarnings, printWarnings)
 import Dojang.ExitCodes
   ( ambiguousRouteError
+  , codecError
   , conflictError
   , fileNotFoundError
   , fileNotRoutedError
@@ -70,6 +73,33 @@ import Dojang.ExitCodes
   , userCancelledError
   )
 import Dojang.MonadFileSystem (FileType (File), MonadFileSystem (..))
+import Dojang.Types.Codec
+  ( CodecSpec (..)
+  , ReflectPolicy (ReflectIdentity, ReflectReAdd, ReflectReject)
+  , identityCodecSpec
+  , renderCodecName
+  )
+import Dojang.Types.Codec.Context
+  ( EvaluatedManagedCorrespondence (..)
+  , evaluateManagedCorrespondencesWithCache
+  , evaluationWarnings
+  , loadCodecCacheEntries
+  , managedCodecStateFor
+  , rawSourceDigestFor
+  , reevaluateManagedCorrespondence
+  , reflectManagedCorrespondence
+  , renderedSourceFor
+  )
+import Dojang.Types.Codec.Evaluate
+  ( CodecRuntime
+  , EvaluatedCodec
+  , EvaluationMode (DryRunEvaluation, NormalEvaluation)
+  , OpaqueBytes
+  , codecReflectPolicy
+  , formatCodecError
+  , identityCodecRuntime
+  , opaqueBytes
+  )
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
@@ -88,7 +118,9 @@ import Dojang.Types.Context
   , getUnregisteredFiles
   , makeCorrespondBetweenThreeFiles
   , makeManagedCorrespond
+  , routePaths
   )
+import Dojang.Types.Context qualified as Context
 import Dojang.Types.MachineState
   ( MachineState (..)
   , formatStateError
@@ -104,6 +136,7 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
+  , ContentGuard (ContentGuard)
   , PlannedSyncOp (..)
   , ReconciliationConflict (..)
   , ReconciliationDirection (..)
@@ -111,13 +144,18 @@ import Dojang.Types.Reconciliation
   , ReconciliationItem (..)
   , ReconciliationOutcome (..)
   , ReconciliationPlan (..)
+  , Replica (SourceReplica)
   , SyncOp (..)
   , executeReconciliationPlanGuarded
   , observeModeDrift
-  , observeReconciliationInput
+  , observeReconciliationInputWithRenderedSource
   , planReconciliation
   )
-import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.Repository
+  ( Repository (..)
+  , RouteMapWarning
+  , RouteResult (..)
+  )
 import Dojang.Types.RouteMetadata
   ( RouteKind (CopyRoute)
   , RouteMode (DefaultMode)
@@ -126,7 +164,7 @@ import Dojang.Types.RouteMetadata
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
   , newTargetSnapshotTransaction
-  , observeConvergedManagedTarget
+  , observeConvergedManagedTargetWithRenderedSource
   )
 
 
@@ -144,26 +182,51 @@ reflect
   -- ^ Target paths (may be empty for all changed files).
   -> App i ExitCode
 reflect force allFlag includeUnregistered explicitSource paths =
-  withCommandHooks
-    "reflect"
-    (disambiguatedHookScopePaths explicitSource paths)
-    (reflectCore force allFlag includeUnregistered explicitSource paths)
+  do
+    dryRun' <- asks (.dryRun)
+    let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
+    reflectWithCodecRuntime
+      (identityCodecRuntime mode)
+      force
+      allFlag
+      includeUnregistered
+      explicitSource
+      paths
 
 
-reflectCore
+-- | Reflects selected routes using an explicit codec runtime.
+reflectWithCodecRuntime
   :: (MonadFileSystem i, MonadIO i)
-  => Bool
+  => CodecRuntime (App i)
+  -> Bool
   -> Bool
   -> Bool
   -> Maybe OsPath
   -> [OsPath]
   -> App i ExitCode
-reflectCore force allFlag includeUnregistered _explicitSource [] = do
+reflectWithCodecRuntime runtime force allFlag includeUnregistered explicitSource paths =
+  withCommandHooks
+    "reflect"
+    (disambiguatedHookScopePaths explicitSource paths)
+    (reflectCore runtime force allFlag includeUnregistered explicitSource paths)
+
+
+reflectCore
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> Bool
+  -> Bool
+  -> Bool
+  -> Maybe OsPath
+  -> [OsPath]
+  -> App i ExitCode
+reflectCore runtime force allFlag includeUnregistered _explicitSource [] = do
   -- No arguments: reflect all changed files
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
   codeStyle <- codeStyleFor stderr
-  (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  (allEvaluated, ws) <- makeCodecAwareEvaluated runtime ctx
+  let allManaged = (.managed) <$> allEvaluated
   let allFiles = (.correspondence) <$> allManaged
   -- Metadata-only drift also needs reconciliation, even when contents
   -- converged:
@@ -196,7 +259,35 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
             ignored.sourcePath
             ignored.destinationPath
       else return []
-  let changedIgnored = filter isChanged ignoredCorrespondences
+  evaluatedIgnored <-
+    if null ignoredCorrespondences
+      then return []
+      else do
+        (resolvedRoutes, _) <- routePaths ctx
+        let routesByName =
+              Map.fromList
+                [ (normalise route.routeName, route)
+                | route <- resolvedRoutes
+                ]
+            managedIdentities =
+              Set.fromList $ correspondenceIdentity <$> allFiles
+            ignoredManaged =
+              [ ManagedCorrespondence
+                  route
+                  (makeRelative route.sourcePath correspondence.source.path)
+                  correspondence
+              | (ignored, correspondence) <-
+                  zip existingIgnored ignoredCorrespondences
+              , Just route <-
+                  [Map.lookup (normalise ignored.routeName) routesByName]
+              , correspondenceIdentity correspondence
+                  `Set.notMember` managedIdentities
+              ]
+        if null ignoredManaged
+          then return []
+          else evaluateManaged runtime ctx ignoredManaged
+  let changedIgnored =
+        filter isChanged $ (.managed.correspondence) <$> evaluatedIgnored
 
   -- Print warnings for ignored files
   unless (null existingIgnored) $ do
@@ -302,8 +393,7 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
     then do
       printStderr "No changed files to reflect."
       machineState <- prepareMachineState ctx.repository.manifest
-      (managed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
-      persistConvergedTargets ctx machineState managed
+      persistConvergedTargets ctx machineState allEvaluated
       return ExitSuccess
     else do
       -- Display changed files
@@ -324,15 +414,24 @@ reflectCore force allFlag includeUnregistered _explicitSource [] = do
               else return True -- Non-interactive: proceed
       if proceed
         then do
-          reflectCorrespondences ctx force True selectedCorrespondences
+          reflectCorrespondences
+            runtime
+            ctx
+            force
+            True
+            (allEvaluated <> evaluatedIgnored)
+            selectedCorrespondences
           return ExitSuccess
         else do
           printStderr "Cancelled."
           liftIO $ exitWith userCancelledError
-reflectCore force allFlag _includeUnregistered explicitSource paths = do
+reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
   pathStyle <- pathStyleFor stderr
-  absPaths <- mapM makeAbsolute paths
+  absPaths <-
+    nubBy
+      (\left right -> destinationPathIdentity left == destinationPathIdentity right)
+      <$> mapM makeAbsolute paths
   nonExistents <- filterM (fmap not . exists) absPaths
   let rejectUntrackedMissingPath path (correspond :: FileCorrespondence) =
         when
@@ -363,11 +462,14 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
   -- Separate directories and files
   (dirPaths, filePaths) <- partitionByType absPaths
   -- For directories: get changed files within
-  dirFiles <-
+  (dirFiles, directoryEvaluated) <-
     if null dirPaths
-      then return []
+      then return ([], [])
       else do
-        (allManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+        (rawManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+        selectedManaged <- filterManagedInDirs dirPaths rawManaged
+        evaluated <- evaluateManaged runtime ctx selectedManaged
+        let allManaged = (.managed) <$> evaluated
         let allFiles = (.correspondence) <$> allManaged
         printWarnings ws
         drifted <- observeModeDrift allManaged
@@ -378,7 +480,8 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
               ]
         let changedFiles = filter isChanged allFiles ++ driftedFiles
         -- Filter files within the directories
-        filterFilesInDirs dirPaths changedFiles
+        files <- filterFilesInDirs dirPaths changedFiles
+        return (files, evaluated)
   -- For files: process as before
   codeStyle <- codeStyleFor stderr
   warningLists <- forM filePaths $ \absPath -> do
@@ -475,7 +578,12 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
             rejectUntrackedMissingPath p correspond
             return correspond
   -- Combine directory files and individual file correspondences
-  let allCorrespondences = dirFiles ++ fileCorrespondences
+  let allCorrespondences =
+        nubBy
+          ( \left right ->
+              correspondenceIdentity left == correspondenceIdentity right
+          )
+          (dirFiles ++ fileCorrespondences)
   -- For directory mode with confirmation
   when (not (null dirPaths) && not allFlag && not (null allCorrespondences)) $ do
     printStderr $
@@ -493,9 +601,11 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
       printStderr "Cancelled."
       liftIO $ exitWith userCancelledError
   reflectCorrespondences
+    runtime
     ctx
     force
     False
+    directoryEvaluated
     [(True, correspondence) | correspondence <- allCorrespondences]
   printWarnings $ nub $ concat warningLists
   return ExitSuccess
@@ -504,6 +614,43 @@ reflectCore force allFlag _includeUnregistered explicitSource paths = do
 -- | Check if a file correspondence has changes.
 isChanged :: FileCorrespondence -> Bool
 isChanged fc = fc.sourceDelta /= Unchanged || fc.destinationDelta /= Unchanged
+
+
+correspondenceIdentity
+  :: FileCorrespondence -> ([Word32], [Word32])
+correspondenceIdentity file =
+  ( destinationPathIdentity file.source.path
+  , destinationPathIdentity file.destination.path
+  )
+
+
+makeCodecAwareEvaluated
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> Context (App i)
+  -> App i ([EvaluatedManagedCorrespondence], [RouteMapWarning])
+makeCodecAwareEvaluated runtime ctx = do
+  (managed, warnings) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  evaluated <- evaluateManaged runtime ctx managed
+  return (evaluated, warnings)
+
+
+evaluateManaged
+  :: (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> Context (App i)
+  -> [ManagedCorrespondence]
+  -> App i [EvaluatedManagedCorrespondence]
+evaluateManaged runtime ctx managed = do
+  machineState <- prepareMachineState ctx.repository.manifest
+  cache <- loadCodecCacheEntries ctx machineState managed
+  result <-
+    evaluateManagedCorrespondencesWithCache runtime ctx cache managed
+  case result of
+    Left err -> die' codecError $ formatCodecError err
+    Right evaluated -> do
+      printWarnings $ evaluationWarnings evaluated
+      return evaluated
 
 
 -- | Partition paths into directories and files.
@@ -536,133 +683,501 @@ filterFilesInDirs dirPaths correspondences = do
     ]
 
 
+filterManagedInDirs
+  :: (Monad m)
+  => [OsPath]
+  -> [ManagedCorrespondence]
+  -> m [ManagedCorrespondence]
+filterManagedInDirs dirPaths managed = do
+  let dirPrefixes = map splitDirectories dirPaths
+  return
+    [ item
+    | item <- managed
+    , let dstDirs = splitDirectories item.correspondence.destination.path
+    , any (`isPrefixOf` dstDirs) dirPrefixes
+    ]
+
+
 -- | Perform the actual reflect operation on file correspondences.
 reflectCorrespondences
-  :: (MonadFileSystem i, MonadIO i)
-  => Context (App i)
+  :: forall i
+   . (MonadFileSystem i, MonadIO i)
+  => CodecRuntime (App i)
+  -> Context (App i)
   -> Bool
   -- ^ Force flag.
   -> Bool
   -- ^ Whether every converged route should be persisted.
+  -> [EvaluatedManagedCorrespondence]
+  -- ^ Evaluations already performed by this command.
   -> [(Bool, FileCorrespondence)]
   -- ^ Selected correspondences and whether an ignored destination was
   -- explicitly admitted by command-level selection.
   -> App i ()
-reflectCorrespondences ctx force persistAll selectedCorrespondences = do
-  machineState <- prepareMachineState ctx.repository.manifest
-  (initialManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
-  let selectedFiles = snd <$> selectedCorrespondences
-  let matchesSelection :: ManagedCorrespondence -> Bool
-      matchesSelection managed =
-        any
-          ( \file ->
-              destinationPathIdentity file.source.path
-                == destinationPathIdentity managed.correspondence.source.path
-                && destinationPathIdentity file.destination.path
-                  == destinationPathIdentity managed.correspondence.destination.path
-          )
-          selectedFiles
-  let initialSelectedManaged = filter matchesSelection initialManaged
-  pathStyle <- pathStyleFor stderr
-  let ownerFor :: FileCorrespondence -> Maybe ManagedCorrespondence
-      ownerFor file =
-        case sortOn
-          ( Down
-              . length
-              . splitDirectories
-              . normalise
-              . (.route.destinationPath)
-          )
-          [ m
-          | m <- initialManaged
-          , -- Compare by native identity so case-variant Windows
-          -- destinations still find their owning route:
-          fmap
-            destinationPathIdentity
-            (splitDirectories $ normalise m.route.destinationPath)
-            `isPrefixOf` fmap
-              destinationPathIdentity
-              (splitDirectories $ normalise file.destination.path)
-          ] of
-          m : _ -> Just m
-          [] -> Nothing
-  -- Reflection still reconciles declared modes toward the destination, so
-  -- unenforceable declarations must be surfaced here too:
-  printUnsupportedModeWarnings $ mapMaybe ownerFor selectedFiles
-  inputs <-
-    mapM
-      ( \(allowIgnored, file) ->
-          observeSelectedReconciliationInput
-            ctx
-            allowIgnored
-            (ownerFor file)
+reflectCorrespondences
+  runtime
+  ctx
+  force
+  persistAll
+  initialEvaluated
+  selectedCorrespondences = do
+    machineState <- prepareMachineState ctx.repository.manifest
+    (initialManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+    let selectedFiles = snd <$> selectedCorrespondences
+    let matchesSelection :: ManagedCorrespondence -> Bool
+        matchesSelection managed =
+          any
+            ( \file ->
+                destinationPathIdentity file.source.path
+                  == destinationPathIdentity managed.correspondence.source.path
+                  && destinationPathIdentity file.destination.path
+                    == destinationPathIdentity managed.correspondence.destination.path
+            )
+            selectedFiles
+    pathStyle <- pathStyleFor stderr
+    let attachSelected
+          :: FileCorrespondence
+          -> ManagedCorrespondence
+          -> ManagedCorrespondence
+        attachSelected file managed =
+          ManagedCorrespondence
+            managed.route
+            (makeRelative managed.route.sourcePath file.source.path)
             file
-      )
-      selectedCorrespondences
-  let policy = if force then PreferAuthoritative else RefuseConflicts
-  let plan = planReconciliation DestinationToSource policy inputs
-  $(logDebugSH) plan
-  unless (force || null plan.conflicts) $ do
-    dieWithErrors
-      conflictError
-      [ "Cannot reflect "
-          <> pathStyle c.destination.path
-          <> ", since "
-          <> pathStyle c.source.path
-          <> " is also changed."
-      | conflict <- plan.conflicts
-      , let c = conflict.correspondence
-      ]
-  forM_ plan.items $ \item -> do
-    let c = item.correspondence
-    case item.outcome of
-      NoChange ->
-        printStderr'
-          Note
-          ( "File "
-              <> pathStyle c.destination.path
-              <> " is skipped, since it is the same as file "
-              <> pathStyle c.source.path
-              <> "."
+        ownerFor :: FileCorrespondence -> Maybe ManagedCorrespondence
+        ownerFor file =
+          case sortOn
+            ( Down
+                . length
+                . splitDirectories
+                . normalise
+                . (.route.destinationPath)
+            )
+            [ m
+            | m <- initialManaged
+            , -- Compare by native identity so case-variant Windows
+            -- destinations still find their owning route:
+            fmap
+              destinationPathIdentity
+              (splitDirectories $ normalise m.route.destinationPath)
+              `isPrefixOf` fmap
+                destinationPathIdentity
+                (splitDirectories $ normalise file.destination.path)
+            ] of
+            m : _ -> Just m
+            [] -> Nothing
+        attachRoute
+          :: FileCorrespondence
+          -> RouteResult
+          -> ManagedCorrespondence
+        attachRoute file route =
+          ManagedCorrespondence
+            route
+            (makeRelative route.sourcePath file.source.path)
+            file
+        routeMatchesSelected
+          :: FileCorrespondence
+          -> RouteResult
+          -> Bool
+        routeMatchesSelected file route =
+          let relative =
+                makeRelative
+                  (normalise route.destinationPath)
+                  (normalise file.destination.path)
+              expectedSource = normalise $ route.sourcePath </> relative
+          in destinationPathIdentity expectedSource
+               == destinationPathIdentity file.source.path
+        routeSpecificity :: RouteResult -> Down Int
+        routeSpecificity =
+          Down . length . splitDirectories . normalise . (.destinationPath)
+        routeOwnerFor :: FileCorrespondence -> App i ManagedCorrespondence
+        routeOwnerFor file = do
+          (routeMatch, _) <- findMatchingRoutes ctx file.destination.path
+          let routes = case routeMatch of
+                NoMatch -> []
+                SingleMatch route -> [route]
+                AmbiguousMatch candidates -> (.route) <$> NE.toList candidates
+          case sortOn routeSpecificity $ filter (routeMatchesSelected file) routes of
+            route : _ -> return $ attachRoute file route
+            [] ->
+              die'
+                fileNotRoutedError
+                ("File " <> pathStyle file.destination.path <> " is not routed.")
+    selectedOwnedRaw <- forM selectedCorrespondences $ \(allowIgnored, file) -> do
+      owner <- case ownerFor file of
+        Just managed -> return $ attachSelected file managed
+        Nothing -> routeOwnerFor file
+      return (allowIgnored, file, owner)
+    let
+      initialEvaluatedByPath =
+        Map.fromList
+          [ (correspondenceIdentity item.managed.correspondence, item)
+          | item <- initialEvaluated
+          ]
+      ownersToEvaluate =
+        [ owner
+        | (_, _, owner) <- selectedOwnedRaw
+        , Map.notMember
+            (correspondenceIdentity owner.correspondence)
+            initialEvaluatedByPath
+        ]
+    newlyEvaluated <- evaluateManaged runtime ctx ownersToEvaluate
+    let evaluatedByPath =
+          Map.union
+            initialEvaluatedByPath
+            ( Map.fromList
+                [ (correspondenceIdentity item.managed.correspondence, item)
+                | item <- newlyEvaluated
+                ]
+            )
+        selectedOwned =
+          [ case Map.lookup
+              (correspondenceIdentity owner.correspondence)
+              evaluatedByPath of
+              Just evaluated ->
+                ( allowIgnored
+                , evaluated.managed.correspondence
+                , evaluated.managed
+                , renderedSourceFor evaluated
+                , evaluated.codecResult
+                )
+              Nothing -> (allowIgnored, file, owner, Nothing, Nothing)
+          | (allowIgnored, file, owner) <- selectedOwnedRaw
+          ]
+    -- Reflection still reconciles declared modes toward the destination, so
+    -- unenforceable declarations must be surfaced here too:
+    printUnsupportedModeWarnings $
+      [owner | (_, _, owner, _, _) <- selectedOwned]
+    inputs <-
+      mapM
+        ( \(allowIgnored, file, owner, rendered, _codecSnapshot) ->
+            observeSelectedReconciliationInput
+              ctx
+              allowIgnored
+              (Just owner)
+              file
+              rendered
+        )
+        selectedOwned
+    let policy = if force then PreferAuthoritative else RefuseConflicts
+    let initialPlan = planReconciliation DestinationToSource policy inputs
+    forM_ selectedOwned $
+      \(_allowIgnored, file, managed, _rendered, _codecSnapshot) -> do
+        routeName <- pack <$> decodePath managed.route.routeName
+        when
+          ( managed.route.codec /= identityCodecSpec
+              && codecAppliesToEntry managed file
           )
-      WillReconcile ->
-        printStderr $
-          "Reflect "
+          $ rejectUnsupportedDestination routeName managed file
+    let sourceWriters =
+          Map.fromListWith
+            (<>)
+            [ (destinationPathIdentity file.source.path, [file])
+            | (_allowIgnored, file, _managed, _rendered, _codecSnapshot) <-
+                selectedOwned
+            , willWriteSource initialPlan file
+            ]
+        ambiguousSources = filter ((> 1) . length) $ Map.elems sourceWriters
+    unless (null ambiguousSources) $
+      dieWithErrors
+        conflictError
+        [ "Cannot reflect multiple selected destinations to "
+            <> pathStyle file.source.path
+            <> "."
+        | file : _ <- ambiguousSources
+        ]
+    reflected <-
+      catMaybes <$> mapM (prepareReflectedSource initialPlan) selectedOwned
+    let reflectedSources =
+          Map.fromList
+            [ (sourcePath, (source, guard))
+            | (_identity, sourcePath, source, guard, _snapshot) <- reflected
+            ]
+        reflectedCodecSnapshots =
+          Map.fromList
+            [ (identity, snapshot)
+            | (identity, _sourcePath, _source, _guard, Just snapshot) <- reflected
+            ]
+    let plan =
+          initialPlan
+            { operations = rewriteReflectedOperations reflectedSources initialPlan.operations
+            }
+    $(logDebugSH) plan
+    unless (force || null plan.conflicts) $ do
+      dieWithErrors
+        conflictError
+        [ "Cannot reflect "
             <> pathStyle c.destination.path
-            <> " to "
+            <> ", since "
             <> pathStyle c.source.path
-            <> "..."
-      ConflictDetected -> return ()
-      Skipped reason ->
-        printSkippedReconciliation
-          pathStyle
-          c.destination.path
-          c.destination.path
-          reason
-  let persist = do
-        (refreshedManaged, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
-        let selectedManaged =
-              nub $
-                (if persistAll then initialManaged else initialSelectedManaged)
-                  <> if persistAll
-                    then refreshedManaged
-                    else filter matchesSelection refreshedManaged
-        persistConvergedTargets ctx machineState selectedManaged
-  void
-    ( executeReconciliationPlanGuarded
-        (logSyncOp . (.syncOp))
-        printModeRestoreFailure
-        plan
-        `catchError` \err -> persist >> throwError err
-    )
-  persist
+            <> " is also changed."
+        | conflict <- plan.conflicts
+        , let c = conflict.correspondence
+        ]
+    forM_ plan.items $ \item -> do
+      let c = item.correspondence
+      case item.outcome of
+        NoChange ->
+          printStderr'
+            Note
+            ( "File "
+                <> pathStyle c.destination.path
+                <> " is skipped, since it is the same as file "
+                <> pathStyle c.source.path
+                <> "."
+            )
+        WillReconcile ->
+          printStderr $
+            "Reflect "
+              <> pathStyle c.destination.path
+              <> " to "
+              <> pathStyle c.source.path
+              <> "..."
+        ConflictDetected -> return ()
+        Skipped reason ->
+          printSkippedReconciliation
+            pathStyle
+            c.destination.path
+            c.destination.path
+            reason
+    let persist = do
+          (rawRefreshed, _) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+          let refreshedIdentities =
+                Set.fromList $
+                  correspondenceIdentity . (.correspondence) <$> rawRefreshed
+              disappearedSelected =
+                [ managed
+                | (_allowIgnored, _file, managed, _rendered, _codecSnapshot) <-
+                    selectedOwned
+                , correspondenceIdentity managed.correspondence
+                    `Set.notMember` refreshedIdentities
+                ]
+              selectedRaw =
+                ( if persistAll
+                    then rawRefreshed
+                    else filter matchesSelection rawRefreshed
+                )
+                  <> disappearedSelected
+              writtenSources =
+                Set.fromList
+                  [ normalise $ syncOpTargetPath operation.syncOp
+                  | operation <- plan.operations
+                  , operation.replica == SourceReplica
+                  ]
+              canReuse :: ManagedCorrespondence -> Bool
+              canReuse managed =
+                normalise managed.correspondence.source.path
+                  `Set.notMember` writtenSources
+                  && Map.member
+                    (correspondenceIdentity managed.correspondence)
+                    evaluatedByPath
+              frozenReevaluation
+                :: ManagedCorrespondence
+                -> Maybe (ManagedCorrespondence, EvaluatedCodec)
+              frozenReevaluation managed = do
+                let key = correspondenceIdentity managed.correspondence
+                snapshot <- case Map.lookup key reflectedCodecSnapshots of
+                  Just reflectedSnapshot -> Just reflectedSnapshot
+                  Nothing -> do
+                    previous <- Map.lookup key evaluatedByPath
+                    previous.codecResult
+                case managed.correspondence.source.stat of
+                  Context.File _
+                    | normalise managed.correspondence.source.path
+                        `Set.member` writtenSources ->
+                        Just (managed, snapshot)
+                  _ -> Nothing
+              toReevaluate = mapMaybe frozenReevaluation selectedRaw
+              reevaluationKeys =
+                Set.fromList
+                  [ correspondenceIdentity managed.correspondence
+                  | (managed, _) <- toReevaluate
+                  ]
+              toEvaluate =
+                [ managed
+                | managed <- selectedRaw
+                , not $ canReuse managed
+                , correspondenceIdentity managed.correspondence
+                    `Set.notMember` reevaluationKeys
+                ]
+          refreshedEvaluated <- evaluateManaged runtime ctx toEvaluate
+          frozenEvaluated <- forM toReevaluate $ \(managed, snapshot) -> do
+            result <-
+              reevaluateManagedCorrespondence runtime ctx managed snapshot
+            case result of
+              Left err -> die' codecError $ formatCodecError err
+              Right evaluated -> return evaluated
+          let refreshedByPath =
+                Map.fromList
+                  [ (correspondenceIdentity item.managed.correspondence, item)
+                  | item <- refreshedEvaluated <> frozenEvaluated
+                  ]
+              selected =
+                mapMaybe
+                  ( \managed ->
+                      let key = correspondenceIdentity managed.correspondence
+                      in case Map.lookup key refreshedByPath of
+                           Just evaluated -> Just evaluated
+                           Nothing -> do
+                             evaluated <- Map.lookup key evaluatedByPath
+                             return
+                               EvaluatedManagedCorrespondence
+                                 { managed = managed
+                                 , codecResult = evaluated.codecResult
+                                 , rawSourceDigest = evaluated.rawSourceDigest
+                                 , warnings = evaluated.warnings
+                                 }
+                  )
+                  selectedRaw
+          persistConvergedTargets ctx machineState selected
+    void
+      ( executeReconciliationPlanGuarded
+          (logSyncOp . (.syncOp))
+          printModeRestoreFailure
+          plan
+          `catchError` \err -> persist >> throwError err
+      )
+    persist
+   where
+    prepareReflectedSource
+      plan
+      (_allowIgnored, file, managed, _rendered, codecSnapshot) = do
+        routeName <- pack <$> decodePath managed.route.routeName
+        if not $ willWriteSource plan file
+          then return Nothing
+          else do
+            policy <- case codecReflectPolicy runtime routeName managed.route.codec of
+              Left err -> die' codecError $ formatCodecError err
+              Right value -> return value
+            case policy of
+              ReflectIdentity -> return Nothing
+              ReflectReject ->
+                die'
+                  codecError
+                  ( "Route "
+                      <> routeName
+                      <> " codec "
+                      <> renderCodecName managed.route.codec.name
+                      <> " rejects reflection."
+                  )
+              ReflectReAdd -> case file.destination.stat of
+                Context.File _ -> do
+                  deployed <- opaqueBytes <$> readFile file.destination.path
+                  result <-
+                    reflectManagedCorrespondence
+                      runtime
+                      ctx
+                      managed
+                      codecSnapshot
+                      deployed
+                  case result of
+                    Left err -> die' codecError $ formatCodecError err
+                    Right (source, snapshot, warnings) -> do
+                      printWarnings warnings
+                      return $
+                        Just
+                          (
+                            ( destinationPathIdentity file.source.path
+                            , destinationPathIdentity file.destination.path
+                            )
+                          , normalise file.source.path
+                          , source
+                          , ContentGuard file.destination.path deployed
+                          , snapshot
+                          )
+                Missing -> return Nothing
+                Context.Directory ->
+                  die'
+                    codecError
+                    ( "Route "
+                        <> routeName
+                        <> " codec "
+                        <> renderCodecName managed.route.codec.name
+                        <> " cannot reflect a directory destination."
+                    )
+                Context.Symlink _ ->
+                  die'
+                    codecError
+                    ( "Route "
+                        <> routeName
+                        <> " codec "
+                        <> renderCodecName managed.route.codec.name
+                        <> " cannot reflect a symbolic-link destination."
+                    )
+    codecAppliesToEntry
+      :: ManagedCorrespondence -> FileCorrespondence -> Bool
+    codecAppliesToEntry managed file =
+      managed.route.fileType == File || case file.source.stat of
+        Context.File _ -> True
+        _ -> False
+    rejectUnsupportedDestination
+      :: Text
+      -> ManagedCorrespondence
+      -> FileCorrespondence
+      -> App i ()
+    rejectUnsupportedDestination routeName managed file =
+      case file.destination.stat of
+        Context.Directory ->
+          die'
+            codecError
+            ( "Route "
+                <> routeName
+                <> " codec "
+                <> renderCodecName managed.route.codec.name
+                <> " cannot reflect a directory destination."
+            )
+        Context.Symlink _ ->
+          die'
+            codecError
+            ( "Route "
+                <> routeName
+                <> " codec "
+                <> renderCodecName managed.route.codec.name
+                <> " cannot reflect a symbolic-link destination."
+            )
+        _ -> return ()
+    willWriteSource :: ReconciliationPlan -> FileCorrespondence -> Bool
+    willWriteSource plan file =
+      any
+        ( \operation ->
+            operation.replica == SourceReplica
+              && normalise (syncOpTargetPath operation.syncOp)
+                == normalise file.source.path
+        )
+        plan.operations
+    syncOpTargetPath :: SyncOp -> OsPath
+    syncOpTargetPath operation = case operation of
+      RemoveDirs path -> path
+      RemoveDirsExcept path _ -> path
+      RemoveFile path -> path
+      RemoveLink path -> path
+      CopyFile _ path -> path
+      WriteContent _ path -> path
+      WriteContentGuarded _ _ path -> path
+      CreateDir path -> path
+      CreateDirs path -> path
+      CreateSymlink _ path _ -> path
+      SetEntryMode path _ _ -> path
+    rewriteReflectedOperations
+      :: Map.Map OsPath (OpaqueBytes, ContentGuard)
+      -> [PlannedSyncOp]
+      -> [PlannedSyncOp]
+    rewriteReflectedOperations reflected = fmap rewrite
+     where
+      rewrite operation@(PlannedSyncOp SourceReplica (CopyFile _ destination)) =
+        case Map.lookup (normalise destination) reflected of
+          Just (content, guard) ->
+            PlannedSyncOp SourceReplica $
+              WriteContentGuarded content guard destination
+          Nothing -> operation
+      rewrite operation = operation
 
 
 persistConvergedTargets
   :: (MonadFileSystem i, MonadIO i)
   => Context (App i)
   -> MachineState
-  -> [ManagedCorrespondence]
+  -> [EvaluatedManagedCorrespondence]
   -> App i ()
 persistConvergedTargets ctx machineState selected =
   unless (null selected) $ do
@@ -679,12 +1194,7 @@ persistConvergedTargets ctx machineState selected =
             observations <-
               ( catMaybes
                   <$> mapM
-                    ( observeConvergedManagedTarget
-                        ctx.repository
-                        transaction
-                        Reflected
-                        now
-                    )
+                    (observeWithCodecState transaction now)
                     selected
               )
                 `catchError` \err -> do
@@ -716,6 +1226,22 @@ persistConvergedTargets ctx machineState selected =
     case result of
       Left err -> die' machineStateError $ formatStateError err
       Right _ -> return ()
+ where
+  observeWithCodecState transaction now evaluated = do
+    observation <-
+      observeConvergedManagedTargetWithRenderedSource
+        ctx.repository
+        transaction
+        Reflected
+        now
+        (renderedSourceFor evaluated)
+        (rawSourceDigestFor evaluated)
+        evaluated.managed
+    let codecState' = managedCodecStateFor evaluated
+    return $ case observation of
+      Just (identifier, Just target) ->
+        Just (identifier, Just target{codecState = codecState'})
+      _ -> observation
 
 
 -- | Observes a correspondence that the command has already selected.  Route
@@ -730,25 +1256,33 @@ observeSelectedReconciliationInput
   -- Descendants of a deployment link resolve to the link route, so
   -- reflection can never reach through a deployed link.
   -> FileCorrespondence
+  -> Maybe OpaqueBytes
+  -- ^ Codec-rendered source bytes used for source/destination comparison.
   -> App i ReconciliationInput
-observeSelectedReconciliationInput ctx allowIgnored owner correspondence = do
-  input <-
-    observeReconciliationInput
-      ctx
-      (maybe DefaultMode (.route.mode) owner)
-      correspondence
-  let input' =
-        input
-          { destinationKind = maybe CopyRoute (.route.kind) owner
-          , routeFileType =
-              maybe File (.route.fileType) owner
-          }
-  return $
-    if allowIgnored
-      then case input'.destinationRouteState of
-        Ignored route _ -> input'{destinationRouteState = Routed route}
-        _ -> input'
-      else input'
+observeSelectedReconciliationInput
+  ctx
+  allowIgnored
+  owner
+  correspondence
+  renderedSource = do
+    input <-
+      observeReconciliationInputWithRenderedSource
+        ctx
+        (maybe DefaultMode (.route.mode) owner)
+        correspondence
+        renderedSource
+    let input' =
+          input
+            { destinationKind = maybe CopyRoute (.route.kind) owner
+            , routeFileType =
+                maybe File (.route.fileType) owner
+            }
+    return $
+      if allowIgnored
+        then case input'.destinationRouteState of
+          Ignored route _ -> input'{destinationRouteState = Routed route}
+          _ -> input'
+        else input'
 
 
 logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
@@ -770,6 +1304,12 @@ logSyncOp (CopyFile source destination) = do
   source' <- decodePath source
   destination' <- decodePath destination
   $(logDebug) $ "Copy file: " <> pack source' <> " -> " <> pack destination'
+logSyncOp (WriteContent _ destination) = do
+  destination' <- decodePath destination
+  $(logDebug) $ "Write rendered content: " <> pack destination'
+logSyncOp (WriteContentGuarded _ _ destination) = do
+  destination' <- decodePath destination
+  $(logDebug) $ "Write rendered content: " <> pack destination'
 logSyncOp (CreateDir path) = do
   path' <- decodePath path
   $(logDebug) $ "Create directory: " <> pack path'

@@ -299,6 +299,17 @@ link or a directory link on Windows follows from the `files` or `dirs`
 table declaring the route; creating symbolic links on Windows requires
 Developer Mode or administrator privileges.
 
+### Route codecs
+
+A detailed branch can set `codec` to transform a regular source file before
+deployment.  The string form names an unconfigured codec; the object form has
+`name` and `config` fields.  The default `identity` codec preserves bytes, so
+existing compact and detailed routes keep their previous behavior.  Codec
+metadata requires `path`, and a deployment link accepts only `identity`.
+
+See [route codecs] for configuration values, caching, dry-run behavior, and
+reflection policies.
+
 A route can be named like `home_directory` in the example above,
 which actually refers to the path where the source of config files are located
 within the repository.  If it says `home_directory`, it refers to
@@ -322,6 +333,8 @@ Similarly, on Windows, they would look like below:
 
 In practice, more complex routing is possible, see the [relevant
 documentation](routing.en.md) for a detailed explanation of routing.
+
+[route codecs]: codecs.en.md
 
 
 List of files to ignore

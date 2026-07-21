@@ -754,7 +754,7 @@ findMatchingRoutes
   -- ^ The route match result, along with any warnings that were generated.
 findMatchingRoutes ctx targetPath = do
   (routes, warnings) <- routePaths ctx
-  let targetDirs = splitDirectories $ normalise targetPath
+  let targetDirs = pathIdentityComponents targetPath
   let matching = [r | r <- routes, startsWithRoute r targetDirs]
   case matching of
     [] -> return (NoMatch, warnings)
@@ -768,9 +768,9 @@ findMatchingRoutes ctx targetPath = do
           candidates <- mapM (makeCandidateRoute targetPath) (r :| rs')
           return (AmbiguousMatch candidates, warnings)
  where
-  startsWithRoute :: RouteResult -> [OsPath] -> Bool
+  startsWithRoute :: RouteResult -> [[Word32]] -> Bool
   startsWithRoute route targetDirs' =
-    splitDirectories (normalise route.destinationPath) `isPrefixOf` targetDirs'
+    pathIdentityComponents route.destinationPath `isPrefixOf` targetDirs'
   makeCandidateRoute
     :: (MonadFileSystem m) => OsPath -> RouteResult -> m CandidateRoute
   makeCandidateRoute target route = do
@@ -796,13 +796,15 @@ getRouteState
   -- ^ The route state of the path, along with any warnings that were generated.
 getRouteState ctx path = do
   absPath <- makeAbsolute path
-  let dirs = splitDirectories absPath
+  let dirs = splitDirectories $ normalise absPath
+  let pathIdentity = pathIdentityComponents absPath
   (routes, ws) <- routePaths ctx
   matches <- forM routes $ \route -> do
     dstPath <- makeAbsolute route.destinationPath
-    let prefix = splitDirectories dstPath
+    let prefix = splitDirectories $ normalise dstPath
+    let prefixIdentity = pathIdentityComponents dstPath
     return $
-      if prefix `isPrefixOf` dirs
+      if prefixIdentity `isPrefixOf` pathIdentity
         then Just (length prefix, route, drop (length prefix) dirs)
         else Nothing
   -- The most-specific containing route owns the path; broader routes must

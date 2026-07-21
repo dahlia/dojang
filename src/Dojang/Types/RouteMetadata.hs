@@ -28,6 +28,7 @@ import Data.Bits ((.&.))
 import Data.String (IsString (fromString))
 import Data.Text (Text)
 
+import Dojang.Types.Codec (CodecSpec, identityCodecSpec)
 import Dojang.Types.FilePathExpression (FilePathExpression)
 
 
@@ -75,6 +76,8 @@ data RouteTarget = RouteTarget
   -- ^ The declared portable mode of the destination.
   , kind :: RouteKind
   -- ^ The declared kind of the destination.
+  , codec :: CodecSpec
+  -- ^ The codec that renders repository bytes into deployed bytes.
   }
   deriving (Eq, Show)
 
@@ -89,7 +92,7 @@ instance IsString RouteTarget where
 -- metadata ('DefaultMode' and 'CopyRoute'), which behaves exactly like
 -- a route value written as a plain string.
 routeTarget :: FilePathExpression -> RouteTarget
-routeTarget expr = RouteTarget expr DefaultMode CopyRoute
+routeTarget expr = RouteTarget expr DefaultMode CopyRoute identityCodecSpec
 
 
 -- | Parses the manifest spelling of a 'RouteMode'.  Returns 'Nothing' for

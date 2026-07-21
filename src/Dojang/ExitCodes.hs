@@ -94,5 +94,10 @@ routeOwnershipError :: ExitCode
 routeOwnershipError = ExitFailure 38
 
 
+-- | A route codec could not be validated or evaluated.
+codecError :: ExitCode
+codecError = ExitFailure 39
+
+
 hookFailedError :: ExitCode
 hookFailedError = ExitFailure 40

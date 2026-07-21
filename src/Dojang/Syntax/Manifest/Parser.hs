@@ -73,6 +73,7 @@ import Dojang.Syntax.Manifest.Internal
   , MonikerMap'
   )
 import qualified Dojang.Syntax.Manifest.Internal as Internal
+import Dojang.Types.Codec (identityCodecSpec)
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -153,7 +154,7 @@ data DetailedRouteError
   | -- | The @moniker@ field refers to an undefined moniker.
     UnknownRouteMoniker MonikerName
   | -- | The branch contains fields other than @moniker@, @when@, @path@,
-    -- @mode@, and @kind@.
+    -- @mode@, @kind@, and @codec@.
     UnexpectedRouteFields [Text]
   | -- | The @mode@ field is not part of the closed mode vocabulary.
     UnknownRouteMode Text
@@ -164,9 +165,11 @@ data DetailedRouteError
   | -- | The branch declares both @kind = \"symlink\"@ and a non-default
     -- @mode@; symbolic links carry no portable permissions of their own.
     SymlinkRouteWithMode
-  | -- | The branch declares @mode@ or @kind@ but no @path@; metadata
+  | -- | The branch declares route metadata but no @path@; metadata
     -- cannot apply to a null route.
     MetadataOnNullRoute
+  | -- | A deployment link declares a non-identity codec.
+    CodecOnSymlinkRoute
   deriving (Eq, Show)
 
 
@@ -271,7 +274,9 @@ formatErrors (FileRouteBranchError fileType path index reason) =
   formatReason SymlinkRouteWithMode =
     "cannot declare a mode together with kind symlink."
   formatReason MetadataOnNullRoute =
-    "cannot declare mode or kind without a path."
+    "cannot declare mode, kind, or codec without a path."
+  formatReason CodecOnSymlinkRoute =
+    "cannot declare a non-identity codec together with kind symlink."
 formatErrors (ManifestVariableError name branchIndex reason) =
   [ prefix <> formatReason reason
   ]
@@ -647,9 +652,12 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
           Just kindText -> case parseRouteKind kindText of
             Just kind' -> pure kind'
             Nothing -> branchError index $ UnknownRouteKind kindText
+        let codec = maybe identityCodecSpec id branch.routeCodec
         case path of
           Nothing
-            | isJust branch.routeMode || isJust branch.routeKind ->
+            | isJust branch.routeMode
+                || isJust branch.routeKind
+                || isJust branch.routeCodec ->
                 branchError index MetadataOnNullRoute
           _ -> pure ()
         if fileType == Directory && (mode == Executable || mode == PrivateExecutable)
@@ -658,7 +666,10 @@ mapFileRoute monikerMap routePath (DetailedFileRoute branches) fileType =
         if kind == SymlinkRoute && mode /= DefaultMode
           then branchError index SymlinkRouteWithMode
           else pure ()
-        pure (predicate, (\expr -> RouteTarget expr mode kind) <$> path)
+        if kind == SymlinkRoute && codec /= identityCodecSpec
+          then branchError index CodecOnSymlinkRoute
+          else pure ()
+        pure (predicate, (\expr -> RouteTarget expr mode kind codec) <$> path)
    where
     parseDetailedPath "" = Right $ BareComponent ""
     parseDetailedPath expression =

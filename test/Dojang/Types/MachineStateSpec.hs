@@ -114,7 +114,8 @@ import Dojang.Types.MachineState
   , withRepositoryStateGeneration
   )
 import Dojang.Types.ManagedTarget
-  ( ManagedTarget (..)
+  ( ManagedCodecState (ManagedCodecState)
+  , ManagedTarget (..)
   , SynchronizationCommand (Applied)
   , TargetFingerprint (FileFingerprint, SymlinkFingerprint)
   )
@@ -330,10 +331,10 @@ spec = do
     it "upgrades schema-version 3 with empty machine facts" $ do
       current <- fixtureState
       let currentDocument = encodeMachineState current
-      Text.isInfixOf "schema-version = 5" currentDocument `shouldBe` True
+      Text.isInfixOf "schema-version = 6" currentDocument `shouldBe` True
       let legacyDocument =
             Text.replace
-              "schema-version = 5"
+              "schema-version = 6"
               "schema-version = 3"
               currentDocument
       Text.isInfixOf "schema-version = 3" legacyDocument `shouldBe` True
@@ -363,6 +364,7 @@ spec = do
               snapshot
               "always => $HOME/.config/app.toml"
               Map.empty
+              Nothing
               (FileFingerprint 7 "sha256")
               Applied
               fixtureTime
@@ -409,6 +411,7 @@ spec = do
               snapshot
               "always => $HOME/.linked"
               Map.empty
+              Nothing
               (SymlinkFingerprint linkTarget)
               Applied
               fixtureTime
@@ -416,6 +419,24 @@ spec = do
       let encoded = encodeMachineState populated
       Text.isInfixOf "route-kind = \"symlink\"" encoded `shouldBe` True
       Text.isInfixOf "fingerprint-link-target" encoded `shouldBe` True
+      decodeMachineState populated.repositoryId populated.machineId encoded
+        `shouldBe` Right populated
+
+    it "round-trips redacted codec cache metadata" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "codec-target"
+      let codecState' =
+            ManagedCodecState
+              "test-codec"
+              "2"
+              "configuration-digest"
+              "cache-key"
+              (Map.fromList [("fact:class", "fact-digest")])
+          target' = target{codecState = Just codecState'}
+          populated = state{targetRecords = Map.singleton target'.targetId target'}
+          encoded = encodeMachineState populated
+      Text.isInfixOf "codec-name = \"test-codec\"" encoded `shouldBe` True
+      Text.isInfixOf "raw-source" encoded `shouldBe` False
       decodeMachineState populated.repositoryId populated.machineId encoded
         `shouldBe` Right populated
 
@@ -439,6 +460,7 @@ spec = do
               snapshot
               "always => $HOME/.config/app.toml"
               Map.empty
+              Nothing
               (FileFingerprint 7 "sha256")
               Applied
               fixtureTime
@@ -448,7 +470,7 @@ spec = do
       -- version-4 document:
       let v4Document =
             Text.replace
-              "schema-version = 5"
+              "schema-version = 6"
               "schema-version = 4"
               (encodeMachineState populated)
       Text.isInfixOf "route-kind" v4Document `shouldBe` False
@@ -753,14 +775,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 5" "schema-version = 6" encoded
+          Text.replace "schema-version = 6" "schema-version = 7" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 6)
+        `shouldBe` Left (UnsupportedSchemaVersion 7)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 6\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 6)
+        "schema-version = 7\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 7)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -3190,7 +3212,7 @@ fixtureState = do
   let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      5
+      6
       repositoryId'
       machineId'
       generationId
@@ -3227,6 +3249,7 @@ fixtureManagedTarget state identifier = do
       (state.targetSnapshotRoot </> snapshotName)
       "definition"
       Map.empty
+      Nothing
       (FileFingerprint 7 "digest")
       Applied
       fixtureTime

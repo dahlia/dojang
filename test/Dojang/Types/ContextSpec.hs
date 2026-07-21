@@ -44,6 +44,7 @@ import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified (FileType (..))
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (Entry (..), makeFixtureTree, withTempDir)
+import Dojang.Types.Codec (identityCodecSpec)
 import Dojang.Types.Context
   ( CandidateRoute (..)
   , Context (..)
@@ -335,6 +336,7 @@ spec = do
                      , kind = CopyRoute
                      , routeDefinition = "$BAR"
                      , routeProvenance = mempty
+                     , codec = identityCodecSpec
                      }
                  , RouteResult
                      { sourcePath = tmpDir </> src </> foo
@@ -345,6 +347,7 @@ spec = do
                      , kind = CopyRoute
                      , routeDefinition = "$FOO"
                      , routeProvenance = mempty
+                     , codec = identityCodecSpec
                      }
                  ]
   specify "makeCorrespondWithDestination" $
@@ -534,7 +537,11 @@ spec = do
                 [
                   ( Always
                   , Just $
-                      RouteTarget (Substitution "LINK_DST") DefaultMode SymlinkRoute
+                      RouteTarget
+                        (Substitution "LINK_DST")
+                        DefaultMode
+                        SymlinkRoute
+                        identityCodecSpec
                   )
                 ]
                 Dojang.MonadFileSystem.File
@@ -615,7 +622,11 @@ spec = do
               [
                 ( Always
                 , Just $
-                    RouteTarget (Substitution "LINK_DST") DefaultMode SymlinkRoute
+                    RouteTarget
+                      (Substitution "LINK_DST")
+                      DefaultMode
+                      SymlinkRoute
+                      identityCodecSpec
                 )
               ]
               Dojang.MonadFileSystem.Directory
@@ -1290,6 +1301,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       calculateSpecificity (tmpDir </> bar) route `shouldBe` 0
 
@@ -1304,6 +1316,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       calculateSpecificity (tmpDir </> bar </> baz) route `shouldBe` 1
 
@@ -1318,6 +1331,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       calculateSpecificity (tmpDir </> bar </> baz </> qux) route `shouldBe` 2
 
@@ -1336,6 +1350,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       let route2 =
             RouteResult
@@ -1347,6 +1362,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       -- route1: specificity = 2 (bar/qux/foo)
       -- route2: specificity = 1 (qux/foo)
@@ -1364,6 +1380,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       let route2 =
             RouteResult
@@ -1375,6 +1392,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       -- Both routes have the same destinationPath, so same specificity
       let target = tmpDir </> dst </> baz

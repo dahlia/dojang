@@ -17,6 +17,7 @@ import Dojang.Commands.Disambiguation
   , getAutoSelectMode
   )
 import Dojang.MonadFileSystem qualified (FileType (..))
+import Dojang.Types.Codec (identityCodecSpec)
 import Dojang.Types.Context (CandidateRoute (..))
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute)
@@ -78,6 +79,7 @@ spec = do
               , kind = CopyRoute
               , routeDefinition = ""
               , routeProvenance = mempty
+              , codec = identityCodecSpec
               }
       let candidate = CandidateRoute route 1 foo True
       candidate.specificity `shouldBe` 1

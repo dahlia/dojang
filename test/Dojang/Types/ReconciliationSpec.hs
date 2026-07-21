@@ -14,7 +14,9 @@ import Test.Hspec (Spec, describe, it, runIO)
 import Test.Hspec.Expectations.Pretty (shouldBe)
 
 import Control.Monad.Except (tryError)
+import Control.Monad.IO.Class (liftIO)
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List (isInfixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Hedgehog.Gen qualified as Gen
@@ -28,6 +30,8 @@ import Test.Hspec.Hedgehog (MonadGen, forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.TestUtils (withTempDir)
+import Dojang.Types.Codec (identityCodecSpec)
+import Dojang.Types.Codec.Evaluate (opaqueBytes)
 import Dojang.Types.Context
   ( Context (..)
   , FileCorrespondence (..)
@@ -43,6 +47,7 @@ import Dojang.Types.FileRoute (RouteKind (CopyRoute, SymlinkRoute))
 import Dojang.Types.Manifest qualified as Manifest
 import Dojang.Types.Reconciliation
   ( ConflictPolicy (..)
+  , ContentGuard (ContentGuard)
   , PlannedSyncOp (..)
   , ReconciliationDirection (..)
   , ReconciliationInput (..)
@@ -153,6 +158,9 @@ applyModelOperations = foldl' applyOperation
     SetEntryMode _ _ _ -> state
     CreateSymlink _ _ _ -> state
     RemoveDirsExcept path _ -> Map.insert path ModelMissing state
+    WriteContent _ destinationPath -> Map.insert destinationPath (ModelFile 0) state
+    WriteContentGuarded _ _ destinationPath ->
+      Map.insert destinationPath (ModelFile 0) state
 
 
 swapReplica :: Replica -> Replica
@@ -184,6 +192,8 @@ swapInput input =
     , destinationKind = input.destinationKind
     , routeFileType = input.routeFileType
     , protectedDestinations = input.protectedDestinations
+    , renderedSource = Nothing
+    , renderedSourceGuard = Nothing
     }
 
 
@@ -214,6 +224,8 @@ makeInput paths sourceStat intermediateStat destinationStat sourceDelta destinat
     , destinationKind = CopyRoute
     , routeFileType = FileSystem.File
     , protectedDestinations = []
+    , renderedSource = Nothing
+    , renderedSourceGuard = Nothing
     }
 
 
@@ -282,6 +294,42 @@ spec = do
                        (CopyFile paths.intermediate paths.destination)
                    ]
       fmap (.outcome) plan.items `shouldBe` [WillReconcile]
+
+    it "plans rendered bytes without exposing them" $ do
+      let rendered = opaqueBytes "rendered-secret"
+          guard = ContentGuard paths.source $ opaqueBytes "raw-secret"
+          input =
+            ( makeInput
+                paths
+                (File 15)
+                Missing
+                Missing
+                Added
+                Unchanged
+                ReplicasDifferent
+                routed
+            )
+              { renderedSource = Just rendered
+              , renderedSourceGuard = Just guard
+              }
+          plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp
+                       IntermediateReplica
+                       (CreateDirs $ takeDirectory paths.intermediate)
+                   , PlannedSyncOp
+                       IntermediateReplica
+                       (WriteContentGuarded rendered guard paths.intermediate)
+                   , PlannedSyncOp
+                       DestinationReplica
+                       (CreateDirs $ takeDirectory paths.destination)
+                   , PlannedSyncOp
+                       DestinationReplica
+                       (CopyFile paths.intermediate paths.destination)
+                   ]
+      show plan `shouldSatisfy` not . ("rendered-secret" `isInfixOf`)
+      show plan `shouldSatisfy` not . ("raw-secret" `isInfixOf`)
 
     it "reports an incompatible two-sided change without planning it" $ do
       let input =
@@ -1059,6 +1107,70 @@ spec = do
         finalMode.writable `shouldBe` False
         FileSystem.setPortableWritable destinationPath True
 
+    it "rejects stale buffered content before any mutation" $ hedgehog $ do
+      expected <- forAll $ Gen.bytes $ linear 0 256
+      rendered <- forAll $ Gen.bytes $ linear 0 256
+      victimContents <- forAll $ Gen.bytes $ linear 0 256
+      destinationContents <- forAll $ Gen.bytes $ linear 0 256
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        authoritativeName <- encodeFS "authoritative"
+        victimName <- encodeFS "victim"
+        destinationName <- encodeFS "destination"
+        let authoritative = tmpDir </> authoritativeName
+            victim = tmpDir </> victimName
+            destinationPath = tmpDir </> destinationName
+            staleGuard =
+              ContentGuard authoritative $ opaqueBytes expected
+        FileSystem.writeFile authoritative $ expected <> "\0"
+        FileSystem.writeFile victim victimContents
+        FileSystem.writeFile destinationPath destinationContents
+        result <-
+          tryError $
+            executeReconciliationPlanGuarded
+              (const $ return ())
+              (const $ return ())
+              ( manualPlan
+                  [ RemoveFile victim
+                  , WriteContentGuarded
+                      (opaqueBytes rendered)
+                      staleGuard
+                      destinationPath
+                  ]
+              )
+        victimAfter <- FileSystem.readFile victim
+        destinationAfter <- FileSystem.readFile destinationPath
+        return
+          ( case result of Left _ -> True; Right _ -> False
+          , victimAfter
+          , destinationAfter
+          )
+      observed === (True, victimContents, destinationContents)
+
+    it "rechecks buffered content immediately before writing" $
+      withTempDir $ \tmpDir _ -> do
+        authoritativeName <- encodeFS "authoritative"
+        destinationName <- encodeFS "destination"
+        let authoritative = tmpDir </> authoritativeName
+            destinationPath = tmpDir </> destinationName
+            guard = ContentGuard authoritative $ opaqueBytes "evaluated"
+            operation =
+              WriteContentGuarded
+                (opaqueBytes "rendered")
+                guard
+                destinationPath
+        FileSystem.writeFile authoritative "evaluated"
+        FileSystem.writeFile destinationPath "preserved"
+        result <-
+          tryError $
+            executeReconciliationPlanGuarded
+              (\_ -> FileSystem.writeFile authoritative "changed")
+              (const $ return ())
+              (manualPlan [operation])
+        result `shouldSatisfy` \case
+          Left _ -> True
+          Right _ -> False
+        FileSystem.readFile destinationPath `shouldReturn` "preserved"
+
     it "leaves recreated entries writable without a declared mode" $
       withTempDir $ \tmpDir _ -> do
         sourceName <- encodeFS "guard-source"
@@ -1174,6 +1286,7 @@ spec = do
                     CopyRoute
                     ""
                     mempty
+                    identityCodecSpec
                 )
                 mempty
                 FileCorrespondence
@@ -1237,6 +1350,15 @@ spec = do
       differentInput.declaredDestinationMode `shouldBe` Private
 
   describe "execution" $ do
+    it "writes arbitrary rendered bytes exactly" $ hedgehog $ do
+      bytes <- forAll $ Gen.bytes $ linear 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        renderedName <- encodeFS "rendered"
+        let renderedPath = tmpDir </> renderedName
+        executeSyncOp $ WriteContent (opaqueBytes bytes) renderedPath
+        FileSystem.readFile renderedPath
+      observed === bytes
+
     it "interprets every synchronization operation" $ withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source-file"
       parentName <- encodeFS "parent"

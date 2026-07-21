@@ -9,6 +9,7 @@ module Dojang.Types.TargetTrackingSpec (spec) where
 
 import Control.Exception qualified as Exception
 import Control.Monad.IO.Class (liftIO)
+import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Either (isLeft)
 import Data.Map.Strict qualified as Map
 import Data.Time (getCurrentTime)
@@ -55,6 +56,8 @@ import Prelude hiding (readFile, writeFile)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.TestUtils (withTempDir)
+import Dojang.Types.Codec (identityCodecSpec)
+import Dojang.Types.Codec.Evaluate (opaqueBytes)
 import Dojang.Types.Context
   ( FileCorrespondence (..)
   , FileDeltaKind (Unchanged)
@@ -78,6 +81,7 @@ import Dojang.Types.TargetTracking
   ( managedTargetId
   , newTargetSnapshotTransaction
   , observeConvergedManagedTarget
+  , observeConvergedManagedTargetWithRenderedSource
   , observeManagedTarget
   , observeOrphanStatus
   )
@@ -135,6 +139,7 @@ spec = do
               canonicalRoute.kind
               canonicalRoute.routeDefinition
               canonicalRoute.routeProvenance
+              canonicalRoute.codec
       canonicalId <- managedTargetId repository managed
       rawId <- managedTargetId repository managed{route = rawRoute}
       rawId `shouldBe` canonicalId
@@ -154,6 +159,7 @@ spec = do
               route.kind
               "other-definition"
               route.routeProvenance
+              route.codec
       originalId <- managedTargetId repository managed
       changedId <-
         managedTargetId
@@ -175,6 +181,7 @@ spec = do
               route.kind
               route.routeDefinition
               route.routeProvenance
+              route.codec
       originalId <- managedTargetId repository managed
       changedId <-
         managedTargetId
@@ -215,6 +222,7 @@ spec = do
                       route.kind
                       route.routeDefinition
                       route.routeProvenance
+                      route.codec
                 , correspondence =
                     FileCorrespondence
                       (directoryEntry managed.correspondence.source.path)
@@ -258,6 +266,7 @@ spec = do
                 route.kind
                 route.routeDefinition
                 route.routeProvenance
+                route.codec
         let escaped = managed{route = escapedRoute}
         managedTargetId repository escaped
           `shouldThrow` (const True :: IOError -> Bool)
@@ -323,6 +332,34 @@ spec = do
           managed
           `shouldReturn` Nothing
 
+    it "does not record rendered convergence after the raw source changes" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let intermediate = managed.correspondence.intermediate.path
+            source = managed.correspondence.source.path
+            destination = managed.correspondence.destination.path
+            rendered = "rendered"
+            originalRaw = "raw"
+        createDirectories $ takeDirectory intermediate
+        createDirectories $ takeDirectory source
+        writeFile intermediate rendered
+        writeFile destination rendered
+        writeFile source "changed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        observeConvergedManagedTargetWithRenderedSource
+          repository
+          transaction
+          Applied
+          now
+          (Just $ opaqueBytes rendered)
+          (Just $ SHA256.hash originalRaw)
+          managed
+          `shouldReturn` Nothing
+
     convergedSymlinkSpec
 
     it "materializes directory baselines one entry at a time" $
@@ -356,6 +393,7 @@ spec = do
                     CopyRoute
                     "definition"
                     Map.empty
+                    identityCodecSpec
                 )
                 childName
                 ( FileCorrespondence
@@ -405,6 +443,7 @@ spec = do
                 snapshot
                 "definition"
                 Map.empty
+                Nothing
                 DirectoryFingerprint
                 Applied
                 now
@@ -528,6 +567,7 @@ symlinkOrphanSpec =
         (root </> snapshotName)
         "definition"
         Map.empty
+        Nothing
         (SymlinkFingerprint sourceName)
         Applied
         now
@@ -551,6 +591,7 @@ fixtureOrphanTarget root = do
       (root </> snapshotName)
       "definition"
       Map.empty
+      Nothing
       (FileFingerprint 7 "digest")
       Applied
       now
@@ -578,6 +619,7 @@ fixtureManagedPath destination = do
           CopyRoute
           "definition"
           Map.empty
+          identityCodecSpec
       )
       mempty
       ( FileCorrespondence
@@ -610,6 +652,7 @@ fixtureManagedAt root = do
           CopyRoute
           "definition"
           Map.empty
+          identityCodecSpec
       )
       mempty
       ( FileCorrespondence

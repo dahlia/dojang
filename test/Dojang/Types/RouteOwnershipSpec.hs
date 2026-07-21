@@ -33,6 +33,7 @@ import Test.Hspec.Hedgehog (annotateShow, assert, forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem (FileType (Directory, File))
 import Dojang.TestUtils (withTempDir)
+import Dojang.Types.Codec (identityCodecSpec)
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
@@ -59,6 +60,7 @@ mkRoute src name destination fileType' kind' =
     kind'
     ""
     mempty
+    identityCodecSpec
 
 
 spec :: Spec

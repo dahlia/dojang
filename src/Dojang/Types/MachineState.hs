@@ -139,7 +139,8 @@ import Dojang.Types.Hook
   , renderHookType
   )
 import Dojang.Types.ManagedTarget
-  ( ManagedTarget (..)
+  ( ManagedCodecState (..)
+  , ManagedTarget (..)
   , SynchronizationCommand (..)
   , TargetFingerprint (..)
   , isSafeManagedRelativePath
@@ -162,7 +163,7 @@ import Dojang.Types.RouteMetadata
 
 -- | The on-disk schema version understood by this release.
 schemaVersion :: Integer
-schemaVersion = 5
+schemaVersion = 6
 
 
 -- | A stable identifier for the local machine-state store.
@@ -760,6 +761,11 @@ data TargetDocument = TargetDocument
   , targetDocumentSnapshotPath :: Text
   , targetDocumentRouteDefinition :: Text
   , targetDocumentRouteProvenance :: Map Text Text
+  , targetDocumentCodecName :: Maybe Text
+  , targetDocumentCodecVersion :: Maybe Text
+  , targetDocumentCodecConfigurationDigest :: Maybe Text
+  , targetDocumentCodecCacheKey :: Maybe Text
+  , targetDocumentCodecDependencies :: Maybe (Map Text Text)
   , targetDocumentFingerprintKind :: Text
   , targetDocumentFingerprintSize :: Integer
   , targetDocumentFingerprintDigest :: Text
@@ -821,6 +827,11 @@ instance FromValue TargetDocument where
         <*> reqKey "snapshot-path"
         <*> reqKey "route-definition"
         <*> reqKey "route-provenance"
+        <*> optKey "codec-name"
+        <*> optKey "codec-version"
+        <*> optKey "codec-configuration-digest"
+        <*> optKey "codec-cache-key"
+        <*> optKey "codec-dependencies"
         <*> reqKey "fingerprint-kind"
         <*> reqKey "fingerprint-size"
         <*> reqKey "fingerprint-digest"
@@ -852,6 +863,13 @@ instance ToTable TargetDocument where
       ]
         ++ maybeField "route-kind" target.targetDocumentRouteKind
         ++ maybeField "declared-mode" target.targetDocumentDeclaredMode
+        ++ maybeField "codec-name" target.targetDocumentCodecName
+        ++ maybeField "codec-version" target.targetDocumentCodecVersion
+        ++ maybeField
+          "codec-configuration-digest"
+          target.targetDocumentCodecConfigurationDigest
+        ++ maybeField "codec-cache-key" target.targetDocumentCodecCacheKey
+        ++ maybeField "codec-dependencies" target.targetDocumentCodecDependencies
         ++ maybeField
           "fingerprint-link-target"
           target.targetDocumentFingerprintLinkTarget
@@ -1059,9 +1077,10 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
     1 -> upgradeLegacyDocument expectedTargetRoot source
     2 -> upgradeV2Document source
     3 -> upgradeV3Document source
-    -- Version 4 documents decode with the current decoder: version 5 only
-    -- adds optional keys whose absence means the former defaults.
+    -- Versions 4 and 5 decode with the current decoder.  Newer fields are
+    -- optional, and their absence selects the former defaults.
     4 -> decodeCurrentDocument source
+    5 -> decodeCurrentDocument source
     version
       | version == schemaVersion -> decodeCurrentDocument source
       | otherwise -> Left $ UnsupportedSchemaVersion version
@@ -1307,6 +1326,11 @@ targetToDocument target =
     (osPathText target.snapshotPath)
     target.routeDefinition
     target.routeProvenance
+    ((.name) <$> target.codecState)
+    ((.version) <$> target.codecState)
+    ((.configurationDigest) <$> target.codecState)
+    ((.cacheKey) <$> target.codecState)
+    ((.dependencies) <$> target.codecState)
     fingerprintKind
     fingerprintSize
     fingerprintDigest
@@ -1414,6 +1438,28 @@ targetFromDocument key target = do
       Just mode -> Right mode
       Nothing ->
         Left $ MalformedState $ "Unknown target declared mode: " <> modeText
+  codecState <- case ( target.targetDocumentCodecName
+                     , target.targetDocumentCodecVersion
+                     , target.targetDocumentCodecConfigurationDigest
+                     , target.targetDocumentCodecCacheKey
+                     , target.targetDocumentCodecDependencies
+                     ) of
+    (Nothing, Nothing, Nothing, Nothing, Nothing) -> Right Nothing
+    ( Just name
+      , Just version
+      , Just configurationDigest
+      , Just cacheKey
+      , Just dependencies
+      ) ->
+        Right $
+          Just $
+            ManagedCodecState
+              name
+              version
+              configurationDigest
+              cacheKey
+              dependencies
+    _ -> Left $ MalformedState "A managed codec record is incomplete."
   fingerprint <- case target.targetDocumentFingerprintKind of
     "file" ->
       Right $
@@ -1472,6 +1518,7 @@ targetFromDocument key target = do
       snapshot
       target.targetDocumentRouteDefinition
       target.targetDocumentRouteProvenance
+      codecState
       fingerprint
       command
       updated

@@ -7,7 +7,8 @@
 
 -- | Pure reconciliation planning and filesystem-plan execution.
 module Dojang.Types.Reconciliation
-  ( ConflictPolicy (..)
+  ( ContentGuard (..)
+  , ConflictPolicy (..)
   , PlannedSyncOp (..)
   , ReconciliationConflict (..)
   , ReconciliationDirection (..)
@@ -27,16 +28,21 @@ module Dojang.Types.Reconciliation
   , isDestructiveSyncOp
   , observeModeDrift
   , observeReconciliationInput
+  , observeReconciliationInputWithRenderedSource
+  , observeReconciliationInputWithRenderedSourceGuard
   , planReconciliation
   ) where
 
 import Control.Monad (forM, forM_)
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.IO.Class (MonadIO)
+import Data.ByteString qualified as ByteString
 import Data.List (isPrefixOf, nub, sortBy, sortOn)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
+import GHC.IO.Exception (IOErrorType (InvalidArgument))
 import System.FilePattern (FilePattern)
+import System.IO.Error (ioeSetErrorString, mkIOError)
 import System.OsPath
   ( OsPath
   , isAbsolute
@@ -45,9 +51,14 @@ import System.OsPath
   , takeDirectory
   , (</>)
   )
+import Prelude hiding (readFile, writeFile)
 
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified as FileSystem (FileType (..))
+import Dojang.Types.Codec.Evaluate
+  ( OpaqueBytes
+  , revealBytes
+  )
 import Dojang.Types.Context
   ( Context
   , FileCorrespondence (..)
@@ -135,6 +146,11 @@ data ReconciliationInput = ReconciliationInput
   , protectedDestinations :: [OsPath]
   -- ^ Absolute destination roots owned by routes nested inside this
   -- correspondence's route.  Recursive removals must preserve them.
+  , renderedSource :: Maybe OpaqueBytes
+  -- ^ Codec-produced source bytes.  When present, the planner writes these
+  -- bytes to the intermediate rather than copying the raw source path.
+  , renderedSourceGuard :: Maybe ContentGuard
+  -- ^ Exact authoritative bytes that produced 'renderedSource'.
   }
   deriving (Eq, Ord, Show)
 
@@ -193,6 +209,17 @@ data ReconciliationItem = ReconciliationItem
   deriving (Eq, Ord, Show)
 
 
+-- | An authoritative file observation that must still match before buffered
+-- codec output may be written.
+data ContentGuard = ContentGuard
+  { path :: OsPath
+  -- ^ Authoritative file path read during codec evaluation or reflection.
+  , expectedContent :: OpaqueBytes
+  -- ^ Exact bytes observed at that path, redacted by 'Show'.
+  }
+  deriving (Eq, Ord, Show)
+
+
 -- | A filesystem synchronization operation.
 data SyncOp
   = -- | Remove a directory and all of its children.
@@ -210,6 +237,11 @@ data SyncOp
     RemoveLink OsPath
   | -- | Copy a regular file from the first path to the second path.
     CopyFile OsPath OsPath
+  | -- | Write opaque codec-produced bytes to a regular file.
+    WriteContent OpaqueBytes OsPath
+  | -- | Write opaque codec-produced bytes only while the authoritative file
+    -- still matches the guarded observation.
+    WriteContentGuarded OpaqueBytes ContentGuard OsPath
   | -- | Create one directory whose parent already exists.
     CreateDir OsPath
   | -- | Create a directory and any missing ancestors.
@@ -233,6 +265,10 @@ syncOpOrdKey (RemoveDirsExcept path _) = (path, 2, path)
 syncOpOrdKey (CreateDir path) = (path, 3, path)
 syncOpOrdKey (CreateDirs path) = (path, 4, path)
 syncOpOrdKey (CopyFile _ destination) =
+  (takeDirectory destination, 5, destination)
+syncOpOrdKey (WriteContent _ destination) =
+  (takeDirectory destination, 5, destination)
+syncOpOrdKey (WriteContentGuarded _ _ destination) =
   (takeDirectory destination, 5, destination)
 syncOpOrdKey (SetEntryMode path _ _) = (takeDirectory path, 6, path)
 syncOpOrdKey (CreateSymlink _ link _) = (takeDirectory link, 5, link)
@@ -282,41 +318,108 @@ observeReconciliationInput
   -> m ReconciliationInput
   -- ^ Pure planner input containing the correspondence and extra observations.
 observeReconciliationInput context declaredMode correspondence = do
-  comparison <- observeComparison correspondence
-  (routeState, _) <- getRouteState context correspondence.destination.path
-  observedMode <- case correspondence.destination.stat of
-    File _ -> observeDestinationMode
-    Directory -> observeDestinationMode
-    _ -> return Nothing
-  return
-    ReconciliationInput
-      { correspondence = correspondence
-      , sourceDestinationComparison = comparison
-      , destinationRouteState = routeState
-      , declaredDestinationMode = declaredMode
-      , observedDestinationMode = observedMode
-      , destinationKind = CopyRoute
-      , routeFileType = FileSystem.File
-      , protectedDestinations = []
-      }
+  observeReconciliationInputWithRenderedSource
+    context
+    declaredMode
+    correspondence
+    Nothing
+
+
+-- | Observes reconciliation input while comparing a codec-produced source
+-- view with the concrete destination.
+observeReconciliationInputWithRenderedSource
+  :: (MonadFileSystem m, MonadIO m)
+  => Context m
+  -> RouteMode
+  -> FileCorrespondence
+  -> Maybe OpaqueBytes
+  -> m ReconciliationInput
+observeReconciliationInputWithRenderedSource
+  context
+  declaredMode
+  correspondence
+  renderedSource =
+    observeReconciliationInputWithRenderedSourceGuard
+      context
+      declaredMode
+      correspondence
+      renderedSource
+      Nothing
+
+
+-- | Observes reconciliation input while retaining the exact raw source bytes
+-- that produced codec-rendered content.  Execution refuses the buffered write
+-- if those authoritative bytes have changed.
+observeReconciliationInputWithRenderedSourceGuard
+  :: (MonadFileSystem m, MonadIO m)
+  => Context m
+  -> RouteMode
+  -> FileCorrespondence
+  -> Maybe OpaqueBytes
+  -> Maybe OpaqueBytes
+  -> m ReconciliationInput
+observeReconciliationInputWithRenderedSourceGuard
+  context
+  declaredMode
+  correspondence
+  renderedSource
+  expectedSource = do
+    comparison <- observeComparison correspondence renderedSource
+    (routeState, _) <- getRouteState context correspondence.destination.path
+    observedMode <- case correspondence.destination.stat of
+      File _ -> observeDestinationMode
+      Directory -> observeDestinationMode
+      _ -> return Nothing
+    return
+      ReconciliationInput
+        { correspondence = correspondence
+        , sourceDestinationComparison = comparison
+        , destinationRouteState = routeState
+        , declaredDestinationMode = declaredMode
+        , observedDestinationMode = observedMode
+        , destinationKind = CopyRoute
+        , routeFileType = FileSystem.File
+        , protectedDestinations = []
+        , renderedSource = renderedSource
+        , renderedSourceGuard =
+            ContentGuard correspondence.source.path <$> expectedSource
+        }
+   where
+    observeDestinationMode =
+      (Just <$> getPortableMode correspondence.destination.path)
+        `catchError` const (return Nothing)
+    observeComparison
+      :: (MonadFileSystem m)
+      => FileCorrespondence
+      -> Maybe OpaqueBytes
+      -> m ReplicaComparison
+    observeComparison value rendered =
+      case (value.sourceDelta, value.destinationDelta) of
+        (Unchanged, Unchanged) -> return ReplicasEquivalent
+        (Unchanged, _) -> return ReplicasDifferent
+        (_, Unchanged) -> return ReplicasDifferent
+        (Removed, Removed) -> return ReplicasEquivalent
+        _ -> do
+          delta <- case rendered of
+            Nothing -> calculateFileDelta value.source value.destination
+            Just content -> calculateRenderedDelta content value.destination
+          return $
+            if delta == Unchanged
+              then ReplicasEquivalent
+              else ReplicasDifferent
+
+
+calculateRenderedDelta
+  :: (MonadFileSystem m) => OpaqueBytes -> FileEntry -> m FileDeltaKind
+calculateRenderedDelta content (FileEntry path (File size))
+  | fromIntegral (ByteString.length bytes) /= size = return Modified
+  | otherwise = do
+      destination <- readFile path
+      return $ if destination == bytes then Unchanged else Modified
  where
-  observeDestinationMode =
-    (Just <$> getPortableMode correspondence.destination.path)
-      `catchError` const (return Nothing)
-  observeComparison
-    :: (MonadFileSystem m) => FileCorrespondence -> m ReplicaComparison
-  observeComparison value =
-    case (value.sourceDelta, value.destinationDelta) of
-      (Unchanged, Unchanged) -> return ReplicasEquivalent
-      (Unchanged, _) -> return ReplicasDifferent
-      (_, Unchanged) -> return ReplicasDifferent
-      (Removed, Removed) -> return ReplicasEquivalent
-      _ -> do
-        delta <- calculateFileDelta value.source value.destination
-        return $
-          if delta == Unchanged
-            then ReplicasEquivalent
-            else ReplicasDifferent
+  bytes = revealBytes content
+calculateRenderedDelta _ (FileEntry _ Missing) = return Added
+calculateRenderedDelta _ _ = return Modified
 
 
 -- | Observes destinations whose permission state does not satisfy the
@@ -590,7 +693,11 @@ planSupportedInput direction input
             then []
             else
               tagOperations FirstPhase IntermediateReplica $
-                replaceEntry authoritative correspondence.intermediate
+                replaceAuthoritativeEntry
+                  authoritativeContent
+                  authoritativeContentGuard
+                  authoritative
+                  correspondence.intermediate
         stagedIntermediate =
           FileEntry correspondence.intermediate.path authoritative.stat
         targetOperations =
@@ -615,6 +722,12 @@ planSupportedInput direction input
             | null operations -> NoChange
             | otherwise -> WillReconcile
     in (outcome, operations)
+  authoritativeContent = case direction of
+    SourceToDestination -> input.renderedSource
+    DestinationToSource -> Nothing
+  authoritativeContentGuard = case direction of
+    SourceToDestination -> input.renderedSourceGuard
+    DestinationToSource -> Nothing
 
 
 -- | Plans the mode change reconciling the destination toward the mode
@@ -723,6 +836,30 @@ replaceEntry from to = case from.stat of
     ]
 
 
+replaceAuthoritativeEntry
+  :: Maybe OpaqueBytes
+  -> Maybe ContentGuard
+  -> FileEntry
+  -> FileEntry
+  -> [SyncOp]
+replaceAuthoritativeEntry Nothing _ from to = replaceEntry from to
+replaceAuthoritativeEntry (Just content) guard from to = case from.stat of
+  File _ -> case to.stat of
+    Missing -> createAndWrite
+    File _ -> [writeContent]
+    Symlink _ -> RemoveFile to.path : createAndWrite
+    Directory -> RemoveDirs to.path : createAndWrite
+  _ -> replaceEntry from to
+ where
+  writeContent = case guard of
+    Nothing -> WriteContent content to.path
+    Just contentGuard -> WriteContentGuarded content contentGuard to.path
+  createAndWrite =
+    [ CreateDirs $ takeDirectory to.path
+    , writeContent
+    ]
+
+
 normalizeOperations :: [TaggedOperation] -> [PlannedSyncOp]
 normalizeOperations operations =
   fmap (.plannedOperation) $
@@ -780,6 +917,8 @@ operationKey operation =
     CreateDir _ -> (1, depth)
     CreateDirs _ -> (1, depth)
     CopyFile _ _ -> (2, depth)
+    WriteContent{} -> (2, depth)
+    WriteContentGuarded{} -> (2, depth)
     CreateSymlink{} -> (2, depth)
     SetEntryMode{} -> (3, depth)
 
@@ -790,6 +929,8 @@ syncOpTarget (RemoveDirsExcept path _) = path
 syncOpTarget (RemoveFile path) = path
 syncOpTarget (RemoveLink path) = path
 syncOpTarget (CopyFile _ destination) = destination
+syncOpTarget (WriteContent _ destination) = destination
+syncOpTarget (WriteContentGuarded _ _ destination) = destination
 syncOpTarget (CreateDir path) = path
 syncOpTarget (CreateDirs path) = path
 syncOpTarget (SetEntryMode path _ _) = path
@@ -831,6 +972,11 @@ executeSyncOp (RemoveDirsExcept path protected) =
 executeSyncOp (RemoveFile path) = removeFile path
 executeSyncOp (RemoveLink path) = removeFile path
 executeSyncOp (CopyFile source destination) = copyFile source destination
+executeSyncOp (WriteContent content destination) =
+  writeFile destination $ revealBytes content
+executeSyncOp (WriteContentGuarded content guard destination) = do
+  validateContentGuard guard
+  writeFile destination $ revealBytes content
 executeSyncOp (CreateDir path) = createDirectory path
 executeSyncOp (CreateDirs path) = createDirectories path
 executeSyncOp (CreateSymlink target link fileType) =
@@ -843,6 +989,29 @@ executeSyncOp (SetEntryMode path mode fileType) =
   bits = case fileType of
     FileSystem.Directory -> posixDirectoryModeBits mode
     _ -> posixFileModeBits mode
+
+
+validateContentGuard
+  :: (MonadFileSystem m) => ContentGuard -> m ()
+validateContentGuard guard = do
+  current <- readFile guard.path
+  if current == revealBytes guard.expectedContent
+    then return ()
+    else do
+      path <- decodePath guard.path
+      throwError $
+        mkIOError InvalidArgument "writeContent" Nothing (Just path)
+          `ioeSetErrorString` "authoritative file changed after codec evaluation"
+
+
+validatePlanContentGuards
+  :: forall m. (MonadFileSystem m) => [PlannedSyncOp] -> m ()
+validatePlanContentGuards = mapM_ validate
+ where
+  validate :: PlannedSyncOp -> m ()
+  validate operation = case operation.syncOp of
+    WriteContentGuarded _ guard _ -> validateContentGuard guard
+    _ -> return ()
 
 
 -- | Removes a directory's contents while preserving the protected
@@ -925,6 +1094,7 @@ executeReconciliationPlanGuarded observe reportRestoreFailure plan =
   case (plan.conflictPolicy, NE.nonEmpty plan.conflicts) of
     (RefuseConflicts, Just conflicts) -> return $ Left conflicts
     _ -> do
+      validatePlanContentGuards plan.operations
       widened <- go [] plan.operations
       failures <- restoreAll' widened
       case failures of
@@ -1018,6 +1188,16 @@ executeReconciliationPlanGuarded observe reportRestoreFailure plan =
       [ widenIfReadOnly destination
       , widenIfReadOnly $ takeDirectory destination
       ]
+  widenForSyncOp (WriteContent _ destination) =
+    widenMany
+      [ widenIfReadOnly destination
+      , widenIfReadOnly $ takeDirectory destination
+      ]
+  widenForSyncOp (WriteContentGuarded _ _ destination) =
+    widenMany
+      [ widenIfReadOnly destination
+      , widenIfReadOnly $ takeDirectory destination
+      ]
   widenForSyncOp (CreateDir path) =
     widenIfReadOnly $ takeDirectory path
   widenForSyncOp (CreateDirs path) =
@@ -1096,6 +1276,7 @@ executeReconciliationPlanWith observe plan =
   case (plan.conflictPolicy, NE.nonEmpty plan.conflicts) of
     (RefuseConflicts, Just conflicts) -> return $ Left conflicts
     _ -> do
+      validatePlanContentGuards plan.operations
       forM_ plan.operations $ \operation -> do
         observe operation
         executeSyncOp operation.syncOp

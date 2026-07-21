@@ -26,6 +26,8 @@
 | architecture                 | 프로세서 아키텍처          | `arch` 식별자는 그대로 씁니다.                                                               |
 | baseline                     | 기준 사본                  | 고아 상태 판정에 쓰는 보존된 사본을 뜻합니다.                                                |
 | checkout                     | 체크아웃                   |                                                                                              |
+| codec                        | 코덱                       | 경로 규칙의 원본 바이트를 배치할 바이트로 변환합니다.                                        |
+| codec cache                  | 코덱 캐시                  | 원문이나 렌더링 결과가 아니라 지문과 캐시 키를 상태에 저장합니다.                            |
 | change key                   | 개정 키                    | `change-key` 필드 이름은 그대로 씁니다.                                                      |
 | command                      | 명령                       | `command line`은 “명령행”으로 씁니다.                                                        |
 | compact route                | 간결 경로 규칙             |                                                                                              |
@@ -70,6 +72,8 @@
 | provenance                   | 결정 근거                  | 단순한 출처를 뜻할 때는 “출처”로 쓸 수 있습니다.                                             |
 | record                       | 레코드, 기록하다           | 명사와 동사를 구분합니다.                                                                    |
 | reflection, reflect          | 반영, 반영하다             | 명령 이름 `dojang reflect`는 그대로 씁니다.                                                  |
+| reflection policy            | 반영 정책                  | 코덱 구현이 `identity`, `reject`, `re-add` 중 하나로 정합니다.                               |
+| rendered bytes               | 렌더링된 바이트            | 코덱의 정방향 변환 결과이며 중간 스냅샷과 대상 경로에 배치됩니다.                            |
 | registry                     | 레지스트리                 |                                                                                              |
 | repository                   | 저장소                     |                                                                                              |
 | route                        | 경로 규칙                  |                                                                                              |

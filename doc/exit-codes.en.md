@@ -33,4 +33,6 @@ it returns the following exit codes, depending on the situation.
  -  37: A lifecycle selection is empty, unknown, or still active.
  -  38: The route configuration cannot give every destination exactly one
     owning route, or a route's source and destination alias each other.
+ -  39: A route codec is unknown, invalid, unavailable in the current dry run,
+    or failed during forward or reverse evaluation.
  -  40: A hook failed with a non-zero exit code.

@@ -95,6 +95,52 @@
         "type": "string"
       }
     },
+    "codecConfigurationValue": {
+      "title": "Codec configuration value",
+      "description": "A deterministic codec configuration value. Floating-point and date/time values are not supported.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "integer" },
+        { "type": "boolean" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/codecConfigurationValue" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/codecConfigurationValue"
+          }
+        }
+      ]
+    },
+    "codec": {
+      "title": "Route codec",
+      "description": "The codec that renders repository bytes into deployed bytes. A string selects a codec with no configuration.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "config": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/codecConfigurationValue"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "detailedRouteBranch": {
       "title": "Detailed route branch",
       "description": "An ordered route branch selected by either a moniker or an inline environment predicate.  If path is omitted, the branch is a null route.",
@@ -130,6 +176,9 @@
           "description": "Whether the destination is an ordinary copied entry (copy) or a symbolic link pointing back at the route's repository source (symlink).  Requires path.",
           "type": "string",
           "enum": ["copy", "symlink"]
+        },
+        "codec": {
+          "$ref": "#/$defs/codec"
         }
       },
       "oneOf": [
@@ -142,7 +191,8 @@
       ],
       "dependentRequired": {
         "mode": ["path"],
-        "kind": ["path"]
+        "kind": ["path"],
+        "codec": ["path"]
       },
       "if": {
         "properties": {
@@ -156,6 +206,20 @@
         "properties": {
           "mode": {
             "const": "default"
+          },
+          "codec": {
+            "oneOf": [
+              { "const": "identity" },
+              {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "const": "identity" },
+                  "config": { "type": "object", "maxProperties": 0 }
+                },
+                "additionalProperties": false
+              }
+            ]
           }
         }
       },

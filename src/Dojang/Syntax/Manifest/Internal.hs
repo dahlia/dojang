@@ -31,6 +31,14 @@ import Data.CaseInsensitive (CI (original))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, pack, unpack)
+import Dojang.Types.Codec
+  ( CodecConfiguration (CodecConfiguration)
+  , CodecSpec (CodecSpec)
+  , CodecValue (..)
+  , identityCodecSpec
+  , parseCodecName
+  , renderCodecName
+  )
 import Dojang.Types.ManifestVariable
   ( ManifestVariableName
   , parseManifestVariableName
@@ -47,7 +55,9 @@ import Toml.FromValue
   , parseTableFromValue
   , setTable
   )
+import qualified Toml.FromValue as FromValue
 import Toml.FromValue.Matcher (Matcher)
+import Toml.FromValue.ParseTable (ParseTable)
 import Toml.ToValue
   ( ToKey (..)
   , ToTable (toTable)
@@ -271,6 +281,7 @@ data FileRouteBranch' = FileRouteBranch'
   , routePath :: Maybe Text
   , routeMode :: Maybe Text
   , routeKind :: Maybe Text
+  , routeCodec :: Maybe CodecSpec
   , routeUnexpectedFields :: [Text]
   }
   deriving (Eq, Show)
@@ -283,10 +294,11 @@ instance FromValue FileRouteBranch' where
     path <- optKey "path"
     mode <- optKey "mode"
     kind <- optKey "kind"
+    codec <- optKey "codec"
     unexpectedFields <- fmap pack . Map.keys <$> getTable
     setTable Map.empty
     return $
-      FileRouteBranch' moniker condition path mode kind unexpectedFields
+      FileRouteBranch' moniker condition path mode kind codec unexpectedFields
 
 
 instance ToValue FileRouteBranch' where
@@ -301,10 +313,83 @@ instance ToTable FileRouteBranch' where
         ++ maybeField "path" branch.routePath
         ++ maybeField "mode" branch.routeMode
         ++ maybeField "kind" branch.routeKind
+        ++ maybeField "codec" branch.routeCodec
    where
     maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
     maybeField key (Just value) = [(key, toValue value)]
     maybeField _ Nothing = []
+
+
+instance FromValue CodecValue where
+  fromValue (String value) = return $ CodecString $ pack value
+  fromValue (Integer value) = return $ CodecInteger value
+  fromValue (Bool value) = return $ CodecBoolean value
+  fromValue (Array values) = CodecArray <$> traverse fromValue values
+  fromValue (Table values) =
+    CodecTable . Map.fromList
+      <$> traverse
+        (\(key, value) -> (,) (pack key) <$> fromValue value)
+        (Map.toList values)
+  fromValue value =
+    typeError value "string, integer, boolean, array, or table"
+
+
+instance ToValue CodecValue where
+  toValue (CodecString value) = String $ unpack value
+  toValue (CodecInteger value) = Integer value
+  toValue (CodecBoolean value) = Bool value
+  toValue (CodecArray values) = Array $ toValue <$> values
+  toValue (CodecTable values) =
+    Table $
+      Map.fromList
+        [(unpack key, toValue value) | (key, value) <- Map.toAscList values]
+
+
+instance FromValue CodecConfiguration where
+  fromValue value@(Table _) = do
+    CodecTable values <- fromValue value
+    return $ CodecConfiguration values
+  fromValue value = typeError value "table"
+
+
+instance ToValue CodecConfiguration where
+  toValue (CodecConfiguration values) = toValue $ CodecTable values
+
+
+instance FromValue CodecSpec where
+  fromValue (String value) = makeCodecSpec (pack value) $ CodecConfiguration Map.empty
+  fromValue value@(Table _) = parseTableFromValue parseCodecTable value
+  fromValue value = typeError value "string or codec table"
+
+
+parseCodecTable :: ParseTable CodecSpec
+parseCodecTable = do
+  name <- FromValue.reqKey "name"
+  configuration <- fromMaybe (CodecConfiguration Map.empty) <$> optKey "config"
+  unexpectedFields <- Map.keys <$> getTable
+  setTable Map.empty
+  case unexpectedFields of
+    [] -> makeCodecSpec (pack name) configuration
+    fields -> fail $ "unexpected codec fields: " ++ show fields
+
+
+makeCodecSpec :: (MonadFail m) => Text -> CodecConfiguration -> m CodecSpec
+makeCodecSpec name configuration = case parseCodecName name of
+  Just name' -> return $ CodecSpec name' configuration
+  Nothing -> fail "codec name must not be empty"
+
+
+instance ToValue CodecSpec where
+  toValue codec@(CodecSpec name configuration)
+    | codec == identityCodecSpec = toValue (renderCodecName name)
+    | configuration == CodecConfiguration Map.empty =
+        toValue $ renderCodecName name
+    | otherwise =
+        Table $
+          Map.fromList
+            [ ("name", toValue $ renderCodecName name)
+            , ("config", toValue configuration)
+            ]
 
 
 type FileRouteMap' = Map FilePath FileRoute'

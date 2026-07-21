@@ -11,6 +11,7 @@ module Dojang.Types.TargetTracking
   , managedTargetId
   , newTargetSnapshotTransaction
   , observeConvergedManagedTarget
+  , observeConvergedManagedTargetWithRenderedSource
   , observeOrphanStatus
   , observeManagedTarget
   ) where
@@ -48,9 +49,10 @@ import Prelude hiding (readFile)
 
 import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified as FileSystem
+import Dojang.Types.Codec.Evaluate (OpaqueBytes, revealBytes)
 import Dojang.Types.Context
   ( FileCorrespondence (..)
-  , FileDeltaKind (Unchanged)
+  , FileDeltaKind (Added, Modified, Unchanged)
   , FileEntry (..)
   , FileStat (..)
   , ManagedCorrespondence (..)
@@ -225,54 +227,121 @@ observeConvergedManagedTarget
   -- ^ Selected correspondence to re-observe.
   -> m (Maybe (Text, Maybe ManagedTarget))
   -- ^ No update, a successful deletion, or a new managed record.
-observeConvergedManagedTarget repository snapshotRoot command now managed
-  | managed.route.kind == SymlinkRoute = do
-      -- A deployment link converged when the destination is a link that
-      -- still projects the route source; the stored target string is the
-      -- snapshot, so no filesystem baseline is materialized.
-      let previous = managed.correspondence
-      absoluteSource <- makeAbsolute managed.route.sourcePath
-      destinationStat <- observeFileStat previous.destination.path
-      case destinationStat of
-        Symlink linkTarget
-          | resolveTargetFrom previous.destination.path linkTarget
-              == normalise absoluteSource -> do
-              let refreshed =
-                    previous
-                      { destination =
-                          FileEntry previous.destination.path destinationStat
-                      , destinationDelta = Unchanged
-                      }
-              target <-
-                observeManagedTarget
-                  repository
-                  snapshotRoot
-                  command
-                  now
-                  managed{correspondence = refreshed}
-              return $ (\value -> (value.targetId, Just value)) <$> target
-        _ -> return Nothing
-observeConvergedManagedTarget repository snapshotRoot command now managed = do
-  let previous = managed.correspondence
-  refreshed <-
-    makeCorrespondBetweenThreeFiles
-      previous.intermediate.path
-      previous.source.path
-      previous.destination.path
-  if
-    | refreshed.sourceDelta /= Unchanged -> return Nothing
-    | refreshed.destinationDelta /= Unchanged -> return Nothing
-    | otherwise ->
-        let converged = managed{correspondence = refreshed}
-        in case refreshed.destination.stat of
-             Missing -> do
-               identifier <- managedTargetId repository converged
-               return $ Just (identifier, Nothing)
-             Symlink _ -> return Nothing
-             _ -> do
-               target <-
-                 observeManagedTarget repository snapshotRoot command now converged
-               return $ (\value -> (value.targetId, Just value)) <$> target
+observeConvergedManagedTarget repository snapshotRoot command now managed =
+  observeConvergedManagedTargetWithRenderedSource
+    repository
+    snapshotRoot
+    command
+    now
+    Nothing
+    Nothing
+    managed
+
+
+-- | Re-observes a selected operation using codec-produced source bytes.
+observeConvergedManagedTargetWithRenderedSource
+  :: (MonadFileSystem m)
+  => Repository
+  -- ^ Repository whose source root owns the managed entry.
+  -> OsPath
+  -- ^ Caller-owned transaction root for any new baseline.
+  -> SynchronizationCommand
+  -- ^ Command responsible for the synchronization.
+  -> UTCTime
+  -- ^ Time recorded on a newly observed target.
+  -> Maybe OpaqueBytes
+  -- ^ Codec-rendered source bytes, when source observation requires them.
+  -> Maybe ByteString.ByteString
+  -- ^ Digest of the raw source used to produce the rendered bytes.
+  -> ManagedCorrespondence
+  -- ^ Selected correspondence to re-observe.
+  -> m (Maybe (Text, Maybe ManagedTarget))
+  -- ^ No update, a successful deletion, or a new managed record.
+observeConvergedManagedTargetWithRenderedSource
+  repository
+  snapshotRoot
+  command
+  now
+  _renderedSource
+  _rawSourceDigest
+  managed
+    | managed.route.kind == SymlinkRoute = do
+        -- A deployment link converged when the destination is a link that
+        -- still projects the route source; the stored target string is the
+        -- snapshot, so no filesystem baseline is materialized.
+        let previous = managed.correspondence
+        absoluteSource <- makeAbsolute managed.route.sourcePath
+        destinationStat <- observeFileStat previous.destination.path
+        case destinationStat of
+          Symlink linkTarget
+            | resolveTargetFrom previous.destination.path linkTarget
+                == normalise absoluteSource -> do
+                let refreshed =
+                      previous
+                        { destination =
+                            FileEntry previous.destination.path destinationStat
+                        , destinationDelta = Unchanged
+                        }
+                target <-
+                  observeManagedTarget
+                    repository
+                    snapshotRoot
+                    command
+                    now
+                    managed{correspondence = refreshed}
+                return $ (\value -> (value.targetId, Just value)) <$> target
+          _ -> return Nothing
+observeConvergedManagedTargetWithRenderedSource
+  repository
+  snapshotRoot
+  command
+  now
+  renderedSource
+  rawSourceDigest
+  managed = do
+    let previous = managed.correspondence
+    refreshed <-
+      makeCorrespondBetweenThreeFiles
+        previous.intermediate.path
+        previous.source.path
+        previous.destination.path
+    rawSourceMatches <- case rawSourceDigest of
+      Nothing -> return True
+      Just expected -> case refreshed.source.stat of
+        File _ -> (== expected) . SHA256.hash <$> readFile refreshed.source.path
+        _ -> return False
+    refreshed' <- case renderedSource of
+      Nothing -> return refreshed
+      Just content -> do
+        let bytes = revealBytes content
+            renderedStat = File $ fromIntegral $ ByteString.length bytes
+        renderedDelta <- case refreshed.intermediate.stat of
+          File size
+            | size == fromIntegral (ByteString.length bytes) -> do
+                intermediate <- readFile refreshed.intermediate.path
+                return $ if intermediate == bytes then Unchanged else Modified
+          Missing -> return Added
+          _ -> return Modified
+        return $
+          refreshed
+            { source = refreshed.source{stat = renderedStat}
+            , sourceDelta = renderedDelta
+            }
+    if
+      | not rawSourceMatches -> return Nothing
+      | refreshed'.sourceDelta /= Unchanged -> return Nothing
+      | refreshed'.destinationDelta /= Unchanged -> return Nothing
+      | otherwise ->
+          let converged = managed{correspondence = refreshed'}
+          in case refreshed'.destination.stat of
+               Missing -> do
+                 identifier <- managedTargetId repository converged
+                 return $ Just (identifier, Nothing)
+               Symlink _ -> return Nothing
+               _ -> do
+                 target <-
+                   observeManagedTarget repository snapshotRoot command now converged
+                 return $ (\value -> (value.targetId, Just value)) <$> target
 
 
 -- | Builds a record only when source, snapshot, and destination converged.
@@ -334,6 +403,7 @@ observeManagedTarget repository snapshotRoot command now managed
         snapshot
         managed.route.routeDefinition
         managed.route.routeProvenance
+        Nothing
         fingerprint
         command
         now
