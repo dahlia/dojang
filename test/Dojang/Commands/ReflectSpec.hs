@@ -68,7 +68,9 @@ import Dojang.Types.Codec.Evaluate
   , revealBytes
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
-import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent, Substitution)
+  )
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
@@ -84,6 +86,11 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget (ManagedTarget (..))
 import Dojang.Types.Manifest (Manifest (..), manifest)
 import qualified Dojang.Types.Manifest as Manifest
+import Dojang.Types.ManifestVariable
+  ( ManifestVariableMap
+  , manifestVariable
+  , parseManifestVariableName
+  )
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
 
@@ -557,6 +564,27 @@ spec = sequential $ do
             appEnv
             ( reflectWithCodecRuntime
                 (sourceAwareReAddRuntime codecSpec)
+                False
+                True
+                False
+                Nothing
+                [destination]
+            )
+            `shouldReturn` ExitSuccess
+          readFile source `shouldReturn` "new"
+
+    it "resolves variables discovered after missing-source re-add" $ do
+      let Right variableName = parseManifestVariableName "NAME"
+          variables =
+            Map.singleton variableName $
+              manifestVariable mempty $
+                BareComponent "Ada"
+      withMissingReAddFileWithVariables variables $
+        \appEnv source destination codecSpec -> do
+          runAppWithoutLogging
+            appEnv
+            ( reflectWithCodecRuntime
+                (sourceVariableReAddRuntime codecSpec)
                 False
                 True
                 False
@@ -1404,7 +1432,14 @@ withCaseVariantRotatingReAddFile action =
 withMissingRotatingReAddFile
   :: (AppEnv -> OsPath -> OsPath -> CodecSpec -> IO a)
   -> IO a
-withMissingRotatingReAddFile action =
+withMissingRotatingReAddFile = withMissingReAddFileWithVariables mempty
+
+
+withMissingReAddFileWithVariables
+  :: ManifestVariableMap
+  -> (AppEnv -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withMissingReAddFileWithVariables variables action =
   withReflectRepository $ \tmpDir repository _ manifestPath appEnv -> do
     routeName <- encodeFS "encoded-file"
     destinationName <- encodeFS "destination"
@@ -1432,7 +1467,7 @@ withMissingRotatingReAddFile action =
           Manifest
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
-            , variables = mempty
+            , variables = variables
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
             , hooks = mempty
@@ -1683,6 +1718,39 @@ sourceAwareReAddRuntime spec' =
             else Right $ CodecRequirements noCodecInputs noCodecInputs []
       )
       (\inputs -> Right $ "A:" <> revealBytes inputs.rawSource)
+      ( Just $ \_ deployed ->
+          maybe
+            (Left "deployed bytes use another key")
+            Right
+            (ByteString.stripPrefix "A:" $ revealBytes deployed)
+      )
+      PersistentCache
+      EvaluatePurely
+
+
+sourceVariableReAddRuntime :: CodecSpec -> CodecRuntime (App IO)
+sourceVariableReAddRuntime spec' =
+  CodecRuntime
+    (codecRegistry [implementation])
+    NormalEvaluation
+    (const $ return $ Left "unexpected external input")
+ where
+  CodecSpec name _ = spec'
+  implementation =
+    codecImplementationWithSourceRequirements
+      (CodecDefinition name "test-1" ReflectReAdd)
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      ( \_ _ ->
+          Right $
+            CodecRequirements
+              noCodecInputs
+              (requiredCodecInputs ["NAME"])
+              []
+      )
+      ( \inputs -> case Map.lookup "NAME" inputs.variables of
+          Just "Ada" -> Right $ "A:" <> revealBytes inputs.rawSource
+          _ -> Left "missing NAME"
+      )
       ( Just $ \_ deployed ->
           maybe
             (Left "deployed bytes use another key")

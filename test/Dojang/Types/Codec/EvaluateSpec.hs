@@ -59,6 +59,7 @@ import Dojang.Types.Codec.Evaluate
   , opaqueBytes
   , reevaluateCodec
   , reflectCodec
+  , reflectCodecWithoutSourceWithEvaluation
   , requiredCodecInputs
   , revealBytes
   )
@@ -371,6 +372,25 @@ spec = do
           result = runIdentity $ reflectCodec runtime request $ opaqueBytes deployed
       (revealBytes <$> result) === Right deployed
 
+    specify "resolves requirements discovered after missing-source reversal" $
+      hedgehog $ do
+        deployed <- forAll $ Gen.bytes $ Range.linear 0 4096
+        let request =
+              evaluationRequest
+                reversibleSpec
+                ""
+                (Map.singleton "class" "work")
+            (result, resolutionCount) =
+              runState
+                ( reflectCodecWithoutSourceWithEvaluation
+                    sourceAwareReversibleRuntime
+                    request
+                    (opaqueBytes deployed)
+                )
+                0
+        (revealBytes . fst <$> result) === Right deployed
+        resolutionCount === 1
+
     specify "rejects a reverse result that does not round trip" $ do
       let runtime = brokenReversibleRuntime
           request = evaluationRequest reversibleSpec "old" Map.empty
@@ -477,6 +497,42 @@ configuredRuntime =
 
 reversibleRuntime :: CodecRuntime Identity
 reversibleRuntime = reversibleRuntimeWith id
+
+
+sourceAwareReversibleRuntime :: CodecRuntime (State Int)
+sourceAwareReversibleRuntime =
+  CodecRuntime
+    (codecRegistry [implementation])
+    NormalEvaluation
+    resolveExternalInput
+ where
+  sourceInput = ExternalInputRequest "source-input"
+  implementation =
+    codecImplementationWithSourceRequirements
+      (CodecDefinition reversibleName "1" ReflectReAdd)
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      ( \_ _ ->
+          Right $
+            CodecRequirements
+              (requiredCodecInputs ["class"])
+              noCodecInputs
+              [sourceInput]
+      )
+      ( \inputs -> case ( Map.lookup "class" inputs.facts
+                        , Map.lookup sourceInput inputs.externalInputs
+                        ) of
+          (Just _, Just _) -> Right $ revealBytes inputs.rawSource
+          _ -> Left "missing source input"
+      )
+      (Just $ \_ deployed -> Right $ revealBytes deployed)
+      PersistentCache
+      EvaluatePurely
+  resolveExternalInput request
+    | request == sourceInput = do
+        count <- get
+        put $ count + 1
+        return $ Right $ ExternalInput (opaqueBytes "value") "stable"
+    | otherwise = return $ Left "unexpected external input"
 
 
 brokenReversibleRuntime :: CodecRuntime Identity
