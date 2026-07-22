@@ -1748,8 +1748,8 @@ sourceVariableReAddRuntime spec' =
               []
       )
       ( \inputs -> case Map.lookup "NAME" inputs.variables of
-          Just "Ada" -> Right $ "A:" <> revealBytes inputs.rawSource
-          _ -> Left "missing NAME"
+          Just _ -> Right $ "A:" <> revealBytes inputs.rawSource
+          Nothing -> Left "missing NAME"
       )
       ( Just $ \_ deployed ->
           maybe
