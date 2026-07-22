@@ -32,6 +32,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.Time (UTCTime, defaultTimeLocale, parseTimeOrError)
+import Dojang.CommandEffect (MonadCommandEffect)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (linear)
 import System.Directory.OsPath qualified
@@ -3368,6 +3369,7 @@ newtype FailingReplaceIO a
     , MonadIO
     , MonadError IOError
     , MonadReader OsPath
+    , MonadCommandEffect
     )
 
 
@@ -3421,6 +3423,7 @@ newtype FailingCopyIO a
     , MonadIO
     , MonadError IOError
     , MonadReader OsPath
+    , MonadCommandEffect
     )
 
 
@@ -3475,6 +3478,7 @@ newtype FailingRemoveIO a
     , MonadIO
     , MonadError IOError
     , MonadReader OsPath
+    , MonadCommandEffect
     )
 
 

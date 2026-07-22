@@ -7,18 +7,16 @@
 module Dojang.Commands.TargetLifecycle (forget, unmanage) where
 
 import Control.Monad (forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (ExitSuccess))
-import System.IO (stderr)
 import System.OsPath (OsPath, normalise, takeDirectory, (</>))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (sourceDirectory, stateDirectory)
   , clearLegacyFirstApplyHistory
   , ensureContext
@@ -26,8 +24,10 @@ import Dojang.App
   , prepareMachineState
   , validateRepositoryStateOwnership
   )
+import Dojang.CommandEffect (MonadCommandEffect (currentTime))
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , ensureRouteOwnership
@@ -80,7 +80,7 @@ import Dojang.Types.TargetTracking (observeOrphanStatus)
 
 -- | Stops tracking selected orphan records while leaving destinations intact.
 unmanage
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> [OsPath]
   -> Bool
@@ -102,7 +102,7 @@ unmanage routeSelector destinations force = do
 
 
 unmanageCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> [OsPath]
   -> Bool
@@ -134,7 +134,7 @@ unmanageCore routeSelector destinations force = do
     die' lifecycleSelectionError "At least one lifecycle selector is unknown."
   let matched = filter matches records
   when (null matched) $ do
-    codeStyle <- codeStyleFor stderr
+    codeStyle <- codeStyleFor StandardError
     die' lifecycleSelectionError $
       "No managed target matches the selection.  Use `"
         <> codeStyle "dojang status"
@@ -150,7 +150,7 @@ unmanageCore routeSelector destinations force = do
       "The selection includes an active target.  Change the manifest first, "
         <> "then run `dojang unmanage' again."
   statuses <- mapM observeOrphanStatus selected
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   forM_ (zip selected statuses) $ \(target, targetStatus) ->
     printStderr' Note $
       "Selected managed-target record "
@@ -159,14 +159,14 @@ unmanageCore routeSelector destinations force = do
         <> renderOrphanStatus targetStatus
         <> ") for removal."
   when (not force && OrphanModified `elem` statuses) $ do
-    codeStyle <- codeStyleFor stderr
+    codeStyle <- codeStyleFor StandardError
     die' accidentalDeletionWarning $
       "At least one orphan destination differs from its recorded baseline.  "
         <> "Review it "
         <> "and retry with `"
         <> codeStyle "--force"
         <> "' to discard only its machine-local record."
-  now <- liftIO getCurrentTime
+  now <- currentTime
   root <- asks (.stateDirectory)
   let selectedIds = Set.fromList $ (.targetId) <$> selected
   result <-
@@ -244,7 +244,7 @@ unmanageCore routeSelector destinations force = do
 
 -- | Removes all machine-local state for the selected repository.
 forget
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Bool
   -> App i ExitCode
 forget force = do
@@ -289,7 +289,7 @@ forget force = do
           statuses <-
             mapM observeOrphanStatus $ Map.elems state.targetRecords
           when (not force && OrphanModified `elem` statuses) $ do
-            codeStyle <- codeStyleFor stderr
+            codeStyle <- codeStyleFor StandardError
             die' accidentalDeletionWarning $
               "At least one managed destination differs from its snapshot.  "
                 <> "Review it and retry with `"
@@ -323,7 +323,7 @@ renderOrphanStatus OrphanModified = "modified"
 renderOrphanStatus OrphanMissing = "missing"
 
 
-removeSnapshot :: (MonadFileSystem i, MonadIO i) => OsPath -> App i ()
+removeSnapshot :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 removeSnapshot path = do
   symbolicLink <- isSymlink path
   when symbolicLink $
@@ -336,7 +336,7 @@ removeSnapshot path = do
 
 
 removeEmptySnapshotDirectory
-  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i ()
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 removeEmptySnapshotDirectory path = do
   symbolicLink <- isSymlink path
   when symbolicLink $
@@ -348,7 +348,7 @@ removeEmptySnapshotDirectory path = do
 
 
 stateOrDie
-  :: (MonadIO i)
+  :: (AppEffects i)
   => Either StateError value
   -> App i value
 stateOrDie result = case result of

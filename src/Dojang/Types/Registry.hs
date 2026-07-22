@@ -14,7 +14,6 @@ module Dojang.Types.Registry
   , writeRegistry
   ) where
 
-import Control.Monad.IO.Class (MonadIO)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import System.IO.Unsafe (unsafePerformIO)
@@ -79,7 +78,7 @@ instance ToTable Registry where
 
 -- | Read the registry from a file.
 readRegistry
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m)
   => OsPath
   -- ^ The path to the registry file.
   -> m (Maybe Registry)
@@ -90,7 +89,7 @@ readRegistry path = do
 
 -- | Reads the registry without confusing malformed contents with absence.
 readRegistryStrict
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m)
   => OsPath
   -- ^ The path to the registry file.
   -> m (Either [Text] (Maybe Registry))

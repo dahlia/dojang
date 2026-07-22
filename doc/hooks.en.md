@@ -188,6 +188,9 @@ is not treated as an ignored hook failure.
 Stateful hooks with the same repository, event, and `id` are serialized across
 processes.  Eligibility is checked again while holding the hook lock, then a
 successful execution is saved through the repository's atomic state update.
+The process starts while Dojang verifies the repository state generation, but
+Dojang releases the repository state lock before waiting for the process.  An
+explicitly allowed nested invocation can therefore acquire the same lock.
 If the repository is forgotten and recreated while a hook is running, the old
 execution cannot enter the new state generation.  Hook execution identities
 and policy data use validated types before they reach the state writer.

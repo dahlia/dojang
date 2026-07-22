@@ -8,6 +8,16 @@ To be released.
 
 ### Command-line interface
 
+ -  Command execution now routes environment reads, platform detection, clocks,
+    random identifiers, terminal checks, prompts, output, and child processes
+    through explicit interpreters.  Dry runs still accept interactive input but
+    never start diff tools, editors, hooks, or other external programs.  Hook
+    processes are started while their repository state generation is validated,
+    then awaited without holding the repository state lock so an explicitly
+    allowed nested Dojang invocation cannot deadlock.  If orchestration is
+    interrupted after a hook starts, Dojang invokes the interpreter's
+    cancellation action before propagating the interruption.  [[#46], [#72]]
+
  -  Detailed route branches can declare a byte-oriented `codec`.  The default
     `identity` codec preserves all existing behavior.  Applying a route writes
     its rendered bytes through the intermediate snapshot, while status, diff,
@@ -212,6 +222,7 @@ To be released.
 [#42]: https://github.com/dahlia/dojang/issues/42
 [#43]: https://github.com/dahlia/dojang/issues/43
 [#44]: https://github.com/dahlia/dojang/issues/44
+[#46]: https://github.com/dahlia/dojang/issues/46
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
@@ -223,8 +234,27 @@ To be released.
 [#69]: https://github.com/dahlia/dojang/pull/69
 [#70]: https://github.com/dahlia/dojang/pull/70
 [#71]: https://github.com/dahlia/dojang/pull/71
+[#72]: https://github.com/dahlia/dojang/pull/72
 
 ### Haskell API
+
+ -  Added `MonadCommandEffect`, `MonadProcessControl`, structured process and
+    prompt requests, production and dry-run interpreters, and an exact scripted
+    test interpreter.  `App` delegates command effects to its selected
+    interpreter, so embedding tests can replay complete commands without using
+    host environment, clock, terminal, prompt, output, or process APIs.  The
+    scripted interpreter records process starts, waits, and cancellations
+    separately, and rejects leaked processes.  `startAndAwaitAppProcess` masks
+    the handoff from process startup to an interruptible wait and invokes the
+    registered cancellation action on exceptional exits or application aborts.
+    `awaitProcess` and `cancelStartedProcess` now have fixed semantics over an
+    opaque `StartedProcess`.  `App` no longer has a `MonadIO` instance:
+    embedding code should add a dedicated effect, or use `liftApp` only at an
+    interpreter or test boundary.  Command exits now travel through
+    `ExceptT ExitCode`; use `runAppResultWithoutLogging`,
+    `runAppResultWithLogging`, or `runAppResultWithStderrLogging` to receive
+    them as values.  The older runners remain as compatibility adapters that
+    throw the returned exit code.  [[#46], [#72]]
 
  -  Added declarative codec types, deterministic cache keys, a controlled
     effect interpreter, typed redacted failures, and explicit runtime injection

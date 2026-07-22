@@ -69,7 +69,6 @@ import Control.Monad.Except
   ( MonadError (catchError, throwError)
   , tryError
   )
-import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString (ByteString)
 import Data.Char (chr, isHexDigit, ord)
 import Data.List (find, isPrefixOf, isSuffixOf, nub, sort)
@@ -117,6 +116,7 @@ import Toml.ToValue
   , (.=)
   )
 
+import Dojang.CommandEffect (MonadCommandEffect)
 import Dojang.MonadFileSystem
   ( FileType (..)
   , MonadFileSystem (..)
@@ -243,7 +243,7 @@ newtype StateGenerationId = StateGenerationId RepositoryId
 
 
 -- | Generates a fresh repository-state generation identity.
-newStateGenerationId :: (MonadIO m) => m StateGenerationId
+newStateGenerationId :: (MonadCommandEffect m) => m StateGenerationId
 newStateGenerationId = StateGenerationId <$> newRepositoryId
 
 
@@ -1828,7 +1828,7 @@ validateProtectedSnapshotLocation
 
 -- | Reads or creates the identity of the local machine-state store.
 ensureMachineId
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => OsPath
   -> m (Either StateError MachineId)
 ensureMachineId root = catchStateIOErrors $ do
@@ -2194,7 +2194,7 @@ selectRepositoryState _ = AmbiguousRepositoryStates
 -- An explicit intermediate path is persisted.  Relative paths are resolved
 -- against the checkout before they are stored.
 prepareRepositoryState
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -2214,7 +2214,7 @@ prepareRepositoryState root repositoryId' machineId' checkout explicit =
 
 -- | Prepares state while preserving known legacy first-apply history.
 prepareRepositoryStateWithLegacyHistory
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -2252,7 +2252,7 @@ prepareRepositoryStateWithLegacyHistory
 -- return 'True' only when the supplied checkout has a readable manifest that
 -- declares this repository identity.
 prepareRepositoryStateWithOwnership
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -2296,7 +2296,7 @@ prepareRepositoryStateWithOwnership
 -- without publishing it for a snapshot layout that is already known to be
 -- invalid.  The action is not run when an existing repository state is reused.
 prepareRepositoryStateWithOwnershipBeforeMigration
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => OsPath
   -> RepositoryId
   -> MachineId
@@ -2365,7 +2365,7 @@ resolveExplicitSnapshot checkout (Just explicit) = catchStateIOErrors $ do
 
 
 prepareRepositoryStateUnlocked
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => OsPath
   -> RepositoryId
   -> MachineId

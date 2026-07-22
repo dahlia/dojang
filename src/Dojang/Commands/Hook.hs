@@ -1,3 +1,4 @@
+{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -12,10 +13,10 @@ module Dojang.Commands.Hook
   , HookScopePath (..)
   , commandHookTypes
   , disambiguatedHookScopePaths
+  , defaultHookProcessRunner
   , effectiveHookWorkingDirectory
   , effectiveHookWorkingDirectoryWithVariables
   , executeHooks
-  , defaultHookProcessRunner
   , hookDueReason
   , hookIsDue
   , hookRecursionKey
@@ -28,9 +29,7 @@ module Dojang.Commands.Hook
   , withCommandHooks
   ) where
 
-import Control.Exception (IOException, try)
 import Control.Monad (forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as ByteString
@@ -47,11 +46,8 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
-import Data.Time (getCurrentTime)
 import Numeric (showHex)
-import System.Environment (getEnvironment, lookupEnv)
 import System.Exit (ExitCode (..))
-import System.Info (os)
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logError, logInfo)
@@ -59,7 +55,6 @@ import Data.CaseInsensitive (mk, original)
 import Data.Text (Text, pack, unpack)
 import System.OsPath
   ( OsPath
-  , decodeFS
   , isAbsolute
   , makeRelative
   , normalise
@@ -67,21 +62,31 @@ import System.OsPath
   , (</>)
   )
 import System.OsPath qualified as OsPath
-import System.Process
-  ( CreateProcess (..)
-  , createProcess
-  , proc
-  , waitForProcess
-  )
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (..)
   , ensureContext
   , prepareMachineState
+  , startAndAwaitAppProcess
   )
-import Dojang.Commands (Admonition (..), die', pathStyleFor, printStderr')
+import Dojang.CommandEffect
+  ( MonadCommandEffect (..)
+  , MonadProcessControl (startProcess)
+  , ProcessRequest (..)
+  , ProcessResult (..)
+  , StartedProcess
+  , emptyProcessRequest
+  )
+import Dojang.Commands
+  ( Admonition (..)
+  , StandardStream (..)
+  , die'
+  , pathStyleFor
+  , printStderr'
+  )
 import Dojang.ExitCodes (hookFailedError, machineStateError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Types.Context (Context (..))
@@ -130,8 +135,6 @@ import Dojang.Types.MonikerMap (MonikerMap)
 import Dojang.Types.Repository (Repository (..))
 import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
 
-import System.IO (stderr)
-
 
 -- | Environment information for hook execution.
 data HookEnv = HookEnv
@@ -159,10 +162,8 @@ data HookEnv = HookEnv
   -- ^ Repository-scoped state used by stateful policies.
   , stateRoot :: OsPath
   -- ^ Platform-native machine-state root.
-  , processStarter
-      :: CreateProcess
-      -> IO (Either IOException (IO (Either IOException ExitCode)))
-  -- ^ Injectable process start effect used by tests and the real command runner.
+  , processSimulation :: ProcessRequest -> Maybe ProcessResult
+  -- ^ Optional deterministic process result supplied by a test interpreter.
   }
 
 
@@ -195,7 +196,7 @@ disambiguatedHookScopePaths explicitSource paths =
 
 -- | Builds the complete context supplied to hooks for one command.
 makeHookEnv
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Text
   -- ^ Command whose lifecycle event will run.
   -> [HookScopePath]
@@ -287,7 +288,7 @@ commandHookTypes _ = Nothing
 
 -- | Runs a command action between its pre and successful-post lifecycle hooks.
 withCommandHooks
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Text
   -- ^ Command name used to select lifecycle events.
   -> [HookScopePath]
@@ -330,7 +331,7 @@ shouldRunHook monikers environment hook =
 -- | Overlay the variables supplied by Dojang on the parent environment.
 mergeHookEnvironment
   :: String
-  -- ^ The host platform identifier from 'System.Info.os'.
+  -- ^ The host platform identifier exposed by the command effect interpreter.
   -> [(String, String)]
   -- ^ The variables supplied by Dojang.
   -> [(String, String)]
@@ -386,7 +387,7 @@ managedHookContextNames =
 
 -- | Executes all matching hooks of a lifecycle event in manifest order.
 executeHooks
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -- ^ Normalized command and machine-state context.
   -> Context (App i)
@@ -399,9 +400,9 @@ executeHooks hookEnv ctx hookType = do
   let repo = ctx.repository :: Repository
   let manifest' = repo.manifest :: Manifest
   let hookMap = manifest'.hooks :: HookMap
-  depth <- liftIO currentHookDepth
+  depth <- currentHookDepth
   allowRecursion <-
-    liftIO $ (== Just "1") <$> lookupEnv "DOJANG_ALLOW_HOOK_RECURSION"
+    (== Just "1") <$> lookupEnvironmentVariable "DOJANG_ALLOW_HOOK_RECURSION"
   if hooksSuppressed depth allowRecursion
     then $(logDebug) "Suppressing hooks for a nested Dojang invocation."
     else case Map.lookup hookType hookMap of
@@ -448,7 +449,7 @@ hookRecursionKey repositoryId event identifier =
 
 -- | Execute a single hook.
 executeHook
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -> VariableGetter (App i)
   -> HookType
@@ -473,7 +474,7 @@ executeHook hookEnv variableGetter hookType hook = do
           hook
           workingDirectory
           provenance
-  ancestorStack <- liftIO $ fromMaybe "" <$> lookupEnv "DOJANG_HOOK_STACK"
+  ancestorStack <- fromMaybe "" <$> lookupEnvironmentVariable "DOJANG_HOOK_STACK"
   if recursionKey `elem` Text.splitOn "," (pack ancestorStack)
     then $(logDebug) $ "Suppressing recursive hook " <> recursionKey <> "."
     else
@@ -494,7 +495,7 @@ executeHook hookEnv variableGetter hookType hook = do
                 identifier
                 hook
                 workingDirectory
-                (liftIO . hookEnv.processStarter)
+                (startRegisteredHook hookEnv)
             return ()
           _ -> case executionKey of
             Nothing ->
@@ -541,7 +542,7 @@ executeHook hookEnv variableGetter hookType hook = do
                 Right () -> return ()
  where
   printDryRun event workingDirectory reason hook' = do
-    pathStyle <- pathStyleFor stderr
+    pathStyle <- pathStyleFor StandardError
     printStderr' Note $
       renderHookDryRun
         event
@@ -566,7 +567,7 @@ executeHook hookEnv variableGetter hookType hook = do
           workingDirectory
           startCurrentGeneration
       when (succeeded && hook.policy /= HookAlways) $ do
-        now <- liftIO getCurrentTime
+        now <- currentTime
         case hookExecutionPolicy hook.policy fingerprint of
           Nothing ->
             die'
@@ -590,12 +591,12 @@ executeHook hookEnv variableGetter hookType hook = do
     Just $ HookOnChangeExecution value
   hookExecutionPolicy _ _ = Nothing
 
-  startCurrentGeneration createProc = do
+  startCurrentGeneration register request = do
     guarded <-
       withRepositoryStateGeneration
         hookEnv.stateRoot
         hookEnv.machineState
-        (liftIO $ hookEnv.processStarter createProc)
+        (startRegisteredHook hookEnv register request)
     case guarded of
       Left err -> die' machineStateError $ formatStateError err
       Right started -> return started
@@ -739,9 +740,9 @@ digestBytes = Text.pack . concatMap byteHex . ByteString.unpack
     digits -> digits
 
 
-currentHookDepth :: IO Int
+currentHookDepth :: (MonadCommandEffect m) => m Int
 currentHookDepth = do
-  value <- lookupEnv "DOJANG_HOOK_DEPTH"
+  value <- lookupEnvironmentVariable "DOJANG_HOOK_DEPTH"
   return $ case value >>= readMaybeInt of
     Just depth -> max 0 depth
     Nothing -> 0
@@ -752,18 +753,21 @@ currentHookDepth = do
 
 
 runHookProcess
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -> HookType
   -> Text
   -> Text
   -> Hook
   -> OsPath
-  -> (CreateProcess -> App i (Either IOException (IO (Either IOException ExitCode))))
+  -> ( (StartedProcess (App i) -> App i ())
+       -> ProcessRequest
+       -> App i (Either ProcessResult (StartedProcess (App i)))
+     )
   -> App i Bool
 runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start = do
-  pathStyle <- pathStyleFor stderr
-  cmdPath <- liftIO $ decodeFS hook.command
+  pathStyle <- pathStyleFor StandardError
+  cmdPath <- decodePath hook.command
   let argsStr = unpack <$> hook.args
   $(logInfo) $
     "Running hook: "
@@ -781,8 +785,9 @@ runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start =
         hookEnv.machineState.repositoryId
   intermediate <- decodePath hookEnv.machineState.intermediatePath
   paths <- mapM decodePath hookEnv.selectedPaths
-  depth <- liftIO currentHookDepth
-  parentEnv <- liftIO getEnvironment
+  depth <- currentHookDepth
+  parentEnv <- processEnvironment
+  platform <- hostPlatform
   let environment =
         [ ("DOJANG_REPOSITORY", repoPath)
         , ("DOJANG_MANIFEST", manifestPath')
@@ -821,35 +826,33 @@ runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start =
       stackSuffix variables = case lookup "DOJANG_HOOK_STACK" variables of
         Just old | old /= "" -> "," <> old
         _ -> ""
-      createProc =
-        (proc cmdPath argsStr)
-          { cwd = workDir
-          , env = Just $ mergeHookEnvironment os environment parentEnv
-          , delegate_ctlc = True
+      request =
+        emptyProcessRequest
+          { executable = cmdPath
+          , arguments = argsStr
+          , workingDirectory = workDir
+          , environment = Just $ mergeHookEnvironment platform environment parentEnv
           }
-  started <- start createProc
-  result <- case started of
-    Left err -> return $ Left err
-    Right waitForExit -> liftIO waitForExit
+  result <- startAndAwaitAppProcess $ \register -> start register request
   case result of
-    Left err -> do
+    ProcessStartFailed err -> do
       $(logError) $
-        "Hook could not be started: " <> showt (FromStringShow err) <> "."
+        "Hook could not be started: " <> err <> "."
       unless hook.ignoreFailure $
         die' hookFailedError $
           "Hook "
             <> pathStyle hook.command
             <> " could not be started: "
-            <> showt (FromStringShow err)
+            <> err
             <> "."
       return False
-    Right ExitSuccess -> do
+    ProcessCompleted ExitSuccess _ _ -> do
       $(logInfo) $
         "Hook completed successfully: "
           <> showt (FromStringShow hook.command)
           <> "."
       return True
-    Right (ExitFailure code) -> do
+    ProcessCompleted (ExitFailure code) _ _ -> do
       $(logError) $
         "Hook failed with exit code "
           <> showt code
@@ -864,11 +867,28 @@ runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start =
             <> showt code
             <> "."
       return False
+    ProcessWaitFailed err -> processError pathStyle "wait for" err
+    ProcessIOFailed err -> processError pathStyle "communicate with" err
+    ProcessUnavailable _ ->
+      processError pathStyle "execute" "execution is unavailable"
+ where
+  processError pathStyle action err = do
+    $(logError) $ "Hook could not " <> action <> ": " <> err <> "."
+    unless hook.ignoreFailure $
+      die' hookFailedError $
+        "Hook "
+          <> pathStyle hook.command
+          <> " could not "
+          <> action
+          <> ": "
+          <> err
+          <> "."
+    return False
 
 
 -- | Resolves the hook's effective working directory.
 effectiveHookWorkingDirectory
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -- ^ Hook context whose repository is the relative-path base.
   -> Hook
@@ -882,14 +902,14 @@ effectiveHookWorkingDirectory hookEnv hook =
     hook
  where
   inheritedGetter variable = do
-    value <- liftIO $ lookupEnv $ unpack variable
+    value <- lookupEnvironmentVariable $ unpack variable
     traverse encodePath value
 
 
 -- | Resolves a hook working directory with the shared manifest-variable
 -- lookup.
 effectiveHookWorkingDirectoryWithVariables
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => VariableGetter (App i)
   -- ^ Manifest-variable and inherited-environment lookup.
   -> HookEnv
@@ -905,7 +925,7 @@ effectiveHookWorkingDirectoryWithVariables variableGetter hookEnv hook =
 
 
 resolveHookWorkingDirectory
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => VariableGetter (App i)
   -> HookEnv
   -> Hook
@@ -930,21 +950,39 @@ resolveHookWorkingDirectory variableGetter hookEnv hook = do
 
 
 printExpansionWarning
-  :: (MonadIO i) => ExpansionWarning -> App i ()
+  :: (AppEffects i) => ExpansionWarning -> App i ()
 printExpansionWarning (UndefinedEnvironmentVariable variable) =
   printStderr' Warning $
     "Reference to an undefined environment variable: " <> variable <> "."
 
 
--- | Starts a hook process and returns an action that waits for its exit status.
-defaultHookProcessRunner
-  :: CreateProcess
-  -- ^ Fully configured process specification.
-  -> IO (Either IOException (IO (Either IOException ExitCode)))
-  -- ^ Start error or an action that waits for the process result.
-defaultHookProcessRunner createProc = do
-  started <- try @IOException $ createProcess createProc
-  return $ case started of
-    Left err -> Left err
-    Right (_, _, _, processHandle) ->
-      Right $ try @IOException $ waitForProcess processHandle
+-- | Uses the command-effect interpreter unless a test supplied a simulation.
+startHookEffect
+  :: (MonadCommandEffect m, MonadProcessControl m)
+  => HookEnv
+  -> ProcessRequest
+  -> m (Either ProcessResult (StartedProcess m))
+startHookEffect hookEnv request =
+  case hookEnv.processSimulation request of
+    Just result -> return $ Left result
+    Nothing -> startProcess request
+
+
+-- | Registers a successfully started hook before its enclosing action returns.
+startRegisteredHook
+  :: (MonadCommandEffect m, MonadProcessControl m)
+  => HookEnv
+  -> (StartedProcess m -> m ())
+  -> ProcessRequest
+  -> m (Either ProcessResult (StartedProcess m))
+startRegisteredHook hookEnv register request = do
+  started <- startHookEffect hookEnv request
+  case started of
+    Left _ -> return ()
+    Right process -> register process
+  return started
+
+
+-- | The production hook process interpreter delegates to command effects.
+defaultHookProcessRunner :: ProcessRequest -> Maybe ProcessResult
+defaultHookProcessRunner = const Nothing

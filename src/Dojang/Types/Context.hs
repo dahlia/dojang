@@ -38,7 +38,6 @@ module Dojang.Types.Context
   ) where
 
 import Control.Monad (forM, when)
-import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, sortOn)
 import Data.Ord (Down (Down))
 import Data.Word (Word32)
@@ -787,7 +786,7 @@ findMatchingRoutes ctx targetPath = do
 
 -- | Gets the route state of the given path (which is a potential destination).
 getRouteState
-  :: (HasCallStack, MonadFileSystem m, MonadIO m)
+  :: (HasCallStack, MonadFileSystem m)
   => Context m
   -- ^ The context in which to perform path routing.
   -> OsPath

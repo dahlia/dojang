@@ -9,12 +9,9 @@ module Dojang.Commands.Apply (apply, applyWithCodecRuntime) where
 
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.List (nub)
-import Data.Time (getCurrentTime)
-import System.Exit (ExitCode (..), exitWith)
-import System.IO (stderr)
+import System.Exit (ExitCode (..))
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
@@ -30,13 +27,16 @@ import System.OsPath
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (debug, dryRun, manifestFile, stateDirectory)
   , ensureContext
   , markMachineStateApplied
   , prepareMachineState
   )
+import Dojang.CommandEffect (MonadCommandEffect (abortCommand, currentTime))
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , ensureRouteOwnership
@@ -130,7 +130,7 @@ import Dojang.Types.TargetTracking
   )
 
 
-apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
+apply :: (MonadFileSystem i, AppEffects i) => Bool -> [OsPath] -> App i ExitCode
 apply force filePaths = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
@@ -139,7 +139,7 @@ apply force filePaths = do
 
 -- | Applies selected routes using an explicit codec runtime.
 applyWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Bool
   -> [OsPath]
@@ -166,7 +166,7 @@ applyWithCodecRuntime codecRuntime force filePaths = do
   fileMap <- fmap fromList $ forM allManaged $ \managed -> do
     srcAbsPath <- makeAbsolute managed.correspondence.source.path
     return (srcAbsPath, managed)
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   filePaths' <- forM filePaths $ \fp -> do
     fp' <- makeAbsolute fp
     when (fp' `notMember` fileMap) $ do
@@ -202,7 +202,7 @@ applyWithCodecRuntime codecRuntime force filePaths = do
   let plan =
         planReconciliation SourceToDestination conflictPolicy inputs
   let conflicts = plan.conflicts
-  codeStyle <- codeStyleFor stderr
+  codeStyle <- codeStyleFor StandardError
   forM_ plan.items $ \item -> case item.outcome of
     Skipped reason ->
       printSkippedReconciliation
@@ -282,11 +282,10 @@ applyWithCodecRuntime codecRuntime force filePaths = do
           <> "/"
           <> codeStyle "--force"
           <> " to ignore these warnings and go ahead."
-      liftIO $
-        exitWith $
-          if not (null conflicts)
-            then conflictError
-            else accidentalDeletionWarning
+      abortCommand $
+        if not (null conflicts)
+          then conflictError
+          else accidentalDeletionWarning
   -- When everything is fine (or excused):
   debug' <- asks (.debug)
   when
@@ -355,14 +354,14 @@ applyWithCodecRuntime codecRuntime force filePaths = do
 
 
 persistConvergedTargets
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> MachineState
   -> [EvaluatedManagedCorrespondence]
   -> App i ()
 persistConvergedTargets ctx machineState selected =
   unless (null selected) $ do
-    now <- liftIO getCurrentTime
+    now <- currentTime
     root <- asks (.stateDirectory)
     result <-
       updateManagedTargetsWith
@@ -429,7 +428,7 @@ persistConvergedTargets ctx machineState selected =
 -- tracked file remains managed even if its destination path also matches an
 -- ignore pattern.
 observeSelectedReconciliationInput
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, MonadCommandEffect i)
   => Context i
   -> ExpectedState
   -> EvaluatedManagedCorrespondence
@@ -459,13 +458,13 @@ observeSelectedReconciliationInput ctx expectedState evaluated = do
     _ -> input'
 
 
-printSyncOp :: (MonadIO i) => SyncOp -> App i ()
+printSyncOp :: (AppEffects i) => SyncOp -> App i ()
 printSyncOp (RemoveDirs path) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   let path' = addTrailingPathSeparator path
   printStderr ("Remove " <> pathStyle path' <> " (and its children)...")
 printSyncOp (RemoveDirsExcept path _) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   let path' = addTrailingPathSeparator path
   printStderr
     ( "Remove "
@@ -473,36 +472,36 @@ printSyncOp (RemoveDirsExcept path _) = do
         <> " (preserving entries owned by nested routes)..."
     )
 printSyncOp (RemoveLink path) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr ("Remove link " <> pathStyle path <> "...")
 printSyncOp (RemoveFile path) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr ("Remove " <> pathStyle path <> "...")
 printSyncOp (CopyFile src dst) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr
     ("Copy " <> pathStyle src <> " to " <> pathStyle dst <> "...")
 printSyncOp (WriteContent _ dst) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr ("Write rendered content to " <> pathStyle dst <> "...")
 printSyncOp (WriteContentGuarded _ _ dst) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr ("Write rendered content to " <> pathStyle dst <> "...")
 printSyncOp (CreateDir path) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> "...")
 printSyncOp (CreateDirs path) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   let path' = addTrailingPathSeparator path
   printStderr ("Create " <> pathStyle path' <> " (and its ancestors)...")
 printSyncOp (CreateSymlink target link _) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr
     ("Link " <> pathStyle link <> " to " <> pathStyle target <> "...")
 printSyncOp (SetEntryMode path mode _) = do
-  pathStyle <- pathStyleFor stderr
-  codeStyle <- codeStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
+  codeStyle <- codeStyleFor StandardError
   printStderr
     ( "Set mode of "
         <> pathStyle path

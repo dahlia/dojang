@@ -35,7 +35,6 @@ module Dojang.Types.Reconciliation
 
 import Control.Monad (forM, forM_)
 import Control.Monad.Except (catchError, throwError)
-import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString qualified as ByteString
 import Data.List (isPrefixOf, nub, sortBy, sortOn)
 import Data.List.NonEmpty (NonEmpty)
@@ -53,6 +52,7 @@ import System.OsPath
   )
 import Prelude hiding (readFile, writeFile)
 
+import Dojang.CommandEffect (MonadCommandEffect)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified as FileSystem (FileType (..))
 import Dojang.Types.Codec.Evaluate
@@ -308,7 +308,7 @@ data ReconciliationPlan = ReconciliationPlan
 -- input.  File contents are compared only when both sides changed and file
 -- metadata cannot decide equivalence.
 observeReconciliationInput
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => Context m
   -- ^ The repository context used to observe destination routing.
   -> RouteMode
@@ -328,7 +328,7 @@ observeReconciliationInput context declaredMode correspondence = do
 -- | Observes reconciliation input while comparing a codec-produced source
 -- view with the concrete destination.
 observeReconciliationInputWithRenderedSource
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => Context m
   -> RouteMode
   -> FileCorrespondence
@@ -351,7 +351,7 @@ observeReconciliationInputWithRenderedSource
 -- that produced codec-rendered content.  Execution refuses the buffered write
 -- if those authoritative bytes have changed.
 observeReconciliationInputWithRenderedSourceGuard
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => Context m
   -> RouteMode
   -> FileCorrespondence

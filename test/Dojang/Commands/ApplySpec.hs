@@ -11,7 +11,6 @@ module Dojang.Commands.ApplySpec (spec) where
 
 import Control.Exception (bracket, bracket_)
 import Control.Monad.Except (catchError)
-import Control.Monad.IO.Class (liftIO)
 import Data.ByteString qualified as ByteString
 import Data.HashMap.Strict (singleton)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
@@ -47,7 +46,7 @@ import Test.Hspec.Expectations.Pretty
   )
 import Prelude hiding (readFile, writeFile)
 
-import Dojang.App (App, AppEnv (..), runAppWithoutLogging)
+import Dojang.App (App, AppEnv (..), liftApp, runAppWithoutLogging)
 import Dojang.Commands.Apply (apply, applyWithCodecRuntime)
 import Dojang.Commands.Status (defaultStatusOptions, statusWithCodecRuntime)
 import Dojang.ExitCodes (codecError, conflictError, manifestReadError)
@@ -915,7 +914,7 @@ countingApplyRuntime resolutionCount spec' =
       EvaluatePurely
   resolve request
     | request == counterInput = do
-        liftIO $ modifyIORef' resolutionCount (+ 1)
+        liftApp $ modifyIORef' resolutionCount (+ 1)
         return $ Right $ ExternalInput (opaqueBytes "") "stable"
     | otherwise = return $ Left "unexpected external input"
 

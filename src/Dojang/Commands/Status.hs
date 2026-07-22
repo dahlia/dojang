@@ -17,14 +17,11 @@ module Dojang.Commands.Status
   ) where
 
 import Control.Monad (forM, forM_, when)
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (..))
-import System.IO (Handle, stderr)
-import System.Info qualified
 
 import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
@@ -33,9 +30,17 @@ import System.Console.Pretty (Color (..))
 import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
-import Dojang.App (App, AppEnv (dryRun), ensureContext, prepareMachineState)
+import Dojang.App
+  ( App
+  , AppEffects
+  , AppEnv (dryRun)
+  , ensureContext
+  , prepareMachineState
+  )
+import Dojang.CommandEffect (MonadCommandEffect (hostPlatform))
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , ensureRouteOwnership
@@ -112,7 +117,7 @@ defaultStatusOptions =
     }
 
 
-status :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
+status :: (MonadFileSystem i, AppEffects i) => StatusOptions -> App i ExitCode
 status options = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
@@ -121,7 +126,7 @@ status options = do
 
 -- | Runs status reporting with an explicit codec runtime.
 statusWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> StatusOptions
   -> App i ExitCode
@@ -130,7 +135,8 @@ statusWithCodecRuntime runtime options =
 
 
 -- | Runs status reporting without lifecycle hooks for command-internal use.
-statusCore :: (MonadFileSystem i, MonadIO i) => StatusOptions -> App i ExitCode
+statusCore
+  :: (MonadFileSystem i, AppEffects i) => StatusOptions -> App i ExitCode
 statusCore options = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
@@ -139,7 +145,7 @@ statusCore options = do
 
 -- | Runs hook-free status reporting with an explicit codec runtime.
 statusCoreWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> StatusOptions
   -> App i ExitCode
@@ -166,7 +172,7 @@ statusCoreWithCodecRuntime runtime options = do
 -- command.  The complete raw correspondence list is used only for orphan
 -- classification; rows and mode notes are limited to the evaluated selection.
 statusCoreWithEvaluated
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> MachineState
   -> [RouteMapWarning]
@@ -219,12 +225,12 @@ statusCoreWithEvaluated ctx machineState ws allManaged evaluated options = do
 -- | Prints mode-drift notes and, on platforms that cannot enforce the
 -- declared modes, one warning per affected route.
 printModeNotes
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => [ManagedCorrespondence]
   -> App i ()
 printModeNotes managed = do
-  pathStyle <- pathStyleFor stderr
-  codeStyle <- codeStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
+  codeStyle <- codeStyleFor StandardError
   drifted <- observeModeDrift managed
   forM_ drifted $ \(m, _) ->
     printStderr' Note $
@@ -241,13 +247,14 @@ printModeNotes managed = do
 -- so any other declaration must be surfaced instead of silently claiming
 -- success.
 printUnsupportedModeWarnings
-  :: (MonadIO i)
+  :: (AppEffects i)
   => [ManagedCorrespondence]
   -> App i ()
-printUnsupportedModeWarnings managed =
-  when (System.Info.os == "mingw32") $ do
-    pathStyle <- pathStyleFor stderr
-    codeStyle <- codeStyleFor stderr
+printUnsupportedModeWarnings managed = do
+  platform <- hostPlatform
+  when (platform == "mingw32") $ do
+    pathStyle <- pathStyleFor StandardError
+    codeStyle <- codeStyleFor StandardError
     forM_ unsupported $ \(name, mode) ->
       printStderr' Warning $
         "Route "
@@ -266,7 +273,7 @@ printUnsupportedModeWarnings managed =
 
 
 printOrphans
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> [ManagedCorrespondence]
   -> MachineState
@@ -360,9 +367,10 @@ renderFileStat (Symlink _) = (Default, "L")
 
 
 -- TODO: This should be in a separate module:
-formatWarning :: (MonadIO i) => Handle -> RouteMapWarning -> i Text
-formatWarning handle (EnvironmentPredicateWarning w) = do
-  codeStyle <- codeStyleFor handle
+formatWarning
+  :: (MonadCommandEffect i) => StandardStream -> RouteMapWarning -> i Text
+formatWarning stream (EnvironmentPredicateWarning w) = do
+  codeStyle <- codeStyleFor stream
   case w of
     (UndefinedMoniker moniker) ->
       return $
@@ -384,14 +392,14 @@ formatWarning handle (EnvironmentPredicateWarning w) = do
         "Reference to an undefined machine fact: "
           <> codeStyle (factKeyText key)
           <> "."
-formatWarning handle (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
-  codeStyle <- codeStyleFor handle
+formatWarning stream (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
+  codeStyle <- codeStyleFor stream
   return $
     "Reference to an undefined environment variable: "
       <> codeStyle envVar
       <> "."
-formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
-  pathStyle <- pathStyleFor handle
+formatWarning stream (OverlapDestinationPathsWarning name dst paths) = do
+  pathStyle <- pathStyleFor stream
   pairStrings <- forM paths $ \(from, to) -> do
     return $ pathStyle from <> " -> " <> pathStyle to
   case pairStrings of
@@ -413,8 +421,8 @@ formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
 
 
 -- TODO: This should be in a separate module:
-printWarnings :: (MonadIO i) => [RouteMapWarning] -> App i ()
+printWarnings :: (AppEffects i) => [RouteMapWarning] -> App i ()
 printWarnings ws =
   forM_ ws $ \w -> do
-    formatted <- formatWarning stderr w
+    formatted <- formatWarning StandardError w
     printStderr' Warning formatted

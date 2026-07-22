@@ -12,36 +12,46 @@ module Dojang.Commands.Edit
   , editWithCodecRuntime
   , getEditor
   , runEditor
+  , selectNewFileRoute
   ) where
 
-import Control.Monad (filterM, foldM, forM, forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad (filterM, foldM, forM, forM_, unless)
 import Control.Monad.Reader (asks)
 import Data.List (isPrefixOf, nub)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Word (Word32)
-import System.Environment (lookupEnv)
-import System.Exit (ExitCode (..), exitWith)
-import System.IO (hIsTerminalDevice, stderr, stdin)
-import System.Process (spawnProcess, waitForProcess)
+import System.Exit (ExitCode (..))
 
 import Control.Monad.Logger (logDebugSH)
 import Data.List.NonEmpty qualified as NE
 import Data.Text (Text, pack)
-import FortyTwo.Prompts.Confirm (confirm)
-import FortyTwo.Prompts.Select (select)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
 import TextShow (showt)
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (dryRun)
   , ensureContext
   , prepareMachineState
   )
+import Dojang.CommandEffect
+  ( MonadCommandEffect
+      ( abortCommand
+      , isTerminal
+      , lookupEnvironmentVariable
+      , runProcess
+      )
+  , ProcessRequest (..)
+  , ProcessResult (..)
+  , confirmPrompt
+  , emptyProcessRequest
+  , selectPrompt
+  )
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , dieWithErrors
@@ -114,31 +124,62 @@ defaultEditor = "vi"
 
 -- | Get the editor to use, checking --editor option, then VISUAL, then EDITOR.
 -- Returns Nothing if no editor is specified (caller should use defaultEditor).
-getEditor :: (MonadIO m) => Maybe String -> m (Maybe String)
+getEditor :: (MonadCommandEffect m) => Maybe String -> m (Maybe String)
 getEditor (Just editor) = return $ Just editor
-getEditor Nothing = liftIO $ do
-  visual <- lookupEnv "VISUAL"
+getEditor Nothing = do
+  visual <- lookupEnvironmentVariable "VISUAL"
   case visual of
     Just v -> return $ Just v
-    Nothing -> lookupEnv "EDITOR"
+    Nothing -> lookupEnvironmentVariable "EDITOR"
+
+
+-- | Prompts for one of the routes that can create a new source file.
+--
+-- A canceled or unavailable prompt aborts the command instead of selecting an
+-- arbitrary route.  An answer that does not identify a supplied route is also
+-- treated as cancellation.
+selectNewFileRoute
+  :: (MonadFileSystem m, MonadCommandEffect m)
+  => [RouteResult]
+  -- ^ Candidate routes to present.
+  -> m RouteResult
+  -- ^ The selected route, or a command abort when selection is unavailable.
+selectNewFileRoute routes = do
+  labeledRoutes <- forM routes $ \route -> do
+    label <- pack <$> decodePath route.routeName
+    return (label, route)
+  selectedLabel <-
+    selectPrompt "Select route to use:" $ fst <$> labeledRoutes
+  case selectedLabel of
+    Nothing -> cancelSelection
+    Just label -> case lookup label labeledRoutes of
+      Just route -> return route
+      Nothing -> cancelSelection
+ where
+  cancelSelection = do
+    printStderr "Cancelled."
+    abortCommand userCancelledError
 
 
 -- | Run the editor with the given files.
 runEditor
-  :: (MonadIO m)
+  :: (MonadCommandEffect m)
   => String
   -- ^ The editor program to run.
   -> [FilePath]
   -- ^ The files to edit.
-  -> m ExitCode
-runEditor editor files = liftIO $ do
-  handle <- spawnProcess editor files
-  waitForProcess handle
+  -> m ProcessResult
+runEditor editor files =
+  runProcess
+    emptyProcessRequest
+      { executable = editor
+      , arguments = files
+      }
 
 
 -- | The edit command: open source files in an editor and apply changes.
 edit
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe String
   -- ^ The @--editor@ option.
   -> Bool
@@ -175,7 +216,7 @@ edit editorOpt noApply force sequential allFlag includeUnregistered explicitSour
 -- | Opens selected source files and applies them with an explicit codec
 -- runtime.
 editWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Maybe String
   -> Bool
@@ -213,7 +254,7 @@ editWithCodecRuntime
 
 
 editCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Maybe String
   -> Bool
@@ -227,8 +268,8 @@ editCore
 editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered _explicitSource [] = do
   -- No arguments: edit source files of all changed files
   ctx <- ensureContext
-  pathStyle <- pathStyleFor stderr
-  codeStyle <- codeStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
+  codeStyle <- codeStyleFor StandardError
   machineState <- prepareMachineState ctx.repository.manifest
   (rawManaged, ws) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   cache <- loadCodecCacheEntries ctx machineState rawManaged
@@ -348,9 +389,9 @@ editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered
         if allFlag
           then return True
           else do
-            isTerminal <- liftIO $ hIsTerminalDevice stdin
-            if isTerminal
-              then liftIO $ confirm "Edit all changed source files?"
+            terminal <- isTerminal StandardInput
+            if terminal
+              then confirmPrompt "Edit all changed source files?"
               else return True -- Non-interactive: proceed
       if proceed
         then do
@@ -358,7 +399,7 @@ editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered
           runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles
         else do
           printStderr "Cancelled."
-          liftIO $ exitWith userCancelledError
+          abortCommand userCancelledError
  where
   correspondenceIdentity
     :: FileCorrespondence -> ([Word32], [Word32])
@@ -368,8 +409,8 @@ editCore runtime editorOpt noApply force sequential allFlag _includeUnregistered
     )
 editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
-  pathStyle <- pathStyleFor stderr
-  codeStyle <- codeStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
+  codeStyle <- codeStyleFor StandardError
 
   -- Reject unsafe route configurations before touching any file:
   (ownership, _) <- projectExpectedState ctx
@@ -410,7 +451,7 @@ editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistere
       NoMatch -> do
         printStderr' Error ("File " <> pathStyle targetPath <> " is not routed.")
         printStderr' Hint "Add a route for it in your manifest (dojang.toml)."
-        liftIO $ exitWith fileNotRoutedError
+        abortCommand fileNotRoutedError
       SingleMatch route -> do
         srcPath <- computeSourcePath ctx targetPath route
         return srcPath
@@ -433,7 +474,7 @@ editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistere
                 <> " to specify which source path to use, or set "
                 <> codeStyle "DOJANG_AUTO_SELECT=first"
                 <> " to auto-select."
-            liftIO $ exitWith ambiguousRouteError
+            abortCommand ambiguousRouteError
           Just route -> do
             srcPath <- computeSourcePath ctx targetPath route
             return srcPath
@@ -445,7 +486,7 @@ editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistere
       [] -> do
         printStderr' Error ("File " <> pathStyle targetPath <> " is not routed.")
         printStderr' Hint "Add a route for it in your manifest (dojang.toml)."
-        liftIO $ exitWith fileNotRoutedError
+        abortCommand fileNotRoutedError
       [route] -> do
         srcPath <- computeSourcePath ctx targetPath route
         createEmptySourceFile pathStyle srcPath
@@ -453,27 +494,12 @@ editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistere
       (firstRoute : restRoutes) -> do
         let routes = firstRoute : restRoutes
         -- Multiple routes: prompt for selection.
-        isTerminal <- liftIO $ hIsTerminalDevice stdin
-        if isTerminal
+        terminal <- isTerminal StandardInput
+        if terminal
           then do
-            routeLabels <- forM routes $ \route -> do
-              routeName' <- decodePath route.routeName
-              return routeName'
             printStderr' Note $
               "Multiple routes can create " <> pathStyle targetPath <> ":"
-            selectedLabel <-
-              liftIO $ select "Select route to use:" routeLabels
-            -- Find the route that matches the selected label.
-            matchingRoutes <-
-              filterM
-                ( \r -> do
-                    name <- decodePath r.routeName
-                    return (name == selectedLabel)
-                )
-                routes
-            let selectedRoute = case matchingRoutes of
-                  (match : _) -> match
-                  [] -> firstRoute -- Fallback to first if no match.
+            selectedRoute <- selectNewFileRoute routes
             srcPath <- computeSourcePath ctx targetPath selectedRoute
             createEmptySourceFile pathStyle srcPath
             return srcPath
@@ -500,7 +526,7 @@ isChanged fc = fc.sourceDelta /= Unchanged || fc.destinationDelta /= Unchanged
 
 -- | Run the editor on the given source files.
 runEditorOnFiles
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Maybe String
   -- ^ The @--editor@ option.
@@ -514,7 +540,7 @@ runEditorOnFiles
   -- ^ The source file paths to edit.
   -> App i ExitCode
 runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
 
   -- Get the editor to use.
   maybeEditor <- getEditor editorOpt
@@ -536,10 +562,8 @@ runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles = do
           forM_ sourceFilePaths $ \srcPath -> do
             srcOsPath <- encodePath srcPath
             printStderr $ "Editing " <> pathStyle srcOsPath <> "..."
-            exitCode <- runEditor editor [srcPath]
-            when (exitCode /= ExitSuccess) $ do
-              die' externalProgramNonZeroExit $
-                pack editor <> " exited with code " <> showt exitCode <> "."
+            result <- runEditor editor [srcPath]
+            ensureEditorSucceeded editor result
             -- Apply after each file if not disabled.
             unless noApply $ do
               printStderr "Applying changes..."
@@ -547,16 +571,35 @@ runEditorOnFiles runtime editorOpt noApply force sequential sourceFiles = do
               return ()
         else do
           -- Concurrent mode: open all files at once.
-          exitCode <- runEditor editor sourceFilePaths
-          when (exitCode /= ExitSuccess) $ do
-            die' externalProgramNonZeroExit $
-              pack editor <> " exited with code " <> showt exitCode <> "."
+          result <- runEditor editor sourceFilePaths
+          ensureEditorSucceeded editor result
           -- Apply changes if not disabled.
           unless noApply $ do
             printStderr "Applying changes..."
             _ <- Dojang.Commands.Apply.applyWithCodecRuntime runtime force []
             return ()
       return ExitSuccess
+
+
+ensureEditorSucceeded
+  :: (MonadCommandEffect m) => String -> ProcessResult -> m ()
+ensureEditorSucceeded _ (ProcessCompleted ExitSuccess _ _) = return ()
+ensureEditorSucceeded editor (ProcessCompleted exitCode _ _) =
+  die' externalProgramNonZeroExit $
+    pack editor <> " exited with code " <> showt exitCode <> "."
+ensureEditorSucceeded editor (ProcessStartFailed err) =
+  editorFailure editor $ "could not be started: " <> err
+ensureEditorSucceeded editor (ProcessWaitFailed err) =
+  editorFailure editor $ "could not be awaited: " <> err
+ensureEditorSucceeded editor (ProcessIOFailed err) =
+  editorFailure editor $ "failed: " <> err
+ensureEditorSucceeded editor (ProcessUnavailable _) =
+  editorFailure editor "is unavailable in this mode"
+
+
+editorFailure :: (MonadCommandEffect m) => String -> Text -> m a
+editorFailure editor reason =
+  die' externalProgramNonZeroExit $ pack editor <> " " <> reason <> "."
 
 
 -- | Compute the source path for a target path given a route.
@@ -589,7 +632,7 @@ partitionM p xs = foldM go ([], []) xs
 
 -- | Create an empty source file for a new file.
 createEmptySourceFile
-  :: (MonadFileSystem m, MonadIO m)
+  :: (MonadFileSystem m, MonadCommandEffect m)
   => (OsPath -> Text)
   -- ^ Path style function for display.
   -> OsPath

@@ -13,11 +13,12 @@ import System.IO.Unsafe (unsafePerformIO)
 
 #ifndef mingw32_HOST_OS
 import Data.Char (chr)
+import System.Exit (ExitCode (ExitFailure))
+import System.OsPath (decodeFS)
 import System.OsString qualified as OsString
 #endif
 
 import Data.HashMap.Strict (empty)
-import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8)
@@ -57,6 +58,13 @@ import Test.Hspec
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
+import Dojang.CommandEffect (ProcessResult (..))
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.CommandEffect (ProcessRequest (ProcessRequest))
+#endif
+
 import Dojang.Commands.Hook
   ( HookEnv (..)
   , HookScopePath (..)
@@ -76,6 +84,12 @@ import Dojang.Commands.Hook
   , withCommandHooks
   )
 import Dojang.ExitCodes (machineStateError)
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.ExitCodes (hookFailedError)
+#endif
+
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
@@ -674,7 +688,10 @@ spec = sequential $ do
                   const $
                     pure Nothing
         let failingHookEnv =
-              hookEnv{processStarter = const $ pure $ Left $ userError "not found"}
+              hookEnv
+                { processSimulation =
+                    const $ Just $ ProcessStartFailed "not found"
+                }
         runAppWithoutLogging appEnv $
           executeHooks failingHookEnv ignoredContext PreApply
 
@@ -760,7 +777,6 @@ spec = sequential $ do
           FileSystem.writeFile
             (repositoryStatePath stateRootPath repositoryId)
             (encodeUtf8 $ encodeMachineState recreatedState)
-        launches <- newIORef (0 :: Int)
         let hookEnv =
               HookEnv
                 tmpDir
@@ -775,13 +791,9 @@ spec = sequential $ do
                 []
                 oldState
                 stateRootPath
-                ( \_ -> do
-                    modifyIORef' launches (+ 1)
-                    pure $ Right $ pure $ Right ExitSuccess
-                )
+                (const $ Just $ ProcessCompleted ExitSuccess "" "")
         (runAppWithoutLogging appEnv $ executeHooks hookEnv context PreApply)
           `shouldThrow` (== machineStateError)
-        readIORef launches `shouldReturn` 0
 
     it "hook environment probe" $ do
       arguments <- getArgs
@@ -918,10 +930,10 @@ posixNonUtf8HookScopeSpec =
         FileSystem.writeFile
           (repositoryStatePath stateRootPath repositoryId)
           (encodeUtf8 $ encodeMachineState state)
-      launches <- newIORef (0 :: Int)
       let path byte =
             OsString.pack
               [OsString.unsafeFromChar $ chr $ 0xdc00 + fromIntegral byte]
+      secondPath <- decodeFS $ path secondByte
       let hookEnv selectedPath =
             HookEnv
               tmpDir
@@ -936,15 +948,21 @@ posixNonUtf8HookScopeSpec =
               [selectedPath]
               state
               stateRootPath
-              ( \_ -> do
-                  modifyIORef' launches (+ 1)
-                  pure $ Right $ pure $ Right ExitSuccess
+              ( \request ->
+                  let ProcessRequest _ _ _ childEnvironment _ = request
+                      selected =
+                        childEnvironment >>= lookup "DOJANG_PATH_0"
+                  in Just $
+                      if selected == Just secondPath
+                        then ProcessCompleted (ExitFailure 1) "" ""
+                        else ProcessCompleted ExitSuccess "" ""
               )
       runAppWithoutLogging appEnv $
         executeHooks (hookEnv $ path firstByte) context PreApply
-      runAppWithoutLogging appEnv $
-        executeHooks (hookEnv $ path secondByte) context PreApply
-      readIORef launches `shouldReturn` 2
+      ( runAppWithoutLogging appEnv $
+          executeHooks (hookEnv $ path secondByte) context PreApply
+        )
+        `shouldThrow` (== hookFailedError)
 #endif
 
 

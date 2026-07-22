@@ -5,6 +5,7 @@
 module Dojang.Commands
   ( Admonition (..)
   , Color (..)
+  , StandardStream (..)
   , codeStyleFor
   , colorFor
   , die'
@@ -20,16 +21,12 @@ module Dojang.Commands
   ) where
 
 import Control.Monad (forM_)
-import Control.Monad.IO.Class (MonadIO (liftIO))
-import System.Environment (lookupEnv)
-import System.Exit (ExitCode, exitWith)
-import System.IO.Extra (Handle, hIsTerminalDevice, stderr, stdout)
+import System.Exit (ExitCode)
 import System.IO.Unsafe (unsafePerformIO)
 import Prelude hiding (putStr, replicate)
 
 import Data.List (transpose)
 import Data.Text (Text, length, pack, replicate)
-import Data.Text.IO (hPutStr, hPutStrLn, putStr)
 import System.Console.Pretty
   ( Color (..)
   , Pretty
@@ -40,6 +37,11 @@ import System.Console.Pretty
 import System.Console.Pretty qualified (color)
 import System.OsPath (OsPath, decodeFS)
 
+import Dojang.CommandEffect
+  ( MonadCommandEffect (..)
+  , OutputStream (..)
+  , StandardStream (..)
+  )
 import Dojang.ExitCodes (routeOwnershipError)
 import Dojang.Types.Reconciliation (ReconciliationSkipReason (..))
 import Dojang.Types.RouteOwnership
@@ -49,20 +51,23 @@ import Dojang.Types.RouteOwnership
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 
-isColorAvailable :: (MonadIO m) => Handle -> m Bool
-isColorAvailable handle = liftIO $ do
-  term <- lookupEnv "TERM"
-  noColor <- lookupEnv "NO_COLOR"
+isColorAvailable :: (MonadCommandEffect m) => StandardStream -> m Bool
+isColorAvailable stream = do
+  term <- lookupEnvironmentVariable "TERM"
+  noColor <- lookupEnvironmentVariable "NO_COLOR"
   case (term, noColor) of
     (Just "dumb", _) -> return False
     (_, Just (_ : _)) -> return False
-    _ -> hIsTerminalDevice handle
+    _ -> isTerminal stream
 
 
 colorFor
-  :: forall a m. (Pretty a, MonadIO m) => Handle -> m (Color -> Color -> a -> a)
-colorFor handle = do
-  colorAvailable <- isColorAvailable handle
+  :: forall a m
+   . (Pretty a, MonadCommandEffect m)
+  => StandardStream
+  -> m (Color -> Color -> a -> a)
+colorFor stream = do
+  colorAvailable <- isColorAvailable stream
   return $ if colorAvailable then color else dumb
  where
   dumb :: Color -> Color -> a -> a
@@ -71,44 +76,50 @@ colorFor handle = do
   color bg text v = bgColor bg $ System.Console.Pretty.color text v
 
 
-codeStyleFor :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
-codeStyleFor handle = do
-  colorAvailable <- isColorAvailable handle
+codeStyleFor
+  :: forall a m. (Pretty a, MonadCommandEffect m) => StandardStream -> m (a -> a)
+codeStyleFor stream = do
+  colorAvailable <- isColorAvailable stream
   return $
     if colorAvailable
       then style Bold
       else id
 
 
-pathStyleFor :: forall m. (MonadIO m) => Handle -> m (OsPath -> Text)
-pathStyleFor handle = do
-  pathStyle <- pathStyleFor' handle
+pathStyleFor
+  :: forall m. (MonadCommandEffect m) => StandardStream -> m (OsPath -> Text)
+pathStyleFor stream = do
+  pathStyle <- pathStyleFor' stream
   return $ \path -> pathStyle $ decodeFS' path
  where
   decodeFS' :: OsPath -> Text
   decodeFS' = pack . unsafePerformIO . decodeFS
 
 
-pathStyleFor' :: forall a m. (Pretty a, MonadIO m) => Handle -> m (a -> a)
-pathStyleFor' handle = do
-  colorAvailable <- isColorAvailable handle
+pathStyleFor'
+  :: forall a m
+   . (Pretty a, MonadCommandEffect m)
+  => StandardStream
+  -> m (a -> a)
+pathStyleFor' stream = do
+  colorAvailable <- isColorAvailable stream
   return $
     if colorAvailable
       then style Italic
       else id
 
 
-printStderr :: (MonadIO m) => Text -> m ()
-printStderr = liftIO . hPutStrLn stderr
+printStderr :: (MonadCommandEffect m) => Text -> m ()
+printStderr message = writeStream OutputError $ message <> "\n"
 
 
 data Admonition = Hint | Note | Warning | Error
   deriving (Show, Eq, Ord, Enum, Bounded)
 
 
-printStderr' :: (MonadIO m) => Admonition -> Text -> m ()
+printStderr' :: (MonadCommandEffect m) => Admonition -> Text -> m ()
 printStderr' admonition message = do
-  color <- colorFor stderr
+  color <- colorFor StandardError
   printStderr $ color Default color' prefix <> message
  where
   color' :: Color
@@ -121,45 +132,46 @@ printStderr' admonition message = do
   prefix = showt (FromStringShow admonition) <> ": "
 
 
-die' :: (MonadIO m) => ExitCode -> Text -> m a
+die' :: (MonadCommandEffect m) => ExitCode -> Text -> m a
 die' exitCode message = do
   printStderr' Error message
-  liftIO $ exitWith exitCode
+  abortCommand exitCode
 
 
 -- | Unwraps a route-ownership result, dying with 'routeOwnershipError'
 -- and a formatted message when the route configuration is unsafe.
 ensureRouteOwnership
-  :: (MonadIO m) => Either OwnershipError a -> m a
+  :: (MonadCommandEffect m) => Either OwnershipError a -> m a
 ensureRouteOwnership (Right value) = return value
 ensureRouteOwnership (Left err) = do
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   die' routeOwnershipError $ formatOwnershipError pathStyle err
 
 
-dieWithErrors :: (MonadIO m) => ExitCode -> [Text] -> m a
+dieWithErrors :: (MonadCommandEffect m) => ExitCode -> [Text] -> m a
 dieWithErrors exitCode errors = do
   forM_ errors $ printStderr' Error
-  liftIO $ exitWith exitCode
+  abortCommand exitCode
 
 
-printTable :: forall m. (MonadIO m) => [Text] -> [[(Color, Text)]] -> m ()
+printTable
+  :: forall m. (MonadCommandEffect m) => [Text] -> [[(Color, Text)]] -> m ()
 printTable headers rows = do
   -- Headers are printed to stderr, so that they can be piped to another
   -- program without interfering with the table.
   forM_ (zip headers columnWidths) $ \(header, width) -> do
-    putCol stderr Cyan header width
-    liftIO $ hPutStr stderr " "
+    putCol OutputError StandardError Cyan header width
+    writeStream OutputError " "
   putLnStderr
   forM_ columnWidths $ \width -> do
-    putCol stderr Cyan (replicate width "\x2500") width
-    liftIO $ hPutStr stderr " "
+    putCol OutputError StandardError Cyan (replicate width "\x2500") width
+    writeStream OutputError " "
   putLnStderr
   forM_ rows $ \row -> do
     forM_ (zip3 row columnWidths [1 ..]) $ \((color', value), width, i) -> do
-      putCol stdout color' value $
+      putCol OutputStandard StandardOutput color' value $
         if i < Prelude.length row then width else Data.Text.length value
-      liftIO $ putStr " "
+      writeStream OutputStandard " "
     putLn
  where
   valueWidths :: [[Int]]
@@ -168,15 +180,15 @@ printTable headers rows = do
       : [[Data.Text.length v | (_, v) <- row] | row <- rows]
   columnWidths :: [Int]
   columnWidths = map maximum $ transpose valueWidths
-  putCol :: Handle -> Color -> Text -> Int -> m ()
-  putCol h color' value width = do
-    color <- colorFor stdout
-    liftIO $ hPutStr h $ color Default color' value
-    liftIO $ hPutStr h $ replicate (width - Data.Text.length value) " "
+  putCol :: OutputStream -> StandardStream -> Color -> Text -> Int -> m ()
+  putCol output stream color' value width = do
+    color <- colorFor stream
+    writeStream output $ color Default color' value
+    writeStream output $ replicate (width - Data.Text.length value) " "
   putLn :: m ()
-  putLn = liftIO $ putStrLn mempty
+  putLn = writeStream OutputStandard "\n"
   putLnStderr :: m ()
-  putLnStderr = liftIO $ hPutStrLn stderr mempty
+  putLnStderr = writeStream OutputError "\n"
 
 
 -- | Explains why one planned correspondence was skipped.  The first path
@@ -184,7 +196,7 @@ printTable headers rows = do
 -- symbolic links, which differs between apply and reflect; every other
 -- reason names the destination path.
 printSkippedReconciliation
-  :: (MonadIO m)
+  :: (MonadCommandEffect m)
   => (OsPath -> Text)
   -- ^ Path renderer.
   -> OsPath
@@ -222,7 +234,7 @@ printSkippedReconciliation pathStyle authoritativePath destinationPath reason =
 
 -- | Warns that a prior read-only mode could not be restored while a
 -- failed reconciliation plan was being undone.
-printModeRestoreFailure :: (MonadIO m) => IOError -> m ()
+printModeRestoreFailure :: (MonadCommandEffect m) => IOError -> m ()
 printModeRestoreFailure err =
   printStderr' Warning $
     "Failed to restore a prior mode while undoing changes: "

@@ -6,16 +6,11 @@
 module Dojang.Commands.Diff (DiffMode (..), diff, diffWithCodecRuntime) where
 
 import Control.Monad (filterM, forM, forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (asks)
 import Data.List (find, nub)
 import Data.Maybe (catMaybes)
-import System.Environment (lookupEnv)
-import System.Exit (ExitCode (ExitFailure, ExitSuccess), exitWith)
-import System.IO (stderr, stdout)
-import System.Info (os)
-import Prelude hiding (lines, putStrLn, readFile)
-import Prelude qualified (putStrLn)
+import System.Exit (ExitCode (ExitFailure, ExitSuccess))
+import Prelude hiding (lines, readFile)
 
 import Data.Algorithm.Diff (getGroupedDiff)
 import Data.Algorithm.DiffOutput
@@ -26,20 +21,33 @@ import Data.Algorithm.DiffOutput
 import Data.ByteString (ByteString)
 import Data.Text (Text, cons, lines, pack, unpack)
 import Data.Text.Encoding (decodeUtf8')
-import Data.Text.IO (putStrLn)
 import System.OsPath (OsPath)
-import System.Process (spawnProcess, waitForProcess)
 import TextShow (TextShow (showt))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (dryRun)
   , ensureContext
   , prepareMachineState
   )
+import Dojang.CommandEffect
+  ( MonadCommandEffect
+      ( abortCommand
+      , hostPlatform
+      , lookupEnvironmentVariable
+      , runProcess
+      , writeStream
+      )
+  , OutputStream (OutputStandard)
+  , ProcessRequest (..)
+  , ProcessResult (..)
+  , emptyProcessRequest
+  )
 import Dojang.Commands
   ( Admonition (..)
   , Color (..)
+  , StandardStream (..)
   , colorFor
   , die'
   , ensureRouteOwnership
@@ -89,7 +97,7 @@ data DiffMode = Both | Source | Destination deriving (Show)
 
 
 diff
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => DiffMode
   -> Maybe OsPath
   -> [OsPath]
@@ -107,7 +115,7 @@ diff mode diffProgram files =
 
 -- | Displays differences using an explicit codec runtime.
 diffWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> DiffMode
   -> Maybe OsPath
@@ -119,7 +127,7 @@ diffWithCodecRuntime runtime mode diffProgram files =
 
 
 diffCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> DiffMode
   -> Maybe OsPath
@@ -132,7 +140,7 @@ diffCore runtime mode diffProgram files = do
     sourcePath <- makeAbsolute item.correspondence.source.path
     destinationPath <- makeAbsolute item.correspondence.destination.path
     return ((sourcePath, destinationPath), item)
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   nonExistents <- (`filterM` files) $ \file -> do
     file' <- makeAbsolute file
     if any
@@ -147,7 +155,7 @@ diffCore runtime mode diffProgram files = do
         return True
   unless (null nonExistents) $ do
     printWarnings ws
-    liftIO $ exitWith fileNotRoutedError
+    abortCommand fileNotRoutedError
   selected <- case files of
     [] -> return managed
     _ -> fmap (nub . catMaybes) $ forM files $ \file -> do
@@ -198,19 +206,21 @@ diffCore runtime mode diffProgram files = do
   return ExitSuccess
 
 
-nullPath :: FilePath
-nullPath = if os == "mingw32" then "NUL" else "/dev/null"
+nullPath :: (MonadCommandEffect m) => m FilePath
+nullPath = do
+  platform <- hostPlatform
+  return $ if platform == "mingw32" then "NUL" else "/dev/null"
 
 
-getPath :: (MonadFileSystem m) => FileEntry -> m FilePath
+getPath :: (MonadFileSystem m, MonadCommandEffect m) => FileEntry -> m FilePath
 getPath entry = case entry.stat of
-  Missing -> return nullPath
-  Directory -> return nullPath
+  Missing -> nullPath
+  Directory -> nullPath
   _ -> decodePath entry.path
 
 
 twoWay
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> Bool
   -> (FileCorrespondence -> Bool)
@@ -221,7 +231,7 @@ twoWay
 twoWay program' usesRenderedSource selectedHasChange srcSelector dstSelector files = do
   program <- case program' of
     Just p -> Just <$> decodePath p
-    Nothing -> liftIO $ lookupEnv "DOJANG_DIFF"
+    Nothing -> lookupEnvironmentVariable "DOJANG_DIFF"
   case program of
     Just _
       | usesRenderedSource
@@ -246,15 +256,26 @@ twoWay program' usesRenderedSource selectedHasChange srcSelector dstSelector fil
       Just prog -> do
         srcPath <- getPath src
         dstPath <- getPath dst
-        handle <- liftIO $ spawnProcess prog [srcPath, dstPath]
-        exitCode <- liftIO $ waitForProcess handle
-        when (exitCode /= ExitSuccess && exitCode /= ExitFailure 1) $ do
-          cmdStyle <- pathStyleFor' stderr
-          die' externalProgramNonZeroExit $
-            cmdStyle (pack prog)
-              <> " terminated with exit code "
-              <> showt exitCode
-              <> "."
+        result <-
+          runProcess
+            emptyProcessRequest
+              { executable = prog
+              , arguments = [srcPath, dstPath]
+              }
+        case result of
+          ProcessCompleted exitCode _ _
+            | exitCode == ExitSuccess || exitCode == ExitFailure 1 -> return ()
+            | otherwise -> processFailure prog $ "exit code " <> showt exitCode
+          ProcessStartFailed err -> processFailure prog err
+          ProcessWaitFailed err -> processFailure prog err
+          ProcessIOFailed err -> processFailure prog err
+          ProcessUnavailable _ ->
+            processFailure prog "execution is unavailable in this mode"
+ where
+  processFailure prog reason = do
+    cmdStyle <- pathStyleFor' StandardError
+    die' externalProgramNonZeroExit $
+      cmdStyle (pack prog) <> " terminated with " <> reason <> "."
 
 
 hasChange :: FileCorrespondence -> Bool
@@ -265,7 +286,7 @@ hasChange c = case (c.sourceDelta, c.destinationDelta) of
 
 builtinDiff
   :: forall i
-   . (MonadFileSystem i, MonadIO i)
+   . (MonadFileSystem i, AppEffects i)
   => Maybe OpaqueBytes
   -> FileEntry
   -> FileEntry
@@ -276,21 +297,19 @@ builtinDiff renderedA a b = do
     Nothing -> readFileEntryBytes a
   bytesB <- readFileEntryBytes b
   unless (a.stat == b.stat && bytesA == bytesB) $ do
-    color <- colorFor stdout
-    color' <- colorFor stdout
-    pathStyle <- pathStyleFor stdout
-    liftIO $
-      putStrLn $
-        color Default Red "--- " <> pathStyle a.path <> case a.stat of
-          Missing -> " (missing)"
-          Directory -> " (directory)"
-          _ -> ""
-    liftIO $
-      putStrLn $
-        color Default Green "+++ " <> pathStyle b.path <> case b.stat of
-          Missing -> " (missing)"
-          Directory -> " (directory)"
-          _ -> ""
+    color <- colorFor StandardOutput
+    color' <- colorFor StandardOutput
+    pathStyle <- pathStyleFor StandardOutput
+    putOutputLine $
+      color Default Red "--- " <> pathStyle a.path <> case a.stat of
+        Missing -> " (missing)"
+        Directory -> " (directory)"
+        _ -> ""
+    putOutputLine $
+      color Default Green "+++ " <> pathStyle b.path <> case b.stat of
+        Missing -> " (missing)"
+        Directory -> " (directory)"
+        _ -> ""
     case (decodeUtf8' bytesA, decodeUtf8' bytesB) of
       (Right textA, Right textB) -> do
         let linesA = lines textA
@@ -298,7 +317,7 @@ builtinDiff renderedA a b = do
         let diffOps =
               diffToLineRanges $
                 getGroupedDiff (unpack <$> linesA) (unpack <$> linesB)
-        forM_ diffOps $ \op -> liftIO $ case op of
+        forM_ diffOps $ \op -> case op of
           Deletion aRange bOffset -> do
             let ( addRange
                   , delRange
@@ -307,11 +326,11 @@ builtinDiff renderedA a b = do
                   ) = calcRange linesB (bOffset + 1, bOffset) linesA aRange.lrNumbers
             printRange delRange addRange
             forM_ (take headLines (drop headOffset linesB)) $ \line ->
-              putStrLn $ ' ' `cons` line
+              putOutputLine $ ' ' `cons` line
             forM_ aRange.lrContents $ \line ->
-              Prelude.putStrLn $ color' Default Red ('-' : line)
+              putOutputLine $ pack $ color' Default Red ('-' : line)
             forM_ (take tailLines (drop tailOffset linesB)) $ \line ->
-              putStrLn $ ' ' `cons` line
+              putOutputLine $ ' ' `cons` line
           Addition bRange aOffset -> do
             let ( addRange
                   , delRange
@@ -320,11 +339,11 @@ builtinDiff renderedA a b = do
                   ) = calcRange linesB bRange.lrNumbers linesA (aOffset + 1, aOffset)
             printRange delRange addRange
             forM_ (take headLines (drop headOffset linesB)) $ \line ->
-              putStrLn $ ' ' `cons` line
+              putOutputLine $ ' ' `cons` line
             forM_ bRange.lrContents $ \line ->
-              Prelude.putStrLn $ color' Default Green ('+' : line)
+              putOutputLine $ pack $ color' Default Green ('+' : line)
             forM_ (take tailLines (drop tailOffset linesB)) $ \line ->
-              putStrLn $ ' ' `cons` line
+              putOutputLine $ ' ' `cons` line
           Change aRange bRange -> do
             let ( addRange
                   , delRange
@@ -333,14 +352,14 @@ builtinDiff renderedA a b = do
                   ) = calcRange linesB bRange.lrNumbers linesA aRange.lrNumbers
             printRange delRange addRange
             forM_ (take headLines (drop headOffset linesB)) $ \line ->
-              putStrLn $ ' ' `cons` line
+              putOutputLine $ ' ' `cons` line
             forM_ aRange.lrContents $ \line ->
-              Prelude.putStrLn $ color' Default Red ('-' : line)
+              putOutputLine $ pack $ color' Default Red ('-' : line)
             forM_ bRange.lrContents $ \line ->
-              Prelude.putStrLn $ color' Default Green ('+' : line)
+              putOutputLine $ pack $ color' Default Green ('+' : line)
             forM_ (take tailLines (drop tailOffset linesB)) $ \line ->
-              putStrLn $ ' ' `cons` line
-      _ -> liftIO $ putStrLn "Binary files differ."
+              putOutputLine $ ' ' `cons` line
+      _ -> putOutputLine "Binary files differ."
  where
   context :: Int
   context = 3
@@ -372,10 +391,10 @@ builtinDiff renderedA a b = do
        , (headOffset, headLines)
        , (tailOffset, tailLines)
        )
-  printRange :: (Int, Int) -> (Int, Int) -> IO ()
+  printRange :: (Int, Int) -> (Int, Int) -> App i ()
   printRange (delOffset, delLines) (addOffset, addLines) = do
-    color <- colorFor stdout
-    putStrLn $
+    color <- colorFor StandardOutput
+    putOutputLine $
       color Default Cyan $
         "@@ -"
           <> showt delOffset
@@ -391,3 +410,7 @@ builtinDiff renderedA a b = do
     Missing -> return ""
     Directory -> return ""
     _ -> readFile entry.path
+
+
+putOutputLine :: (MonadCommandEffect m) => Text -> m ()
+putOutputLine value = writeStream OutputStandard $ value <> "\n"

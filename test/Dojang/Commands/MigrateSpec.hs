@@ -20,6 +20,7 @@ import Control.Concurrent
 import Control.Exception (SomeException, bracket_)
 import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except
   ( ExceptT
   , MonadError (throwError)
@@ -60,6 +61,11 @@ import Test.Hspec.Expectations.Pretty (shouldBe)
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
+import Dojang.CommandEffect
+  ( MonadCommandEffect
+  , MonadProcessControl (startProcess)
+  , hoistStartedProcess
+  )
 import Dojang.Commands.Migrate (migrate)
 import Dojang.ExitCodes (machineStateError, manifestReadError)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
@@ -513,9 +519,19 @@ newtype CoordinatedMigrationIO a
     , Applicative
     , Monad
     , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadReader ManifestReadGate
+    , MonadCommandEffect
     )
+
+
+instance MonadProcessControl CoordinatedMigrationIO where
+  startProcess request = CoordinatedMigrationIO $ do
+    started <- startProcess request
+    return $ hoistStartedProcess CoordinatedMigrationIO <$> started
 
 
 runCoordinatedMigrationIO
@@ -618,9 +634,19 @@ newtype FailingManifestWriteIO a
     , Applicative
     , Monad
     , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadReader OsPath
+    , MonadCommandEffect
     )
+
+
+instance MonadProcessControl FailingManifestWriteIO where
+  startProcess request = FailingManifestWriteIO $ do
+    started <- startProcess request
+    return $ hoistStartedProcess FailingManifestWriteIO <$> started
 
 
 runFailingManifestWrite

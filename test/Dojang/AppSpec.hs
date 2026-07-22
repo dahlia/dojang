@@ -9,7 +9,7 @@ module Dojang.AppSpec (spec) where
 import Control.Exception qualified
 import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
 import Data.ByteString.Char8 qualified as ByteString
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict qualified as Map
 
 
@@ -17,24 +17,46 @@ import Data.Map.Strict qualified as Map
 import Control.Exception (bracket_)
 #endif
 
+import Options.Applicative.Path (hyphen)
 import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Exit (ExitCode (ExitSuccess))
 import System.Info (os)
 import System.OsPath (encodeFS, (</>))
-import Test.Hspec (Spec, it, runIO, sequential, xit)
+import Test.Hspec (Spec, anyIOException, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.App
-  ( AppEnv (..)
+  ( App
+  , AppEnv (..)
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
+  , liftApp
   , prepareMachineState
+  , runAppResultWithoutLogging
   , runAppWithLogging
   , runAppWithoutLogging
+  , startAndAwaitAppProcess
   , validateRepositoryCheckout
   )
+import Dojang.CommandEffect
+  ( CommandEffect (..)
+  , CommandEffectKind (ProcessExecution)
+  , CommandEffectResponse (..)
+  , CommandEffectTest
+  , MonadCommandEffect (abortCommand, runProcess)
+  , MonadProcessControl (startProcess)
+  , OutputStream (OutputStandard)
+  , ProcessRequest (executable)
+  , ProcessResult (ProcessUnavailable)
+  , emptyProcessRequest
+  , lookupEnvironmentVariable
+  , runCommandEffectTest
+  , startedProcess
+  )
+import Dojang.Commands.Env qualified as Env
 import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
   ( MonadFileSystem
@@ -44,9 +66,11 @@ import Dojang.MonadFileSystem
       , removeDirectory
       , writeFile
       )
+  , dryRunIO
   )
+import Dojang.Syntax.Env (writeEnvironment)
 import Dojang.TestUtils (withHome, withTempDir)
-import Dojang.Types.Environment (lookupFact)
+import Dojang.Types.Environment (Kernel (Kernel), emptyEnvironment, lookupFact)
 import Dojang.Types.MachineState
   ( MachineState (..)
   , StateError (..)
@@ -77,6 +101,109 @@ spec = sequential $ do
   let posixIt = if os == "mingw32" then xit else it
   let redirectedHomeSymlinkIt =
         if symlinkAvailable then redirectedHomeIt else xit
+
+  it "returns command exits as values" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path False False
+    runAppResultWithoutLogging
+      appEnv
+      (abortCommand machineStateError :: App IO ())
+      `shouldReturn` Left machineStateError
+
+  it "refuses process execution through a dry-run App" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path True False
+        request = emptyProcessRequest{executable = "does-not-exist"}
+    dryRunIO (runAppWithoutLogging appEnv $ runProcess request)
+      `shouldReturn` ProcessUnavailable ProcessExecution
+    started <- dryRunIO $ runAppWithoutLogging appEnv $ startProcess request
+    case started of
+      Left result -> result `shouldBe` ProcessUnavailable ProcessExecution
+      Right _ -> fail "dry-run App unexpectedly started a process"
+
+  it "cancels a process interrupted during its registered handoff" $ do
+    path <- encodeFS "."
+    startMask <- newIORef Control.Exception.Unmasked
+    cancelled <- newIORef False
+    let appEnv = AppEnv path True Nothing path path path False False
+        start register = do
+          liftApp (Control.Exception.getMaskingState >>= writeIORef startMask)
+          let process =
+                startedProcess
+                  (return $ ProcessUnavailable ProcessExecution)
+                  (liftApp $ writeIORef cancelled True)
+          _ <- register process
+          liftApp $ Control.Exception.throwIO $ userError "interrupted"
+    runAppWithoutLogging appEnv (startAndAwaitAppProcess start)
+      `shouldThrow` anyIOException
+    readIORef startMask `shouldReturn` Control.Exception.MaskedInterruptible
+    readIORef cancelled `shouldReturn` True
+
+  it "cancels a process when its registered handoff aborts" $ do
+    path <- encodeFS "."
+    cancelled <- newIORef False
+    let appEnv = AppEnv path True Nothing path path path False False
+        start register = do
+          let process =
+                startedProcess
+                  (abortCommand machineStateError)
+                  (liftApp $ writeIORef cancelled True)
+          _ <- register process
+          return $ Right process
+    runAppResultWithoutLogging appEnv (startAndAwaitAppProcess start)
+      `shouldReturn` Left machineStateError
+    readIORef cancelled `shouldReturn` True
+
+  it "restores masking while waiting and cancels an interrupted process" $ do
+    path <- encodeFS "."
+    waitMask <- newIORef Control.Exception.MaskedUninterruptible
+    cancelled <- newIORef False
+    let appEnv = AppEnv path True Nothing path path path False False
+        start register = do
+          let process =
+                startedProcess
+                  ( do
+                      liftApp $
+                        Control.Exception.getMaskingState >>= writeIORef waitMask
+                      liftApp $ Control.Exception.throwIO $ userError "interrupted"
+                  )
+                  (liftApp $ writeIORef cancelled True)
+          _ <- register process
+          return $ Right process
+    runAppWithoutLogging appEnv (startAndAwaitAppProcess start)
+      `shouldThrow` anyIOException
+    readIORef waitMask `shouldReturn` Control.Exception.Unmasked
+    readIORef cancelled `shouldReturn` True
+
+  it "routes App effects through its scripted interpreter" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path False False
+        action = lookupEnvironmentVariable "EDITOR" :: App CommandEffectTest (Maybe String)
+    result <-
+      runCommandEffectTest [EnvironmentValue $ Just "scripted-editor"] $
+        runAppResultWithoutLogging appEnv action
+    result
+      `shouldBe` Right
+        ( Right $ Just "scripted-editor"
+        , [EnvironmentLookup "EDITOR"]
+        )
+
+  it "runs a command entirely through the scripted interpreter" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path False False
+        environment = emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0"
+    result <-
+      runCommandEffectTest [HostEnvironmentValue environment] $
+        runAppResultWithoutLogging appEnv $
+          Env.env True hyphen
+    result
+      `shouldBe` Right
+        ( Right ExitSuccess
+        ,
+          [ HostEnvironmentRead
+          , StreamWrite OutputStandard $ writeEnvironment environment
+          ]
+        )
 
   posixIt "reads a complete environment file without detecting the host" $
     withTempDir $ \tmp tmpPath -> do
