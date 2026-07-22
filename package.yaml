@@ -21,6 +21,7 @@ flags:
     default: false
 
 dependencies:
+  aeson: ">=2.2 && <2.3"
   base: ">=4.7 && <5"
   bytestring: ">=0.11 && <0.13"
   case-insensitive: ">=1.2.1.0 && <2"
@@ -60,6 +61,7 @@ ghc-options:
 library:
   source-dirs: src
   dependencies:
+    async: ">=2.2 && <2.3"
     deepseq: ">=1.4 && <2"
     exceptions: ">=0.10 && <0.11"
     extra: ">=1.7 && <2"

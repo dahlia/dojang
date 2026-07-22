@@ -1,21 +1,28 @@
+{-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.CommandEffectSpec (spec) where
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.Except (catchError, throwError)
+import Data.ByteString qualified as ByteString
+import Data.ByteString.Char8 qualified as ByteString.Char8
+import Data.List (isInfixOf)
 import Data.Time (UTCTime)
 import Data.UUID qualified as UUID
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.Exit (ExitCode (..))
-import Test.Hspec (Spec, describe, it, shouldBe)
+import System.Info qualified
+import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 
 import Dojang.CommandEffect
-  ( CommandEffect (..)
+  ( BinaryProcessRequest (..)
+  , BinaryProcessResult (..)
+  , CommandEffect (..)
   , CommandEffectError (..)
   , CommandEffectKind (..)
   , CommandEffectResponse (..)
@@ -29,6 +36,9 @@ import Dojang.CommandEffect
   , awaitProcess
   , cancelStartedProcess
   , emptyProcessRequest
+  , redactedProcessBytes
+  , revealProcessBytes
+  , runBinaryProcessIO
   , runCommandEffectTest
   )
 import Dojang.MonadFileSystem (dryRunIO)
@@ -134,6 +144,17 @@ spec = do
           runProcess emptyProcessRequest{executable = "does-not-exist"}
       result `shouldBe` ProcessUnavailable ProcessExecution
 
+    it "refuses codec backend execution in DryRunIO" $ do
+      let request =
+            BinaryProcessRequest
+              "does-not-exist"
+              Nothing
+              []
+              (redactedProcessBytes "payload")
+              30
+      result <- dryRunIO $ runBinaryProcess request
+      result `shouldBe` BinaryProcessUnavailable CodecBackendExecution
+
     it "records output without requiring execution" $ do
       result <- runCommandEffectTest [] $ writeStream OutputError "warning\n"
       result `shouldBe` Right ((), [StreamWrite OutputError "warning\n"])
@@ -145,6 +166,100 @@ spec = do
       result `shouldBe` Right (PromptUnavailable, [Prompted request])
 
   describe "effect value round trips" $ do
+    it "preserves arbitrary binary process input and output" $ hedgehog $ do
+      input <- forAll $ Gen.bytes (Range.linear 0 4096)
+      output <- forAll $ Gen.bytes (Range.linear 0 4096)
+      let request =
+            BinaryProcessRequest
+              "/backend"
+              (Just "/repository")
+              []
+              (redactedProcessBytes input)
+              30
+          completed =
+            BinaryProcessCompleted
+              ExitSuccess
+              (redactedProcessBytes output)
+              (redactedProcessBytes ByteString.empty)
+      result <-
+        evalIO $
+          runCommandEffectTest [BinaryProcessValue completed] $
+            runBinaryProcess request
+      result === Right (completed, [BinaryProcessRun request])
+
+    it "redacts binary process payloads from Show" $ do
+      let sentinel = "DOJANG-SENTINEL-SECRET" :: ByteString.ByteString
+          request =
+            BinaryProcessRequest
+              "/backend"
+              Nothing
+              []
+              (redactedProcessBytes sentinel)
+              30
+      show request
+        `shouldSatisfy` (not . isInfixOf (ByteString.Char8.unpack sentinel))
+
+    it "streams large binary payloads without pipe deadlock" $ do
+      when (System.Info.os /= "mingw32") $ do
+        let payload = ByteString.replicate (1024 * 1024) 97
+            request =
+              BinaryProcessRequest
+                "/bin/cat"
+                Nothing
+                []
+                (redactedProcessBytes payload)
+                5
+        result <- runBinaryProcessIO request
+        case result of
+          BinaryProcessCompleted ExitSuccess output errors -> do
+            revealProcessBytes output `shouldBe` payload
+            revealProcessBytes errors `shouldBe` ByteString.empty
+          _ ->
+            result
+              `shouldBe` BinaryProcessCompleted
+                ExitSuccess
+                (redactedProcessBytes payload)
+                (redactedProcessBytes ByteString.empty)
+
+    it "retains an early backend exit when stdin closes" $ do
+      when (System.Info.os /= "mingw32") $ do
+        let request =
+              BinaryProcessRequest
+                "/bin/false"
+                Nothing
+                []
+                (redactedProcessBytes $ ByteString.replicate (1024 * 1024) 97)
+                5
+        result <- runBinaryProcessIO request
+        result
+          `shouldBe` BinaryProcessCompleted
+            (ExitFailure 1)
+            (redactedProcessBytes ByteString.empty)
+            (redactedProcessBytes ByteString.empty)
+
+    it "terminates a backend at its hard timeout" $ do
+      when (System.Info.os /= "mingw32") $ do
+        let request =
+              BinaryProcessRequest
+                "/usr/bin/yes"
+                Nothing
+                []
+                (redactedProcessBytes ByteString.empty)
+                1
+        result <- runBinaryProcessIO request
+        result `shouldBe` BinaryProcessTimedOut
+
+    it "rejects non-positive binary process timeouts" $ do
+      let request =
+            BinaryProcessRequest
+              "does-not-exist"
+              Nothing
+              []
+              (redactedProcessBytes ByteString.empty)
+              0
+      result <- runBinaryProcessIO request
+      result `shouldBe` BinaryProcessIOFailed "Backend timeout must be positive."
+
     it "preserves arbitrary process arguments and environments" $ hedgehog $ do
       executable <- forAll $ Gen.string (Range.linear 0 30) Gen.unicode
       arguments <-

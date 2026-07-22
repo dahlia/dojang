@@ -295,6 +295,7 @@ instance
   writeStream stream = liftApp . writeStream stream
   prompt = liftApp . prompt
   runProcess = liftApp . runProcess
+  runBinaryProcess = liftApp . runBinaryProcess
   abortCommand exitCode = App $ lift $ throwError exitCode
 
 

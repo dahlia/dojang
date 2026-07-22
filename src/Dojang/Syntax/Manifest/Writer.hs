@@ -59,6 +59,11 @@ import Dojang.Types.Codec
   , identityCodecSpec
   , renderCodecName
   )
+import Dojang.Types.CodecBackend
+  ( CodecBackend (..)
+  , CodecBackendOptions (CodecBackendOptions)
+  , defaultCodecBackendTimeoutSeconds
+  )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -206,10 +211,11 @@ writeManifest manifest = do
   order [] field = case field of
     "repository-id" -> Left 0
     "vars" -> Left 1
-    "dirs" -> Left 2
-    "files" -> Left 3
-    "ignores" -> Left 4
-    "monikers" -> Left 5
+    "codec-backends" -> Left 2
+    "dirs" -> Left 3
+    "files" -> Left 4
+    "ignores" -> Left 5
+    "monikers" -> Left 6
     _ -> Right field
   order _ field = Right field
   validateHooks hookMap =
@@ -274,6 +280,7 @@ mapManifest' manifest =
     (repositoryIdText <$> manifest.repositoryId)
     monikers'
     variables'
+    codecBackends'
     dirs
     files
     ignores
@@ -290,6 +297,21 @@ mapManifest' manifest =
       [ (decodePath path, pattern)
       | (path, pattern) <- Data.Map.Strict.toList manifest.ignorePatterns
       ]
+  codecBackends' :: Data.Map.Strict.Map Text Internal.CodecBackend'
+  codecBackends' = fmap mapCodecBackend manifest.codecBackends
+  mapCodecBackend :: CodecBackend -> Internal.CodecBackend'
+  mapCodecBackend backend =
+    Internal.CodecBackend'
+      { Internal.backendCommand = toPathText backend.command
+      , Internal.backendVersion = backend.version
+      , Internal.backendTimeoutSeconds =
+          if backend.timeoutSeconds == defaultCodecBackendTimeoutSeconds
+            then Nothing
+            else Just $ fromIntegral backend.timeoutSeconds
+      , Internal.backendOptions =
+          case backend.options of
+            CodecBackendOptions values -> values
+      }
   hooks' :: Maybe Hooks'
   hooks' =
     if Data.Map.Strict.null manifest.hooks

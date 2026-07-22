@@ -851,7 +851,7 @@ withDebugTargetedCodecFiles action = withTempDir $ \tmpDir _ -> do
           ]
           File
       manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
@@ -861,6 +861,7 @@ withDebugTargetedCodecFiles action = withTempDir $ \tmpDir _ -> do
                 , (routeB, route "DEST_B" unrelatedSpec)
                 ]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
       appEnv =
@@ -961,7 +962,7 @@ withSharedSourceCodecRoutes action = withTempDir $ \root _ -> do
           ]
           fileType
       manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId
           , monikers = mempty
           , variables = mempty
@@ -971,6 +972,7 @@ withSharedSourceCodecRoutes action = withTempDir $ \root _ -> do
                 , (childRoute, route "CHILD_DEST" childCodec File)
                 ]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
       appEnv =
@@ -1080,12 +1082,13 @@ withCodecFileWithSpec manifestVariables codecSpec action = withTempDir $ \tmpDir
           ]
           File
       manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = manifestVariables
           , fileRoutes = Map.singleton routeName route
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
       appEnv =
@@ -1182,12 +1185,13 @@ withPrivateModeFile action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1249,12 +1253,13 @@ withKindSwitchRoute action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifestOf kind' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, routeOf kind')]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1318,12 +1323,13 @@ withSymlinkRoute action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1384,12 +1390,13 @@ withPrivateModeDirectory action = withTempDir $ \tmpDir _ -> do
           ]
           Directory
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =

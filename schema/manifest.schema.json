@@ -156,6 +156,48 @@
         }
       ]
     },
+    "codecBackendMap": {
+      "title": "Codec backend definitions",
+      "description": "Reusable shell-free commands that implement the sensitive codec backend protocol.",
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/codecBackend"
+      }
+    },
+    "codecBackend": {
+      "title": "Codec backend",
+      "type": "object",
+      "required": ["command", "version"],
+      "properties": {
+        "command": {
+          "description": "An executable file path expression. Arguments and shell interpolation are not supported.",
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "description": "A stable implementation version used in cache identities.",
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout-seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "default": 30
+        },
+        "options": {
+          "description": "Non-secret values passed in the protocol header.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/codecConfigurationValue"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "detailedRouteBranch": {
       "title": "Detailed route branch",
       "description": "An ordered route branch selected by either a moniker or an inline environment predicate.  If path is omitted, the branch is a null route.",
@@ -500,6 +542,9 @@
     },
     "vars": {
       "$ref": "#/$defs/manifestVariableMap"
+    },
+    "codec-backends": {
+      "$ref": "#/$defs/codecBackendMap"
     },
     "files": {
       "$ref": "#/$defs/routeMap"

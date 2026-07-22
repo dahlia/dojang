@@ -52,6 +52,10 @@ import Dojang.Types.Codec
   , identityCodecSpec
   , parseCodecName
   )
+import Dojang.Types.CodecBackend
+  ( CodecBackend (CodecBackend)
+  , CodecBackendOptions (CodecBackendOptions)
+  )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Always, Architecture, Moniker, OperatingSystem, Or)
   , normalizePredicate
@@ -79,7 +83,10 @@ import Dojang.Types.Hook
   , parseHookId
   , renderHookId
   )
-import Dojang.Types.Manifest (Manifest (Manifest))
+import Dojang.Types.Manifest
+  ( Manifest (Manifest)
+  , manifestWithCodecBackends
+  )
 import Dojang.Types.ManifestVariable
   ( manifestVariablePreservingOrder
   , parseManifestVariableName
@@ -201,6 +208,45 @@ spec = do
       Right (parsed, _) -> do
         annotateShow parsed
         parsed === manifest'
+
+  specify "round-trips arbitrary codec backend registries" $ hedgehog $ do
+    Manifest repositoryId monikers variables routes ignores hooks <-
+      forAll Gen.manifest
+    entries <-
+      forAll $
+        Hedgehog.list (Range.linear 0 20) $ do
+          name <- Hedgehog.text (Range.linear 1 30) Hedgehog.alphaNum
+          command <- Hedgehog.text (Range.linear 1 60) Hedgehog.alphaNum
+          version <- Hedgehog.text (Range.linear 1 30) Hedgehog.alphaNum
+          timeoutSeconds <- Hedgehog.int (Range.linear 1 300)
+          optionName <- Hedgehog.text (Range.linear 1 30) Hedgehog.alphaNum
+          optionValue <- Hedgehog.text (Range.linear 0 60) Hedgehog.unicode
+          return
+            ( name
+            , CodecBackend
+                (BareComponent command)
+                version
+                timeoutSeconds
+                ( CodecBackendOptions $
+                    Map.singleton optionName $
+                      CodecString optionValue
+                )
+            )
+    let backends = Map.fromList entries
+        manifest' =
+          manifestWithCodecBackends
+            repositoryId
+            monikers
+            variables
+            routes
+            ignores
+            backends
+            hooks
+        toml = writeValidManifest manifest'
+    annotate $ unpack toml
+    case readManifest toml of
+      Left err -> annotateShow (formatErrors err) >> assert False
+      Right (parsed, _) -> parsed === manifest'
 
   specify "rejects arbitrary invalid hook policy configurations" $ hedgehog $ do
     invalidKind <-

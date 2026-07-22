@@ -340,7 +340,7 @@ fileRoute _ variable codecSpec =
 
 baseManifest :: Map.Map OsPath FileRoute -> Manifest
 baseManifest routes =
-  Manifest
+  ManifestWithCodecBackends
     { Manifest.repositoryId =
         either (const Nothing) Just $
           parseRepositoryId "823e4567-e89b-42d3-a456-426614174000"
@@ -348,6 +348,7 @@ baseManifest routes =
     , variables = mempty
     , fileRoutes = routes
     , ignorePatterns = mempty
+    , codecBackends = mempty
     , hooks = mempty
     }
 

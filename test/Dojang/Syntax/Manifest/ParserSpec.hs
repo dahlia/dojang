@@ -28,6 +28,10 @@ import Dojang.Types.Codec
   , identityCodecSpec
   , parseCodecName
   )
+import Dojang.Types.CodecBackend
+  ( CodecBackend (..)
+  , CodecBackendOptions (CodecBackendOptions)
+  )
 import Dojang.Types.Environment (Kernel (Kernel), emptyEnvironment)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression
@@ -453,6 +457,51 @@ spec = do
           `shouldBe` [ (show $ Architecture "x86_64", Just "architecture-first")
                      , (show $ OperatingSystem "linux", Just "operating-system-second")
                      ]
+
+  specify "reads reusable codec backend declarations" $ do
+    let source =
+          Text.unlines
+            [ "[codec-backends.vault]"
+            , "command = \"$HOME/bin/dojang-vault\""
+            , "version = \"2026-07\""
+            , "timeout-seconds = 45"
+            , "options = { profile = \"work\", strict = true }"
+            ]
+        Right (parsed, _) = readManifest source
+        Just backend = Map.lookup "vault" parsed.codecBackends
+    toPathText backend.command `shouldBe` "$HOME/bin/dojang-vault"
+    backend.version `shouldBe` "2026-07"
+    backend.timeoutSeconds `shouldBe` 45
+    backend.options
+      `shouldBe` CodecBackendOptions
+        ( Map.fromList
+            [ ("profile", CodecString "work")
+            , ("strict", CodecBoolean True)
+            ]
+        )
+
+    let updated = parsed{repositoryId = Nothing}
+    updated.codecBackends `shouldBe` parsed.codecBackends
+
+  specify "rejects invalid codec backend declarations" $ do
+    forM_
+      [ ("backend", "version = \"\"", "must have a nonempty version")
+      , ("backend", "version = \"1\"\ntimeout-seconds = 0", "between 1 and 300")
+      , ("backend", "version = \"1\"\ntimeout-seconds = 301", "between 1 and 300")
+      , ("", "version = \"1\"", "must have a nonempty command")
+      , ("$", "version = \"1\"", "codec-backends.vault.command")
+      ]
+      $ \(command, fields, expected) -> do
+        let source =
+              Text.unlines
+                [ "[codec-backends.vault]"
+                , "command = \"" <> command <> "\""
+                , fields
+                ]
+        case readManifest source of
+          Left err ->
+            formatErrors err `shouldSatisfy` any (Text.isInfixOf expected)
+          Right _ -> expectationFailure "Expected codec backend rejection."
 
   specify "normalizes detailed conditions before routing" $ do
     let toml =

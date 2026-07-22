@@ -349,7 +349,13 @@ makeRouteMap neededMonikers monikers' =
 
 makeManifest :: RepositoryId -> [InitPreset] -> Manifest
 makeManifest repositoryId presets =
-  Manifest (Just repositoryId) monikers' empty routeMap ignorePatterns'' empty
+  Manifest
+    (Just repositoryId)
+    monikers'
+    empty
+    routeMap
+    ignorePatterns''
+    empty
  where
   neededMonikers :: [(InitPreset, NonEmpty MonikerName)]
   neededMonikers = listNeededMonikers presets
