@@ -7,7 +7,6 @@
 module Dojang.Commands.TargetLifecycle (forget, unmanage) where
 
 import Control.Monad (forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -17,6 +16,7 @@ import System.OsPath (OsPath, normalise, takeDirectory, (</>))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (sourceDirectory, stateDirectory)
   , clearLegacyFirstApplyHistory
   , ensureContext
@@ -80,7 +80,7 @@ import Dojang.Types.TargetTracking (observeOrphanStatus)
 
 -- | Stops tracking selected orphan records while leaving destinations intact.
 unmanage
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> [OsPath]
   -> Bool
@@ -102,7 +102,7 @@ unmanage routeSelector destinations force = do
 
 
 unmanageCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> [OsPath]
   -> Bool
@@ -244,7 +244,7 @@ unmanageCore routeSelector destinations force = do
 
 -- | Removes all machine-local state for the selected repository.
 forget
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Bool
   -> App i ExitCode
 forget force = do
@@ -323,7 +323,7 @@ renderOrphanStatus OrphanModified = "modified"
 renderOrphanStatus OrphanMissing = "missing"
 
 
-removeSnapshot :: (MonadFileSystem i, MonadIO i) => OsPath -> App i ()
+removeSnapshot :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 removeSnapshot path = do
   symbolicLink <- isSymlink path
   when symbolicLink $
@@ -336,7 +336,7 @@ removeSnapshot path = do
 
 
 removeEmptySnapshotDirectory
-  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i ()
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 removeEmptySnapshotDirectory path = do
   symbolicLink <- isSymlink path
   when symbolicLink $
@@ -348,7 +348,7 @@ removeEmptySnapshotDirectory path = do
 
 
 stateOrDie
-  :: (MonadFileSystem i, MonadIO i)
+  :: (AppEffects i)
   => Either StateError value
   -> App i value
 stateOrDie result = case result of

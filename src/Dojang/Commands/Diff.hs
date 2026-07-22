@@ -6,7 +6,6 @@
 module Dojang.Commands.Diff (DiffMode (..), diff, diffWithCodecRuntime) where
 
 import Control.Monad (filterM, forM, forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.List (find, nub)
 import Data.Maybe (catMaybes)
@@ -27,6 +26,7 @@ import TextShow (TextShow (showt))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (dryRun)
   , ensureContext
   , prepareMachineState
@@ -97,7 +97,7 @@ data DiffMode = Both | Source | Destination deriving (Show)
 
 
 diff
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => DiffMode
   -> Maybe OsPath
   -> [OsPath]
@@ -115,7 +115,7 @@ diff mode diffProgram files =
 
 -- | Displays differences using an explicit codec runtime.
 diffWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> DiffMode
   -> Maybe OsPath
@@ -127,7 +127,7 @@ diffWithCodecRuntime runtime mode diffProgram files =
 
 
 diffCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> DiffMode
   -> Maybe OsPath
@@ -220,7 +220,7 @@ getPath entry = case entry.stat of
 
 
 twoWay
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> Bool
   -> (FileCorrespondence -> Bool)
@@ -286,7 +286,7 @@ hasChange c = case (c.sourceDelta, c.destinationDelta) of
 
 builtinDiff
   :: forall i
-   . (MonadFileSystem i, MonadIO i)
+   . (MonadFileSystem i, AppEffects i)
   => Maybe OpaqueBytes
   -> FileEntry
   -> FileEntry

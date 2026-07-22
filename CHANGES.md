@@ -238,13 +238,17 @@ To be released.
 
  -  Added `MonadCommandEffect`, `MonadProcessControl`, structured process and
     prompt requests, production and dry-run interpreters, and an exact scripted
-    test interpreter.  `App` no longer has a `MonadIO` instance: embedding code
-    should add a dedicated effect, or use `liftApp` only at an interpreter or
-    test boundary.  Command exits now travel through `ExceptT ExitCode`; use
-    `runAppResultWithoutLogging`, `runAppResultWithLogging`, or
-    `runAppResultWithStderrLogging` to receive them as values.  The older
-    runners remain as compatibility adapters that throw the returned exit code.
-    [[#46], [#72]]
+    test interpreter.  `App` delegates command effects to its selected
+    interpreter, so embedding tests can replay complete commands without using
+    host environment, clock, terminal, prompt, output, or process APIs.  The
+    scripted interpreter records process starts, waits, and cancellations
+    separately, and rejects leaked processes.  `App` no longer has a `MonadIO`
+    instance: embedding code should add a dedicated effect, or use `liftApp`
+    only at an interpreter or test boundary.  Command exits now travel through
+    `ExceptT ExitCode`; use `runAppResultWithoutLogging`,
+    `runAppResultWithLogging`, or `runAppResultWithStderrLogging` to receive
+    them as values.  The older runners remain as compatibility adapters that
+    throw the returned exit code.  [[#46], [#72]]
 
  -  Added declarative codec types, deterministic cache keys, a controlled
     effect interpreter, typed redacted failures, and explicit runtime injection

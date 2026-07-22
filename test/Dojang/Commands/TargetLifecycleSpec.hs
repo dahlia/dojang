@@ -30,6 +30,11 @@ import Test.Hspec.Expectations.Pretty
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
+import Dojang.CommandEffect
+  ( MonadCommandEffect
+  , MonadProcessControl (startProcess)
+  , hoistStartedProcess
+  )
 import Dojang.Commands.Apply (apply)
 import Dojang.Commands.Status (defaultStatusOptions, status)
 import Dojang.Commands.TargetLifecycle (forget, unmanage)
@@ -761,7 +766,20 @@ withEnvVars variables action = do
 newtype IsolatedHomeIO a = IsolatedHomeIO
   { unIsolatedHomeIO :: ReaderT OsPath IO a
   }
-  deriving (Functor, Applicative, Monad, MonadIO, MonadError IOError)
+  deriving
+    ( Functor
+    , Applicative
+    , Monad
+    , MonadIO
+    , MonadError IOError
+    , MonadCommandEffect
+    )
+
+
+instance MonadProcessControl IsolatedHomeIO where
+  startProcess request = IsolatedHomeIO $ do
+    started <- startProcess request
+    return $ hoistStartedProcess IsolatedHomeIO <$> started
 
 
 runIsolatedHomeIO :: OsPath -> IsolatedHomeIO a -> IO a

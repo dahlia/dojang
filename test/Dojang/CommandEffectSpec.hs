@@ -4,6 +4,8 @@
 
 module Dojang.CommandEffectSpec (spec) where
 
+import Control.Monad (void)
+import Control.Monad.Except (catchError, throwError)
 import Data.Time (UTCTime)
 import Data.UUID qualified as UUID
 import Hedgehog.Gen qualified as Gen
@@ -18,13 +20,16 @@ import Dojang.CommandEffect
   , CommandEffectKind (..)
   , CommandEffectResponse (..)
   , MonadCommandEffect (..)
-  , MonadProcessControl (startProcess)
+  , MonadProcessControl
+    ( awaitProcess
+    , cancelStartedProcess
+    , startProcess
+    )
   , OutputStream (..)
   , ProcessRequest (..)
   , ProcessResult (..)
   , PromptRequest (..)
   , PromptResult (..)
-  , StartedProcess (..)
   , emptyProcessRequest
   , runCommandEffectTest
   )
@@ -69,6 +74,31 @@ spec = do
       result <- runCommandEffectTest [response] $ return ()
       result `shouldBe` Left (UnusedResponses [response])
 
+    it "fails when a started process is leaked" $ do
+      let request = emptyProcessRequest{executable = "hook"}
+      result <- runCommandEffectTest [ProcessStartedValue] $ do
+        void $ startProcess request
+      result `shouldBe` Left (UnfinishedProcesses [0])
+
+    it "preserves effects and responses across caught I/O errors" $ do
+      let Just uuid = UUID.fromString "00112233-4455-6677-8899-aabbccddeeff"
+          time = read "2026-07-22 00:00:00 UTC" :: UTCTime
+      result <-
+        runCommandEffectTest [CurrentTimeValue time, UUIDValue uuid] $
+          catchError
+            (currentTime >> throwError (userError "failure"))
+            (const newUUID)
+      result `shouldBe` Right (uuid, [CurrentTimeRead, UUIDGenerated])
+
+    it "preserves process accounting across caught I/O errors" $ do
+      let request = emptyProcessRequest{executable = "hook"}
+      result <-
+        runCommandEffectTest [ProcessStartedValue] $
+          catchError
+            (startProcess request >> throwError (userError "failure"))
+            (const $ return ())
+      result `shouldBe` Left (UnfinishedProcesses [0])
+
     it "stops at an arbitrary command exit" $ hedgehog $ do
       code <- forAll $ Gen.int (Range.linear 1 255)
       result <-
@@ -77,6 +107,18 @@ spec = do
             _ <- abortCommand $ ExitFailure code
             writeStream OutputError "unreachable"
       result === Left (CommandAborted $ ExitFailure code)
+
+    it "reports arbitrary command exits with leaked processes" $ hedgehog $ do
+      code <- forAll $ Gen.int (Range.linear 1 255)
+      let request = emptyProcessRequest{executable = "hook"}
+      result <-
+        evalIO $
+          runCommandEffectTest [ProcessStartedValue] $ do
+            void $ startProcess request
+            void $ abortCommand $ ExitFailure code
+      result
+        === Left
+          (CommandAbortedWithUnfinishedProcesses (ExitFailure code) [0])
 
   describe "dry-run command effects" $ do
     it "does not execute processes" $ do
@@ -135,12 +177,32 @@ spec = do
       code <- forAll $ Gen.int (Range.linear 1 255)
       let request = emptyProcessRequest{executable = "hook", arguments = [show code]}
           completed = ProcessCompleted (ExitFailure code) "" ""
-      result <- evalIO $ runCommandEffectTest [ProcessValue completed] $ do
-        started <- startProcess request
-        case started of
-          Left failure -> return failure
-          Right (StartedProcess await _) -> await
-      result === Right (completed, [ProcessStart request])
+      result <-
+        evalIO $
+          runCommandEffectTest [ProcessStartedValue, ProcessValue completed] $ do
+            started <- startProcess request
+            case started of
+              Left failure -> return failure
+              Right process -> awaitProcess process
+      result
+        === Right
+          (completed, [ProcessStart request, ProcessAwait 0])
+
+    it "records arbitrary process cancellation" $ hedgehog $ do
+      argument <- forAll $ Gen.string (Range.linear 0 30) Gen.unicode
+      let request = emptyProcessRequest{executable = "hook", arguments = [argument]}
+      result <-
+        evalIO
+          $ runCommandEffectTest
+            [ProcessStartedValue, ProcessCancellationConfirmed]
+          $ do
+            started <- startProcess request
+            case started of
+              Left _ -> return ()
+              Right process -> cancelStartedProcess process
+      result
+        === Right
+          ((), [ProcessStart request, ProcessCancel 0])
 
     it "preserves UUIDs, times, and process exit codes" $ do
       let Just uuid = UUID.fromString "00112233-4455-6677-8899-aabbccddeeff"

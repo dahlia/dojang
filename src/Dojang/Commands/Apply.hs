@@ -9,7 +9,6 @@ module Dojang.Commands.Apply (apply, applyWithCodecRuntime) where
 
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.List (nub)
 import System.Exit (ExitCode (..))
@@ -28,6 +27,7 @@ import System.OsPath
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (debug, dryRun, manifestFile, stateDirectory)
   , ensureContext
   , markMachineStateApplied
@@ -130,7 +130,7 @@ import Dojang.Types.TargetTracking
   )
 
 
-apply :: (MonadFileSystem i, MonadIO i) => Bool -> [OsPath] -> App i ExitCode
+apply :: (MonadFileSystem i, AppEffects i) => Bool -> [OsPath] -> App i ExitCode
 apply force filePaths = do
   dryRun' <- asks (.dryRun)
   let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
@@ -139,7 +139,7 @@ apply force filePaths = do
 
 -- | Applies selected routes using an explicit codec runtime.
 applyWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Bool
   -> [OsPath]
@@ -354,7 +354,7 @@ applyWithCodecRuntime codecRuntime force filePaths = do
 
 
 persistConvergedTargets
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> MachineState
   -> [EvaluatedManagedCorrespondence]
@@ -458,7 +458,7 @@ observeSelectedReconciliationInput ctx expectedState evaluated = do
     _ -> input'
 
 
-printSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
+printSyncOp :: (AppEffects i) => SyncOp -> App i ()
 printSyncOp (RemoveDirs path) = do
   pathStyle <- pathStyleFor StandardError
   let path' = addTrailingPathSeparator path

@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
@@ -12,6 +13,7 @@
 -- | The application monad for Dojang.
 module Dojang.App
   ( App
+  , AppEffects
   , AppEnv (..)
   , Loc
   , LogLevel
@@ -95,23 +97,10 @@ import System.OsPath
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.CommandEffect
-  ( CommandEffectKind (ProcessExecution)
-  , MonadCommandEffect (..)
+  ( MonadCommandEffect (..)
   , MonadProcessControl (..)
-  , ProcessResult (ProcessUnavailable)
   , StandardStream (StandardError)
-  , StartedProcess (..)
-  , currentTimeIO
-  , detectEnvironmentIO
-  , hostPlatformIO
-  , isTerminalIO
-  , lookupEnvironmentVariableIO
-  , newUUIDIO
-  , processEnvironmentIO
-  , promptIO
-  , runProcessIO
-  , startProcessIO
-  , writeStreamIO
+  , hoistStartedProcess
   )
 import Dojang.Commands
   ( Admonition (..)
@@ -196,24 +185,22 @@ data AppEnv = AppEnv
   deriving (Show)
 
 
+-- | Capabilities supplied by an 'App' command-effect interpreter.
+type AppEffects i =
+  (MonadIO i, MonadCommandEffect i, MonadProcessControl i)
+
+
 -- | Lifts an action from the interpreter beneath 'App'.
 --
 -- Command modules should use a dedicated effect instead.  This escape hatch is
 -- provided for interpreter adapters and deterministic test instrumentation.
 liftApp
-  :: (MonadFileSystem i, MonadIO i) => i a -> App i a
+  :: (Monad i) => i a -> App i a
 liftApp = App . lift . lift . lift
 
 
-liftCommandIO
-  :: (MonadFileSystem i, MonadIO i) => IO a -> App i a
-liftCommandIO = liftApp . liftIO
-
-
 -- | The application monad for Dojang.
-newtype
-  (MonadFileSystem i, MonadError IOError i, MonadIO i) =>
-  App i v = App
+newtype App i v = App
   { unApp :: ReaderT AppEnv (ExceptT ExitCode (LoggingT i)) v
   }
   deriving
@@ -226,10 +213,7 @@ newtype
 
 
 instance
-  ( MonadFileSystem i
-  , MonadError IOError i
-  , MonadIO i
-  )
+  (MonadError IOError i)
   => MonadError IOError (App i)
   where
   throwError = App . lift . lift . lift . throwError
@@ -287,53 +271,33 @@ instance
 
 
 instance
-  ( MonadFileSystem i
-  , MonadError IOError i
-  , MonadIO i
-  )
+  (MonadCommandEffect i)
   => MonadCommandEffect (App i)
   where
-  lookupEnvironmentVariable = liftCommandIO . lookupEnvironmentVariableIO
-  processEnvironment = liftCommandIO processEnvironmentIO
-  detectEnvironment = liftCommandIO detectEnvironmentIO
-  hostPlatform = liftCommandIO hostPlatformIO
-  currentTime = liftCommandIO currentTimeIO
-  newUUID = liftCommandIO newUUIDIO
-  isTerminal = liftCommandIO . isTerminalIO
-  writeStream stream = liftCommandIO . writeStreamIO stream
-  prompt = liftCommandIO . promptIO
-  runProcess request = do
-    dryRun' <- asks (.dryRun)
-    if dryRun'
-      then return $ ProcessUnavailable ProcessExecution
-      else liftCommandIO $ runProcessIO request
+  lookupEnvironmentVariable = liftApp . lookupEnvironmentVariable
+  processEnvironment = liftApp processEnvironment
+  detectEnvironment = liftApp detectEnvironment
+  hostPlatform = liftApp hostPlatform
+  currentTime = liftApp currentTime
+  newUUID = liftApp newUUID
+  isTerminal = liftApp . isTerminal
+  writeStream stream = liftApp . writeStream stream
+  prompt = liftApp . prompt
+  runProcess = liftApp . runProcess
   abortCommand exitCode = App $ lift $ throwError exitCode
 
 
 instance
-  ( MonadFileSystem i
-  , MonadError IOError i
-  , MonadIO i
-  )
+  (MonadProcessControl i)
   => MonadProcessControl (App i)
   where
   startProcess request = do
-    dryRun' <- asks (.dryRun)
-    started <-
-      if dryRun'
-        then return $ Left $ ProcessUnavailable ProcessExecution
-        else liftCommandIO $ startProcessIO request
-    return $ case started of
-      Left result -> Left result
-      Right process ->
-        Right $
-          StartedProcess
-            (liftCommandIO process.awaitProcess)
-            (liftCommandIO process.cancelStartedProcess)
+    started <- liftApp $ startProcess request
+    return $ hoistStartedProcess liftApp <$> started
 
 
 currentEnvironment'
-  :: (MonadFileSystem i, MonadIO i) => App i Environment
+  :: (MonadFileSystem i, AppEffects i) => App i Environment
 currentEnvironment' = currentEnvironmentUsing currentRepositoryFacts
 
 
@@ -342,13 +306,13 @@ currentEnvironment' = currentEnvironmentUsing currentRepositoryFacts
 -- Facts read from the environment file retain precedence over the supplied
 -- facts, matching normal runtime environment evaluation.
 currentEnvironmentWithFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => FactMap -> App i Environment
 currentEnvironmentWithFacts facts = currentEnvironmentUsing $ return facts
 
 
 currentEnvironmentUsing
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => App i FactMap -> App i Environment
 currentEnvironmentUsing repositoryFacts = do
   sourceDir <- asks (.sourceDirectory)
@@ -405,7 +369,7 @@ currentEnvironmentUsing repositoryFacts = do
 
 
 currentRepositoryFacts
-  :: (MonadFileSystem i, MonadIO i) => App i FactMap
+  :: (MonadFileSystem i, AppEffects i) => App i FactMap
 currentRepositoryFacts = do
   manifestResult <- loadManifest
   case manifestResult of
@@ -448,7 +412,7 @@ currentRepositoryFacts = do
 -- Returns 'Nothing' when the manifest has no repository identity, the machine
 -- has no identity yet, or this repository has no record on the machine.
 readExistingMachineState
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest -> App i (Maybe MachineState)
 readExistingMachineState manifest = case manifest.repositoryId of
   Nothing -> return Nothing
@@ -465,26 +429,26 @@ readExistingMachineState manifest = case manifest.repositoryId of
           Right state -> return state
 
 
-instance (MonadFileSystem i, MonadIO i) => MonadEnvironment (App i) where
+instance (MonadFileSystem i, AppEffects i) => MonadEnvironment (App i) where
   currentEnvironment = currentEnvironment'
 
 
 instance
-  (MonadFileSystem i, MonadIO i)
+  (MonadFileSystem i, AppEffects i)
   => MonadOperatingSystem (App i)
   where
   currentOperatingSystem = (.operatingSystem) <$> currentEnvironment'
 
 
 instance
-  (MonadFileSystem i, MonadIO i)
+  (MonadFileSystem i, AppEffects i)
   => MonadArchitecture (App i)
   where
   currentArchitecture = (.architecture) <$> currentEnvironment'
 
 
 runAppWithoutLogging
-  :: (MonadFileSystem i, MonadIO i) => AppEnv -> App i a -> i a
+  :: (MonadIO i) => AppEnv -> App i a -> i a
 runAppWithoutLogging env app = do
   result <- runAppResultWithoutLogging env app
   either (liftIO . throwIO) return result
@@ -492,8 +456,7 @@ runAppWithoutLogging env app = do
 
 -- | Runs the application without logging and returns command exits as values.
 runAppResultWithoutLogging
-  :: (MonadFileSystem i, MonadIO i)
-  => AppEnv
+  :: AppEnv
   -> App i a
   -> i (Either ExitCode a)
 runAppResultWithoutLogging env app =
@@ -502,7 +465,7 @@ runAppResultWithoutLogging env app =
 
 -- | Run the application monad with logging handled by the given function.
 runAppWithLogging
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadIO i)
   => AppEnv
   -> App i a
   -> (Loc -> LogSource -> LogLevel -> LogStr -> IO ())
@@ -514,8 +477,7 @@ runAppWithLogging env app logger = do
 
 -- | Runs the application with a logger and returns command exits as values.
 runAppResultWithLogging
-  :: (MonadFileSystem i, MonadIO i)
-  => AppEnv
+  :: AppEnv
   -> App i a
   -> (Loc -> LogSource -> LogLevel -> LogStr -> IO ())
   -> i (Either ExitCode a)
@@ -525,7 +487,7 @@ runAppResultWithLogging env app =
 
 -- | Run the application monad with logging to stderr.
 runAppWithStderrLogging
-  :: (MonadFileSystem i, MonadIO i) => AppEnv -> App i a -> i a
+  :: (MonadIO i) => AppEnv -> App i a -> i a
 runAppWithStderrLogging env app = do
   result <- runAppResultWithStderrLogging env app
   either (liftIO . throwIO) return result
@@ -534,7 +496,7 @@ runAppWithStderrLogging env app = do
 -- | Runs the application with stderr logging and returns command exits as
 -- values.
 runAppResultWithStderrLogging
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadIO i)
   => AppEnv
   -> App i a
   -> i (Either ExitCode a)
@@ -552,7 +514,7 @@ manifestPath = do
 
 
 loadManifest
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => App i (Either Error (Maybe Manifest))
 loadManifest = do
   filename <- manifestPath
@@ -577,7 +539,7 @@ loadManifest = do
 
 
 doesManifestExist
-  :: (MonadFileSystem i, MonadIO i) => App i Bool
+  :: (MonadFileSystem i, AppEffects i) => App i Bool
 doesManifestExist = do
   filePath <- manifestPath
   exists' <- exists filePath
@@ -590,7 +552,7 @@ doesManifestExist = do
 
 
 saveManifest
-  :: (MonadFileSystem i, MonadIO i) => Manifest -> App i OsPath
+  :: (MonadFileSystem i, AppEffects i) => Manifest -> App i OsPath
 saveManifest manifest = do
   filename <- manifestPath
   $(logDebugSH) manifest
@@ -605,7 +567,7 @@ saveManifest manifest = do
 
 
 loadRepository
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => App i (Either Error (Maybe Repository))
 loadRepository = do
   sourceDir <- asks (normalise . (.sourceDirectory))
@@ -721,7 +683,7 @@ automaticSelectionUsesCheckoutManifest state appEnv = do
 
 -- | Loads or creates machine state, preserving known legacy apply history.
 prepareMachineState
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest -> App i MachineState
 prepareMachineState = prepareMachineStateWithLegacyHistory True
 
@@ -729,7 +691,7 @@ prepareMachineState = prepareMachineStateWithLegacyHistory True
 -- | Loads or creates machine state after validating a new migration and then
 -- running the supplied action before migration changes the snapshot layout.
 prepareMachineStateBeforeMigration
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest
   -> App i ()
   -> App i MachineState
@@ -742,7 +704,7 @@ prepareMachineStateBeforeMigration =
 -- Unlike migration, initialization must not adopt a legacy snapshot or inherit
 -- lifecycle history from a repository at the same checkout path.
 prepareNewMachineState
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest -> App i MachineState
 prepareNewMachineState manifest =
   prepareNewMachineStateBeforeMigration manifest (return ())
@@ -751,7 +713,7 @@ prepareNewMachineState manifest =
 -- | Creates machine state after validating a new repository and running an
 -- action that publishes its checkout files.
 prepareNewMachineStateBeforeMigration
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest
   -> App i ()
   -> App i MachineState
@@ -766,7 +728,7 @@ prepareNewMachineStateBeforeMigration manifest beforeMigration = do
 -- snapshot.  This check runs before initialization output is written and is
 -- repeated by the new-state preparation APIs to keep them safe on their own.
 ensureNoLegacySnapshotForInitialization
-  :: (MonadFileSystem i, MonadIO i) => App i ()
+  :: (MonadFileSystem i, AppEffects i) => App i ()
 ensureNoLegacySnapshotForInitialization = do
   sourceDir' <- asks (.sourceDirectory)
   sourceDir <- normalise <$> makeAbsolute sourceDir'
@@ -783,7 +745,7 @@ ensureNoLegacySnapshotForInitialization = do
 
 
 prepareMachineStateWithLegacyHistory
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Bool
   -> Manifest
   -> App i MachineState
@@ -792,7 +754,7 @@ prepareMachineStateWithLegacyHistory inheritLegacyHistory manifest =
 
 
 prepareMachineState'
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Bool
   -> Manifest
   -> App i ()
@@ -867,7 +829,7 @@ prepareMachineState' inheritLegacyHistory manifest beforeMigration =
 -- | Reads the legacy registry and reports malformed data as a machine-state
 -- error instead of treating it as absent.
 readValidatedLegacyRegistry
-  :: (MonadFileSystem i, MonadIO i) => App i (Maybe Registry)
+  :: (MonadFileSystem i, AppEffects i) => App i (Maybe Registry)
 readValidatedLegacyRegistry = do
   homeDirectory <- getHomeDirectory
   registryRead <-
@@ -890,7 +852,7 @@ readValidatedLegacyRegistry = do
 -- A malformed registry remains an actionable machine-state error.  Missing or
 -- unrelated registries are left untouched.
 clearLegacyFirstApplyHistory
-  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i ()
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 clearLegacyFirstApplyHistory checkout = do
   legacyRegistry <- readValidatedLegacyRegistry
   case legacyRegistry of
@@ -975,7 +937,7 @@ manifestDeclaresRepositoryIdentity manifestCandidate repositoryId = do
 
 -- | Marks a repository's first successful apply in machine-local state.
 markMachineStateApplied
-  :: (MonadFileSystem i, MonadIO i) => MachineState -> App i ()
+  :: (MonadFileSystem i, AppEffects i) => MachineState -> App i ()
 markMachineStateApplied state = do
   stateDir <- asks (.stateDirectory)
   now <- currentTime
@@ -986,7 +948,7 @@ markMachineStateApplied state = do
 
 
 ensureRepository
-  :: (MonadFileSystem i, MonadIO i) => App i Repository
+  :: (MonadFileSystem i, AppEffects i) => App i Repository
 ensureRepository = do
   result <- loadRepository
   case result of
@@ -1004,7 +966,7 @@ ensureRepository = do
 
 -- | Loads the selected repository manifest without creating machine state.
 ensureManifest
-  :: (MonadFileSystem i, MonadIO i) => App i Manifest
+  :: (MonadFileSystem i, AppEffects i) => App i Manifest
 ensureManifest = do
   result <- loadManifest
   case result of
@@ -1020,7 +982,7 @@ ensureManifest = do
 
 
 ensureContext
-  :: (MonadFileSystem i, MonadIO i) => App i (Context (App i))
+  :: (MonadFileSystem i, AppEffects i) => App i (Context (App i))
 ensureContext = do
   repo <- ensureRepository
   currentEnv <- currentEnvironment'
@@ -1044,7 +1006,7 @@ ensureContext = do
 
 
 lookupEnv'
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => EnvironmentVariable
   -> App i (Maybe OsString)
 lookupEnv' env = do

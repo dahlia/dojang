@@ -60,6 +60,7 @@ import TextShow (TextShow (showt))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (..)
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
@@ -140,7 +141,7 @@ data ParsedApp i
 
 
 appP
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => OsPath
   -- ^ The platform-native machine-state root.
   -> OsPath
@@ -257,7 +258,7 @@ initPresetP =
 
 
 cmdP
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => OsPath
   -> OsPath
   -- ^ The default repository path (from registry or current directory).
@@ -605,7 +606,7 @@ metaCommandP = fmap ((,) metaCommandMode)
 
 
 helpP
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => OsPath
   -> OsPath
   -- ^ The default repository path (from registry or current directory).
@@ -617,7 +618,7 @@ helpP stateRoot defaultRepoPath =
 
 
 parser
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => OsPath
   -> OsPath
   -- ^ The default repository path (from registry or current directory).
@@ -636,7 +637,7 @@ parserPrefs :: ParserPrefs
 parserPrefs = defaultPrefs
 
 
-versionCmd :: (MonadFileSystem i, MonadIO i) => App i ExitCode
+versionCmd :: (AppEffects i) => App i ExitCode
 versionCmd = do
   writeStream OutputStandard $ pack ("dojang " <> toString version) <> "\n"
   return ExitSuccess
@@ -644,7 +645,7 @@ versionCmd = do
 
 helpCmd
   :: forall i
-   . (MonadFileSystem i, MonadIO i)
+   . (MonadFileSystem i, AppEffects i)
   => OsPath
   -> OsPath
   -- ^ The default repository path (from registry or current directory).
@@ -753,7 +754,7 @@ main = withCP65001 $ do
   exitWith exitCode
  where
   run
-    :: (MonadFileSystem i, MonadIO i)
+    :: (MonadFileSystem i, AppEffects i)
     => AppEnv
     -> App i ExitCode
     -> i ExitCode

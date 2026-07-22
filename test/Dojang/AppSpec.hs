@@ -17,8 +17,10 @@ import Data.Map.Strict qualified as Map
 import Control.Exception (bracket_)
 #endif
 
+import Options.Applicative.Path (hyphen)
 import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Exit (ExitCode (ExitSuccess))
 import System.Info (os)
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, it, runIO, sequential, xit)
@@ -38,13 +40,20 @@ import Dojang.App
   , validateRepositoryCheckout
   )
 import Dojang.CommandEffect
-  ( CommandEffectKind (ProcessExecution)
+  ( CommandEffect (..)
+  , CommandEffectKind (ProcessExecution)
+  , CommandEffectResponse (..)
+  , CommandEffectTest
   , MonadCommandEffect (abortCommand, runProcess)
   , MonadProcessControl (startProcess)
+  , OutputStream (OutputStandard)
   , ProcessRequest (executable)
   , ProcessResult (ProcessUnavailable)
   , emptyProcessRequest
+  , lookupEnvironmentVariable
+  , runCommandEffectTest
   )
+import Dojang.Commands.Env qualified as Env
 import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
   ( MonadFileSystem
@@ -54,9 +63,11 @@ import Dojang.MonadFileSystem
       , removeDirectory
       , writeFile
       )
+  , dryRunIO
   )
+import Dojang.Syntax.Env (writeEnvironment)
 import Dojang.TestUtils (withHome, withTempDir)
-import Dojang.Types.Environment (lookupFact)
+import Dojang.Types.Environment (Kernel (Kernel), emptyEnvironment, lookupFact)
 import Dojang.Types.MachineState
   ( MachineState (..)
   , StateError (..)
@@ -100,12 +111,42 @@ spec = sequential $ do
     path <- encodeFS "."
     let appEnv = AppEnv path True Nothing path path path True False
         request = emptyProcessRequest{executable = "does-not-exist"}
-    runAppWithoutLogging appEnv (runProcess request)
+    dryRunIO (runAppWithoutLogging appEnv $ runProcess request)
       `shouldReturn` ProcessUnavailable ProcessExecution
-    started <- runAppWithoutLogging appEnv $ startProcess request
+    started <- dryRunIO $ runAppWithoutLogging appEnv $ startProcess request
     case started of
       Left result -> result `shouldBe` ProcessUnavailable ProcessExecution
       Right _ -> fail "dry-run App unexpectedly started a process"
+
+  it "routes App effects through its scripted interpreter" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path False False
+        action = lookupEnvironmentVariable "EDITOR" :: App CommandEffectTest (Maybe String)
+    result <-
+      runCommandEffectTest [EnvironmentValue $ Just "scripted-editor"] $
+        runAppResultWithoutLogging appEnv action
+    result
+      `shouldBe` Right
+        ( Right $ Just "scripted-editor"
+        , [EnvironmentLookup "EDITOR"]
+        )
+
+  it "runs a command entirely through the scripted interpreter" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path False False
+        environment = emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0"
+    result <-
+      runCommandEffectTest [HostEnvironmentValue environment] $
+        runAppResultWithoutLogging appEnv $
+          Env.env True hyphen
+    result
+      `shouldBe` Right
+        ( Right ExitSuccess
+        ,
+          [ HostEnvironmentRead
+          , StreamWrite OutputStandard $ writeEnvironment environment
+          ]
+        )
 
   posixIt "reads a complete environment file without detecting the host" $
     withTempDir $ \tmp tmpPath -> do

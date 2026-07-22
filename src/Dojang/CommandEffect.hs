@@ -1,8 +1,10 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
@@ -25,12 +27,13 @@ module Dojang.CommandEffect
   , PromptRequest (..)
   , PromptResult (..)
   , StandardStream (..)
-  , StartedProcess (..)
+  , StartedProcess
   , confirmPrompt
   , currentTimeIO
   , detectEnvironmentIO
   , emptyProcessRequest
   , hostPlatformIO
+  , hoistStartedProcess
   , isTerminalIO
   , lookupEnvironmentVariableIO
   , newUUIDIO
@@ -44,16 +47,12 @@ module Dojang.CommandEffect
   ) where
 
 import Control.Exception (mask, onException, throwIO)
-import Control.Monad.Except (ExceptT, MonadError (throwError), runExceptT)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (ReaderT)
-import Control.Monad.State.Strict
-  ( MonadState (get, put)
-  , StateT
-  , modify'
-  , runStateT
-  )
+import Control.Monad.Except (ExceptT (..), MonadError (..), runExceptT)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Reader (ReaderT (..), ask)
+import Control.Monad.State.Strict (StateT)
 import Control.Monad.Trans.Class (lift)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text (Text, pack, unpack)
 import Data.Text.IO qualified as TextIO
 import Data.Time (UTCTime, getCurrentTime)
@@ -74,6 +73,7 @@ import System.Process
   , terminateProcess
   , waitForProcess
   )
+import Prelude hiding (readFile, writeFile)
 
 import FortyTwo.Prompts.Confirm qualified as FortyTwo
 import FortyTwo.Prompts.Input qualified as FortyTwo
@@ -81,7 +81,11 @@ import FortyTwo.Prompts.Multiselect qualified as FortyTwo
 import FortyTwo.Prompts.Select qualified as FortyTwo
 import System.IO.Extra (hIsTerminalDevice)
 
-import Dojang.MonadFileSystem (DryRunIO)
+import Dojang.MonadFileSystem
+  ( DryRunIO
+  , MonadFileSystem (..)
+  , dryRunIO
+  )
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.Environment.Current qualified as CurrentEnvironment
 
@@ -146,13 +150,15 @@ data ProcessResult
   deriving (Eq, Show)
 
 
--- | A child process that has started and can be awaited or cancelled.
-data StartedProcess m = StartedProcess
-  { awaitProcess :: m ProcessResult
-  -- ^ Waits for the child and returns its observable result.
-  , cancelStartedProcess :: m ()
-  -- ^ Terminates the child and waits for it to release its resources.
-  }
+-- | A child process started by @m@ that can be awaited or cancelled.
+data StartedProcess m = StartedProcess (m ProcessResult) (m ())
+
+
+-- | Maps a started process's lifecycle actions into another monad.
+hoistStartedProcess
+  :: (forall a. m a -> n a) -> StartedProcess m -> StartedProcess n
+hoistStartedProcess transform (StartedProcess await cancel) =
+  StartedProcess (transform await) (transform cancel)
 
 
 -- | An effect that cannot be silently simulated.
@@ -173,6 +179,8 @@ data CommandEffect
   | Prompted PromptRequest
   | ProcessRun ProcessRequest
   | ProcessStart ProcessRequest
+  | ProcessAwait Int
+  | ProcessCancel Int
   deriving (Eq, Show)
 
 
@@ -187,6 +195,8 @@ data CommandEffectResponse
   | TerminalValue Bool
   | PromptValue PromptResult
   | ProcessValue ProcessResult
+  | ProcessStartedValue
+  | ProcessCancellationConfirmed
   | ExecutionRequired CommandEffectKind
   deriving (Eq, Show)
 
@@ -196,7 +206,9 @@ data CommandEffectError
   = UnexpectedEffect CommandEffect
   | UnexpectedResponse CommandEffect CommandEffectResponse
   | UnusedResponses [CommandEffectResponse]
+  | UnfinishedProcesses [Int]
   | CommandAborted ExitCode
+  | CommandAbortedWithUnfinishedProcesses ExitCode [Int]
   deriving (Eq, Show)
 
 
@@ -250,8 +262,18 @@ class (Monad m) => MonadCommandEffect m where
 class (Monad m) => MonadProcessControl m where
   -- | Starts a process whose streams are inherited from the parent.
   --
-  -- The returned wait action may be run after a surrounding lock is released.
+  -- The returned handle may be awaited after a surrounding lock is released.
   startProcess :: ProcessRequest -> m (Either ProcessResult (StartedProcess m))
+
+
+  -- | Waits for a process that was started successfully.
+  awaitProcess :: StartedProcess m -> m ProcessResult
+  awaitProcess (StartedProcess await _) = await
+
+
+  -- | Cancels a process that was started successfully.
+  cancelStartedProcess :: StartedProcess m -> m ()
+  cancelStartedProcess (StartedProcess _ cancel) = cancel
 
 
 -- | Requests confirmation, returning 'False' when prompting is unavailable.
@@ -275,19 +297,91 @@ selectPrompt message values = do
 data CommandEffectTestState = CommandEffectTestState
   { responses :: [CommandEffectResponse]
   , effects :: [CommandEffect]
+  , nextProcessId :: Int
+  , activeProcesses :: [Int]
   }
 
 
 newtype CommandEffectTest a = CommandEffectTest
   { unCommandEffectTest
-      :: ExceptT CommandEffectError (StateT CommandEffectTestState IO) a
+      :: ReaderT
+           (IORef CommandEffectTestState)
+           (ExceptT CommandEffectError DryRunIO)
+           a
   }
-  deriving (Functor, Applicative, Monad)
+  deriving (Functor, Applicative, Monad, MonadIO)
+
+
+liftCommandEffectBase :: DryRunIO a -> CommandEffectTest a
+liftCommandEffectBase = CommandEffectTest . lift . lift
+
+
+instance MonadError IOError CommandEffectTest where
+  throwError = liftCommandEffectBase . throwError
+  catchError action handler = CommandEffectTest $ ReaderT $ \stateRef ->
+    ExceptT $
+      runExceptT (runReaderT action.unCommandEffectTest stateRef)
+        `catchError` \err ->
+          runExceptT $
+            runReaderT (handler err).unCommandEffectTest stateRef
+
+
+instance MonadFileSystem CommandEffectTest where
+  encodePath = liftCommandEffectBase . encodePath
+  decodePath = liftCommandEffectBase . decodePath
+  getCurrentDirectory = liftCommandEffectBase getCurrentDirectory
+  getHomeDirectory = liftCommandEffectBase getHomeDirectory
+  exists = liftCommandEffectBase . exists
+  isFile = liftCommandEffectBase . isFile
+  isRegularFile = liftCommandEffectBase . isRegularFile
+  isDirectory = liftCommandEffectBase . isDirectory
+  isSymlink = liftCommandEffectBase . isSymlink
+  readFile = liftCommandEffectBase . readFile
+  writeFile path = liftCommandEffectBase . writeFile path
+  replaceFile source = liftCommandEffectBase . replaceFile source
+  writeTemporaryFile directory template =
+    liftCommandEffectBase . writeTemporaryFile directory template
+  withFileLock _ action = action
+  canonicalizePath = liftCommandEffectBase . canonicalizePath
+  readSymlinkTarget = liftCommandEffectBase . readSymlinkTarget
+  copyFile source = liftCommandEffectBase . copyFile source
+  copyFileWithMetadata source =
+    liftCommandEffectBase . copyFileWithMetadata source
+  copyFilePermissions source =
+    liftCommandEffectBase . copyFilePermissions source
+  createDirectory = liftCommandEffectBase . createDirectory
+  removeFile = liftCommandEffectBase . removeFile
+  removeDirectory = liftCommandEffectBase . removeDirectory
+  listDirectory = liftCommandEffectBase . listDirectory
+  getFileSize = liftCommandEffectBase . getFileSize
+  getPortableMode = liftCommandEffectBase . getPortableMode
+  setPortableMode path = liftCommandEffectBase . setPortableMode path
+  setPortableWritable path = liftCommandEffectBase . setPortableWritable path
+  createSymbolicLink target link =
+    liftCommandEffectBase . createSymbolicLink target link
 
 
 record :: CommandEffect -> CommandEffectTest ()
-record effect = CommandEffectTest $ modify' $ \state ->
+record effect = modifyCommandEffectState $ \state ->
   state{effects = effect : state.effects}
+
+
+readCommandEffectState :: CommandEffectTest CommandEffectTestState
+readCommandEffectState = CommandEffectTest $ do
+  stateRef <- ask
+  liftIO $ readIORef stateRef
+
+
+modifyCommandEffectState
+  :: (CommandEffectTestState -> CommandEffectTestState)
+  -> CommandEffectTest ()
+modifyCommandEffectState transform = CommandEffectTest $ do
+  stateRef <- ask
+  liftIO $ modifyIORef' stateRef transform
+
+
+throwCommandEffectError :: CommandEffectError -> CommandEffectTest a
+throwCommandEffectError = CommandEffectTest . lift . throwError
 
 
 respond
@@ -296,14 +390,14 @@ respond
   -> CommandEffectTest a
 respond effect decode = do
   record effect
-  state <- CommandEffectTest get
+  state <- readCommandEffectState
   case state.responses of
-    [] -> CommandEffectTest $ throwError $ UnexpectedEffect effect
+    [] -> throwCommandEffectError $ UnexpectedEffect effect
     response : rest -> case decode response of
       Nothing ->
-        CommandEffectTest $ throwError $ UnexpectedResponse effect response
+        throwCommandEffectError $ UnexpectedResponse effect response
       Just value -> do
-        CommandEffectTest $ put state{responses = rest}
+        modifyCommandEffectState $ \current -> current{responses = rest}
         return value
 
 
@@ -341,20 +435,55 @@ instance MonadCommandEffect CommandEffectTest where
     ProcessValue value -> Just value
     ExecutionRequired ProcessExecution -> Just $ ProcessUnavailable ProcessExecution
     _ -> Nothing
-  abortCommand = CommandEffectTest . throwError . CommandAborted
+  abortCommand = throwCommandEffectError . CommandAborted
 
 
 instance MonadProcessControl CommandEffectTest where
   startProcess request = do
     result <- respond (ProcessStart request) $ \response -> case response of
-      ProcessValue value -> Just value
+      ProcessStartedValue -> Just $ Right ()
+      ProcessValue value@ProcessStartFailed{} -> Just $ Left value
+      ProcessValue value@ProcessUnavailable{} -> Just $ Left value
       ExecutionRequired ProcessExecution ->
-        Just $ ProcessUnavailable ProcessExecution
+        Just $ Left $ ProcessUnavailable ProcessExecution
       _ -> Nothing
-    return $ case result of
-      failed@ProcessStartFailed{} -> Left failed
-      unavailable@ProcessUnavailable{} -> Left unavailable
-      other -> Right $ StartedProcess (return other) (return ())
+    case result of
+      Left failure -> return $ Left failure
+      Right () -> do
+        state <- readCommandEffectState
+        let processId = state.nextProcessId
+        modifyCommandEffectState $ \current ->
+          current
+            { nextProcessId = processId + 1
+            , activeProcesses = processId : current.activeProcesses
+            }
+        return $
+          Right $
+            StartedProcess
+              (awaitTestProcess processId)
+              (cancelTestProcess processId)
+
+
+awaitTestProcess :: Int -> CommandEffectTest ProcessResult
+awaitTestProcess processId = do
+  result <- respond (ProcessAwait processId) $ \response -> case response of
+    ProcessValue value -> Just value
+    _ -> Nothing
+  finishProcess processId
+  return result
+
+
+cancelTestProcess :: Int -> CommandEffectTest ()
+cancelTestProcess processId = do
+  respond (ProcessCancel processId) $ \response -> case response of
+    ProcessCancellationConfirmed -> Just ()
+    _ -> Nothing
+  finishProcess processId
+
+
+finishProcess :: Int -> CommandEffectTest ()
+finishProcess processId = modifyCommandEffectState $ \state ->
+  state{activeProcesses = filter (/= processId) state.activeProcesses}
 
 
 instance MonadCommandEffect IO where
@@ -373,6 +502,24 @@ instance MonadCommandEffect IO where
 
 instance MonadProcessControl IO where
   startProcess = startProcessIO
+
+
+instance (MonadProcessControl m) => MonadProcessControl (ReaderT r m) where
+  startProcess request = do
+    started <- lift $ startProcess request
+    return $ hoistStartedProcess lift <$> started
+
+
+instance (MonadProcessControl m) => MonadProcessControl (ExceptT e m) where
+  startProcess request = do
+    started <- lift $ startProcess request
+    return $ hoistStartedProcess lift <$> started
+
+
+instance (MonadProcessControl m) => MonadProcessControl (StateT s m) where
+  startProcess request = do
+    started <- lift $ startProcess request
+    return $ hoistStartedProcess lift <$> started
 
 
 instance (MonadCommandEffect m) => MonadCommandEffect (ReaderT r m) where
@@ -587,12 +734,21 @@ runCommandEffectTest
   -> CommandEffectTest a
   -> IO (Either CommandEffectError (a, [CommandEffect]))
 runCommandEffectTest scripted action = do
-  (result, finalState) <-
-    runStateT
-      (runExceptT action.unCommandEffectTest)
-      (CommandEffectTestState scripted [])
+  stateRef <- newIORef $ CommandEffectTestState scripted [] 0 []
+  result <-
+    dryRunIO $
+      runExceptT $
+        runReaderT action.unCommandEffectTest stateRef
+  finalState <- readIORef stateRef
   return $ case result of
+    Left (CommandAborted exitCode) ->
+      case reverse finalState.activeProcesses of
+        [] -> Left $ CommandAborted exitCode
+        remaining ->
+          Left $ CommandAbortedWithUnfinishedProcesses exitCode remaining
     Left err -> Left err
     Right value -> case finalState.responses of
-      [] -> Right (value, reverse finalState.effects)
+      [] -> case reverse finalState.activeProcesses of
+        [] -> Right (value, reverse finalState.effects)
+        remaining -> Left $ UnfinishedProcesses remaining
       remaining -> Left $ UnusedResponses remaining

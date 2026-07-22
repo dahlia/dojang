@@ -15,7 +15,6 @@ module Dojang.Commands.Edit
   ) where
 
 import Control.Monad (filterM, foldM, forM, forM_, unless)
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.List (isPrefixOf, nub)
 import Data.Map.Strict qualified as Map
@@ -31,6 +30,7 @@ import TextShow (showt)
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (dryRun)
   , ensureContext
   , prepareMachineState
@@ -150,7 +150,7 @@ runEditor editor files =
 
 -- | The edit command: open source files in an editor and apply changes.
 edit
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe String
   -- ^ The @--editor@ option.
   -> Bool
@@ -187,7 +187,7 @@ edit editorOpt noApply force sequential allFlag includeUnregistered explicitSour
 -- | Opens selected source files and applies them with an explicit codec
 -- runtime.
 editWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Maybe String
   -> Bool
@@ -225,7 +225,7 @@ editWithCodecRuntime
 
 
 editCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Maybe String
   -> Bool
@@ -512,7 +512,7 @@ isChanged fc = fc.sourceDelta /= Unchanged || fc.destinationDelta /= Unchanged
 
 -- | Run the editor on the given source files.
 runEditorOnFiles
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Maybe String
   -- ^ The @--editor@ option.

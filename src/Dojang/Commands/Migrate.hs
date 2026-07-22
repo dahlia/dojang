@@ -7,7 +7,6 @@ module Dojang.Commands.Migrate (migrate) where
 
 import Control.Monad (when)
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -18,6 +17,7 @@ import Prelude hiding (readFile, writeFile)
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (manifestFile, sourceDirectory, stateDirectory)
   , loadManifest
   , prepareMachineState
@@ -58,7 +58,7 @@ import Dojang.Types.RepositoryId (newRepositoryId)
 
 
 -- | Migrates an existing manifest and its local intermediate snapshot.
-migrate :: (MonadFileSystem i, MonadIO i) => App i ExitCode
+migrate :: (MonadFileSystem i, AppEffects i) => App i ExitCode
 migrate = do
   stateRoot <- asks (.stateDirectory)
   sourceDir <- asks (.sourceDirectory)

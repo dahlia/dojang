@@ -12,7 +12,6 @@ module Dojang.Commands.Disambiguation
   ) where
 
 import Control.Monad (forM, when)
-import Control.Monad.IO.Class (MonadIO)
 import Data.Map.Strict (Map, fromList, lookup)
 import Prelude hiding (lookup)
 
@@ -21,7 +20,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Text (pack, unpack)
 import System.OsPath (OsPath)
 
-import Dojang.App (App)
+import Dojang.App (App, AppEffects)
 import Dojang.CommandEffect
   ( MonadCommandEffect (lookupEnvironmentVariable, prompt)
   , PromptRequest (SelectPrompt)
@@ -78,7 +77,7 @@ getAutoSelectMode = do
 --    * 'AutoSelectFirst' - Select the first route.
 --    * 'ErrorOnAmbiguity' - Return 'Nothing' to signal an error.
 disambiguateRoutes
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => AutoSelectMode
   -- ^ The auto-select mode.
   -> Maybe OsPath
@@ -116,7 +115,7 @@ disambiguateRoutes mode explicitSource candidates =
 
 -- | Prompt the user to select a route from multiple candidates.
 promptForRoute
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => NonEmpty CandidateRoute
   -> App i (Maybe RouteResult)
 promptForRoute candidates = do

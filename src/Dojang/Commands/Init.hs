@@ -17,7 +17,6 @@ module Dojang.Commands.Init
 
 import Control.Monad (foldM, forM, forM_, void, when)
 import Control.Monad.Except (MonadError (catchError))
-import Control.Monad.IO.Class (MonadIO)
 import Data.Function ((&))
 import Data.List (maximumBy, sortOn)
 import Data.List.NonEmpty as NonEmpty (NonEmpty ((:|)), toList)
@@ -63,6 +62,7 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (debug, dryRun, sourceDirectory, stateDirectory)
   , currentEnvironmentWithFacts
   , doesManifestExist
@@ -370,7 +370,8 @@ makeManifest repositoryId presets =
       ]
 
 
-init :: (MonadFileSystem i, MonadIO i) => [InitPreset] -> Bool -> App i ExitCode
+init
+  :: (MonadFileSystem i, AppEffects i) => [InitPreset] -> Bool -> App i ExitCode
 init presets noInteractive = initWithFacts presets noInteractive Nothing []
 
 
@@ -380,7 +381,7 @@ init presets noInteractive = initWithFacts presets noInteractive Nothing []
 -- returning.  New repositories validate fact inputs before publishing their
 -- manifest and state.
 initWithFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => [InitPreset]
   -- ^ Platform presets used when creating a new manifest.
   -> Bool
@@ -408,7 +409,7 @@ initWithFacts presets noInteractive factsFile assignments = do
 
 
 initializeNew
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => [InitPreset]
   -> Bool
   -> Maybe OsPath
@@ -484,7 +485,7 @@ initializeNew presets noInteractive factsFile assignments = do
 
 
 prevalidateMachineFactInputs
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> [Text]
   -> App i (FactMap, Maybe FactMap)
@@ -505,7 +506,7 @@ prevalidateMachineFactInputs requestedFactsFile assignments = do
 
 
 readSelectedFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => OsPath
   -> Maybe MachineState
   -> App i FactMap
@@ -520,7 +521,7 @@ readSelectedFacts checkout state =
 
 
 prevalidateExistingMachineFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest
   -> Bool
   -> Maybe OsPath
@@ -547,7 +548,7 @@ prevalidateExistingMachineFacts
 
 
 prevalidateNewMachineFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Maybe OsPath
   -> [Text]
   -> App i ()
@@ -561,7 +562,7 @@ prevalidateNewMachineFacts requestedFactsFile assignments = do
 
 
 missingMachineFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Manifest
   -> FactMap
   -> App i (Set FactKey)
@@ -577,7 +578,7 @@ missingMachineFacts manifest known = do
 
 
 reportMissingMachineFacts
-  :: (MonadFileSystem i, MonadIO i) => Set FactKey -> App i ()
+  :: (AppEffects i) => Set FactKey -> App i ()
 reportMissingMachineFacts missing =
   when (not $ Set.null missing) $ do
     codeStyle <- codeStyleFor StandardError
@@ -592,7 +593,7 @@ reportMissingMachineFacts missing =
 
 
 enrollMachineFacts
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => MachineState
   -> Manifest
   -> Bool
@@ -655,7 +656,7 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
 
 
 parseFactAssignments
-  :: (MonadFileSystem i, MonadIO i) => [Text] -> App i FactMap
+  :: (AppEffects i) => [Text] -> App i FactMap
 parseFactAssignments = foldM insertAssignment Map.empty
  where
   insertAssignment facts assignment = do
@@ -676,7 +677,7 @@ parseFactAssignments = foldM insertAssignment Map.empty
 
 
 resolveFactsSource
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => MachineState
   -> Maybe OsPath
   -> App i (Maybe OsPath, FactMap)
@@ -702,7 +703,7 @@ resolveFactsSource state requested = do
 
 
 normalizeFactsFile
-  :: (MonadFileSystem i, MonadIO i) => OsPath -> OsPath -> App i OsPath
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> OsPath -> App i OsPath
 normalizeFactsFile checkout configured =
   ( do
       checkout' <- canonicalizePath checkout
@@ -721,7 +722,7 @@ normalizeFactsFile checkout configured =
 
 
 findDefaultFactsSource
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => OsPath
   -> App i (Maybe OsPath, FactMap)
 findDefaultFactsSource checkout = do
@@ -735,7 +736,7 @@ findDefaultFactsSource checkout = do
 
 
 readFactsSource
-  :: (MonadFileSystem i, MonadIO i) => OsPath -> App i FactMap
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i FactMap
 readFactsSource factsPath = do
   result <-
     readFactsFile factsPath `catchError` \err ->
@@ -868,7 +869,7 @@ windowsAppData :: FilePathExpression
 windowsAppData = Substitution "AppData"
 
 
-askPresets :: (MonadFileSystem i, MonadIO i) => App i [InitPreset]
+askPresets :: (AppEffects i) => App i [InitPreset]
 askPresets = do
   -- FIXME: It doesn't seem to work on Windows...
   -- https://github.com/GianlucaGuarini/fortytwo/issues/7

@@ -30,7 +30,6 @@ module Dojang.Commands.Hook
   ) where
 
 import Control.Monad (forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as ByteString
@@ -67,16 +66,17 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (..)
   , ensureContext
   , prepareMachineState
   )
 import Dojang.CommandEffect
   ( MonadCommandEffect (..)
-  , MonadProcessControl (startProcess)
+  , MonadProcessControl (awaitProcess, startProcess)
   , ProcessRequest (..)
   , ProcessResult (..)
-  , StartedProcess (..)
+  , StartedProcess
   , emptyProcessRequest
   )
 import Dojang.Commands
@@ -195,7 +195,7 @@ disambiguatedHookScopePaths explicitSource paths =
 
 -- | Builds the complete context supplied to hooks for one command.
 makeHookEnv
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Text
   -- ^ Command whose lifecycle event will run.
   -> [HookScopePath]
@@ -287,7 +287,7 @@ commandHookTypes _ = Nothing
 
 -- | Runs a command action between its pre and successful-post lifecycle hooks.
 withCommandHooks
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Text
   -- ^ Command name used to select lifecycle events.
   -> [HookScopePath]
@@ -386,7 +386,7 @@ managedHookContextNames =
 
 -- | Executes all matching hooks of a lifecycle event in manifest order.
 executeHooks
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -- ^ Normalized command and machine-state context.
   -> Context (App i)
@@ -448,7 +448,7 @@ hookRecursionKey repositoryId event identifier =
 
 -- | Execute a single hook.
 executeHook
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -> VariableGetter (App i)
   -> HookType
@@ -752,7 +752,7 @@ currentHookDepth = do
 
 
 runHookProcess
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -> HookType
   -> Text
@@ -832,7 +832,7 @@ runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start =
   started <- start request
   result <- case started of
     Left failure -> return failure
-    Right process -> process.awaitProcess
+    Right process -> awaitProcess process
   case result of
     ProcessStartFailed err -> do
       $(logError) $
@@ -887,7 +887,7 @@ runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start =
 
 -- | Resolves the hook's effective working directory.
 effectiveHookWorkingDirectory
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => HookEnv
   -- ^ Hook context whose repository is the relative-path base.
   -> Hook
@@ -908,7 +908,7 @@ effectiveHookWorkingDirectory hookEnv hook =
 -- | Resolves a hook working directory with the shared manifest-variable
 -- lookup.
 effectiveHookWorkingDirectoryWithVariables
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => VariableGetter (App i)
   -- ^ Manifest-variable and inherited-environment lookup.
   -> HookEnv
@@ -924,7 +924,7 @@ effectiveHookWorkingDirectoryWithVariables variableGetter hookEnv hook =
 
 
 resolveHookWorkingDirectory
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => VariableGetter (App i)
   -> HookEnv
   -> Hook
@@ -949,7 +949,7 @@ resolveHookWorkingDirectory variableGetter hookEnv hook = do
 
 
 printExpansionWarning
-  :: (MonadFileSystem i, MonadIO i) => ExpansionWarning -> App i ()
+  :: (AppEffects i) => ExpansionWarning -> App i ()
 printExpansionWarning (UndefinedEnvironmentVariable variable) =
   printStderr' Warning $
     "Reference to an undefined environment variable: " <> variable <> "."
@@ -963,10 +963,7 @@ startHookEffect
   -> m (Either ProcessResult (StartedProcess m))
 startHookEffect hookEnv request =
   case hookEnv.processSimulation request of
-    Just failure@ProcessStartFailed{} -> return $ Left failure
-    Just unavailable@ProcessUnavailable{} -> return $ Left unavailable
-    Just result ->
-      return $ Right $ StartedProcess (return result) (return ())
+    Just result -> return $ Left result
     Nothing -> startProcess request
 
 

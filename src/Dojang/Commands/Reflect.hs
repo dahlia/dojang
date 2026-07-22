@@ -8,7 +8,6 @@ module Dojang.Commands.Reflect (reflect, reflectWithCodecRuntime) where
 
 import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
-import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, nub, nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
@@ -32,6 +31,7 @@ import System.OsPath
 
 import Dojang.App
   ( App
+  , AppEffects
   , AppEnv (dryRun, manifestFile, stateDirectory)
   , ensureContext
   , prepareMachineState
@@ -171,7 +171,7 @@ import Dojang.Types.TargetTracking
 
 
 reflect
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Bool
   -- ^ Force flag.
   -> Bool
@@ -198,7 +198,7 @@ reflect force allFlag includeUnregistered explicitSource paths =
 
 -- | Reflects selected routes using an explicit codec runtime.
 reflectWithCodecRuntime
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Bool
   -> Bool
@@ -214,7 +214,7 @@ reflectWithCodecRuntime runtime force allFlag includeUnregistered explicitSource
 
 
 reflectCore
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Bool
   -> Bool
@@ -629,7 +629,7 @@ correspondenceIdentity file =
 
 
 makeCodecAwareEvaluated
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Context (App i)
   -> App i ([EvaluatedManagedCorrespondence], [RouteMapWarning])
@@ -640,7 +640,7 @@ makeCodecAwareEvaluated runtime ctx = do
 
 
 evaluateManaged
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Context (App i)
   -> [ManagedCorrespondence]
@@ -705,7 +705,7 @@ filterManagedInDirs dirPaths managed = do
 -- | Perform the actual reflect operation on file correspondences.
 reflectCorrespondences
   :: forall i
-   . (MonadFileSystem i, MonadIO i)
+   . (MonadFileSystem i, AppEffects i)
   => CodecRuntime (App i)
   -> Context (App i)
   -> Bool
@@ -1178,7 +1178,7 @@ reflectCorrespondences
 
 
 persistConvergedTargets
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> MachineState
   -> [EvaluatedManagedCorrespondence]
@@ -1251,7 +1251,7 @@ persistConvergedTargets ctx machineState selected =
 -- | Observes a correspondence that the command has already selected.  Route
 -- selection and the force flag remain responsible for admitting ignored files.
 observeSelectedReconciliationInput
-  :: (MonadFileSystem i, MonadIO i)
+  :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> Bool
   -- ^ Whether command-level selection explicitly admitted an ignored path.
@@ -1289,7 +1289,7 @@ observeSelectedReconciliationInput
         else input'
 
 
-logSyncOp :: (MonadFileSystem i, MonadIO i) => SyncOp -> App i ()
+logSyncOp :: (MonadFileSystem i, AppEffects i) => SyncOp -> App i ()
 logSyncOp (RemoveDirs path) = do
   path' <- decodePath path
   $(logDebug) $ "Remove directory recursively: " <> pack path'

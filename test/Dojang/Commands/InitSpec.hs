@@ -58,6 +58,11 @@ import Dojang.App
   , runAppWithLogging
   , runAppWithoutLogging
   )
+import Dojang.CommandEffect
+  ( MonadCommandEffect
+  , MonadProcessControl (startProcess)
+  , hoistStartedProcess
+  )
 import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
   ( cliError
@@ -896,7 +901,14 @@ newtype CoordinatedInitIO a
     , MonadIO
     , MonadError IOError
     , MonadReader ManifestCheckGate
+    , MonadCommandEffect
     )
+
+
+instance MonadProcessControl CoordinatedInitIO where
+  startProcess request = CoordinatedInitIO $ do
+    started <- startProcess request
+    return $ hoistStartedProcess CoordinatedInitIO <$> started
 
 
 runCoordinatedInitIO
