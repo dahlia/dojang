@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | The application monad for Dojang.
 module Dojang.App
@@ -36,6 +37,10 @@ module Dojang.App
   , readExistingMachineState
   , readValidatedLegacyRegistry
   , lookupEnv'
+  , liftApp
+  , runAppResultWithLogging
+  , runAppResultWithStderrLogging
+  , runAppResultWithoutLogging
   , runAppWithLogging
   , runAppWithStderrLogging
   , runAppWithoutLogging
@@ -44,20 +49,22 @@ module Dojang.App
   , validateRepositoryStateOwnership
   ) where
 
+import Control.Exception (throwIO)
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List.NonEmpty (toList)
 import qualified Data.Map.Strict as Map
 import Data.String (IsString (fromString))
-import Data.Time (getCurrentTime)
 import Dojang.Types.FilePathExpression (EnvironmentVariable)
-import System.Environment (lookupEnv)
-import System.Exit (exitWith)
-import System.IO (stderr)
 import System.IO.Error (isDoesNotExistError)
 import Prelude hiding (readFile, writeFile)
 
-import Control.Monad.Except (MonadError (..), tryError)
+import Control.Monad.Except
+  ( ExceptT (..)
+  , MonadError (..)
+  , runExceptT
+  , tryError
+  )
 import Control.Monad.Logger
   ( Loc
   , LogLevel
@@ -75,6 +82,7 @@ import Control.Monad.Logger
 import Control.Monad.Reader (MonadReader, ReaderT (..), asks)
 import Control.Monad.Trans (MonadTrans (lift))
 import Data.Text (concat, pack, unlines, unpack)
+import System.Exit (ExitCode)
 import System.OsPath
   ( OsPath
   , OsString
@@ -86,6 +94,25 @@ import System.OsPath
   )
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
+import Dojang.CommandEffect
+  ( CommandEffectKind (ProcessExecution)
+  , MonadCommandEffect (..)
+  , MonadProcessControl (..)
+  , ProcessResult (ProcessUnavailable)
+  , StandardStream (StandardError)
+  , StartedProcess (..)
+  , currentTimeIO
+  , detectEnvironmentIO
+  , hostPlatformIO
+  , isTerminalIO
+  , lookupEnvironmentVariableIO
+  , newUUIDIO
+  , processEnvironmentIO
+  , promptIO
+  , runProcessIO
+  , startProcessIO
+  , writeStreamIO
+  )
 import Dojang.Commands
   ( Admonition (..)
   , codeStyleFor
@@ -169,65 +196,144 @@ data AppEnv = AppEnv
   deriving (Show)
 
 
+-- | Lifts an action from the interpreter beneath 'App'.
+--
+-- Command modules should use a dedicated effect instead.  This escape hatch is
+-- provided for interpreter adapters and deterministic test instrumentation.
+liftApp
+  :: (MonadFileSystem i, MonadIO i) => i a -> App i a
+liftApp = App . lift . lift . lift
+
+
+liftCommandIO
+  :: (MonadFileSystem i, MonadIO i) => IO a -> App i a
+liftCommandIO = liftApp . liftIO
+
+
 -- | The application monad for Dojang.
-newtype (MonadFileSystem i, MonadError IOError i, MonadIO i) => App i v = App
-  { unApp :: ReaderT AppEnv (LoggingT i) v
+newtype
+  (MonadFileSystem i, MonadError IOError i, MonadIO i) =>
+  App i v = App
+  { unApp :: ReaderT AppEnv (ExceptT ExitCode (LoggingT i)) v
   }
   deriving
     ( Functor
     , Applicative
     , Monad
-    , MonadIO
     , MonadReader AppEnv
     , MonadLogger
     )
 
 
 instance
-  (MonadFileSystem i, MonadError IOError i, MonadIO i)
+  ( MonadFileSystem i
+  , MonadError IOError i
+  , MonadIO i
+  )
   => MonadError IOError (App i)
   where
-  throwError = App . throwError
-  catchError action handler = App $ catchError (unApp action) (unApp . handler)
+  throwError = App . lift . lift . lift . throwError
+  catchError action handler = App $ ReaderT $ \appEnv ->
+    ExceptT $ LoggingT $ \logger ->
+      runLoggingT (runExceptT $ runReaderT action.unApp appEnv) logger
+        `catchError` \err ->
+          runLoggingT
+            (runExceptT $ runReaderT (handler err).unApp appEnv)
+            logger
 
 
-instance (MonadFileSystem i, MonadIO i) => MonadFileSystem (App i) where
-  encodePath = App . lift . lift . encodePath
-  decodePath = App . lift . lift . decodePath
-  getCurrentDirectory = App $ lift $ lift getCurrentDirectory
-  getHomeDirectory = App $ lift $ lift getHomeDirectory
-  exists = App . lift . lift . exists
-  isFile = App . lift . lift . isFile
-  isRegularFile = App . lift . lift . isRegularFile
-  isDirectory = App . lift . lift . isDirectory
-  isSymlink = App . lift . lift . isSymlink
-  readFile = App . lift . lift . readFile
-  writeFile dst = App . lift . lift . writeFile dst
-  replaceFile src = App . lift . lift . replaceFile src
+instance
+  ( MonadFileSystem i
+  , MonadError IOError i
+  , MonadIO i
+  )
+  => MonadFileSystem (App i)
+  where
+  encodePath = App . lift . lift . lift . encodePath
+  decodePath = App . lift . lift . lift . decodePath
+  getCurrentDirectory = App $ lift $ lift $ lift getCurrentDirectory
+  getHomeDirectory = App $ lift $ lift $ lift getHomeDirectory
+  exists = App . lift . lift . lift . exists
+  isFile = App . lift . lift . lift . isFile
+  isRegularFile = App . lift . lift . lift . isRegularFile
+  isDirectory = App . lift . lift . lift . isDirectory
+  isSymlink = App . lift . lift . lift . isSymlink
+  readFile = App . lift . lift . lift . readFile
+  writeFile dst = App . lift . lift . lift . writeFile dst
+  replaceFile src = App . lift . lift . lift . replaceFile src
   writeTemporaryFile directory template contents =
-    App $ lift $ lift $ writeTemporaryFile directory template contents
+    App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
   withFileLock lockPath action = App $ ReaderT $ \appEnv ->
-    LoggingT $ \logger ->
+    ExceptT $ LoggingT $ \logger ->
       withFileLock lockPath $
-        runLoggingT (runReaderT (unApp action) appEnv) logger
-  canonicalizePath = App . lift . lift . canonicalizePath
-  readSymlinkTarget = App . lift . lift . readSymlinkTarget
-  copyFile src = App . lift . lift . copyFile src
-  copyFileWithMetadata src = App . lift . lift . copyFileWithMetadata src
-  copyFilePermissions src = App . lift . lift . copyFilePermissions src
-  createDirectory = App . lift . lift . createDirectory
-  removeFile = App . lift . lift . removeFile
-  removeDirectory = App . lift . lift . removeDirectory
-  listDirectory = App . lift . lift . listDirectory
-  getFileSize = App . lift . lift . getFileSize
-  getPortableMode = App . lift . lift . getPortableMode
-  setPortableMode path = App . lift . lift . setPortableMode path
-  setPortableWritable path = App . lift . lift . setPortableWritable path
+        runLoggingT
+          (runExceptT $ runReaderT (unApp action) appEnv)
+          logger
+  canonicalizePath = App . lift . lift . lift . canonicalizePath
+  readSymlinkTarget = App . lift . lift . lift . readSymlinkTarget
+  copyFile src = App . lift . lift . lift . copyFile src
+  copyFileWithMetadata src = App . lift . lift . lift . copyFileWithMetadata src
+  copyFilePermissions src = App . lift . lift . lift . copyFilePermissions src
+  createDirectory = App . lift . lift . lift . createDirectory
+  removeFile = App . lift . lift . lift . removeFile
+  removeDirectory = App . lift . lift . lift . removeDirectory
+  listDirectory = App . lift . lift . lift . listDirectory
+  getFileSize = App . lift . lift . lift . getFileSize
+  getPortableMode = App . lift . lift . lift . getPortableMode
+  setPortableMode path = App . lift . lift . lift . setPortableMode path
+  setPortableWritable path = App . lift . lift . lift . setPortableWritable path
   createSymbolicLink target link =
-    App . lift . lift . createSymbolicLink target link
+    App . lift . lift . lift . createSymbolicLink target link
 
 
-currentEnvironment' :: (MonadFileSystem i, MonadIO i) => App i Environment
+instance
+  ( MonadFileSystem i
+  , MonadError IOError i
+  , MonadIO i
+  )
+  => MonadCommandEffect (App i)
+  where
+  lookupEnvironmentVariable = liftCommandIO . lookupEnvironmentVariableIO
+  processEnvironment = liftCommandIO processEnvironmentIO
+  detectEnvironment = liftCommandIO detectEnvironmentIO
+  hostPlatform = liftCommandIO hostPlatformIO
+  currentTime = liftCommandIO currentTimeIO
+  newUUID = liftCommandIO newUUIDIO
+  isTerminal = liftCommandIO . isTerminalIO
+  writeStream stream = liftCommandIO . writeStreamIO stream
+  prompt = liftCommandIO . promptIO
+  runProcess request = do
+    dryRun' <- asks (.dryRun)
+    if dryRun'
+      then return $ ProcessUnavailable ProcessExecution
+      else liftCommandIO $ runProcessIO request
+  abortCommand exitCode = App $ lift $ throwError exitCode
+
+
+instance
+  ( MonadFileSystem i
+  , MonadError IOError i
+  , MonadIO i
+  )
+  => MonadProcessControl (App i)
+  where
+  startProcess request = do
+    dryRun' <- asks (.dryRun)
+    started <-
+      if dryRun'
+        then return $ Left $ ProcessUnavailable ProcessExecution
+        else liftCommandIO $ startProcessIO request
+    return $ case started of
+      Left result -> Left result
+      Right process ->
+        Right $
+          StartedProcess
+            (liftCommandIO process.awaitProcess)
+            (liftCommandIO process.cancelStartedProcess)
+
+
+currentEnvironment'
+  :: (MonadFileSystem i, MonadIO i) => App i Environment
 currentEnvironment' = currentEnvironmentUsing currentRepositoryFacts
 
 
@@ -236,12 +342,14 @@ currentEnvironment' = currentEnvironmentUsing currentRepositoryFacts
 -- Facts read from the environment file retain precedence over the supplied
 -- facts, matching normal runtime environment evaluation.
 currentEnvironmentWithFacts
-  :: (MonadFileSystem i, MonadIO i) => FactMap -> App i Environment
+  :: (MonadFileSystem i, MonadIO i)
+  => FactMap -> App i Environment
 currentEnvironmentWithFacts facts = currentEnvironmentUsing $ return facts
 
 
 currentEnvironmentUsing
-  :: (MonadFileSystem i, MonadIO i) => App i FactMap -> App i Environment
+  :: (MonadFileSystem i, MonadIO i)
+  => App i FactMap -> App i Environment
 currentEnvironmentUsing repositoryFacts = do
   sourceDir <- asks (.sourceDirectory)
   envFile' <- asks (.envFile)
@@ -255,7 +363,7 @@ currentEnvironmentUsing repositoryFacts = do
           $(logWarn) $
             "Environment file not found: "
               <> showt (FromStringShow e)
-          detected <- liftIO currentEnvironment
+          detected <- detectEnvironment
           return $ Right (detected, [])
         else die' noEnvFile $ showt e
   (env, fallbackFacts, warnings) <- case result of
@@ -265,7 +373,7 @@ currentEnvironmentUsing repositoryFacts = do
           die' noEnvFile $ showt e
       case factsOnly of
         Right (facts, factsWarnings) -> do
-          detected <- liftIO currentEnvironment
+          detected <- detectEnvironment
           if envFile' == defaultEnvFile
             then return (detected, facts, factsWarnings)
             else
@@ -296,7 +404,8 @@ currentEnvironmentUsing repositoryFacts = do
   return merged
 
 
-currentRepositoryFacts :: (MonadFileSystem i, MonadIO i) => App i FactMap
+currentRepositoryFacts
+  :: (MonadFileSystem i, MonadIO i) => App i FactMap
 currentRepositoryFacts = do
   manifestResult <- loadManifest
   case manifestResult of
@@ -339,7 +448,8 @@ currentRepositoryFacts = do
 -- Returns 'Nothing' when the manifest has no repository identity, the machine
 -- has no identity yet, or this repository has no record on the machine.
 readExistingMachineState
-  :: (MonadFileSystem i, MonadIO i) => Manifest -> App i (Maybe MachineState)
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest -> App i (Maybe MachineState)
 readExistingMachineState manifest = case manifest.repositoryId of
   Nothing -> return Nothing
   Just repositoryId -> do
@@ -359,17 +469,35 @@ instance (MonadFileSystem i, MonadIO i) => MonadEnvironment (App i) where
   currentEnvironment = currentEnvironment'
 
 
-instance (MonadFileSystem i, MonadIO i) => MonadOperatingSystem (App i) where
+instance
+  (MonadFileSystem i, MonadIO i)
+  => MonadOperatingSystem (App i)
+  where
   currentOperatingSystem = (.operatingSystem) <$> currentEnvironment'
 
 
-instance (MonadFileSystem i, MonadIO i) => MonadArchitecture (App i) where
+instance
+  (MonadFileSystem i, MonadIO i)
+  => MonadArchitecture (App i)
+  where
   currentArchitecture = (.architecture) <$> currentEnvironment'
 
 
 runAppWithoutLogging
   :: (MonadFileSystem i, MonadIO i) => AppEnv -> App i a -> i a
-runAppWithoutLogging env app = runAppWithLogging env app (\_ _ _ _ -> pure ())
+runAppWithoutLogging env app = do
+  result <- runAppResultWithoutLogging env app
+  either (liftIO . throwIO) return result
+
+
+-- | Runs the application without logging and returns command exits as values.
+runAppResultWithoutLogging
+  :: (MonadFileSystem i, MonadIO i)
+  => AppEnv
+  -> App i a
+  -> i (Either ExitCode a)
+runAppResultWithoutLogging env app =
+  runAppResultWithLogging env app (\_ _ _ _ -> pure ())
 
 
 -- | Run the application monad with logging handled by the given function.
@@ -379,13 +507,39 @@ runAppWithLogging
   -> App i a
   -> (Loc -> LogSource -> LogLevel -> LogStr -> IO ())
   -> i a
-runAppWithLogging env app = runLoggingT (runReaderT app.unApp env)
+runAppWithLogging env app logger = do
+  result <- runAppResultWithLogging env app logger
+  either (liftIO . throwIO) return result
+
+
+-- | Runs the application with a logger and returns command exits as values.
+runAppResultWithLogging
+  :: (MonadFileSystem i, MonadIO i)
+  => AppEnv
+  -> App i a
+  -> (Loc -> LogSource -> LogLevel -> LogStr -> IO ())
+  -> i (Either ExitCode a)
+runAppResultWithLogging env app =
+  runLoggingT (runExceptT $ runReaderT app.unApp env)
 
 
 -- | Run the application monad with logging to stderr.
 runAppWithStderrLogging
   :: (MonadFileSystem i, MonadIO i) => AppEnv -> App i a -> i a
-runAppWithStderrLogging env = runStderrLoggingT . (`runReaderT` env) . unApp
+runAppWithStderrLogging env app = do
+  result <- runAppResultWithStderrLogging env app
+  either (liftIO . throwIO) return result
+
+
+-- | Runs the application with stderr logging and returns command exits as
+-- values.
+runAppResultWithStderrLogging
+  :: (MonadFileSystem i, MonadIO i)
+  => AppEnv
+  -> App i a
+  -> i (Either ExitCode a)
+runAppResultWithStderrLogging env =
+  runStderrLoggingT . runExceptT . (`runReaderT` env) . unApp
 
 
 manifestPath :: (MonadIO i) => App i OsPath
@@ -398,7 +552,8 @@ manifestPath = do
 
 
 loadManifest
-  :: (MonadFileSystem i, MonadIO i) => App i (Either Error (Maybe Manifest))
+  :: (MonadFileSystem i, MonadIO i)
+  => App i (Either Error (Maybe Manifest))
 loadManifest = do
   filename <- manifestPath
   result <- tryError (readManifestFile filename)
@@ -421,7 +576,8 @@ loadManifest = do
       return $ Right $ Just manifest
 
 
-doesManifestExist :: (MonadFileSystem i, MonadIO i) => App i Bool
+doesManifestExist
+  :: (MonadFileSystem i, MonadIO i) => App i Bool
 doesManifestExist = do
   filePath <- manifestPath
   exists' <- exists filePath
@@ -433,7 +589,8 @@ doesManifestExist = do
   return exists'
 
 
-saveManifest :: (MonadFileSystem i, MonadIO i) => Manifest -> App i OsPath
+saveManifest
+  :: (MonadFileSystem i, MonadIO i) => Manifest -> App i OsPath
 saveManifest manifest = do
   filename <- manifestPath
   $(logDebugSH) manifest
@@ -448,7 +605,8 @@ saveManifest manifest = do
 
 
 loadRepository
-  :: (MonadFileSystem i, MonadIO i) => App i (Either Error (Maybe Repository))
+  :: (MonadFileSystem i, MonadIO i)
+  => App i (Either Error (Maybe Repository))
 loadRepository = do
   sourceDir <- asks (normalise . (.sourceDirectory))
   result <- loadManifest
@@ -563,7 +721,8 @@ automaticSelectionUsesCheckoutManifest state appEnv = do
 
 -- | Loads or creates machine state, preserving known legacy apply history.
 prepareMachineState
-  :: (MonadFileSystem i, MonadIO i) => Manifest -> App i MachineState
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest -> App i MachineState
 prepareMachineState = prepareMachineStateWithLegacyHistory True
 
 
@@ -583,7 +742,8 @@ prepareMachineStateBeforeMigration =
 -- Unlike migration, initialization must not adopt a legacy snapshot or inherit
 -- lifecycle history from a repository at the same checkout path.
 prepareNewMachineState
-  :: (MonadFileSystem i, MonadIO i) => Manifest -> App i MachineState
+  :: (MonadFileSystem i, MonadIO i)
+  => Manifest -> App i MachineState
 prepareNewMachineState manifest =
   prepareNewMachineStateBeforeMigration manifest (return ())
 
@@ -615,7 +775,7 @@ ensureNoLegacySnapshotForInitialization = do
   present <- exists legacy
   symbolicLink <- isSymlink legacy
   when (present || symbolicLink) $ do
-    pathStyle <- pathStyleFor stderr
+    pathStyle <- pathStyleFor StandardError
     die' machineStateError $
       "Cannot initialize a checkout that already contains legacy state at "
         <> pathStyle legacy
@@ -640,11 +800,11 @@ prepareMachineState'
 prepareMachineState' inheritLegacyHistory manifest beforeMigration =
   case manifest.repositoryId of
     Nothing -> do
-      codeStyle <- codeStyleFor stderr
+      codeStyle <- codeStyleFor StandardError
       printStderr' Error "This repository has no stable repository identity."
       printStderr' Note $
         "Run `" <> codeStyle "dojang migrate" <> "' to migrate it safely."
-      liftIO $ exitWith machineStateError
+      abortCommand machineStateError
     Just repositoryId -> do
       stateDir <- asks (.stateDirectory)
       sourceDir' <- asks (.sourceDirectory)
@@ -676,7 +836,7 @@ prepareMachineState' inheritLegacyHistory manifest beforeMigration =
                   if registryExists && sourceExists
                     then sameExistingPath registry.repositoryPath sourceDir
                     else return False
-      now <- liftIO getCurrentTime
+      now <- currentTime
       stateResult <-
         catchStateIOErrors $
           prepareRepositoryStateWithOwnershipBeforeMigration
@@ -818,14 +978,15 @@ markMachineStateApplied
   :: (MonadFileSystem i, MonadIO i) => MachineState -> App i ()
 markMachineStateApplied state = do
   stateDir <- asks (.stateDirectory)
-  now <- liftIO getCurrentTime
+  now <- currentTime
   result <- markFirstApplied stateDir now state
   case result of
     Left err -> die' machineStateError $ formatStateError err
     Right _ -> return ()
 
 
-ensureRepository :: (MonadFileSystem i, MonadIO i) => App i Repository
+ensureRepository
+  :: (MonadFileSystem i, MonadIO i) => App i Repository
 ensureRepository = do
   result <- loadRepository
   case result of
@@ -833,31 +994,33 @@ ensureRepository = do
       dieWithErrors manifestReadError $ formatErrors e
     Right Nothing -> do
       printStderr' Error "No manifest found."
-      codeStyle <- codeStyleFor stderr
+      codeStyle <- codeStyleFor StandardError
       printStderr'
         Note
         ("Run `" <> codeStyle "dojang init" <> "' to create one.")
-      liftIO $ exitWith manifestUninitialized
+      abortCommand manifestUninitialized
     Right (Just repo) -> return repo
 
 
 -- | Loads the selected repository manifest without creating machine state.
-ensureManifest :: (MonadFileSystem i, MonadIO i) => App i Manifest
+ensureManifest
+  :: (MonadFileSystem i, MonadIO i) => App i Manifest
 ensureManifest = do
   result <- loadManifest
   case result of
     Left err -> dieWithErrors manifestReadError $ formatErrors err
     Right Nothing -> do
       printStderr' Error "No manifest found."
-      codeStyle <- codeStyleFor stderr
+      codeStyle <- codeStyleFor StandardError
       printStderr'
         Note
         ("Run `" <> codeStyle "dojang init" <> "' to create one.")
-      liftIO $ exitWith manifestUninitialized
+      abortCommand manifestUninitialized
     Right (Just manifest) -> return manifest
 
 
-ensureContext :: (MonadFileSystem i, MonadIO i) => App i (Context (App i))
+ensureContext
+  :: (MonadFileSystem i, MonadIO i) => App i (Context (App i))
 ensureContext = do
   repo <- ensureRepository
   currentEnv <- currentEnvironment'
@@ -881,9 +1044,11 @@ ensureContext = do
 
 
 lookupEnv'
-  :: (MonadFileSystem i, MonadIO i) => EnvironmentVariable -> i (Maybe OsString)
+  :: (MonadFileSystem i, MonadIO i)
+  => EnvironmentVariable
+  -> App i (Maybe OsString)
 lookupEnv' env = do
-  value <- liftIO $ lookupEnv $ unpack env
+  value <- lookupEnvironmentVariable $ unpack env
   case value of
     Just v -> do
       Just <$> encodePath v

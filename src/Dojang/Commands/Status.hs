@@ -23,8 +23,6 @@ import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)), toList)
 import Data.Map.Strict qualified as Map
 import System.Exit (ExitCode (..))
-import System.IO (Handle, stderr)
-import System.Info qualified
 
 import Data.CaseInsensitive (original)
 import Data.Text (Text, intercalate, pack)
@@ -34,8 +32,10 @@ import System.OsPath (addTrailingPathSeparator, makeRelative)
 import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.App (App, AppEnv (dryRun), ensureContext, prepareMachineState)
+import Dojang.CommandEffect (MonadCommandEffect (hostPlatform))
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , ensureRouteOwnership
@@ -223,8 +223,8 @@ printModeNotes
   => [ManagedCorrespondence]
   -> App i ()
 printModeNotes managed = do
-  pathStyle <- pathStyleFor stderr
-  codeStyle <- codeStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
+  codeStyle <- codeStyleFor StandardError
   drifted <- observeModeDrift managed
   forM_ drifted $ \(m, _) ->
     printStderr' Note $
@@ -241,13 +241,14 @@ printModeNotes managed = do
 -- so any other declaration must be surfaced instead of silently claiming
 -- success.
 printUnsupportedModeWarnings
-  :: (MonadIO i)
+  :: (MonadFileSystem i, MonadIO i)
   => [ManagedCorrespondence]
   -> App i ()
-printUnsupportedModeWarnings managed =
-  when (System.Info.os == "mingw32") $ do
-    pathStyle <- pathStyleFor stderr
-    codeStyle <- codeStyleFor stderr
+printUnsupportedModeWarnings managed = do
+  platform <- hostPlatform
+  when (platform == "mingw32") $ do
+    pathStyle <- pathStyleFor StandardError
+    codeStyle <- codeStyleFor StandardError
     forM_ unsupported $ \(name, mode) ->
       printStderr' Warning $
         "Route "
@@ -360,9 +361,10 @@ renderFileStat (Symlink _) = (Default, "L")
 
 
 -- TODO: This should be in a separate module:
-formatWarning :: (MonadIO i) => Handle -> RouteMapWarning -> i Text
-formatWarning handle (EnvironmentPredicateWarning w) = do
-  codeStyle <- codeStyleFor handle
+formatWarning
+  :: (MonadCommandEffect i) => StandardStream -> RouteMapWarning -> i Text
+formatWarning stream (EnvironmentPredicateWarning w) = do
+  codeStyle <- codeStyleFor stream
   case w of
     (UndefinedMoniker moniker) ->
       return $
@@ -384,14 +386,14 @@ formatWarning handle (EnvironmentPredicateWarning w) = do
         "Reference to an undefined machine fact: "
           <> codeStyle (factKeyText key)
           <> "."
-formatWarning handle (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
-  codeStyle <- codeStyleFor handle
+formatWarning stream (FilePathExpressionWarning (UndefinedEnvironmentVariable envVar)) = do
+  codeStyle <- codeStyleFor stream
   return $
     "Reference to an undefined environment variable: "
       <> codeStyle envVar
       <> "."
-formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
-  pathStyle <- pathStyleFor handle
+formatWarning stream (OverlapDestinationPathsWarning name dst paths) = do
+  pathStyle <- pathStyleFor stream
   pairStrings <- forM paths $ \(from, to) -> do
     return $ pathStyle from <> " -> " <> pathStyle to
   case pairStrings of
@@ -413,8 +415,8 @@ formatWarning handle (OverlapDestinationPathsWarning name dst paths) = do
 
 
 -- TODO: This should be in a separate module:
-printWarnings :: (MonadIO i) => [RouteMapWarning] -> App i ()
+printWarnings :: (MonadFileSystem i, MonadIO i) => [RouteMapWarning] -> App i ()
 printWarnings ws =
   forM_ ws $ \w -> do
-    formatted <- formatWarning stderr w
+    formatted <- formatWarning StandardError w
     printStderr' Warning formatted

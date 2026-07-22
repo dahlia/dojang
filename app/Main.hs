@@ -8,7 +8,7 @@
 module Main (main) where
 
 import Control.Applicative (Alternative ((<|>)), optional, (<**>))
-import Control.Monad (void, when)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Function ((&))
 import Data.Maybe (catMaybes, fromMaybe, maybeToList)
@@ -17,7 +17,6 @@ import Data.Text (pack)
 import GHC.IO.Encoding (setLocaleEncoding, utf8)
 import System.Environment (lookupEnv, setEnv)
 import System.Exit (ExitCode (..), exitWith)
-import System.IO (stderr)
 import System.IO.CodePage (withCP65001)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Info (os)
@@ -27,7 +26,7 @@ import Options.Applicative
   ( Parser
   , ParserInfo
   , ParserPrefs
-  , ParserResult
+  , ParserResult (..)
   , action
   , argument
   , command
@@ -39,7 +38,6 @@ import Options.Applicative
   , flag'
   , footer
   , fullDesc
-  , handleParseResult
   , header
   , help
   , helper
@@ -48,6 +46,7 @@ import Options.Applicative
   , many
   , metavar
   , progDesc
+  , renderFailure
   , short
   , showDefault
   , str
@@ -64,8 +63,8 @@ import Dojang.App
   , AppEnv (..)
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
-  , runAppWithStderrLogging
-  , runAppWithoutLogging
+  , runAppResultWithStderrLogging
+  , runAppResultWithoutLogging
   , validateRepositoryCheckout
   )
 import Dojang.Cli.CommandMode
@@ -77,8 +76,13 @@ import Dojang.Cli.CommandMode
   , migrationCommandMode
   , repositoryCommandMode
   )
+import Dojang.CommandEffect
+  ( MonadCommandEffect (writeStream)
+  , OutputStream (OutputError, OutputStandard)
+  )
 import Dojang.Commands
   ( Admonition (Error, Hint, Note)
+  , StandardStream (..)
   , codeStyleFor
   , pathStyleFor
   , printStderr'
@@ -632,9 +636,9 @@ parserPrefs :: ParserPrefs
 parserPrefs = defaultPrefs
 
 
-versionCmd :: (MonadIO i) => App i ExitCode
+versionCmd :: (MonadFileSystem i, MonadIO i) => App i ExitCode
 versionCmd = do
-  liftIO $ putStrLn $ "dojang " <> toString version
+  writeStream OutputStandard $ pack ("dojang " <> toString version) <> "\n"
   return ExitSuccess
 
 
@@ -647,8 +651,14 @@ helpCmd
   -> Maybe String
   -> App i ExitCode
 helpCmd stateRoot defaultRepoPath cmdString = do
-  void $ liftIO $ handleParseResult result
-  return ExitSuccess
+  case result of
+    Failure failure -> do
+      let (message, exitCode) = renderFailure failure "dojang"
+      writeStream
+        (if exitCode == ExitSuccess then OutputStandard else OutputError)
+        (pack message <> "\n")
+      return exitCode
+    _ -> return ExitSuccess
  where
   args = maybeToList cmdString ++ ["--help"]
   result :: ParserResult (ParsedApp i)
@@ -687,7 +697,7 @@ main = withCP65001 $ do
           case legacyRegistry of
             Nothing -> return ()
             Just registry -> do
-              pathStyle <- pathStyleFor stderr
+              pathStyle <- pathStyleFor StandardError
               printStderr' Note $
                 "The legacy registry points to "
                   <> pathStyle registry.repositoryPath
@@ -732,7 +742,7 @@ main = withCP65001 $ do
             :: IO (ParsedApp IO)
         exitCode' <- run appEnv cmd
         return (exitCode', -1)
-  codeColor <- codeStyleFor stderr
+  codeColor <- codeStyleFor StandardError
   when (appEnv.dryRun && ops > 0) $ do
     printStderr' Note $
       "Since "
@@ -748,14 +758,19 @@ main = withCP65001 $ do
     -> App i ExitCode
     -> i ExitCode
   run appEnv cmd = do
-    (if appEnv.debug then runAppWithStderrLogging else runAppWithoutLogging)
-      appEnv
-      $ cmd
-        `catchError` \e -> do
-          printStderr' Error $
-            "An unexpected error occurred; you may report this as a bug: "
-              <> showt e
-          return unhandledError
+    result <-
+      ( if appEnv.debug
+          then runAppResultWithStderrLogging
+          else runAppResultWithoutLogging
+      )
+        appEnv
+        $ cmd
+          `catchError` \e -> do
+            printStderr' Error $
+              "An unexpected error occurred; you may report this as a bug: "
+                <> showt e
+            return unhandledError
+    return $ either id id result
 
 
 nativeStateRoot :: IO OsPath

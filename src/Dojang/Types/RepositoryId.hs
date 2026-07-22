@@ -10,11 +10,11 @@ module Dojang.Types.RepositoryId
   , repositoryIdText
   ) where
 
-import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Text (Text)
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
-import Data.UUID.V4 qualified as UUID.V4
+
+import Dojang.CommandEffect (MonadCommandEffect (newUUID))
 
 
 -- | A stable UUID that travels with a repository independently of its path.
@@ -23,8 +23,8 @@ newtype RepositoryId = RepositoryId UUID
 
 
 -- | Generates a new random version 4 repository UUID.
-newRepositoryId :: (MonadIO m) => m RepositoryId
-newRepositoryId = RepositoryId <$> liftIO UUID.V4.nextRandom
+newRepositoryId :: (MonadCommandEffect m) => m RepositoryId
+newRepositoryId = RepositoryId <$> newUUID
 
 
 -- | Parses a UUID as a repository identity.

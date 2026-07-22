@@ -12,19 +12,27 @@ module Dojang.Commands.Disambiguation
   ) where
 
 import Control.Monad (forM, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Data.Map.Strict (Map, fromList, lookup)
-import System.Environment (lookupEnv)
-import System.IO (stderr)
 import Prelude hiding (lookup)
 
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
-import FortyTwo.Prompts.Select (select)
+import Data.Text (pack, unpack)
 import System.OsPath (OsPath)
 
 import Dojang.App (App)
-import Dojang.Commands (Admonition (..), pathStyleFor, printStderr')
+import Dojang.CommandEffect
+  ( MonadCommandEffect (lookupEnvironmentVariable, prompt)
+  , PromptRequest (SelectPrompt)
+  , PromptResult (PromptUnavailable, SelectedValue)
+  )
+import Dojang.Commands
+  ( Admonition (..)
+  , StandardStream (..)
+  , pathStyleFor
+  , printStderr'
+  )
 import Dojang.MonadFileSystem (MonadFileSystem (decodePath))
 import Dojang.Types.Context (CandidateRoute (..))
 import Dojang.Types.Repository (RouteResult (..))
@@ -49,9 +57,9 @@ data AutoSelectMode
 --   * @\"first\"@ - Auto-select the first route without prompting.
 --   * @\"error\"@ - Return an error when routes are ambiguous.
 --   * (unset or other) - Prompt the user interactively.
-getAutoSelectMode :: (MonadIO m) => m AutoSelectMode
-getAutoSelectMode = liftIO $ do
-  env <- lookupEnv "DOJANG_AUTO_SELECT"
+getAutoSelectMode :: (MonadCommandEffect m) => m AutoSelectMode
+getAutoSelectMode = do
+  env <- lookupEnvironmentVariable "DOJANG_AUTO_SELECT"
   return $ case env of
     Just "first" -> AutoSelectFirst
     Just "error" -> ErrorOnAmbiguity
@@ -95,7 +103,7 @@ disambiguateRoutes mode explicitSource candidates =
       case existingCandidates of
         [c] -> do
           -- Auto-select the single existing file.
-          pathStyle <- pathStyleFor stderr
+          pathStyle <- pathStyleFor StandardError
           printStderr' Note $
             "Auto-selected existing file: "
               <> pathStyle c.sourceFilePath
@@ -129,5 +137,11 @@ promptForRoute candidates = do
       "Multiple files exist. This may indicate a configuration issue."
   -- Prompt user to select.
   selected <-
-    liftIO $ select "Multiple source paths found. Select one:" displayStrings
-  return $ lookup selected displayToRoute
+    prompt $
+      SelectPrompt
+        "Multiple source paths found. Select one:"
+        (pack <$> displayStrings)
+  return $ case selected of
+    SelectedValue value -> lookup (unpack value) displayToRoute
+    PromptUnavailable -> Nothing
+    _ -> Nothing

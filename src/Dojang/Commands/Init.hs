@@ -17,17 +17,14 @@ module Dojang.Commands.Init
 
 import Control.Monad (foldM, forM, forM_, void, when)
 import Control.Monad.Except (MonadError (catchError))
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Data.Function ((&))
 import Data.List (maximumBy, sortOn)
 import Data.List.NonEmpty as NonEmpty (NonEmpty ((:|)), toList)
 import Data.Ord (comparing)
 import Data.String (IsString, fromString)
-import Data.Time (getCurrentTime)
-import System.Exit (ExitCode (..), exitWith)
-import System.IO (stderr)
+import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
-import System.Info qualified (os)
 import Prelude hiding (init)
 
 import Control.Monad.Logger (logDebugSH, logInfo, logWarn)
@@ -53,8 +50,6 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text, lines, unlines)
 import Data.Text qualified as Text
-import FortyTwo.Prompts.Input (input)
-import FortyTwo.Prompts.Multiselect (multiselect)
 import System.FilePattern (FilePattern)
 import System.OsPath
   ( OsPath
@@ -79,8 +74,14 @@ import Dojang.App
   , readValidatedLegacyRegistry
   , saveManifest
   )
+import Dojang.CommandEffect
+  ( MonadCommandEffect (abortCommand, currentTime, hostPlatform, prompt)
+  , PromptRequest (InputPrompt, MultiselectPrompt)
+  , PromptResult (InputValue, MultiselectedValues, PromptUnavailable)
+  )
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , pathStyleFor
@@ -414,12 +415,13 @@ initializeNew
   -> [Text]
   -> App i ExitCode
 initializeNew presets noInteractive factsFile assignments = do
+  platform <- hostPlatform
   manifestExists <- doesManifestExist
   when manifestExists $ do
     die' manifestAlreadyExists "Manifest already exists."
   $(logInfo) "No manifest found."
-  when (System.Info.os == "mingw32" && not noInteractive) $ do
-    codeStyle <- codeStyleFor stderr
+  when (platform == "mingw32" && not noInteractive) $ do
+    codeStyle <- codeStyleFor StandardError
     printStderr' Error $
       "We are sorry, but interactive mode is currently not supported on "
         <> "Windows.  See the relevant issue:\n"
@@ -432,7 +434,7 @@ initializeNew presets noInteractive factsFile assignments = do
         <> " flag.  See also "
         <> (codeStyle "-h" <> "/" <> codeStyle "--help")
         <> " for command-line options."
-    liftIO $ exitWith unsupportedOnEnvError
+    abortCommand unsupportedOnEnvError
   _ <- readValidatedLegacyRegistry
   ensureNoLegacySnapshotForInitialization
   presets' <-
@@ -456,7 +458,7 @@ initializeNew presets noInteractive factsFile assignments = do
     let manifest = makeManifest repositoryId presets'
     state <- prepareNewMachineStateBeforeMigration manifest $ do
       repoDir <- asks (.sourceDirectory)
-      pathStyle <- pathStyleFor stderr
+      pathStyle <- pathStyleFor StandardError
       forM_ (Data.Map.Strict.toAscList manifest.fileRoutes) $ \(path', route') -> do
         when (route'.fileType == Directory) $ do
           let dirPath = repoDir </> path'
@@ -537,7 +539,8 @@ prevalidateExistingMachineFacts
       maybe (readSelectedFacts checkout state) return requestedFacts
     let declared =
           maybe supplied (Map.union supplied . (.declaredFacts)) state
-    when (noInteractive || System.Info.os == "mingw32") $ do
+    platform <- hostPlatform
+    when (noInteractive || platform == "mingw32") $ do
       missing <-
         missingMachineFacts manifest $ Map.union declared fileFacts
       reportMissingMachineFacts missing
@@ -573,10 +576,11 @@ missingMachineFacts manifest known = do
   return $ required `Set.difference` Map.keysSet known
 
 
-reportMissingMachineFacts :: (MonadIO i) => Set FactKey -> App i ()
+reportMissingMachineFacts
+  :: (MonadFileSystem i, MonadIO i) => Set FactKey -> App i ()
 reportMissingMachineFacts missing =
   when (not $ Set.null missing) $ do
-    codeStyle <- codeStyleFor stderr
+    codeStyle <- codeStyleFor StandardError
     let rendered =
           Text.intercalate
             ", "
@@ -596,6 +600,7 @@ enrollMachineFacts
   -> [Text]
   -> App i MachineState
 enrollMachineFacts state manifest noInteractive requestedFactsFile assignments = do
+  platform <- hostPlatform
   supplied <- parseFactAssignments assignments
   (factsFile', fileFacts) <-
     resolveFactsSource state requestedFactsFile
@@ -606,14 +611,24 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
     if Set.null missing
       then return Map.empty
       else
-        if noInteractive || System.Info.os == "mingw32"
+        if noInteractive || platform == "mingw32"
           then do
             reportMissingMachineFacts missing
             return Map.empty
           else do
             pairs <- forM (Set.toAscList missing) $ \key -> do
-              value <- input $ "Value for fact." ++ Text.unpack (factKeyText key) ++ ":"
-              return (key, fromString value)
+              response <-
+                prompt $
+                  InputPrompt $
+                    "Value for fact."
+                      <> factKeyText key
+                      <> ":"
+              value <- case response of
+                InputValue text -> return text
+                PromptUnavailable ->
+                  die' cliError "Cannot prompt for a required machine fact."
+                _ -> die' cliError "Invalid response to the machine-fact prompt."
+              return (key, fromString $ Text.unpack value)
             return $ Map.fromList pairs
   let declaredFactUpdates = Map.union prompted supplied
   let factsFileUpdate =
@@ -624,7 +639,7 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
       return state
     else do
       stateRoot <- asks (.stateDirectory)
-      now <- liftIO getCurrentTime
+      now <- currentTime
       updated <-
         updateMachineFacts
           stateRoot
@@ -640,7 +655,7 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
 
 
 parseFactAssignments
-  :: (MonadIO i) => [Text] -> App i FactMap
+  :: (MonadFileSystem i, MonadIO i) => [Text] -> App i FactMap
 parseFactAssignments = foldM insertAssignment Map.empty
  where
   insertAssignment facts assignment = do
@@ -853,14 +868,19 @@ windowsAppData :: FilePathExpression
 windowsAppData = Substitution "AppData"
 
 
-askPresets :: (MonadIO i) => App i [InitPreset]
+askPresets :: (MonadFileSystem i, MonadIO i) => App i [InitPreset]
 askPresets = do
   -- FIXME: It doesn't seem to work on Windows...
   -- https://github.com/GianlucaGuarini/fortytwo/issues/7
-  presets <-
-    multiselect
-      "What operating systems and architectures do you use?"
-      (map initPresetName [minBound .. maxBound])
+  response <-
+    prompt $
+      MultiselectPrompt
+        "What operating systems and architectures do you use?"
+        (Text.pack . initPresetName <$> [minBound .. maxBound])
+  presets <- case response of
+    MultiselectedValues values -> return $ Text.unpack <$> values
+    PromptUnavailable -> die' cliError "Cannot prompt for initialization presets."
+    _ -> die' cliError "Invalid response to the initialization prompt."
   return [namesToPresets ! name | name <- presets]
  where
   namesToPresets :: Map String InitPreset

@@ -7,13 +7,12 @@ module Dojang.Commands.Migrate (migrate) where
 
 import Control.Monad (when)
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
-import System.Exit (ExitCode (ExitSuccess), exitWith)
-import System.IO (stderr)
+import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath ((</>))
 import Prelude hiding (readFile, writeFile)
 
@@ -24,8 +23,10 @@ import Dojang.App
   , prepareMachineState
   , prepareMachineStateBeforeMigration
   )
+import Dojang.CommandEffect (MonadCommandEffect (abortCommand))
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , dieWithErrors
@@ -81,7 +82,7 @@ migrate = do
           let filename = sourceDir </> manifestFile'
           symbolicLink <- isSymlink filename
           when symbolicLink $ do
-            pathStyle <- pathStyleFor stderr
+            pathStyle <- pathStyleFor StandardError
             die' manifestReadError $
               "Cannot migrate symbolic-link manifest "
                 <> pathStyle filename
@@ -102,7 +103,7 @@ migrate = do
             case written of
               Left err -> manifestWriteIOError err
               Right () -> return ()
-            pathStyle <- pathStyleFor stderr
+            pathStyle <- pathStyleFor StandardError
             printStderr $
               "Stable repository identity added to "
                 <> pathStyle filename
@@ -110,7 +111,7 @@ migrate = do
   state <- case lockedState of
     Left err -> die' machineStateError $ formatStateError err
     Right value -> return value
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   printStderr $
     "Repository machine state is ready at "
       <> pathStyle state.intermediatePath
@@ -124,10 +125,10 @@ migrate = do
       Left err -> dieWithErrors manifestReadError $ formatErrors err
       Right Nothing -> do
         printStderr' Error "No manifest found."
-        codeStyle <- codeStyleFor stderr
+        codeStyle <- codeStyleFor StandardError
         printStderr' Note $
           "Run `" <> codeStyle "dojang init" <> "' to create one."
-        liftIO $ exitWith manifestUninitialized
+        abortCommand manifestUninitialized
       Right (Just value) -> return value
 
   readManifestBytes filename =

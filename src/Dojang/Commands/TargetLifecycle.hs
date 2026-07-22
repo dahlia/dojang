@@ -7,14 +7,12 @@
 module Dojang.Commands.TargetLifecycle (forget, unmanage) where
 
 import Control.Monad (forM_, unless, when)
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Reader (asks)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Time (getCurrentTime)
 import System.Exit (ExitCode (ExitSuccess))
-import System.IO (stderr)
 import System.OsPath (OsPath, normalise, takeDirectory, (</>))
 
 import Dojang.App
@@ -26,8 +24,10 @@ import Dojang.App
   , prepareMachineState
   , validateRepositoryStateOwnership
   )
+import Dojang.CommandEffect (MonadCommandEffect (currentTime))
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , ensureRouteOwnership
@@ -134,7 +134,7 @@ unmanageCore routeSelector destinations force = do
     die' lifecycleSelectionError "At least one lifecycle selector is unknown."
   let matched = filter matches records
   when (null matched) $ do
-    codeStyle <- codeStyleFor stderr
+    codeStyle <- codeStyleFor StandardError
     die' lifecycleSelectionError $
       "No managed target matches the selection.  Use `"
         <> codeStyle "dojang status"
@@ -150,7 +150,7 @@ unmanageCore routeSelector destinations force = do
       "The selection includes an active target.  Change the manifest first, "
         <> "then run `dojang unmanage' again."
   statuses <- mapM observeOrphanStatus selected
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   forM_ (zip selected statuses) $ \(target, targetStatus) ->
     printStderr' Note $
       "Selected managed-target record "
@@ -159,14 +159,14 @@ unmanageCore routeSelector destinations force = do
         <> renderOrphanStatus targetStatus
         <> ") for removal."
   when (not force && OrphanModified `elem` statuses) $ do
-    codeStyle <- codeStyleFor stderr
+    codeStyle <- codeStyleFor StandardError
     die' accidentalDeletionWarning $
       "At least one orphan destination differs from its recorded baseline.  "
         <> "Review it "
         <> "and retry with `"
         <> codeStyle "--force"
         <> "' to discard only its machine-local record."
-  now <- liftIO getCurrentTime
+  now <- currentTime
   root <- asks (.stateDirectory)
   let selectedIds = Set.fromList $ (.targetId) <$> selected
   result <-
@@ -289,7 +289,7 @@ forget force = do
           statuses <-
             mapM observeOrphanStatus $ Map.elems state.targetRecords
           when (not force && OrphanModified `elem` statuses) $ do
-            codeStyle <- codeStyleFor stderr
+            codeStyle <- codeStyleFor StandardError
             die' accidentalDeletionWarning $
               "At least one managed destination differs from its snapshot.  "
                 <> "Review it and retry with `"
@@ -348,7 +348,7 @@ removeEmptySnapshotDirectory path = do
 
 
 stateOrDie
-  :: (MonadIO i)
+  :: (MonadFileSystem i, MonadIO i)
   => Either StateError value
   -> App i value
 stateOrDie result = case result of

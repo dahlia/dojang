@@ -8,24 +8,20 @@ module Dojang.Commands.Reflect (reflect, reflectWithCodecRuntime) where
 
 import Control.Monad (filterM, forM, forM_, unless, void, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
-import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.IO.Class (MonadIO)
 import Data.List (isPrefixOf, nub, nubBy, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Ord (Down (Down))
 import Data.Set qualified as Set
-import Data.Time (getCurrentTime)
 import Data.Word (Word32)
-import System.Exit (ExitCode (..), exitWith)
-import System.IO (hIsTerminalDevice, stderr, stdin)
+import System.Exit (ExitCode (..))
 import Prelude hiding (readFile)
 
 import Control.Monad.Logger (logDebug, logDebugSH)
 import Control.Monad.Reader (asks)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (Text, pack)
-import FortyTwo.Prompts.Confirm (confirm)
-import FortyTwo.Prompts.Select (select)
+import Data.Text (Text, pack, unpack)
 import System.OsPath
   ( OsPath
   , makeRelative
@@ -40,8 +36,14 @@ import Dojang.App
   , ensureContext
   , prepareMachineState
   )
+import Dojang.CommandEffect
+  ( MonadCommandEffect (abortCommand, currentTime, isTerminal)
+  , confirmPrompt
+  , selectPrompt
+  )
 import Dojang.Commands
   ( Admonition (..)
+  , StandardStream (..)
   , codeStyleFor
   , die'
   , dieWithErrors
@@ -223,8 +225,8 @@ reflectCore
 reflectCore runtime force allFlag includeUnregistered _explicitSource [] = do
   -- No arguments: reflect all changed files
   ctx <- ensureContext
-  pathStyle <- pathStyleFor stderr
-  codeStyle <- codeStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
+  codeStyle <- codeStyleFor StandardError
   (allEvaluated, ws) <- makeCodecAwareEvaluated runtime ctx
   let allManaged = (.managed) <$> allEvaluated
   let allFiles = (.correspondence) <$> allManaged
@@ -337,8 +339,8 @@ reflectCore runtime force allFlag includeUnregistered _explicitSource [] = do
                 <> " unregistered file(s):"
             forM_ unregisteredFiles $ \unreg -> do
               printStderr $ "  " <> pathStyle unreg.filePath
-            isTerminal <- liftIO $ hIsTerminalDevice stdin
-            if not isTerminal
+            terminal <- isTerminal StandardInput
+            if not terminal
               then do
                 printStderr' Warning $
                   "Cannot prompt for route selection in non-interactive mode."
@@ -371,9 +373,11 @@ reflectCore runtime force allFlag includeUnregistered _explicitSource [] = do
                       printStderr $
                         "Select route for " <> pathStyle unreg.filePath <> ":"
                       selectedName <-
-                        liftIO $
-                          select "Route: " routeNames
-                      case [r | (r, name) <- zip routes routeNames, name == selectedName] of
+                        selectPrompt "Route: " $ pack <$> routeNames
+                      case [ r
+                           | (r, name) <- zip routes routeNames
+                           , Just name == (unpack <$> selectedName)
+                           ] of
                         (selectedRoute : _) -> do
                           correspond <-
                             createUnregisteredCorrespondence ctx unreg selectedRoute
@@ -408,9 +412,9 @@ reflectCore runtime force allFlag includeUnregistered _explicitSource [] = do
         if allFlag
           then return True
           else do
-            isTerminal <- liftIO $ hIsTerminalDevice stdin
-            if isTerminal
-              then liftIO $ confirm "Reflect all changed files?"
+            terminal <- isTerminal StandardInput
+            if terminal
+              then confirmPrompt "Reflect all changed files?"
               else return True -- Non-interactive: proceed
       if proceed
         then do
@@ -424,10 +428,10 @@ reflectCore runtime force allFlag includeUnregistered _explicitSource [] = do
           return ExitSuccess
         else do
           printStderr "Cancelled."
-          liftIO $ exitWith userCancelledError
+          abortCommand userCancelledError
 reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
   ctx <- ensureContext
-  pathStyle <- pathStyleFor stderr
+  pathStyle <- pathStyleFor StandardError
   absPaths <-
     nubBy
       (\left right -> destinationPathIdentity left == destinationPathIdentity right)
@@ -483,7 +487,7 @@ reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
         files <- filterFilesInDirs dirPaths changedFiles
         return (files, evaluated)
   -- For files: process as before
-  codeStyle <- codeStyleFor stderr
+  codeStyle <- codeStyleFor StandardError
   warningLists <- forM filePaths $ \absPath -> do
     (state, ws) <- getRouteState ctx absPath
     case state of
@@ -502,7 +506,7 @@ reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
             printStderr'
               Hint
               ("Add a route for it in " <> pathStyle manifestFile' <> ".")
-            liftIO $ exitWith fileNotRoutedError
+            abortCommand fileNotRoutedError
       Routed _ -> do
         return ws
       Ignored name pattern -> do
@@ -539,7 +543,7 @@ reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
                 <> "/"
                 <> codeStyle "--force"
                 <> " option."
-            liftIO $ exitWith ignoredFileError
+            abortCommand ignoredFileError
   autoSelectMode <- getAutoSelectMode
   fileCorrespondences <- forM filePaths $ \p -> do
     (routeMatch, ws) <- findMatchingRoutes ctx p
@@ -572,7 +576,7 @@ reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
                 <> " to specify which source path to use, or set "
                 <> codeStyle "DOJANG_AUTO_SELECT=first"
                 <> " to auto-select."
-            liftIO $ exitWith ambiguousRouteError
+            abortCommand ambiguousRouteError
           Just route -> do
             correspond <- makeCorrespondForRoute ctx p route
             rejectUntrackedMissingPath p correspond
@@ -592,14 +596,14 @@ reflectCore runtime force allFlag _includeUnregistered explicitSource paths = do
         <> " changed file(s) in specified directories:"
     forM_ allCorrespondences $ \fc -> do
       printStderr $ "  " <> pathStyle fc.destination.path
-    isTerminal <- liftIO $ hIsTerminalDevice stdin
+    terminal <- isTerminal StandardInput
     proceed <-
-      if isTerminal
-        then liftIO $ confirm "Reflect these files?"
+      if terminal
+        then confirmPrompt "Reflect these files?"
         else return True
     unless proceed $ do
       printStderr "Cancelled."
-      liftIO $ exitWith userCancelledError
+      abortCommand userCancelledError
   reflectCorrespondences
     runtime
     ctx
@@ -734,7 +738,7 @@ reflectCorrespondences
                     == destinationPathIdentity managed.correspondence.destination.path
             )
             selectedFiles
-    pathStyle <- pathStyleFor stderr
+    pathStyle <- pathStyleFor StandardError
     let attachSelected
           :: FileCorrespondence
           -> ManagedCorrespondence
@@ -1181,7 +1185,7 @@ persistConvergedTargets
   -> App i ()
 persistConvergedTargets ctx machineState selected =
   unless (null selected) $ do
-    now <- liftIO getCurrentTime
+    now <- currentTime
     root <- asks (.stateDirectory)
     result <-
       updateManagedTargetsWith

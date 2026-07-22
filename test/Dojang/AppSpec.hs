@@ -26,14 +26,24 @@ import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.App
-  ( AppEnv (..)
+  ( App
+  , AppEnv (..)
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
   , prepareMachineState
+  , runAppResultWithoutLogging
   , runAppWithLogging
   , runAppWithoutLogging
   , validateRepositoryCheckout
+  )
+import Dojang.CommandEffect
+  ( CommandEffectKind (ProcessExecution)
+  , MonadCommandEffect (abortCommand, runProcess)
+  , MonadProcessControl (startProcess)
+  , ProcessRequest (executable)
+  , ProcessResult (ProcessUnavailable)
+  , emptyProcessRequest
   )
 import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
@@ -77,6 +87,25 @@ spec = sequential $ do
   let posixIt = if os == "mingw32" then xit else it
   let redirectedHomeSymlinkIt =
         if symlinkAvailable then redirectedHomeIt else xit
+
+  it "returns command exits as values" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path False False
+    runAppResultWithoutLogging
+      appEnv
+      (abortCommand machineStateError :: App IO ())
+      `shouldReturn` Left machineStateError
+
+  it "refuses process execution through a dry-run App" $ do
+    path <- encodeFS "."
+    let appEnv = AppEnv path True Nothing path path path True False
+        request = emptyProcessRequest{executable = "does-not-exist"}
+    runAppWithoutLogging appEnv (runProcess request)
+      `shouldReturn` ProcessUnavailable ProcessExecution
+    started <- runAppWithoutLogging appEnv $ startProcess request
+    case started of
+      Left result -> result `shouldBe` ProcessUnavailable ProcessExecution
+      Right _ -> fail "dry-run App unexpectedly started a process"
 
   posixIt "reads a complete environment file without detecting the host" $
     withTempDir $ \tmp tmpPath -> do
