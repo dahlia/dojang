@@ -739,33 +739,62 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
       case resolved of
         Left err -> return $ Left err
         Right (inputs, dependencies) -> do
-          rendered <- runForward runtime request implementation inputs
-          return $ do
-            (bytes, dynamicDependencies) <- rendered
-            let allDependencies = nub $ dependencies <> dynamicDependencies
-                CodecDefinition _ version _ = implementation.definition
-                key =
-                  codecCacheKey request.codec version rawSource allDependencies
-                makeResult renderedBytes =
-                  EvaluatedCodec
-                    renderedBytes
-                    key
-                    allDependencies
-                    implementation.definition
-                    implementation.cacheScope
-                    inputs
-                    requirements
-            case cached of
-              Just entry | entry.cacheKey == key -> Right $ makeResult entry.renderedBytes
-              _
-                | runtime.mode == DryRunEvaluation
-                , implementation.dryRunPolicy == CachedOnly ->
+          let staticDependencies = nub dependencies
+              staticKey = cacheKey staticDependencies
+          case (implementation.forwardProgram, cached) of
+            (Nothing, Just entry)
+              | entry.cacheKey == staticKey ->
+                  return $
+                    Right $
+                      makeResult inputs staticDependencies staticKey entry.renderedBytes
+            (Nothing, _)
+              | runtime.mode == DryRunEvaluation
+              , implementation.dryRunPolicy == CachedOnly ->
+                  return $
                     Left $
                       CodecError request.routeName codecName DryRunCacheRequired
-                | otherwise -> Right $ makeResult $ opaqueBytes bytes
+            _ -> do
+              rendered <- runForward runtime request implementation inputs
+              return $ do
+                (bytes, dynamicDependencies) <- rendered
+                let allDependencies = nub $ dependencies <> dynamicDependencies
+                    key = cacheKey allDependencies
+                case cached of
+                  Just entry
+                    | entry.cacheKey == key ->
+                        Right $
+                          makeResult
+                            inputs
+                            allDependencies
+                            key
+                            entry.renderedBytes
+                  _
+                    | runtime.mode == DryRunEvaluation
+                    , implementation.dryRunPolicy == CachedOnly ->
+                        Left $
+                          CodecError request.routeName codecName DryRunCacheRequired
+                    | otherwise ->
+                        Right $
+                          makeResult
+                            inputs
+                            allDependencies
+                            key
+                            (opaqueBytes bytes)
  where
   CodecSpec codecName _ = request.codec
   rawSource = revealBytes request.rawSource
+  CodecDefinition _ version _ = implementation.definition
+  cacheKey dependencies =
+    codecCacheKey request.codec version rawSource dependencies
+  makeResult inputs dependencies key renderedBytes =
+    EvaluatedCodec
+      renderedBytes
+      key
+      dependencies
+      implementation.definition
+      implementation.cacheScope
+      inputs
+      requirements
 
 
 -- | Evaluates a codec with the resolved inputs captured by an earlier

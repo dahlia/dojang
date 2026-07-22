@@ -31,6 +31,7 @@ import Dojang.Types.Codec
   , CodecSpec (CodecSpec)
   , CodecValue (CodecBoolean)
   , ReflectPolicy (ReflectReAdd, ReflectReject)
+  , codecCacheKey
   , identityCodecSpec
   , parseCodecName
   )
@@ -280,23 +281,29 @@ spec = do
       (revealBytes <$> reflectedResult) === Right source
 
     specify "reuses a valid cache entry without rendering again" $ hedgehog $ do
+      source <- forAll $ Gen.bytes $ Range.linear 0 4096
       cachedSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
       let cachedBytes = "cached:" <> cachedSuffix
-          runtime = testRuntime EvaluatePurely NormalEvaluation
-          request = evaluationRequest testSpec "source" $ Map.singleton "class" "work"
-          action = do
-            first <- evaluateCodec runtime request Nothing
-            case first of
-              Left err -> return $ Left err
-              Right evaluated ->
-                evaluateCodec
-                  runtime
-                  request
-                  ( Just $
-                      CodecCacheEntry evaluated.cacheKey $
-                        opaqueBytes cachedBytes
-                  )
-          (result, _resolverCount) = runState action 0
+          implementation =
+            CodecImplementation
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (const $ Left "renderer ran on a valid cache hit")
+              Nothing
+              PersistentCache
+              EvaluatePurely
+          runtime :: CodecRuntime Identity
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              NormalEvaluation
+              (const $ pure $ Left "unexpected external input")
+          request = evaluationRequest testSpec source Map.empty
+          cache =
+            CodecCacheEntry
+              (codecCacheKey testSpec "1" source [])
+              (opaqueBytes cachedBytes)
+          result = runIdentity $ evaluateCodec runtime request $ Just cache
       (revealBytes . (.renderedBytes) <$> result) === Right cachedBytes
 
     specify "requires a cache for cached-only dry runs" $ do

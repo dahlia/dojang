@@ -1144,6 +1144,7 @@ spec = do
         FileSystem.setPortableWritable destinationPath True
 
     it "rejects stale buffered content before any mutation" $ hedgehog $ do
+      privateWrite <- forAll Gen.bool
       expected <- forAll $ Gen.bytes $ linear 0 256
       rendered <- forAll $ Gen.bytes $ linear 0 256
       victimContents <- forAll $ Gen.bytes $ linear 0 256
@@ -1157,6 +1158,18 @@ spec = do
             destinationPath = tmpDir </> destinationName
             staleGuard =
               ContentGuard authoritative $ opaqueBytes expected
+            guardedWrite =
+              if privateWrite
+                then
+                  WritePrivateContentGuarded
+                    (opaqueBytes rendered)
+                    staleGuard
+                    destinationPath
+                else
+                  WriteContentGuarded
+                    (opaqueBytes rendered)
+                    staleGuard
+                    destinationPath
         FileSystem.writeFile authoritative $ expected <> "\0"
         FileSystem.writeFile victim victimContents
         FileSystem.writeFile destinationPath destinationContents
@@ -1167,10 +1180,7 @@ spec = do
               (const $ return ())
               ( manualPlan
                   [ RemoveFile victim
-                  , WriteContentGuarded
-                      (opaqueBytes rendered)
-                      staleGuard
-                      destinationPath
+                  , guardedWrite
                   ]
               )
         victimAfter <- FileSystem.readFile victim

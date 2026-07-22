@@ -1121,6 +1121,7 @@ validatePlanContentGuards = mapM_ validate
   validate :: PlannedSyncOp -> m ()
   validate operation = case operation.syncOp of
     WriteContentGuarded _ guard _ -> validateContentGuard guard
+    WritePrivateContentGuarded _ guard _ -> validateContentGuard guard
     _ -> return ()
 
 
