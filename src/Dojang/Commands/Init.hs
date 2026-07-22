@@ -11,6 +11,7 @@ module Dojang.Commands.Init
   , init
   , initWithFacts
   , initPresetName
+  , promptMachineFactValue
   , referencedMachineFacts
   , requiredMachineFacts
   ) where
@@ -592,6 +593,22 @@ reportMissingMachineFacts missing =
         <> ".  Supply them with `--facts-file` or `--fact`."
 
 
+-- | Prompts for the value of a required machine fact.
+promptMachineFactValue
+  :: (MonadCommandEffect m)
+  => FactKey
+  -- ^ Required fact whose value should be entered.
+  -> m Text
+  -- ^ Entered fact value, or a command abort when prompting fails.
+promptMachineFactValue key = do
+  response <- prompt $ InputPrompt $ "Value for fact " <> factKeyText key <> ":"
+  case response of
+    InputValue text -> return text
+    PromptUnavailable ->
+      die' cliError "Cannot prompt for a required machine fact."
+    _ -> die' cliError "Invalid response to the machine-fact prompt."
+
+
 enrollMachineFacts
   :: (MonadFileSystem i, AppEffects i)
   => MachineState
@@ -618,17 +635,7 @@ enrollMachineFacts state manifest noInteractive requestedFactsFile assignments =
             return Map.empty
           else do
             pairs <- forM (Set.toAscList missing) $ \key -> do
-              response <-
-                prompt $
-                  InputPrompt $
-                    "Value for fact."
-                      <> factKeyText key
-                      <> ":"
-              value <- case response of
-                InputValue text -> return text
-                PromptUnavailable ->
-                  die' cliError "Cannot prompt for a required machine fact."
-                _ -> die' cliError "Invalid response to the machine-fact prompt."
+              value <- promptMachineFactValue key
               return (key, fromString $ Text.unpack value)
             return $ Map.fromList pairs
   let declaredFactUpdates = Map.union prompted supplied

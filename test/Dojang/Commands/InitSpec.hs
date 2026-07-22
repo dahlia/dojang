@@ -50,7 +50,7 @@ import Test.Hspec.Expectations.Pretty
   , shouldSatisfy
   , shouldThrow
   )
-import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
+import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 import Prelude hiding (init, readFile, writeFile)
 
 import Dojang.App
@@ -60,9 +60,14 @@ import Dojang.App
   , runAppWithoutLogging
   )
 import Dojang.CommandEffect
-  ( MonadCommandEffect
+  ( CommandEffect (Prompted)
+  , CommandEffectResponse (PromptValue)
+  , MonadCommandEffect
   , MonadProcessControl (startProcess)
+  , PromptRequest (InputPrompt)
+  , PromptResult (InputValue)
   , hoistStartedProcess
+  , runCommandEffectTest
   )
 import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
@@ -77,7 +82,10 @@ import Dojang.MonadFileSystem
   , dryRunIO
   )
 import Dojang.TestUtils (withHome, withTempDir)
-import Dojang.Types.Environment (parseFactKey)
+import Dojang.Types.Environment
+  ( factKeyText
+  , parseFactKey
+  )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (..))
 import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
 import Dojang.Types.MachineState
@@ -144,6 +152,17 @@ spec = sequential $ do
             Map.empty
             Map.empty
     Init.referencedMachineFacts manifest' === Set.empty
+
+  it "prompts for arbitrary fact keys and returns their values" $ hedgehog $ do
+    suffix <- forAll $ Gen.text (Range.linear 1 30) Gen.alphaNum
+    value <- forAll $ Gen.text (Range.linear 0 30) Gen.alphaNum
+    let Right factKey = parseFactKey $ "x" <> Text.toLower suffix
+        request = InputPrompt $ "Value for fact " <> factKeyText factKey <> ":"
+    result <-
+      evalIO $
+        runCommandEffectTest [PromptValue $ InputValue value] $
+          Init.promptMachineFactValue factKey
+    result === Right (value, [Prompted request])
 
   it "creates one repository identity during concurrent initialization" $
     withTempDir $ \tmp _ -> do
