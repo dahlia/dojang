@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -8,12 +9,16 @@ module Dojang.Types.Codec.TemplateSpec (spec) where
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.Char (ord)
 import Data.Functor.Identity (runIdentity)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
+import Data.Word (Word8)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import System.OsString qualified as OsString
 import Test.Hspec (Spec, describe, specify)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldSatisfy)
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
@@ -36,12 +41,16 @@ import Dojang.Types.Codec.Template (templateCodecSpec)
 spec :: Spec
 spec = describe "template codec" $ do
   specify "interpolates a declared manifest variable as UTF-8" $ hedgehog $ do
-    value <- forAll $ Gen.text (Range.linear 0 256) Gen.unicode
+    value <-
+      forAll $
+        Gen.filter
+          (isJust . encodeNativeText)
+          (Gen.text (Range.linear 0 256) Gen.unicode)
     let result =
           render
             "name = {{ vars.GIT_NAME }}\n"
             Map.empty
-            (Map.singleton "GIT_NAME" $ encodeUtf8 value)
+            (Map.singleton "GIT_NAME" $ nativeTextBytes value)
     rendered <- either (fail . Text.unpack . formatCodecError) return result
     revealBytes rendered.renderedBytes === encodeUtf8 ("name = " <> value <> "\n")
 
@@ -58,15 +67,37 @@ spec = describe "template codec" $ do
 
   specify "does not include unrelated inputs in the cache key" $ do
     let source = "{{ vars.NAME }}"
-        first = render source Map.empty $ Map.fromList [("NAME", "Ada"), ("UNUSED", "one")]
-        second = render source Map.empty $ Map.fromList [("NAME", "Ada"), ("UNUSED", "two")]
-    fmap (.cacheKey) first `shouldBe` fmap (.cacheKey) second
+        first =
+          render source Map.empty $
+            Map.fromList
+              [("NAME", nativeTextBytes "Ada"), ("UNUSED", nativeTextBytes "one")]
+        second =
+          render source Map.empty $
+            Map.fromList
+              [("NAME", nativeTextBytes "Ada"), ("UNUSED", nativeTextBytes "two")]
+    firstKey <-
+      either (fail . Text.unpack . formatCodecError) (return . (.cacheKey)) first
+    secondKey <-
+      either (fail . Text.unpack . formatCodecError) (return . (.cacheKey)) second
+    firstKey `shouldBe` secondKey
 
   specify "changes the cache key when a referenced input changes" $ hedgehog $ do
-    prefix <- forAll $ Gen.text (Range.linear 0 128) Gen.unicode
+    prefix <-
+      forAll $
+        Gen.filter
+          (isJust . encodeNativeText)
+          (Gen.text (Range.linear 0 128) Gen.unicode)
     let source = "{{ vars.NAME }}"
-        first = render source Map.empty $ Map.singleton "NAME" $ encodeUtf8 $ prefix <> "a"
-        second = render source Map.empty $ Map.singleton "NAME" $ encodeUtf8 $ prefix <> "b"
+        first =
+          render source Map.empty $
+            Map.singleton "NAME" $
+              nativeTextBytes $
+                prefix <> "a"
+        second =
+          render source Map.empty $
+            Map.singleton "NAME" $
+              nativeTextBytes $
+                prefix <> "b"
     firstKey <-
       either (fail . Text.unpack . formatCodecError) (return . (.cacheKey)) first
     secondKey <-
@@ -181,7 +212,7 @@ spec = describe "template codec" $ do
           render
             (encodeUtf8 $ "{{ " <> namespace <> "[vars.SELECTOR] }}")
             Map.empty
-            (Map.singleton "SELECTOR" $ encodeUtf8 secret)
+            (Map.singleton "SELECTOR" $ nativeTextBytes secret)
     case result of
       Left err -> do
         let message = formatCodecError err
@@ -288,7 +319,7 @@ spec = describe "template codec" $ do
             templateCodecSpec
             (opaqueBytes "{{ vars.NAME }}")
             Map.empty
-            (Map.singleton "NAME" "Ada")
+            (Map.singleton "NAME" $ nativeTextBytes "Ada")
         result =
           runIdentity $
             reflectCodec
@@ -316,3 +347,25 @@ render source facts variables =
           variables
       )
       Nothing
+
+
+nativeTextBytes :: Text.Text -> ByteString
+nativeTextBytes value = case encodeNativeText value of
+  Just bytes -> bytes
+  Nothing -> error "test text is not representable as a native string"
+
+
+encodeNativeText :: Text.Text -> Maybe ByteString
+encodeNativeText value = do
+  native <- OsString.encodeUtf $ Text.unpack value
+  return $ ByteString.pack $ concatMap codeUnitBytes $ OsString.unpack native
+
+
+codeUnitBytes :: OsString.OsChar -> [Word8]
+#ifdef mingw32_HOST_OS
+codeUnitBytes character =
+  let value = ord $ OsString.toChar character
+  in [fromIntegral value, fromIntegral $ value `div` 0x100]
+#else
+codeUnitBytes = (: []) . fromIntegral . ord . OsString.toChar
+#endif
