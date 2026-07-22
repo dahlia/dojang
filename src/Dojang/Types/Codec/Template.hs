@@ -22,6 +22,7 @@ import Data.Char (chr, isAlphaNum, isSpace)
 import Data.HashMap.Strict qualified as HashMap
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust, maybeToList)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -625,13 +626,3 @@ allowedFunctions =
     , "upper"
     , "zip"
     ]
-
-
-isJust :: Maybe a -> Bool
-isJust (Just _) = True
-isJust Nothing = False
-
-
-maybeToList :: Maybe a -> [a]
-maybeToList (Just value) = [value]
-maybeToList Nothing = []
