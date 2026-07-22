@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Reject host effects outside the command effect interpreter."""
 
+import re
+import sys
 from pathlib import Path
-from re import Pattern, compile
-from sys import exit, stderr
 
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND_FILES = [ROOT / "src/Dojang/App.hs", ROOT / "src/Dojang/Commands.hs"]
 COMMAND_FILES.extend(sorted((ROOT / "src/Dojang/Commands").glob("*.hs")))
 
-FORBIDDEN: tuple[tuple[str, Pattern[str]], ...] = (
-    ("direct IO lifting", compile(r"\bliftIO\b")),
-    ("direct process exit", compile(r"\bexitWith\b")),
-    ("direct process API", compile(r"\bSystem\.Process\b")),
-    ("direct environment API", compile(r"\bSystem\.Environment\b")),
-    ("direct clock API", compile(r"\bData\.Time\b")),
-    ("direct platform API", compile(r"\bSystem\.Info\b")),
-    ("direct prompt API", compile(r"\bFortyTwo\b")),
-    ("direct text output API", compile(r"\bData\.Text\.IO\b")),
-    ("direct terminal API", compile(r"\bhIsTerminalDevice\b")),
+FORBIDDEN: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("direct IO lifting", re.compile(r"\bliftIO\b")),
+    ("direct process exit", re.compile(r"\bexitWith\b")),
+    ("direct process API", re.compile(r"\bSystem\.Process\b")),
+    ("direct environment API", re.compile(r"\bSystem\.Environment\b")),
+    ("direct clock API", re.compile(r"\bData\.Time\b")),
+    ("direct platform API", re.compile(r"\bSystem\.Info\b")),
+    ("direct prompt API", re.compile(r"\bFortyTwo\b")),
+    ("direct text output API", re.compile(r"\bData\.Text\.IO\b")),
+    ("direct terminal API", re.compile(r"\bhIsTerminalDevice\b")),
 )
 
 
@@ -48,8 +48,8 @@ def main() -> None:
 
     if errors:
         for error in errors:
-            print(error, file=stderr)
-        exit(1)
+            print(error, file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
