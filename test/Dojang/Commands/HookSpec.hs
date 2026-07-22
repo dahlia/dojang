@@ -13,6 +13,8 @@ import System.IO.Unsafe (unsafePerformIO)
 
 #ifndef mingw32_HOST_OS
 import Data.Char (chr)
+import System.Exit (ExitCode (ExitFailure))
+import System.OsPath (decodeFS)
 import System.OsString qualified as OsString
 #endif
 
@@ -29,10 +31,9 @@ import System.Environment
   , setEnv
   , unsetEnv
   )
-import System.Exit (ExitCode (ExitFailure, ExitSuccess))
+import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath
   ( OsPath
-  , decodeFS
   , encodeFS
   , joinPath
   , normalise
@@ -57,10 +58,13 @@ import Test.Hspec
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.App (AppEnv (..), runAppWithoutLogging)
-import Dojang.CommandEffect
-  ( ProcessRequest (ProcessRequest)
-  , ProcessResult (..)
-  )
+import Dojang.CommandEffect (ProcessResult (..))
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.CommandEffect (ProcessRequest (ProcessRequest))
+#endif
+
 import Dojang.Commands.Hook
   ( HookEnv (..)
   , HookScopePath (..)
@@ -79,7 +83,13 @@ import Dojang.Commands.Hook
   , shouldRunHook
   , withCommandHooks
   )
-import Dojang.ExitCodes (hookFailedError, machineStateError)
+import Dojang.ExitCodes (machineStateError)
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.ExitCodes (hookFailedError)
+#endif
+
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
