@@ -42,6 +42,7 @@ module Dojang.Types.Codec.Evaluate
   , codecReflectPolicy
   , codecSourceTypeError
   , evaluateCodec
+  , evaluateCodecWithRequirements
   , formatCodecError
   , identityCodecRuntime
   , noCodecInputs
@@ -560,21 +561,71 @@ evaluateCodec runtime request cached = case Map.lookup codecName runtime.registr
   Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
   Just implementation -> case requirementsForImplementation request implementation of
     Left err -> return $ Left err
-    Right _
-      | runtime.mode == DryRunEvaluation
-      , implementation.dryRunPolicy == CachedOnly
-      , Nothing <- cached ->
-          return $
-            Left $
-              CodecError request.routeName codecName DryRunCacheRequired
-    Right requirements
-      | runtime.mode == DryRunEvaluation
-      , implementation.dryRunPolicy == CachedOnly
-      , not $ null requirements.externalInputs ->
-          return $
-            Left $
-              CodecError request.routeName codecName DryRunCacheRequired
-    Right requirements -> do
+    Right requirements ->
+      evaluateCodecWithImplementation
+        runtime
+        request
+        requirements
+        implementation
+        cached
+ where
+  CodecSpec codecName _ = request.codec
+
+
+-- | Evaluates a selected route codec using requirements already validated for
+-- the same configuration and raw source.
+--
+-- Callers should pass the result of 'codecRequirements' for the same runtime,
+-- route, codec specification, and source bytes.  This avoids repeating
+-- source-dependent requirement discovery after the caller resolves variables.
+evaluateCodecWithRequirements
+  :: (Monad m)
+  => CodecRuntime m
+  -- ^ Registry, evaluation mode, and external-input resolver to use.
+  -> CodecEvaluationRequest
+  -- ^ Route, codec specification, source bytes, and available inputs.
+  -> CodecRequirements
+  -- ^ Requirements already validated for the request.
+  -> Maybe CodecCacheEntry
+  -- ^ Previously rendered entry to reuse when its key still matches.
+  -> m (Either CodecError EvaluatedCodec)
+  -- ^ A redacted codec error or the rendered bytes and cache metadata.
+evaluateCodecWithRequirements runtime request requirements cached =
+  case Map.lookup codecName runtime.registry of
+    Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
+    Just implementation ->
+      evaluateCodecWithImplementation
+        runtime
+        request
+        requirements
+        implementation
+        cached
+ where
+  CodecSpec codecName _ = request.codec
+
+
+evaluateCodecWithImplementation
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
+  -> CodecRequirements
+  -> CodecImplementation
+  -> Maybe CodecCacheEntry
+  -> m (Either CodecError EvaluatedCodec)
+evaluateCodecWithImplementation runtime request requirements implementation cached
+  | runtime.mode == DryRunEvaluation
+  , implementation.dryRunPolicy == CachedOnly
+  , Nothing <- cached =
+      return $
+        Left $
+          CodecError request.routeName codecName DryRunCacheRequired
+  | runtime.mode == DryRunEvaluation
+  , implementation.dryRunPolicy == CachedOnly
+  , not $ null requirements.externalInputs =
+      return $
+        Left $
+          CodecError request.routeName codecName DryRunCacheRequired
+  | otherwise = do
       resolved <- resolveInputs runtime request requirements
       case resolved of
         Left err -> return $ Left err

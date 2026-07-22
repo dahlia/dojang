@@ -63,7 +63,7 @@ import Dojang.Types.Codec.Evaluate
   , codecReflectPolicy
   , codecRequirements
   , codecSourceTypeError
-  , evaluateCodec
+  , evaluateCodecWithRequirements
   , opaqueBytes
   , reevaluateCodec
   , reflectCodecWithEvaluation
@@ -233,7 +233,7 @@ evaluateManagedCorrespondencesWithCache runtime context cache managed =
         (variables, warnings) <- resolveRequiredVariables context requirements
         identifier <- managedTargetId context.repository correspondence
         result <-
-          evaluateCodec
+          evaluateCodecWithRequirements
             runtime
             ( CodecEvaluationRequest
                 routeName
@@ -242,6 +242,7 @@ evaluateManagedCorrespondencesWithCache runtime context cache managed =
                 availableFacts
                 variables
             )
+            requirements
             (Map.lookup identifier cache)
         case result of
           Left err -> return $ Left err

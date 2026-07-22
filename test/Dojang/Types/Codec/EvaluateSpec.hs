@@ -13,6 +13,7 @@ import Data.Functor.Identity (Identity, runIdentity)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding (encodeUtf8)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Hspec (Spec, describe, specify)
@@ -53,6 +54,7 @@ import Dojang.Types.Codec.Evaluate
   , codecRegistry
   , codecRequirements
   , evaluateCodec
+  , evaluateCodecWithRequirements
   , formatCodecError
   , identityCodecRuntime
   , noCodecInputs
@@ -127,6 +129,90 @@ spec = do
       case result of
         Left err -> fail $ Text.unpack $ formatCodecError err
         Right evaluated -> revealBytes evaluated.renderedBytes === "work"
+
+    specify "rejects an absent required fact" $ hedgehog $ do
+      name <- forAll $ Gen.text (Range.linear 1 32) Gen.alphaNum
+      let runtime = factSelectionRuntime $ requiredCodecInputs [name]
+          request = evaluationRequest testSpec "source" Map.empty
+          result = runIdentity $ evaluateCodec runtime request Nothing
+      either formatCodecError (const "unexpected success") result
+        === "Route route codec test is missing declared input fact:"
+        <> name
+        <> "."
+
+    specify "allows an absent deferred fact" $ hedgehog $ do
+      name <- forAll $ Gen.text (Range.linear 1 32) Gen.alphaNum
+      let selection =
+            CodecInputSelection
+              (Map.singleton name DeferredInput)
+              False
+              False
+          runtime = factSelectionRuntime selection
+          request = evaluationRequest testSpec "source" Map.empty
+          result = runIdentity $ evaluateCodec runtime request Nothing
+      case result of
+        Left err -> fail $ Text.unpack $ formatCodecError err
+        Right evaluated -> revealBytes evaluated.renderedBytes === "absent"
+
+    specify "still rejects a missing required fact when all inputs are included" $ do
+      let required = requiredCodecInputs ["missing"]
+          selection = required{includeAllInputs = True}
+          runtime = factSelectionRuntime selection
+          request =
+            evaluationRequest
+              testSpec
+              "source"
+              (Map.singleton "available" "value")
+          result = runIdentity $ evaluateCodec runtime request Nothing
+      either formatCodecError (const "unexpected success") result
+        `shouldBe` "Route route codec test is missing declared input fact:missing."
+
+    specify "selects folded fact-key collisions deterministically" $ hedgehog $ do
+      earlierValue <- forAll $ Gen.text (Range.linear 0 1024) Gen.unicode
+      laterValue <- forAll $ Gen.text (Range.linear 0 1024) Gen.unicode
+      let runtime = factSelectionRuntime $ requiredCodecInputs ["class"]
+          request =
+            evaluationRequest
+              testSpec
+              "source"
+              ( Map.fromList
+                  [ ("Class", earlierValue)
+                  , ("class", laterValue)
+                  ]
+              )
+          result = runIdentity $ evaluateCodec runtime request Nothing
+      case result of
+        Left err -> fail $ Text.unpack $ formatCodecError err
+        Right evaluated -> revealBytes evaluated.renderedBytes === encodeUtf8 laterValue
+
+    specify "uses supplied requirements without deriving them again" $ do
+      let implementation =
+            codecImplementationWithSourceRequirements
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Left "source requirements were derived twice")
+              (Right . revealBytes . (.rawSource))
+              Nothing
+              PersistentCache
+              EvaluatePurely
+          runtime :: CodecRuntime Identity
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              NormalEvaluation
+              (const $ pure $ Left "unexpected external input")
+          request = evaluationRequest testSpec "source" Map.empty
+          requirements = CodecRequirements noCodecInputs noCodecInputs []
+          result =
+            runIdentity $
+              evaluateCodecWithRequirements
+                runtime
+                request
+                requirements
+                Nothing
+      case result of
+        Left err -> fail $ Text.unpack $ formatCodecError err
+        Right evaluated -> revealBytes evaluated.renderedBytes `shouldBe` "source"
 
     specify "preserves arbitrary declared variable bytes" $ hedgehog $ do
       variable <- forAll $ Gen.bytes $ Range.linear 0 4096
@@ -620,6 +706,28 @@ testRuntime dryRunPolicy mode =
   unexpectedExternalInput _ = do
     count <- get
     return $ Left $ "unexpected external input after " <> Text.pack (show count)
+
+
+factSelectionRuntime :: CodecInputSelection -> CodecRuntime Identity
+factSelectionRuntime selection =
+  CodecRuntime
+    (codecRegistry [implementation])
+    NormalEvaluation
+    (const $ pure $ Left "unexpected external input")
+ where
+  implementation =
+    CodecImplementation
+      (CodecDefinition testName "1" ReflectReject)
+      ( const $
+          Right $
+            CodecRequirements selection noCodecInputs []
+      )
+      ( \inputs ->
+          Right $ Map.findWithDefault "absent" "class" inputs.facts
+      )
+      Nothing
+      PersistentCache
+      EvaluatePurely
 
 
 variableRuntime :: CodecRuntime Identity
