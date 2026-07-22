@@ -7,6 +7,9 @@ module Dojang.Commands.EditSpec (spec) where
 
 import Control.Exception (bracket_)
 import Data.Map.Strict qualified as Map
+import Data.Text qualified as Text
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.Info (os)
@@ -14,10 +17,25 @@ import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
 
 import Test.Hspec (Spec, describe, it, sequential)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn)
+import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 import Prelude hiding (writeFile)
 
 import Dojang.App (App, AppEnv (AppEnv), runAppWithoutLogging)
-import Dojang.Commands.Edit (defaultEditor, editWithCodecRuntime, getEditor)
+import Dojang.CommandEffect
+  ( CommandEffect (Prompted)
+  , CommandEffectError (CommandAborted)
+  , CommandEffectResponse (PromptValue)
+  , PromptRequest (SelectPrompt)
+  , PromptResult (PromptUnavailable, SelectedValue)
+  , runCommandEffectTest
+  )
+import Dojang.Commands.Edit
+  ( defaultEditor
+  , editWithCodecRuntime
+  , getEditor
+  , selectNewFileRoute
+  )
+import Dojang.ExitCodes (userCancelledError)
 import Dojang.MonadFileSystem
   ( FileType (Directory, File)
   , MonadFileSystem (createDirectories, writeFile)
@@ -29,6 +47,7 @@ import Dojang.Types.Codec
   , CodecDefinition (CodecDefinition)
   , CodecSpec (CodecSpec)
   , ReflectPolicy (ReflectReject)
+  , identityCodecSpec
   , parseCodecName
   )
 import Dojang.Types.Codec.Evaluate
@@ -52,6 +71,7 @@ import Dojang.Types.FileRoute
   , fileRoutePreservingOrder
   )
 import Dojang.Types.Manifest (Manifest (Manifest))
+import Dojang.Types.Repository (RouteResult (..))
 import Dojang.Types.RepositoryId (parseRepositoryId)
 
 
@@ -106,6 +126,46 @@ spec = do
         editor <- getEditor Nothing
         editor `shouldBe` Nothing
 
+  describe "selectNewFileRoute" $ do
+    it "aborts when route selection is unavailable" $ do
+      firstName <- encodeFS "first"
+      secondName <- encodeFS "second"
+      result <-
+        runCommandEffectTest [PromptValue PromptUnavailable] $
+          selectNewFileRoute [newFileRoute firstName, newFileRoute secondName]
+      result `shouldBe` Left (CommandAborted userCancelledError)
+
+    it "aborts when the prompt returns no available route" $ hedgehog $ do
+      suffix <- forAll $ Gen.string (Range.linear 1 20) Gen.alphaNum
+      firstName <- evalIO $ encodeFS $ "first-" <> suffix
+      secondName <- evalIO $ encodeFS $ "second-" <> suffix
+      let unavailableLabel = Text.pack $ "missing-" <> suffix
+      result <-
+        evalIO $
+          runCommandEffectTest [PromptValue $ SelectedValue unavailableLabel] $
+            selectNewFileRoute
+              [newFileRoute firstName, newFileRoute secondName]
+      result === Left (CommandAborted userCancelledError)
+
+    it "returns the route matching an arbitrary selected label" $ hedgehog $ do
+      suffix <- forAll $ Gen.string (Range.linear 1 20) Gen.alphaNum
+      selectFirst <- forAll Gen.bool
+      firstName <- evalIO $ encodeFS $ "first-" <> suffix
+      secondName <- evalIO $ encodeFS $ "second-" <> suffix
+      let firstRoute = newFileRoute firstName
+          secondRoute = newFileRoute secondName
+          routes = [firstRoute, secondRoute]
+          labels = Text.pack <$> ["first-" <> suffix, "second-" <> suffix]
+          selectedIndex = if selectFirst then 0 else 1
+          selectedLabel = labels !! selectedIndex
+          selectedRoute = routes !! selectedIndex
+          promptRequest = SelectPrompt "Select route to use:" labels
+      result <-
+        evalIO $
+          runCommandEffectTest [PromptValue $ SelectedValue selectedLabel] $
+            selectNewFileRoute routes
+      result === Right (selectedRoute, [Prompted promptRequest])
+
   sequential $ describe "editWithCodecRuntime" $ do
     it "treats a converged rendered route as unchanged" $
       withCodecFile $ \appEnv missingEditor _ runtime ->
@@ -159,6 +219,21 @@ spec = do
               []
           )
           `shouldReturn` ExitSuccess
+
+
+newFileRoute :: OsPath -> RouteResult
+newFileRoute name =
+  RouteResult
+    { sourcePath = name
+    , routeName = name
+    , destinationPath = name
+    , fileType = Directory
+    , mode = DefaultMode
+    , kind = CopyRoute
+    , routeDefinition = ""
+    , routeProvenance = mempty
+    , codec = identityCodecSpec
+    }
 
 
 withCodecFile

@@ -12,6 +12,7 @@ module Dojang.Commands.Edit
   , editWithCodecRuntime
   , getEditor
   , runEditor
+  , selectNewFileRoute
   ) where
 
 import Control.Monad (filterM, foldM, forM, forM_, unless)
@@ -24,7 +25,7 @@ import System.Exit (ExitCode (..))
 
 import Control.Monad.Logger (logDebugSH)
 import Data.List.NonEmpty qualified as NE
-import Data.Text (Text, pack, unpack)
+import Data.Text (Text, pack)
 import System.OsPath (OsPath, makeRelative, normalise, splitDirectories, (</>))
 import TextShow (showt)
 
@@ -130,6 +131,34 @@ getEditor Nothing = do
   case visual of
     Just v -> return $ Just v
     Nothing -> lookupEnvironmentVariable "EDITOR"
+
+
+-- | Prompts for one of the routes that can create a new source file.
+--
+-- A canceled or unavailable prompt aborts the command instead of selecting an
+-- arbitrary route.  An answer that does not identify a supplied route is also
+-- treated as cancellation.
+selectNewFileRoute
+  :: (MonadFileSystem m, MonadCommandEffect m)
+  => [RouteResult]
+  -- ^ Candidate routes to present.
+  -> m RouteResult
+  -- ^ The selected route, or a command abort when selection is unavailable.
+selectNewFileRoute routes = do
+  labeledRoutes <- forM routes $ \route -> do
+    label <- pack <$> decodePath route.routeName
+    return (label, route)
+  selectedLabel <-
+    selectPrompt "Select route to use:" $ fst <$> labeledRoutes
+  case selectedLabel of
+    Nothing -> cancelSelection
+    Just label -> case lookup label labeledRoutes of
+      Just route -> return route
+      Nothing -> cancelSelection
+ where
+  cancelSelection = do
+    printStderr "Cancelled."
+    abortCommand userCancelledError
 
 
 -- | Run the editor with the given files.
@@ -468,24 +497,9 @@ editCore runtime editorOpt noApply force sequential _allFlag _includeUnregistere
         terminal <- isTerminal StandardInput
         if terminal
           then do
-            routeLabels <- forM routes $ \route -> do
-              routeName' <- decodePath route.routeName
-              return routeName'
             printStderr' Note $
               "Multiple routes can create " <> pathStyle targetPath <> ":"
-            selectedLabel <-
-              selectPrompt "Select route to use:" $ pack <$> routeLabels
-            -- Find the route that matches the selected label.
-            matchingRoutes <-
-              filterM
-                ( \r -> do
-                    name <- decodePath r.routeName
-                    return (Just name == (unpack <$> selectedLabel))
-                )
-                routes
-            let selectedRoute = case matchingRoutes of
-                  (match : _) -> match
-                  [] -> firstRoute -- Fallback to first if no match.
+            selectedRoute <- selectNewFileRoute routes
             srcPath <- computeSourcePath ctx targetPath selectedRoute
             createEmptySourceFile pathStyle srcPath
             return srcPath
