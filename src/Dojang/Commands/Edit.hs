@@ -70,6 +70,7 @@ import Dojang.ExitCodes
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.MonadFileSystem qualified as FS
+import Dojang.Types.Codec.BuiltIn (builtInCodecRuntime)
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
@@ -80,7 +81,6 @@ import Dojang.Types.Codec.Evaluate
   ( CodecRuntime
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , formatCodecError
-  , identityCodecRuntime
   )
 import Dojang.Types.Context
   ( CandidateRoute (..)
@@ -161,7 +161,7 @@ edit editorOpt noApply force sequential allFlag includeUnregistered explicitSour
     dryRun' <- asks (.dryRun)
     let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
     editWithCodecRuntime
-      (identityCodecRuntime mode)
+      (builtInCodecRuntime mode)
       editorOpt
       noApply
       force

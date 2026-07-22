@@ -114,6 +114,11 @@ valid_manifests = [
                 {
                     "when": "always",
                     "path": "~/.vimrc",
+                    "codec": "template",
+                },
+                {
+                    "when": "always",
+                    "path": "~/.vimrc",
                     "codec": {
                         "name": "example",
                         "config": {"profile": "work", "strict": True},
@@ -182,6 +187,20 @@ invalid_manifests = [
                     "path": "~/.vimrc",
                     "kind": "symlink",
                     "codec": {"name": "identity", "config": {"unexpected": True}},
+                }
+            ]
+        }
+    },
+    {
+        "files": {
+            "vimrc": [
+                {
+                    "when": "always",
+                    "path": "x",
+                    "codec": {
+                        "name": "template",
+                        "config": {"unexpected": True},
+                    },
                 }
             ]
         }

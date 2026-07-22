@@ -79,6 +79,7 @@ import Dojang.Types.Codec
   , identityCodecSpec
   , renderCodecName
   )
+import Dojang.Types.Codec.BuiltIn (builtInCodecRuntime)
 import Dojang.Types.Codec.Context
   ( EvaluatedManagedCorrespondence (..)
   , evaluateManagedCorrespondencesWithCache
@@ -97,7 +98,6 @@ import Dojang.Types.Codec.Evaluate
   , OpaqueBytes
   , codecReflectPolicy
   , formatCodecError
-  , identityCodecRuntime
   , opaqueBytes
   )
 import Dojang.Types.Context
@@ -186,7 +186,7 @@ reflect force allFlag includeUnregistered explicitSource paths =
     dryRun' <- asks (.dryRun)
     let mode = if dryRun' then DryRunEvaluation else NormalEvaluation
     reflectWithCodecRuntime
-      (identityCodecRuntime mode)
+      (builtInCodecRuntime mode)
       force
       allFlag
       includeUnregistered

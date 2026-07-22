@@ -5,10 +5,11 @@ A route codec transforms a repository file before Dojang writes it to the
 intermediate snapshot and destination.  The repository keeps the raw source;
 the intermediate snapshot keeps the rendered bytes.
 
-The only built-in codec is `identity`.  It copies bytes without changing them
-and remains the default for every existing manifest.  Other codec names can be
-used only when an embedding application registers an implementation.  Template
-and secret codecs are not part of this release.
+Dojang includes two codecs.  `identity` copies bytes without changing them and
+remains the default for every existing manifest.  `template` renders a
+deterministic text template.  Other codec names can be used only when an
+embedding application registers an implementation.  A secret codec is not part
+of this release.
 
 
 Manifest syntax
@@ -49,16 +50,86 @@ A codec requires `path` and cannot be attached to a null route.  A
 Deployment links remain a direct, one-way projection of the repository source.
 
 
+Template codec
+--------------
+
+Select the built-in template codec with its string form.  It has no
+configuration:
+
+~~~~ toml
+[vars]
+git_name = "Ada"
+
+[[files."git/config"]]
+when = "always"
+path = "~/.gitconfig"
+codec = "template"
+~~~~
+
+The source file is UTF-8 text.  It can read exact, case-sensitive manifest
+variable names through `vars` and case-insensitive machine-fact names through
+`facts`:
+
+~~~~ jinja
+[user]
+    name = {{ vars.git_name }}
+{% if facts.os == "linux" %}
+[credential]
+    helper = libsecret
+{% endif %}
+~~~~
+
+`vars` contains only active declarations from the manifest.  It never falls
+back to the process environment.  A missing value is an error only if template
+execution reaches the expression that reads it, so an unselected conditional
+branch may refer to an unavailable value.  Errors report a one-based source
+line and column without printing the source or rendered contents.  A
+missing-value error retains its namespace, such as `vars.git_name` or
+`facts.os`.  When the missing member name is computed dynamically, the error
+uses `<dynamic>` instead of exposing the runtime-derived key.  If a selected
+manifest variable is not valid platform text, the error identifies its
+`vars` name without printing its value or an unrelated template position.
+
+The supported language is a pure subset of Ginger/Jinja syntax:
+
+ -  literals, comments, interpolation, lists, and dictionaries;
+ -  `if`/`elif`/`else`, `switch`, finite `for` loops, local `set`, `scope`, and
+    `indent` statements;
+ -  indexing, ternaries, arithmetic, comparisons, Boolean operations, and
+    deterministic text, numeric, collection, and predicate built-ins.
+
+Local names become available only after their `set` statement.  After a
+conditional, a newly assigned name is available only when every possible
+branch assigns it.
+
+The codec rejects includes, imports, inheritance, blocks, macros, calls with a
+dynamic target, scripts in every Ginger whitespace-control and comment-prefix
+form, `do`, lambdas, exception handling, and effectful or
+representation-dependent built-ins such as `eval`, `throw`, date, regular
+expression, escaping, JSON, and higher-order functions.  It preserves mixed
+line endings and a trailing newline.  Operations that can raise an unchecked
+Ginger runtime error are also unsupported: `center`, `divisibleby`, integer
+division (`//` or `int_ratio`), modulo (`%` or `modulo`), printf-style
+formatting (`format` or `printf`), and text replacement (`replace`).  Template
+reflection is rejected even with `--force`; edit the repository template
+instead.
+
+
 Evaluation and caching
 ----------------------
 
 Dojang evaluates only routes selected by the command.  A codec receives the
 raw source bytes, normalized configuration, and only the machine facts,
 manifest variables, or controlled external inputs that it declared.  Every
+selected non-identity route has its codec registration and configuration
+validated even when its source is missing.  Analysis that depends on source
+contents runs only for a regular source file.  Every
 used input contributes a fingerprint to a deterministic cache key.  Unrelated
 facts and variables do not invalidate the result.  Manifest variable values
-retain their native operating-system bytes, including non-UTF-8 values on
-POSIX.  Machine facts use the environment predicate keys `os`, `arch`,
+for custom codecs retain their native operating-system bytes, including
+non-UTF-8 values on POSIX.  The template codec decodes selected values as
+strict platform text.  Machine facts use the environment predicate keys `os`,
+`arch`,
 `kernel`, `kernel-release`, and `hostname`.  A custom fact uses the part after
 `fact.` in its predicate name.
 

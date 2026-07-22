@@ -83,6 +83,7 @@
 | route name                   | 경로 규칙 이름             |                                                                                              |
 | route ownership              | 경로 규칙 소유권           | 문맥에 따라 “소유 경로 규칙”, “소유하다”처럼 씁니다.                                         |
 | routing                      | 경로 지정                  |                                                                                              |
+| secret codec                 | 비밀 값 코덱               | 비밀 값을 조회하거나 복호화하는 코덱을 뜻합니다.                                             |
 | snapshot                     | 스냅샷                     |                                                                                              |
 | socket                       | 소켓                       |                                                                                              |
 | source, source file          | 원본, 원본 파일            | 사용자 문서에서는 “소스”를 쓰지 않습니다.                                                    |
@@ -94,6 +95,7 @@
 | symbolic link                | 심볼릭 링크                |                                                                                              |
 | symlink target               | 링크 대상                  | 심볼릭 링크가 가리키는 경로를 뜻합니다. 동기화 대상은 “대상 경로”로 씁니다.                  |
 | target, target file          | 대상, 대상 파일            |                                                                                              |
+| template codec               | 템플릿 코덱                | 순수한 템플릿 부분집합으로 UTF-8 원본을 렌더링합니다.                                        |
 | traversal boundary           | 순회 경계                  | 링크로 배포된 디렉터리 경계를 뜻합니다.                                                      |
 | unchanged, modified, missing | 변경 없음, 수정됨, 사라짐  | 상태 표시에 사용합니다.                                                                      |
 | unmanage                     | 추적을 중단하다, 추적 해제 | 명령 이름 `dojang unmanage`는 그대로 씁니다.                                                 |

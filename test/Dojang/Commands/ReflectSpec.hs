@@ -52,6 +52,7 @@ import Dojang.Types.Codec
 import Dojang.Types.Codec.Evaluate
   ( CacheScope (PersistentCache)
   , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
+  , CodecFailure (OpaqueCodecFailure)
   , CodecImplementation (CodecImplementation)
   , CodecInputs (..)
   , CodecRequirements (CodecRequirements)
@@ -59,12 +60,17 @@ import Dojang.Types.Codec.Evaluate
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , ExternalInput (..)
   , ExternalInputRequest (ExternalInputRequest)
+  , codecImplementationWithSourceRequirements
   , codecRegistry
+  , noCodecInputs
   , opaqueBytes
+  , requiredCodecInputs
   , revealBytes
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
-import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent, Substitution)
+  )
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
   , RouteMode (DefaultMode)
@@ -80,6 +86,11 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget (ManagedTarget (..))
 import Dojang.Types.Manifest (Manifest (..), manifest)
 import qualified Dojang.Types.Manifest as Manifest
+import Dojang.Types.ManifestVariable
+  ( ManifestVariableMap
+  , manifestVariable
+  , parseManifestVariableName
+  )
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (parseRepositoryId)
 
@@ -546,6 +557,43 @@ spec = sequential $ do
           readFile source `shouldReturn` "new"
           readIORef resolutionCount `shouldReturn` 1
 
+    it "analyzes a reconstructed source after missing-source re-add" $
+      withMissingRotatingReAddFile $
+        \appEnv source destination codecSpec -> do
+          runAppWithoutLogging
+            appEnv
+            ( reflectWithCodecRuntime
+                (sourceAwareReAddRuntime codecSpec)
+                False
+                True
+                False
+                Nothing
+                [destination]
+            )
+            `shouldReturn` ExitSuccess
+          readFile source `shouldReturn` "new"
+
+    it "resolves variables discovered after missing-source re-add" $ do
+      let Right variableName = parseManifestVariableName "NAME"
+          variables =
+            Map.singleton variableName $
+              manifestVariable mempty $
+                BareComponent "Ada"
+      withMissingReAddFileWithVariables variables $
+        \appEnv source destination codecSpec -> do
+          runAppWithoutLogging
+            appEnv
+            ( reflectWithCodecRuntime
+                (sourceVariableReAddRuntime codecSpec)
+                False
+                True
+                False
+                Nothing
+                [destination]
+            )
+            `shouldReturn` ExitSuccess
+          readFile source `shouldReturn` "new"
+
     it "rejects ambiguous reflection of routes sharing a source" $
       withSharedSourceReAddRoutes $
         \appEnv source destinations codecSpec -> do
@@ -801,7 +849,7 @@ withConvergedIgnoredCodecFile action =
         implementation =
           CodecImplementation
             (CodecDefinition codecName "test-1" ReflectReject)
-            (const $ Right $ CodecRequirements mempty mempty [])
+            (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
             (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
             Nothing
             PersistentCache
@@ -1384,7 +1432,14 @@ withCaseVariantRotatingReAddFile action =
 withMissingRotatingReAddFile
   :: (AppEnv -> OsPath -> OsPath -> CodecSpec -> IO a)
   -> IO a
-withMissingRotatingReAddFile action =
+withMissingRotatingReAddFile = withMissingReAddFileWithVariables mempty
+
+
+withMissingReAddFileWithVariables
+  :: ManifestVariableMap
+  -> (AppEnv -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withMissingReAddFileWithVariables variables action =
   withReflectRepository $ \tmpDir repository _ manifestPath appEnv -> do
     routeName <- encodeFS "encoded-file"
     destinationName <- encodeFS "destination"
@@ -1412,7 +1467,7 @@ withMissingRotatingReAddFile action =
           Manifest
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
-            , variables = mempty
+            , variables = variables
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
             , hooks = mempty
@@ -1506,7 +1561,7 @@ reAddRuntimeWith dryRunPolicy mode spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReAdd)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       ( Just $ \_ deployed ->
           maybe
@@ -1529,7 +1584,7 @@ rejectRuntime spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReject)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache
@@ -1547,7 +1602,7 @@ identityReflectRuntime spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectIdentity)
-      (const $ Right $ CodecRequirements mempty mempty [])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache
@@ -1566,7 +1621,7 @@ countingRejectRuntime count spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReject)
-      (const $ Right $ CodecRequirements mempty mempty [counterInput])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [counterInput])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       Nothing
       PersistentCache
@@ -1590,7 +1645,7 @@ countingReAddRuntime count spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReAdd)
-      (const $ Right $ CodecRequirements mempty mempty [counterInput])
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [counterInput])
       (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
       (Just $ \_ deployed -> Right $ revealBytes deployed)
       PersistentCache
@@ -1614,7 +1669,10 @@ rotatingReAddRuntime resolutionCount spec' =
   implementation =
     CodecImplementation
       (CodecDefinition name "test-1" ReflectReAdd)
-      (const $ Right $ CodecRequirements ["os"] mempty [keyInput])
+      ( const $
+          Right $
+            CodecRequirements (requiredCodecInputs ["os"]) noCodecInputs [keyInput]
+      )
       ( \inputs -> do
           key <- inputKey inputs
           Right $ key <> ":" <> revealBytes inputs.rawSource
@@ -1628,11 +1686,11 @@ rotatingReAddRuntime resolutionCount spec' =
       )
       PersistentCache
       EvaluatePurely
-  inputKey :: CodecInputs -> Either Text.Text ByteString
+  inputKey :: CodecInputs -> Either CodecFailure ByteString
   inputKey inputs =
     case Map.lookup keyInput inputs.externalInputs of
       Just input -> Right $ revealBytes input.value
-      Nothing -> Left "missing key"
+      Nothing -> Left $ OpaqueCodecFailure "missing key"
   resolve request
     | request == keyInput = do
         count <- liftIO $ readIORef resolutionCount
@@ -1640,6 +1698,67 @@ rotatingReAddRuntime resolutionCount spec' =
         let key = if count == 0 then "A" else "B"
         return $ Right $ ExternalInput (opaqueBytes key) (Text.pack $ show key)
     | otherwise = return $ Left "unexpected external input"
+
+
+sourceAwareReAddRuntime :: CodecSpec -> CodecRuntime (App IO)
+sourceAwareReAddRuntime spec' =
+  CodecRuntime
+    (codecRegistry [implementation])
+    NormalEvaluation
+    (const $ return $ Left "unexpected external input")
+ where
+  CodecSpec name _ = spec'
+  implementation =
+    codecImplementationWithSourceRequirements
+      (CodecDefinition name "test-1" ReflectReAdd)
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      ( \_ source ->
+          if revealBytes source == ""
+            then Left "source must not be empty"
+            else Right $ CodecRequirements noCodecInputs noCodecInputs []
+      )
+      (\inputs -> Right $ "A:" <> revealBytes inputs.rawSource)
+      ( Just $ \_ deployed ->
+          maybe
+            (Left "deployed bytes use another key")
+            Right
+            (ByteString.stripPrefix "A:" $ revealBytes deployed)
+      )
+      PersistentCache
+      EvaluatePurely
+
+
+sourceVariableReAddRuntime :: CodecSpec -> CodecRuntime (App IO)
+sourceVariableReAddRuntime spec' =
+  CodecRuntime
+    (codecRegistry [implementation])
+    NormalEvaluation
+    (const $ return $ Left "unexpected external input")
+ where
+  CodecSpec name _ = spec'
+  implementation =
+    codecImplementationWithSourceRequirements
+      (CodecDefinition name "test-1" ReflectReAdd)
+      (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+      ( \_ _ ->
+          Right $
+            CodecRequirements
+              noCodecInputs
+              (requiredCodecInputs ["NAME"])
+              []
+      )
+      ( \inputs -> case Map.lookup "NAME" inputs.variables of
+          Just _ -> Right $ "A:" <> revealBytes inputs.rawSource
+          Nothing -> Left "missing NAME"
+      )
+      ( Just $ \_ deployed ->
+          maybe
+            (Left "deployed bytes use another key")
+            Right
+            (ByteString.stripPrefix "A:" $ revealBytes deployed)
+      )
+      PersistentCache
+      EvaluatePurely
 
 
 withReflectRepository

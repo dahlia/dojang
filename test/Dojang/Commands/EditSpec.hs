@@ -40,6 +40,7 @@ import Dojang.Types.Codec.Evaluate
   , CodecRuntime (CodecRuntime)
   , EvaluationMode (NormalEvaluation)
   , codecRegistry
+  , noCodecInputs
   , revealBytes
   )
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
@@ -215,7 +216,7 @@ withCodecFile action = withTempDir $ \root _ -> do
       implementation =
         CodecImplementation
           (CodecDefinition codecName "test-1" ReflectReject)
-          (const $ Right $ CodecRequirements mempty mempty [])
+          (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
           (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
           Nothing
           PersistentCache
@@ -294,7 +295,7 @@ withIgnoredCodecFile action = withTempDir $ \root _ -> do
       implementation =
         CodecImplementation
           (CodecDefinition codecName "test-1" ReflectReject)
-          (const $ Right $ CodecRequirements mempty mempty [])
+          (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
           (\inputs -> Right $ revealBytes inputs.rawSource <> ":rendered")
           Nothing
           PersistentCache

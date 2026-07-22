@@ -23,6 +23,7 @@ module Dojang.Types.Codec
   , identityCodecSpec
   , parseCodecName
   , renderCodecName
+  , templateCodecName
   ) where
 
 import Crypto.Hash.SHA256 qualified as SHA256
@@ -143,6 +144,11 @@ identityCodecDefinition =
 
 identityName :: CodecName
 identityName = CodecName "identity"
+
+
+-- | Name of the built-in deterministic text-template codec.
+templateCodecName :: CodecName
+templateCodecName = CodecName "template"
 
 
 -- | Computes a deterministic, hexadecimal SHA-256 cache key.
