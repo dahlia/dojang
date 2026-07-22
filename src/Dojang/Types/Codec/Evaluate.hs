@@ -283,12 +283,19 @@ data CodecImplementation = CodecImplementationWithSourceRequirements
 -- This compatibility constructor supplies no source-derived requirements.
 pattern CodecImplementation
   :: CodecDefinition
+  -- ^ Stable codec identity, version, and reflection policy.
   -> (CodecConfiguration -> Either CodecFailure CodecRequirements)
+  -- ^ Validates configuration and declares configuration-derived inputs.
   -> (CodecInputs -> Either CodecFailure ByteString)
+  -- ^ Renders repository bytes with the declared inputs.
   -> Maybe (CodecInputs -> OpaqueBytes -> Either CodecFailure ByteString)
+  -- ^ Optionally reconstructs repository bytes from deployed bytes.
   -> CacheScope
+  -- ^ Whether rendered results may be persisted in machine state.
   -> CodecDryRunPolicy
+  -- ^ Whether an uncached dry-run may execute the transformations.
   -> CodecImplementation
+  -- ^ A codec implementation with no source-derived requirements.
 pattern CodecImplementation
   definition
   validateConfiguration
@@ -322,13 +329,21 @@ pattern CodecImplementation
 -- | Constructs a codec with configuration- and source-derived requirements.
 codecImplementationWithSourceRequirements
   :: CodecDefinition
+  -- ^ Stable codec identity, version, and reflection policy.
   -> (CodecConfiguration -> Either CodecFailure CodecRequirements)
+  -- ^ Validates configuration and declares configuration-derived inputs.
   -> (CodecConfiguration -> OpaqueBytes -> Either CodecFailure CodecRequirements)
+  -- ^ Validates source bytes and declares inputs referenced by that source.
   -> (CodecInputs -> Either CodecFailure ByteString)
+  -- ^ Renders repository bytes with the combined declared inputs.
   -> Maybe (CodecInputs -> OpaqueBytes -> Either CodecFailure ByteString)
+  -- ^ Optionally reconstructs repository bytes from deployed bytes.
   -> CacheScope
+  -- ^ Whether rendered results may be persisted in machine state.
   -> CodecDryRunPolicy
+  -- ^ Whether an uncached dry-run may execute the transformations.
   -> CodecImplementation
+  -- ^ A codec implementation with configuration- and source-derived inputs.
 codecImplementationWithSourceRequirements = CodecImplementationWithSourceRequirements
 
 
