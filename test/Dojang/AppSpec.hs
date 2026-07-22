@@ -9,7 +9,7 @@ module Dojang.AppSpec (spec) where
 import Control.Exception qualified
 import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
 import Data.ByteString.Char8 qualified as ByteString
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict qualified as Map
 
 
@@ -23,7 +23,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.Info (os)
 import System.OsPath (encodeFS, (</>))
-import Test.Hspec (Spec, it, runIO, sequential, xit)
+import Test.Hspec (Spec, anyIOException, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (readFile, writeFile)
 
@@ -33,10 +33,12 @@ import Dojang.App
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
   , currentEnvironment'
+  , liftApp
   , prepareMachineState
   , runAppResultWithoutLogging
   , runAppWithLogging
   , runAppWithoutLogging
+  , startAndAwaitAppProcess
   , validateRepositoryCheckout
   )
 import Dojang.CommandEffect
@@ -52,6 +54,7 @@ import Dojang.CommandEffect
   , emptyProcessRequest
   , lookupEnvironmentVariable
   , runCommandEffectTest
+  , startedProcess
   )
 import Dojang.Commands.Env qualified as Env
 import Dojang.ExitCodes (machineStateError)
@@ -117,6 +120,60 @@ spec = sequential $ do
     case started of
       Left result -> result `shouldBe` ProcessUnavailable ProcessExecution
       Right _ -> fail "dry-run App unexpectedly started a process"
+
+  it "cancels a process interrupted during its registered handoff" $ do
+    path <- encodeFS "."
+    startMask <- newIORef Control.Exception.Unmasked
+    cancelled <- newIORef False
+    let appEnv = AppEnv path True Nothing path path path False False
+        start register = do
+          liftApp (Control.Exception.getMaskingState >>= writeIORef startMask)
+          let process =
+                startedProcess
+                  (return $ ProcessUnavailable ProcessExecution)
+                  (liftApp $ writeIORef cancelled True)
+          _ <- register process
+          liftApp $ Control.Exception.throwIO $ userError "interrupted"
+    runAppWithoutLogging appEnv (startAndAwaitAppProcess start)
+      `shouldThrow` anyIOException
+    readIORef startMask `shouldReturn` Control.Exception.MaskedInterruptible
+    readIORef cancelled `shouldReturn` True
+
+  it "cancels a process when its registered handoff aborts" $ do
+    path <- encodeFS "."
+    cancelled <- newIORef False
+    let appEnv = AppEnv path True Nothing path path path False False
+        start register = do
+          let process =
+                startedProcess
+                  (abortCommand machineStateError)
+                  (liftApp $ writeIORef cancelled True)
+          _ <- register process
+          return $ Right process
+    runAppResultWithoutLogging appEnv (startAndAwaitAppProcess start)
+      `shouldReturn` Left machineStateError
+    readIORef cancelled `shouldReturn` True
+
+  it "restores masking while waiting and cancels an interrupted process" $ do
+    path <- encodeFS "."
+    waitMask <- newIORef Control.Exception.MaskedUninterruptible
+    cancelled <- newIORef False
+    let appEnv = AppEnv path True Nothing path path path False False
+        start register = do
+          let process =
+                startedProcess
+                  ( do
+                      liftApp $
+                        Control.Exception.getMaskingState >>= writeIORef waitMask
+                      liftApp $ Control.Exception.throwIO $ userError "interrupted"
+                  )
+                  (liftApp $ writeIORef cancelled True)
+          _ <- register process
+          return $ Right process
+    runAppWithoutLogging appEnv (startAndAwaitAppProcess start)
+      `shouldThrow` anyIOException
+    readIORef waitMask `shouldReturn` Control.Exception.Unmasked
+    readIORef cancelled `shouldReturn` True
 
   it "routes App effects through its scripted interpreter" $ do
     path <- encodeFS "."

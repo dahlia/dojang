@@ -23,12 +23,15 @@ FORBIDDEN: tuple[tuple[str, Pattern[str]], ...] = (
 )
 
 
-def is_legacy_runner_boundary(path: Path, line: str) -> bool:
-    """Allow old throwing runners to adapt the new typed command result."""
+def is_app_interpreter_boundary(path: Path, line: str) -> bool:
+    """Allow App's typed runner adapters and private interpreter state."""
     return path.name == "App.hs" and (
         line.strip() == "import Control.Monad.IO.Class (MonadIO (liftIO))"
-        or line.strip() == "liftCommandIO = liftApp . liftIO"
         or "either (liftIO . throwIO)" in line
+        or line.strip() == "processRef <- liftApp $ liftIO $ newIORef Nothing"
+        or line.strip()
+        == "let register process = liftApp $ liftIO $ writeIORef processRef $ Just process"
+        or line.strip() == "process <- liftApp $ liftIO $ readIORef processRef"
     )
 
 
@@ -39,7 +42,7 @@ def main() -> None:
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
             for description, pattern in FORBIDDEN:
-                if pattern.search(line) and not is_legacy_runner_boundary(path, line):
+                if pattern.search(line) and not is_app_interpreter_boundary(path, line):
                     relative = path.relative_to(ROOT)
                     errors.append(f"{relative}:{line_number}: {description}: {line.strip()}")
 

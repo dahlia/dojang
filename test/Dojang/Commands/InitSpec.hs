@@ -18,6 +18,7 @@ import Control.Concurrent
 import Control.Exception (SomeException)
 import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Logger (LogLevel (LevelWarn), fromLogStr)
@@ -899,6 +900,9 @@ newtype CoordinatedInitIO a
     , Applicative
     , Monad
     , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadReader ManifestCheckGate
     , MonadCommandEffect

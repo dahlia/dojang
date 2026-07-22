@@ -17,6 +17,7 @@ module Dojang.MonadFileSystem
 
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forM_, unless, when)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
@@ -761,6 +762,9 @@ newtype DryRunIO a = DryRunIO {unDryRunIO :: StateT DryRunState IO a}
     , Applicative
     , Monad
     , MonadFail
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadIO
     , MonadState DryRunState

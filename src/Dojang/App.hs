@@ -47,13 +47,17 @@ module Dojang.App
   , runAppWithStderrLogging
   , runAppWithoutLogging
   , saveManifest
+  , startAndAwaitAppProcess
   , validateRepositoryCheckout
   , validateRepositoryStateOwnership
   ) where
 
 import Control.Exception (throwIO)
 import Control.Monad (forM_, when)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
+import qualified Control.Monad.Catch as MonadCatch
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (toList)
 import qualified Data.Map.Strict as Map
 import Data.String (IsString (fromString))
@@ -98,8 +102,12 @@ import TextShow (FromStringShow (FromStringShow), TextShow (showt))
 
 import Dojang.CommandEffect
   ( MonadCommandEffect (..)
-  , MonadProcessControl (..)
+  , MonadProcessControl (startProcess)
+  , ProcessResult
   , StandardStream (StandardError)
+  , StartedProcess
+  , awaitProcess
+  , cancelStartedProcess
   , hoistStartedProcess
   )
 import Dojang.Commands
@@ -187,7 +195,7 @@ data AppEnv = AppEnv
 
 -- | Capabilities supplied by an 'App' command-effect interpreter.
 type AppEffects i =
-  (MonadIO i, MonadCommandEffect i, MonadProcessControl i)
+  (MonadIO i, MonadMask i, MonadCommandEffect i, MonadProcessControl i)
 
 
 -- | Lifts an action from the interpreter beneath 'App'.
@@ -207,6 +215,9 @@ newtype App i v = App
     ( Functor
     , Applicative
     , Monad
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadReader AppEnv
     , MonadLogger
     )
@@ -294,6 +305,35 @@ instance
   startProcess request = do
     started <- liftApp $ startProcess request
     return $ hoistStartedProcess liftApp <$> started
+
+
+-- | Starts an application process and safely transfers it to an interruptible
+-- wait, cancelling a registered child when startup, handoff, or waiting exits
+-- exceptionally or aborts through the application stack.
+--
+-- The starter must register a successful process immediately after creation,
+-- before releasing any surrounding resource such as a repository lock.
+startAndAwaitAppProcess
+  :: (AppEffects i)
+  => ( (StartedProcess (App i) -> App i ())
+       -> App i (Either ProcessResult (StartedProcess (App i)))
+     )
+  -> App i ProcessResult
+startAndAwaitAppProcess start = do
+  processRef <- liftApp $ liftIO $ newIORef Nothing
+  let register process = liftApp $ liftIO $ writeIORef processRef $ Just process
+      cancelRegistered = do
+        process <- liftApp $ liftIO $ readIORef processRef
+        forM_ process cancelStartedProcess
+      handoff = MonadCatch.mask $ \restore -> do
+        started <- start register
+        case started of
+          Left failure -> return failure
+          Right process -> restore $ awaitProcess process
+  MonadCatch.bracketOnError
+    (return ())
+    (const cancelRegistered)
+    (const handoff)
 
 
 currentEnvironment'

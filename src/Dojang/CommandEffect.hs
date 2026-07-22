@@ -28,6 +28,8 @@ module Dojang.CommandEffect
   , PromptResult (..)
   , StandardStream (..)
   , StartedProcess
+  , awaitProcess
+  , cancelStartedProcess
   , confirmPrompt
   , currentTimeIO
   , detectEnvironmentIO
@@ -43,10 +45,12 @@ module Dojang.CommandEffect
   , runProcessIO
   , selectPrompt
   , startProcessIO
+  , startedProcess
   , writeStreamIO
   ) where
 
 import Control.Exception (mask, onException, throwIO)
+import Control.Monad.Catch qualified as MonadCatch
 import Control.Monad.Except (ExceptT (..), MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT (..), ask)
@@ -152,6 +156,11 @@ data ProcessResult
 
 -- | A child process started by @m@ that can be awaited or cancelled.
 data StartedProcess m = StartedProcess (m ProcessResult) (m ())
+
+
+-- | Creates an interpreter-specific started-process handle.
+startedProcess :: m ProcessResult -> m () -> StartedProcess m
+startedProcess = StartedProcess
 
 
 -- | Maps a started process's lifecycle actions into another monad.
@@ -263,17 +272,19 @@ class (Monad m) => MonadProcessControl m where
   -- | Starts a process whose streams are inherited from the parent.
   --
   -- The returned handle may be awaited after a surrounding lock is released.
+  -- Callers that split startup from waiting must mask that handoff and arrange
+  -- cancellation on exceptional exits.
   startProcess :: ProcessRequest -> m (Either ProcessResult (StartedProcess m))
 
 
-  -- | Waits for a process that was started successfully.
-  awaitProcess :: StartedProcess m -> m ProcessResult
-  awaitProcess (StartedProcess await _) = await
+-- | Waits for a process that was started successfully.
+awaitProcess :: StartedProcess m -> m ProcessResult
+awaitProcess (StartedProcess await _) = await
 
 
-  -- | Cancels a process that was started successfully.
-  cancelStartedProcess :: StartedProcess m -> m ()
-  cancelStartedProcess (StartedProcess _ cancel) = cancel
+-- | Cancels a process that was started successfully.
+cancelStartedProcess :: StartedProcess m -> m ()
+cancelStartedProcess (StartedProcess _ cancel) = cancel
 
 
 -- | Requests confirmation, returning 'False' when prompting is unavailable.
@@ -309,7 +320,15 @@ newtype CommandEffectTest a = CommandEffectTest
            (ExceptT CommandEffectError DryRunIO)
            a
   }
-  deriving (Functor, Applicative, Monad, MonadIO)
+  deriving
+    ( Functor
+    , Applicative
+    , Monad
+    , MonadIO
+    , MonadCatch.MonadThrow
+    , MonadCatch.MonadCatch
+    , MonadCatch.MonadMask
+    )
 
 
 liftCommandEffectBase :: DryRunIO a -> CommandEffectTest a
@@ -688,6 +707,8 @@ cleanupProcess handle = do
 
 startProcessHandleIO
   :: ProcessRequest -> IO (Either ProcessResult ProcessHandle)
+-- Mask process creation itself.  The caller remains responsible for masking
+-- the handoff after this function returns a handle.
 startProcessHandleIO request = mask $ \_ -> do
   started <- tryIOError $ createProcess $ toCreateProcess request
   return $ case started of

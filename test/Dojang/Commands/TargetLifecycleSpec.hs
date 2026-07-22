@@ -8,6 +8,7 @@
 module Dojang.Commands.TargetLifecycleSpec (spec) where
 
 import Control.Exception (bracket_)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except (MonadError, catchError)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (ReaderT (ReaderT), ask, runReaderT)
@@ -771,6 +772,9 @@ newtype IsolatedHomeIO a = IsolatedHomeIO
     , Applicative
     , Monad
     , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadCommandEffect
     )

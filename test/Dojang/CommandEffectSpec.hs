@@ -20,16 +20,14 @@ import Dojang.CommandEffect
   , CommandEffectKind (..)
   , CommandEffectResponse (..)
   , MonadCommandEffect (..)
-  , MonadProcessControl
-    ( awaitProcess
-    , cancelStartedProcess
-    , startProcess
-    )
+  , MonadProcessControl (startProcess)
   , OutputStream (..)
   , ProcessRequest (..)
   , ProcessResult (..)
   , PromptRequest (..)
   , PromptResult (..)
+  , awaitProcess
+  , cancelStartedProcess
   , emptyProcessRequest
   , runCommandEffectTest
   )

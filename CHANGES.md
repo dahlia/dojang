@@ -14,7 +14,9 @@ To be released.
     never start diff tools, editors, hooks, or other external programs.  Hook
     processes are started while their repository state generation is validated,
     then awaited without holding the repository state lock so an explicitly
-    allowed nested Dojang invocation cannot deadlock.  [[#46], [#72]]
+    allowed nested Dojang invocation cannot deadlock.  If orchestration is
+    interrupted after a hook starts, Dojang invokes the interpreter's
+    cancellation action before propagating the interruption.  [[#46], [#72]]
 
  -  Detailed route branches can declare a byte-oriented `codec`.  The default
     `identity` codec preserves all existing behavior.  Applying a route writes
@@ -242,9 +244,13 @@ To be released.
     interpreter, so embedding tests can replay complete commands without using
     host environment, clock, terminal, prompt, output, or process APIs.  The
     scripted interpreter records process starts, waits, and cancellations
-    separately, and rejects leaked processes.  `App` no longer has a `MonadIO`
-    instance: embedding code should add a dedicated effect, or use `liftApp`
-    only at an interpreter or test boundary.  Command exits now travel through
+    separately, and rejects leaked processes.  `startAndAwaitAppProcess` masks
+    the handoff from process startup to an interruptible wait and invokes the
+    registered cancellation action on exceptional exits or application aborts.
+    `awaitProcess` and `cancelStartedProcess` now have fixed semantics over an
+    opaque `StartedProcess`.  `App` no longer has a `MonadIO` instance:
+    embedding code should add a dedicated effect, or use `liftApp` only at an
+    interpreter or test boundary.  Command exits now travel through
     `ExceptT ExitCode`; use `runAppResultWithoutLogging`,
     `runAppResultWithLogging`, or `runAppResultWithStderrLogging` to receive
     them as values.  The older runners remain as compatibility adapters that

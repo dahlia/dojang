@@ -20,6 +20,7 @@ import Control.Concurrent
 import Control.Exception (SomeException, bracket_)
 import Control.Exception qualified as Exception
 import Control.Monad (replicateM, void, when)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except
   ( ExceptT
   , MonadError (throwError)
@@ -518,6 +519,9 @@ newtype CoordinatedMigrationIO a
     , Applicative
     , Monad
     , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadReader ManifestReadGate
     , MonadCommandEffect
@@ -630,6 +634,9 @@ newtype FailingManifestWriteIO a
     , Applicative
     , Monad
     , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadMask
     , MonadError IOError
     , MonadReader OsPath
     , MonadCommandEffect

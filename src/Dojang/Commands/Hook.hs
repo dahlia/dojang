@@ -70,10 +70,11 @@ import Dojang.App
   , AppEnv (..)
   , ensureContext
   , prepareMachineState
+  , startAndAwaitAppProcess
   )
 import Dojang.CommandEffect
   ( MonadCommandEffect (..)
-  , MonadProcessControl (awaitProcess, startProcess)
+  , MonadProcessControl (startProcess)
   , ProcessRequest (..)
   , ProcessResult (..)
   , StartedProcess
@@ -494,7 +495,7 @@ executeHook hookEnv variableGetter hookType hook = do
                 identifier
                 hook
                 workingDirectory
-                (startHookEffect hookEnv)
+                (startRegisteredHook hookEnv)
             return ()
           _ -> case executionKey of
             Nothing ->
@@ -590,12 +591,12 @@ executeHook hookEnv variableGetter hookType hook = do
     Just $ HookOnChangeExecution value
   hookExecutionPolicy _ _ = Nothing
 
-  startCurrentGeneration request = do
+  startCurrentGeneration register request = do
     guarded <-
       withRepositoryStateGeneration
         hookEnv.stateRoot
         hookEnv.machineState
-        (startHookEffect hookEnv request)
+        (startRegisteredHook hookEnv register request)
     case guarded of
       Left err -> die' machineStateError $ formatStateError err
       Right started -> return started
@@ -759,7 +760,10 @@ runHookProcess
   -> Text
   -> Hook
   -> OsPath
-  -> (ProcessRequest -> App i (Either ProcessResult (StartedProcess (App i))))
+  -> ( (StartedProcess (App i) -> App i ())
+       -> ProcessRequest
+       -> App i (Either ProcessResult (StartedProcess (App i)))
+     )
   -> App i Bool
 runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start = do
   pathStyle <- pathStyleFor StandardError
@@ -829,10 +833,7 @@ runHookProcess hookEnv hookType recursionKey identifier hook workDirPath start =
           , workingDirectory = workDir
           , environment = Just $ mergeHookEnvironment platform environment parentEnv
           }
-  started <- start request
-  result <- case started of
-    Left failure -> return failure
-    Right process -> awaitProcess process
+  result <- startAndAwaitAppProcess $ \register -> start register request
   case result of
     ProcessStartFailed err -> do
       $(logError) $
@@ -965,6 +966,21 @@ startHookEffect hookEnv request =
   case hookEnv.processSimulation request of
     Just result -> return $ Left result
     Nothing -> startProcess request
+
+
+-- | Registers a successfully started hook before its enclosing action returns.
+startRegisteredHook
+  :: (MonadCommandEffect m, MonadProcessControl m)
+  => HookEnv
+  -> (StartedProcess m -> m ())
+  -> ProcessRequest
+  -> m (Either ProcessResult (StartedProcess m))
+startRegisteredHook hookEnv register request = do
+  started <- startHookEffect hookEnv request
+  case started of
+    Left _ -> return ()
+    Right process -> register process
+  return started
 
 
 -- | The production hook process interpreter delegates to command effects.
