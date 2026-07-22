@@ -69,7 +69,10 @@ import Dojang.Types.ManagedTarget
   , isSafeManagedRelativePath
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
-import Dojang.Types.RouteMetadata (RouteKind (SymlinkRoute))
+import Dojang.Types.RouteMetadata
+  ( RouteKind (SymlinkRoute)
+  , RouteMode (Private, PrivateExecutable)
+  )
 
 
 -- | Derives a stable identifier from one route generation and destination.
@@ -123,6 +126,7 @@ newTargetSnapshotTransaction root = do
   transaction <- writeTemporaryFile root "baseline-set.tmp" ByteString.empty
   removeFile transaction
   createDirectory transaction
+  setPortableMode transaction 0o700
   return transaction
 
 
@@ -390,7 +394,11 @@ observeManagedTarget repository snapshotRoot command now managed
     identifier <- managedTargetId repository managed
     destination <- makeAbsolute correspondence.destination.path
     snapshot <- targetSnapshotPath snapshotRoot managed
-    materializeSnapshot correspondence.intermediate.path snapshot fingerprint
+    materializeSnapshot
+      correspondence.intermediate.path
+      snapshot
+      managed.route.mode
+      fingerprint
     return $
       ManagedTarget
         identifier
@@ -507,17 +515,30 @@ materializeSnapshot
   :: (MonadFileSystem m)
   => OsPath
   -> OsPath
+  -> RouteMode
   -> TargetFingerprint
   -> m ()
-materializeSnapshot source destination fingerprint = do
+materializeSnapshot source destination mode fingerprint = do
   case fingerprint of
     FileFingerprint _ _ -> do
       createDirectories $ takeDirectory destination
       copyFileWithMetadata source destination
+      protectSnapshotDirectory
+      protectSnapshotFile
     DirectoryFingerprint -> createDirectories destination
     -- The stored link target in the state record is the snapshot; hosts
     -- that cannot create links must still be able to hold the record:
     SymlinkFingerprint _ -> return ()
+ where
+  protectSnapshotDirectory = case mode of
+    Private ->
+      setPortableMode (takeDirectory destination) 0o700
+    PrivateExecutable -> setPortableMode (takeDirectory destination) 0o700
+    _ -> return ()
+  protectSnapshotFile = case mode of
+    Private -> setPortableMode destination 0o600
+    PrivateExecutable -> setPortableMode destination 0o600
+    _ -> return ()
 
 
 hashParts :: [ByteString.ByteString] -> Text

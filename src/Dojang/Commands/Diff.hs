@@ -78,8 +78,10 @@ import Dojang.Types.Codec.Evaluate
   ( CodecRuntime
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , OpaqueBytes
+  , codecRequiresProtectedStorage
   , formatCodecError
   , revealBytes
+  , validateCodecProtectedStorage
   )
 import Dojang.Types.Context
   ( Context (..)
@@ -90,7 +92,8 @@ import Dojang.Types.Context
   , ManagedCorrespondence (..)
   , makeManagedCorrespond
   )
-import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata (RouteMode (Private, PrivateExecutable))
 
 
 data DiffMode = Both | Source | Destination deriving (Show)
@@ -167,9 +170,25 @@ diffCore runtime mode diffProgram files = do
                 file' == src || file' == dst
             )
             routedManaged
+  forM_ selected $ \item -> do
+    when (codecRequiresProtectedStorage runtime item.route.codec) $ do
+      routeName <- pack <$> decodePath item.route.routeName
+      case validateCodecProtectedStorage
+        runtime
+        routeName
+        item.route.codec
+        (item.route.mode == Private || item.route.mode == PrivateExecutable) of
+        Left err -> die' codecError $ formatCodecError err
+        Right () -> return ()
   files' <- case mode of
     Destination ->
-      return [(item.correspondence, Nothing) | item <- selected]
+      return
+        [ ( item.correspondence
+          , Nothing
+          , codecRequiresProtectedStorage runtime item.route.codec
+          )
+        | item <- selected
+        ]
     _ -> do
       machineState <- prepareMachineState ctx.repository.manifest
       cache <- loadCodecCacheEntries ctx machineState selected
@@ -180,7 +199,10 @@ diffCore runtime mode diffProgram files = do
         Right value -> return value
       printWarnings $ evaluationWarnings evaluated
       return
-        [ (item.managed.correspondence, renderedSourceFor item)
+        [ ( item.managed.correspondence
+          , renderedSourceFor item
+          , codecRequiresProtectedStorage runtime item.managed.route.codec
+          )
         | item <- evaluated
         ]
   case mode of
@@ -226,7 +248,7 @@ twoWay
   -> (FileCorrespondence -> Bool)
   -> (FileCorrespondence -> FileEntry)
   -> (FileCorrespondence -> FileEntry)
-  -> [(FileCorrespondence, Maybe OpaqueBytes)]
+  -> [(FileCorrespondence, Maybe OpaqueBytes, Bool)]
   -> App i ()
 twoWay program' usesRenderedSource selectedHasChange srcSelector dstSelector files = do
   program <- case program' of
@@ -239,20 +261,29 @@ twoWay program' usesRenderedSource selectedHasChange srcSelector dstSelector fil
           ( \(file, renderedSource) ->
               selectedHasChange file && renderedSource /= Nothing
           )
-          files ->
+          [(file, renderedSource) | (file, renderedSource, _) <- files] ->
           die'
             codecError
             "An external diff program cannot inspect a rendered codec source."
+    Just _
+      | any
+          (\(file, _, sensitive) -> selectedHasChange file && sensitive)
+          files ->
+          die'
+            codecError
+            "An external diff program cannot inspect sensitive codec content."
     _ -> return ()
-  forM_ files $ \(file, renderedSource) -> when (selectedHasChange file) $ do
+  forM_ files $ \(file, renderedSource, sensitive) -> when (selectedHasChange file) $ do
     let src = srcSelector file
     let dst = dstSelector file
     case program of
-      Nothing -> do
-        builtinDiff
-          (if usesRenderedSource then renderedSource else Nothing)
-          src
-          dst
+      Nothing
+        | sensitive -> putOutputLine "Sensitive codec content differs; diff suppressed."
+        | otherwise -> do
+            builtinDiff
+              (if usesRenderedSource then renderedSource else Nothing)
+              src
+              dst
       Just prog -> do
         srcPath <- getPath src
         dstPath <- getPath dst

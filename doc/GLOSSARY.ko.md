@@ -25,6 +25,8 @@
 | application, apply           | 적용, 적용하다             | 명령 이름 `dojang apply`는 그대로 씁니다.                                                    |
 | architecture                 | 프로세서 아키텍처          | `arch` 식별자는 그대로 씁니다.                                                               |
 | baseline                     | 기준 사본                  | 고아 상태 판정에 쓰는 보존된 사본을 뜻합니다.                                                |
+| backend                      | 백엔드                     | 비밀 값 코덱의 외부 명령 구현을 뜻합니다.                                                    |
+| backend protocol             | 백엔드 프로토콜            | 코덱 백엔드와 주고받는 구조화된 표준 입출력 규약을 뜻합니다.                                 |
 | checkout                     | 체크아웃                   |                                                                                              |
 | codec                        | 코덱                       | 경로 규칙의 원본 바이트를 배치할 바이트로 변환합니다.                                        |
 | codec cache                  | 코덱 캐시                  | 원문이나 렌더링 결과가 아니라 지문과 캐시 키를 상태에 저장합니다.                            |
@@ -44,6 +46,7 @@
 | environment                  | 환경                       |                                                                                              |
 | environment facts            | 환경 정보                  | 키-값으로 다루는 기술 개념입니다. 일반 문장에서 참·거짓을 나타내는 `fact`는 “사실”로 씁니다. |
 | environment predicate        | 환경 서술어                |                                                                                              |
+| encryption at rest           | 저장 데이터 암호화         | 파일 권한만으로는 저장 데이터 암호화를 제공하지 못합니다.                                    |
 | execution policy             | 실행 정책                  | `policy` 필드 값은 그대로 씁니다.                                                            |
 | file path expression         | 파일 경로 표현식           |                                                                                              |
 | filesystem                   | 파일 시스템                |                                                                                              |

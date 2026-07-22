@@ -27,6 +27,7 @@ module Dojang.Types.Codec.Evaluate
   , CodecInputPresence (..)
   , CodecInputSelection (..)
   , CodecInputs (..)
+  , CodecProgram (..)
   , CodecRequirements (..)
   , CodecRuntime (..)
   , CodecSourcePosition (..)
@@ -38,8 +39,11 @@ module Dojang.Types.Codec.Evaluate
   , codecRegistry
   , codecConfigurationRequirements
   , codecImplementationWithSourceRequirements
+  , codecImplementationWithEffects
   , codecRequirements
   , codecReflectPolicy
+  , codecRequiresProtectedStorage
+  , validateCodecProtectedStorage
   , codecSourceTypeError
   , evaluateCodec
   , evaluateCodecWithRequirements
@@ -82,6 +86,9 @@ import Dojang.Types.Codec
   , identityCodecDefinition
   , identityCodecSpec
   , renderCodecName
+  )
+import Dojang.Types.CodecBackend.Protocol
+  ( BackendOperation (Decrypt, Encrypt, Lookup)
   )
 
 
@@ -163,9 +170,27 @@ instance IsString CodecFailure where
   fromString = OpaqueCodecFailure . Text.pack
 
 
--- | A controlled external input declared by a codec.
-newtype ExternalInputRequest = ExternalInputRequest Text
-  deriving (Eq, Ord, Show)
+-- | A controlled external input declared or dynamically requested by a codec.
+data ExternalInputRequest
+  = ExternalInputRequest Text
+  | BackendInputRequest Text BackendOperation OpaqueBytes
+  deriving (Eq, Ord)
+
+
+instance Show ExternalInputRequest where
+  show (ExternalInputRequest name) =
+    "ExternalInputRequest " <> show name
+  show (BackendInputRequest backend operation payload) =
+    "BackendInputRequest "
+      <> show backend
+      <> " "
+      <> showSafeOperation operation
+      <> " "
+      <> show payload
+   where
+    showSafeOperation Decrypt = "Decrypt"
+    showSafeOperation Encrypt = "Encrypt"
+    showSafeOperation Lookup{} = "Lookup <redacted>"
 
 
 -- | A resolved external input and its cache fingerprint.
@@ -173,9 +198,22 @@ data ExternalInput = ExternalInput
   { value :: OpaqueBytes
   -- ^ Input value, redacted by 'Show'.
   , fingerprint :: Text
-  -- ^ Stable fingerprint used in the codec cache key.
+  -- ^ Stable identity for this resolution within one evaluation.  Backend
+  -- fingerprints identify the request and declared backend version, not the
+  -- returned value, so effectful codec results are never persistently cached.
   }
   deriving (Eq, Show)
+
+
+-- | A pure description of a codec transformation that may request controlled
+-- external inputs while it runs.
+--
+-- The runtime interprets each request in order.  A continuation receives only
+-- the redacted value and fingerprint returned by the declared resolver, so an
+-- implementation cannot perform effects outside the codec boundary.
+data CodecProgram a
+  = CodecDone (Either CodecFailure a)
+  | CodecRequest ExternalInputRequest (ExternalInput -> CodecProgram a)
 
 
 -- | How a named codec input handles absence.
@@ -272,6 +310,13 @@ data CodecImplementation = CodecImplementationWithSourceRequirements
   -- ^ Renders repository representation into deployed bytes.
   , reverse :: Maybe (CodecInputs -> OpaqueBytes -> Either CodecFailure ByteString)
   -- ^ Reconstructs repository representation for a re-add codec.
+  , forwardProgram :: Maybe (CodecInputs -> CodecProgram ByteString)
+  -- ^ Optional effectful renderer interpreted through 'CodecRuntime'.
+  , reverseProgram
+      :: Maybe (CodecInputs -> OpaqueBytes -> CodecProgram ByteString)
+  -- ^ Optional effectful reverse operation interpreted through 'CodecRuntime'.
+  , requiresProtectedStorage :: Bool
+  -- ^ Whether rendered content must use owner-only storage.
   , cacheScope :: CacheScope
   -- ^ Whether machine state may persist cache metadata.
   , dryRunPolicy :: CodecDryRunPolicy
@@ -310,6 +355,9 @@ pattern CodecImplementation
     _
     forward
     reverseImplementation
+    _
+    _
+    _
     cacheScope
     dryRunPolicy
  where
@@ -320,6 +368,9 @@ pattern CodecImplementation
       (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
       forward
       reverseImplementation
+      Nothing
+      Nothing
+      False
       cacheScope
       dryRunPolicy
 
@@ -345,7 +396,64 @@ codecImplementationWithSourceRequirements
   -- ^ Whether an uncached dry-run may execute the transformations.
   -> CodecImplementation
   -- ^ A codec implementation with configuration- and source-derived inputs.
-codecImplementationWithSourceRequirements = CodecImplementationWithSourceRequirements
+codecImplementationWithSourceRequirements
+  definition
+  validateConfiguration
+  requirementsForSource
+  forward
+  reverseImplementation
+  cacheScope
+  dryRunPolicy =
+    CodecImplementationWithSourceRequirements
+      definition
+      validateConfiguration
+      requirementsForSource
+      forward
+      reverseImplementation
+      Nothing
+      Nothing
+      False
+      cacheScope
+      dryRunPolicy
+
+
+-- | Constructs a command-scoped codec whose forward and optional reverse
+-- transformations can request controlled external inputs while they run.
+-- Effectful results cannot opt into persistent caching because an external
+-- input fingerprint need not attest to the returned value.
+codecImplementationWithEffects
+  :: CodecDefinition
+  -- ^ Stable codec identity, version, and reflection policy.
+  -> (CodecConfiguration -> Either CodecFailure CodecRequirements)
+  -- ^ Configuration validator and its statically declared inputs.
+  -> (CodecConfiguration -> OpaqueBytes -> Either CodecFailure CodecRequirements)
+  -- ^ Source validator and source-derived inputs.
+  -> (CodecInputs -> CodecProgram ByteString)
+  -- ^ Effectful forward transformation.
+  -> Maybe (CodecInputs -> OpaqueBytes -> CodecProgram ByteString)
+  -- ^ Optional effectful reverse transformation.
+  -> CodecDryRunPolicy
+  -- ^ Whether the program may execute during a dry run.
+  -> CodecImplementation
+  -- ^ Command-scoped sensitive codec implementation.
+codecImplementationWithEffects
+  definition
+  validateConfiguration
+  requirementsForSource
+  forwardProgram
+  reverseProgram
+  dryRunPolicy =
+    CodecImplementationWithSourceRequirements
+      definition
+      validateConfiguration
+      requirementsForSource
+      (const $ Left "effectful codec renderer was not interpreted")
+      Nothing
+      (Just forwardProgram)
+      reverseProgram
+      True
+      CommandCacheOnly
+      dryRunPolicy
 
 
 -- | Runtime capabilities supplied explicitly to codec evaluation.
@@ -449,6 +557,7 @@ data CodecErrorKind
   | ReverseUnavailable
   | ReverseFailure CodecFailure
   | ReverseValidationFailure
+  | ProtectedStorageRequired
   deriving (Eq, Show)
 
 
@@ -630,32 +739,30 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
       case resolved of
         Left err -> return $ Left err
         Right (inputs, dependencies) -> do
-          let CodecDefinition _ version _ = implementation.definition
-              key = codecCacheKey request.codec version rawSource dependencies
-              makeResult bytes =
-                EvaluatedCodec
-                  bytes
-                  key
-                  dependencies
-                  implementation.definition
-                  implementation.cacheScope
-                  inputs
-                  requirements
-          case cached of
-            Just entry | entry.cacheKey == key -> return $ Right $ makeResult entry.renderedBytes
-            _
-              | runtime.mode == DryRunEvaluation
-              , implementation.dryRunPolicy == CachedOnly ->
-                  return $
+          rendered <- runForward runtime request implementation inputs
+          return $ do
+            (bytes, dynamicDependencies) <- rendered
+            let allDependencies = nub $ dependencies <> dynamicDependencies
+                CodecDefinition _ version _ = implementation.definition
+                key =
+                  codecCacheKey request.codec version rawSource allDependencies
+                makeResult renderedBytes =
+                  EvaluatedCodec
+                    renderedBytes
+                    key
+                    allDependencies
+                    implementation.definition
+                    implementation.cacheScope
+                    inputs
+                    requirements
+            case cached of
+              Just entry | entry.cacheKey == key -> Right $ makeResult entry.renderedBytes
+              _
+                | runtime.mode == DryRunEvaluation
+                , implementation.dryRunPolicy == CachedOnly ->
                     Left $
                       CodecError request.routeName codecName DryRunCacheRequired
-              | otherwise ->
-                  return $ case implementation.forward inputs of
-                    Left reason ->
-                      Left $
-                        CodecError request.routeName codecName $
-                          EvaluationFailure reason
-                    Right bytes -> Right $ makeResult $ opaqueBytes bytes
+                | otherwise -> Right $ makeResult $ opaqueBytes bytes
  where
   CodecSpec codecName _ = request.codec
   rawSource = revealBytes request.rawSource
@@ -704,9 +811,8 @@ reevaluateCodec runtime request previous =
                   CodecError request.routeName codecName $
                     InvalidConfiguration
                       "source input requirements changed during evaluation"
-          | otherwise ->
-              let CodecDefinition _ version _ = implementation.definition
-                  previousInputs = previous.resolvedInputs
+          | otherwise -> do
+              let previousInputs = previous.resolvedInputs
                   inputs =
                     CodecInputs
                       request.rawSource
@@ -714,29 +820,91 @@ reevaluateCodec runtime request previous =
                       previousInputs.facts
                       previousInputs.variables
                       previousInputs.externalInputs
-                  key =
-                    codecCacheKey
-                      request.codec
-                      version
-                      (revealBytes request.rawSource)
-                      previous.dependencies
-                  makeResult bytes =
-                    EvaluatedCodec
-                      (opaqueBytes bytes)
-                      key
-                      previous.dependencies
-                      implementation.definition
-                      implementation.cacheScope
-                      inputs
-                      requirements
-              in return $ case implementation.forward inputs of
-                   Left reason ->
-                     Left $
-                       CodecError request.routeName codecName $
-                         EvaluationFailure reason
-                   Right bytes -> Right $ makeResult bytes
+              rendered <- runForward runtime request implementation inputs
+              return $ do
+                (bytes, dynamicDependencies) <- rendered
+                let CodecDefinition _ version _ = implementation.definition
+                    dependencies = nub $ previous.dependencies <> dynamicDependencies
+                    key =
+                      codecCacheKey
+                        request.codec
+                        version
+                        (revealBytes request.rawSource)
+                        dependencies
+                Right $
+                  EvaluatedCodec
+                    (opaqueBytes bytes)
+                    key
+                    dependencies
+                    implementation.definition
+                    implementation.cacheScope
+                    inputs
+                    requirements
  where
   CodecSpec codecName configuration = request.codec
+
+
+runForward
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
+  -> CodecImplementation
+  -> CodecInputs
+  -> m (Either CodecError (ByteString, [CodecDependency]))
+runForward runtime request implementation inputs =
+  case implementation.forwardProgram of
+    Nothing ->
+      return $ case implementation.forward inputs of
+        Left reason ->
+          Left $
+            CodecError request.routeName codecName $
+              EvaluationFailure reason
+        Right bytes -> Right (bytes, [])
+    Just _
+      | runtime.mode == DryRunEvaluation
+      , implementation.dryRunPolicy == CachedOnly ->
+          return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
+    Just program ->
+      runCodecProgram
+        runtime
+        request
+        EvaluationFailure
+        (program inputs)
+ where
+  CodecSpec codecName _ = request.codec
+
+
+runCodecProgram
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
+  -> (CodecFailure -> CodecErrorKind)
+  -> CodecProgram a
+  -> m (Either CodecError (a, [CodecDependency]))
+runCodecProgram runtime request failureKind = go []
+ where
+  CodecSpec codecName _ = request.codec
+  go dependencies (CodecDone result) =
+    return $ case result of
+      Left failure ->
+        Left $ CodecError request.routeName codecName $ failureKind failure
+      Right value -> Right (value, reverse dependencies)
+  go dependencies (CodecRequest externalRequest continuation) = do
+    resolved <- runtime.resolveExternalInput externalRequest
+    case resolved of
+      Left reason ->
+        return $
+          Left $
+            CodecError request.routeName codecName $
+              ExternalInputFailure (requestName externalRequest) reason
+      Right input ->
+        go
+          ( CodecDependency
+              ("external:" <> requestName externalRequest)
+              input.fingerprint
+              : dependencies
+          )
+          (continuation input)
 
 
 -- | Reconstructs repository bytes according to a codec's reflection policy.
@@ -879,15 +1047,15 @@ reflectCodecUsingSourceRequirements runtime request deployed = case Map.lookup c
             case resolved of
               Left err -> return $ Left err
               Right (inputs, dependencies) ->
-                return $
-                  fmap (\(source, evaluated) -> (source, Just evaluated)) $
-                    reverseWithInputs
-                      request
-                      implementation
-                      requirements
-                      inputs
-                      dependencies
-                      deployed
+                fmap (fmap $ \(source, evaluated) -> (source, Just evaluated)) $
+                  reverseWithInputs
+                    runtime
+                    request
+                    implementation
+                    requirements
+                    inputs
+                    dependencies
+                    deployed
  where
   CodecSpec codecName configuration = request.codec
 
@@ -949,62 +1117,69 @@ reflectEvaluatedCodecWithEvaluation runtime request evaluated deployed =
                         InvalidConfiguration
                           "source input requirements changed during evaluation"
               | otherwise ->
-                  return $
-                    fmap (\(source, result) -> (source, Just result)) $
-                      reverseWithInputs
-                        request
-                        implementation
-                        requirements
-                        evaluated.resolvedInputs
-                        evaluated.dependencies
-                        deployed
+                  fmap (fmap $ \(source, result) -> (source, Just result)) $
+                    reverseWithInputs
+                      runtime
+                      request
+                      implementation
+                      requirements
+                      evaluated.resolvedInputs
+                      evaluated.dependencies
+                      deployed
  where
   CodecSpec codecName configuration = request.codec
 
 
 reverseWithInputs
-  :: CodecEvaluationRequest
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
   -> CodecImplementation
   -> CodecRequirements
   -> CodecInputs
   -> [CodecDependency]
   -> OpaqueBytes
-  -> Either CodecError (OpaqueBytes, EvaluatedCodec)
-reverseWithInputs request implementation requirements inputs dependencies deployed =
+  -> m (Either CodecError (OpaqueBytes, EvaluatedCodec))
+reverseWithInputs runtime request implementation requirements inputs dependencies deployed =
   do
-    source <- reverseSource request implementation inputs deployed
-    let source' = opaqueBytes source
-        candidateInputs =
-          CodecInputs
-            source'
-            inputs.configuration
-            inputs.facts
-            inputs.variables
-            inputs.externalInputs
-        candidateRequest =
-          CodecEvaluationRequest
-            request.routeName
-            request.codec
-            source'
-            request.facts
-            request.variables
-    candidateRequirements <-
-      requirementsForImplementation candidateRequest implementation
-    if candidateRequirements /= requirements
-      then
-        Left $
-          CodecError request.routeName codecName $
-            InvalidConfiguration
-              "source input requirements changed during reverse validation"
-      else
-        validateReversedSource
-          request
-          implementation
-          candidateRequirements
-          candidateInputs
-          dependencies
-          deployed
-          source
+    reversed <- reverseSource runtime request implementation inputs deployed
+    case reversed of
+      Left err -> return $ Left err
+      Right (source, reverseDependencies) -> do
+        let source' = opaqueBytes source
+            candidateInputs =
+              CodecInputs
+                source'
+                inputs.configuration
+                inputs.facts
+                inputs.variables
+                inputs.externalInputs
+            candidateRequest =
+              CodecEvaluationRequest
+                request.routeName
+                request.codec
+                source'
+                request.facts
+                request.variables
+        case requirementsForImplementation candidateRequest implementation of
+          Left err -> return $ Left err
+          Right candidateRequirements
+            | candidateRequirements /= requirements ->
+                return $
+                  Left $
+                    CodecError request.routeName codecName $
+                      InvalidConfiguration
+                        "source input requirements changed during reverse validation"
+            | otherwise ->
+                validateReversedSource
+                  runtime
+                  candidateRequest
+                  implementation
+                  candidateRequirements
+                  candidateInputs
+                  (nub $ dependencies <> reverseDependencies)
+                  deployed
+                  source
  where
   CodecSpec codecName _ = request.codec
 
@@ -1025,45 +1200,48 @@ reverseWithoutSourceWithInputs
   implementation
   inputs
   deployed =
-    case reverseSource request implementation inputs deployed of
-      Left err -> return $ Left err
-      Right source -> do
-        let source' = opaqueBytes source
-            candidateRequest =
-              CodecEvaluationRequest
-                request.routeName
-                request.codec
-                source'
-                request.facts
-                request.variables
-        case requirementsForImplementation candidateRequest implementation of
-          Left err -> return $ Left err
-          Right candidateRequirements -> do
-            (variables, annotation) <- resolveVariables candidateRequirements
-            let resolvedRequest =
-                  CodecEvaluationRequest
-                    request.routeName
-                    request.codec
-                    source'
-                    request.facts
-                    variables
-            resolved <-
-              resolveInputs
-                (reuseExternalInputs runtime inputs.externalInputs)
-                resolvedRequest
-                candidateRequirements
-            return $ do
-              (candidateInputs, dependencies) <- resolved
-              evaluated <-
-                validateReversedSource
-                  request
-                  implementation
+    do
+      reversed <- reverseSource runtime request implementation inputs deployed
+      case reversed of
+        Left err -> return $ Left err
+        Right (source, reverseDependencies) -> do
+          let source' = opaqueBytes source
+              candidateRequest =
+                CodecEvaluationRequest
+                  request.routeName
+                  request.codec
+                  source'
+                  request.facts
+                  request.variables
+          case requirementsForImplementation candidateRequest implementation of
+            Left err -> return $ Left err
+            Right candidateRequirements -> do
+              (variables, annotation) <- resolveVariables candidateRequirements
+              let resolvedRequest =
+                    CodecEvaluationRequest
+                      request.routeName
+                      request.codec
+                      source'
+                      request.facts
+                      variables
+              resolved <-
+                resolveInputs
+                  (reuseExternalInputs runtime inputs.externalInputs)
+                  resolvedRequest
                   candidateRequirements
-                  candidateInputs
-                  dependencies
-                  deployed
-                  source
-              Right (evaluated, annotation)
+              case resolved of
+                Left err -> return $ Left err
+                Right (candidateInputs, dependencies) ->
+                  fmap (fmap $ \evaluated -> (evaluated, annotation)) $
+                    validateReversedSource
+                      runtime
+                      resolvedRequest
+                      implementation
+                      candidateRequirements
+                      candidateInputs
+                      (nub $ dependencies <> reverseDependencies)
+                      deployed
+                      source
 
 
 reuseExternalInputs
@@ -1081,72 +1259,83 @@ reuseExternalInputs runtime existing =
 
 
 reverseSource
-  :: CodecEvaluationRequest
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
   -> CodecImplementation
   -> CodecInputs
   -> OpaqueBytes
-  -> Either CodecError ByteString
-reverseSource request implementation inputs deployed =
-  case implementation.reverse of
-    Nothing -> Left $ CodecError request.routeName codecName ReverseUnavailable
-    Just reverseCodec -> case reverseCodec inputs deployed of
-      Left reason ->
-        Left $
-          CodecError request.routeName codecName $
-            ReverseFailure reason
-      Right source -> Right source
+  -> m (Either CodecError (ByteString, [CodecDependency]))
+reverseSource runtime request implementation inputs deployed =
+  case implementation.reverseProgram of
+    Just _
+      | runtime.mode == DryRunEvaluation
+      , implementation.dryRunPolicy == CachedOnly ->
+          return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
+    Just program ->
+      runCodecProgram runtime request ReverseFailure $ program inputs deployed
+    Nothing -> case implementation.reverse of
+      Nothing -> return $ Left $ CodecError request.routeName codecName ReverseUnavailable
+      Just reverseCodec -> return $ case reverseCodec inputs deployed of
+        Left reason ->
+          Left $
+            CodecError request.routeName codecName $
+              ReverseFailure reason
+        Right source -> Right (source, [])
  where
   CodecSpec codecName _ = request.codec
 
 
 validateReversedSource
-  :: CodecEvaluationRequest
+  :: (Monad m)
+  => CodecRuntime m
+  -> CodecEvaluationRequest
   -> CodecImplementation
   -> CodecRequirements
   -> CodecInputs
   -> [CodecDependency]
   -> OpaqueBytes
   -> ByteString
-  -> Either CodecError (OpaqueBytes, EvaluatedCodec)
+  -> m (Either CodecError (OpaqueBytes, EvaluatedCodec))
 validateReversedSource
+  runtime
   request
   implementation
   requirements
   inputs
   dependencies
   deployed
-  source =
-    case implementation.forward inputs of
-      Left reason ->
-        Left $
-          CodecError request.routeName codecName $
-            EvaluationFailure reason
-      Right bytes
-        | bytes == revealBytes deployed ->
-            let CodecDefinition _ version _ = implementation.definition
-                key =
-                  codecCacheKey
-                    request.codec
-                    version
-                    source
-                    dependencies
-            in Right
-                 ( inputs.rawSource
-                 , EvaluatedCodec
-                     deployed
-                     key
-                     dependencies
-                     implementation.definition
-                     implementation.cacheScope
-                     inputs
-                     requirements
-                 )
-        | otherwise ->
-            Left $
-              CodecError
-                request.routeName
-                codecName
-                ReverseValidationFailure
+  source = do
+    rendered <- runForward runtime request implementation inputs
+    return $ do
+      (bytes, dynamicDependencies) <- rendered
+      let allDependencies = nub $ dependencies <> dynamicDependencies
+      if bytes == revealBytes deployed
+        then
+          let CodecDefinition _ version _ = implementation.definition
+              key =
+                codecCacheKey
+                  request.codec
+                  version
+                  source
+                  allDependencies
+          in Right
+               ( inputs.rawSource
+               , EvaluatedCodec
+                   deployed
+                   key
+                   allDependencies
+                   implementation.definition
+                   implementation.cacheScope
+                   inputs
+                   requirements
+               )
+        else
+          Left $
+            CodecError
+              request.routeName
+              codecName
+              ReverseValidationFailure
    where
     CodecSpec codecName _ = request.codec
 
@@ -1215,6 +1404,41 @@ codecReflectPolicy runtime routeName (CodecSpec name configuration) =
         Left $ CodecError routeName name $ InvalidConfiguration failure
       Right _ -> case implementation.definition of
         CodecDefinition _ _ policy -> Right policy
+
+
+-- | Checks whether the selected route satisfies a sensitive codec's explicit
+-- owner-only storage requirement.
+validateCodecProtectedStorage
+  :: CodecRuntime m
+  -> Text
+  -> CodecSpec
+  -> Bool
+  -> Either CodecError ()
+validateCodecProtectedStorage runtime routeName (CodecSpec name configuration) protected =
+  case Map.lookup name runtime.registry of
+    Nothing -> Left $ CodecError routeName name UnknownCodec
+    Just implementation -> case implementation.validateConfiguration configuration of
+      Left failure ->
+        Left $ CodecError routeName name $ InvalidConfiguration failure
+      Right _
+        | implementation.requiresProtectedStorage && not protected ->
+            Left $ CodecError routeName name ProtectedStorageRequired
+        | otherwise -> Right ()
+
+
+-- | Reports whether a registered codec can render sensitive material that
+-- must not be stored or displayed without protection.  Identity and unknown
+-- codecs return 'False'; normal validation still reports unknown codecs before
+-- they can be evaluated.
+codecRequiresProtectedStorage
+  :: CodecRuntime m
+  -- ^ Runtime containing the codec registry.
+  -> CodecSpec
+  -- ^ Codec whose storage policy should be inspected.
+  -> Bool
+  -- ^ Whether owner-only storage and redacted diffs are required.
+codecRequiresProtectedStorage runtime (CodecSpec name _) =
+  maybe False (.requiresProtectedStorage) $ Map.lookup name runtime.registry
 
 
 -- | Constructs a redacted error for a source entry a codec cannot render.
@@ -1356,6 +1580,12 @@ selectInputs namespace canonicalize codecName routeName selection available = do
 
 requestName :: ExternalInputRequest -> Text
 requestName (ExternalInputRequest name) = name
+requestName (BackendInputRequest backend operation _) =
+  "backend:" <> backend <> ":" <> operationName operation
+ where
+  operationName Decrypt = "decrypt"
+  operationName Encrypt = "encrypt"
+  operationName (Lookup item) = "lookup:" <> digestText (encodeUtf8 item)
 
 
 -- | Formats a redacted, route-scoped codec error.
@@ -1380,6 +1610,7 @@ formatCodecError (CodecError routeName codecName kind) =
     ReverseUnavailable -> " has no reverse implementation."
     ReverseFailure _ -> " failed while reversing."
     ReverseValidationFailure -> " failed reverse validation."
+    ProtectedStorageRequired -> " requires an owner-only destination mode."
  where
   at :: CodecSourcePosition -> Text
   at position =

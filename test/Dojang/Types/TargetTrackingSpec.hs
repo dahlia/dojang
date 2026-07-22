@@ -67,7 +67,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
-  , RouteMode (DefaultMode)
+  , RouteMode (DefaultMode, Private)
   )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
@@ -77,6 +77,7 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+import Dojang.Types.RouteMetadata (portableModeFromBits)
 import Dojang.Types.TargetTracking
   ( managedTargetId
   , newTargetSnapshotTransaction
@@ -109,6 +110,28 @@ spec = do
           Just target <-
             observeManagedTarget repository transaction Applied now managed
           isAbsolute target.destinationPath `shouldBe` True
+
+    it "protects target transactions and sensitive file snapshots" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let route = managed.route
+            protected = managed{route = route{mode = Private}}
+            intermediate = protected.correspondence.intermediate.path
+            destination = protected.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        writeFile intermediate "managed"
+        writeFile destination "managed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        getPortableMode transaction `shouldReturn` portableModeFromBits 0o700
+        now <- getCurrentTime
+        Just target <-
+          observeManagedTarget repository transaction Applied now protected
+        getPortableMode target.snapshotPath `shouldReturn` portableModeFromBits 0o600
+        getPortableMode (takeDirectory target.snapshotPath)
+          `shouldReturn` portableModeFromBits 0o700
 
     it "distinguishes arbitrary surrogate-escaped destination bytes" $
       hedgehog $ do

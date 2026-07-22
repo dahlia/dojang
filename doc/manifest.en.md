@@ -6,8 +6,8 @@ it resides is a repository for config files managed by Dojang, and sets up how
 those config files should be applied on the actual machine.
 
 It is in [TOML] format, as you might guess from the extension, and is divided
-into six main sections: `vars`, `dirs`, `files`, `monikers`, `ignores`, and
-`hooks`.
+into seven main sections: `vars`, `dirs`, `files`, `monikers`, `ignores`,
+`codec-backends`, and `hooks`.
 This document assumes that the reader knows the basic syntax of TOML.
 
 [TOML]: https://toml.io/
@@ -29,6 +29,36 @@ repository.  Dojang uses it to isolate the repository's [machine state] on each
 device.
 
 [machine state]: machine-state.en.md
+
+
+Codec backends
+--------------
+
+The optional `codec-backends` table declares commands used by the built-in
+encrypted and secret-template codecs.  Each key is a manifest-local backend
+name:
+
+~~~~ toml
+[codec-backends.vault]
+command = "$HOME/.local/bin/dojang-vault"
+version = "2026-07"
+timeout-seconds = 45
+options = { profile = "work", strict = true }
+~~~~
+
+`command` is a file path expression and must expand to an absolute executable
+path.  `version` is a nonempty identity supplied by the backend operator;
+change it whenever backend behavior or key material changes.  The optional
+`timeout-seconds` field ranges from 1 to 300 and defaults to 30.  `options`
+accepts codec configuration values but must not contain secrets because it is
+sent in the protocol header and may affect diagnostic identities.
+
+Dojang invokes a backend without a shell, arguments, or inherited environment.
+The working directory is the repository root.  Sensitive codec backends are
+not available on Windows in this release.  See the [codec backend protocol] for
+the security boundary and recovery procedure.
+
+[codec backend protocol]: codecs.en.md#sensitive-codec-backends
 
 
 Moniker
@@ -308,6 +338,9 @@ existing compact and detailed routes keep their previous behavior.  Codec
 metadata requires `path`, and a deployment link accepts only `identity`.
 The built-in `template` codec has no configuration and renders UTF-8 source
 with manifest variables under `vars` and machine facts under `facts`.
+`encrypted`, `encrypted-re-add`, and `secret-template` use a named
+`codec-backends` declaration and require `mode = "private"` or
+`mode = "private-executable"`.
 
 See [route codecs] for configuration values, caching, dry-run behavior, and
 reflection policies.

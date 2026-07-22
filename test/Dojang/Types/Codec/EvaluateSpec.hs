@@ -35,7 +35,7 @@ import Dojang.Types.Codec
   , parseCodecName
   )
 import Dojang.Types.Codec.Evaluate
-  ( CacheScope (PersistentCache)
+  ( CacheScope (CommandCacheOnly, PersistentCache)
   , CodecCacheEntry (CodecCacheEntry)
   , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
   , CodecEvaluationRequest (CodecEvaluationRequest)
@@ -44,12 +44,14 @@ import Dojang.Types.Codec.Evaluate
   , CodecInputPresence (DeferredInput)
   , CodecInputSelection (..)
   , CodecInputs (..)
+  , CodecProgram (..)
   , CodecRequirements (..)
   , CodecRuntime (CodecRuntime)
   , EvaluatedCodec (..)
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
-  , ExternalInput (ExternalInput)
+  , ExternalInput (..)
   , ExternalInputRequest (ExternalInputRequest)
+  , codecImplementationWithEffects
   , codecImplementationWithSourceRequirements
   , codecRegistry
   , codecRequirements
@@ -64,6 +66,7 @@ import Dojang.Types.Codec.Evaluate
   , reflectCodecWithoutSourceWithEvaluation
   , requiredCodecInputs
   , revealBytes
+  , validateCodecProtectedStorage
   )
 
 
@@ -115,6 +118,7 @@ spec = do
               Nothing
               PersistentCache
               EvaluatePurely
+          runtime :: CodecRuntime Identity
           runtime =
             CodecRuntime
               (codecRegistry [implementation])
@@ -372,6 +376,134 @@ spec = do
       either formatCodecError (const "unexpected success") result
         `shouldBe` "Route route codec test could not resolve declared input first."
       resolvedRequests `shouldBe` [first]
+
+    specify "resolves effectful forward inputs only when requested" $ do
+      let requested = ExternalInputRequest "dynamic"
+          unused = ExternalInputRequest "unused"
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              ( \_ ->
+                  CodecRequest requested $ \input ->
+                    CodecDone $ Right $ revealBytes input.value
+              )
+              Nothing
+              EvaluatePurely
+          resolve
+            :: ExternalInputRequest
+            -> State [ExternalInputRequest] (Either Text ExternalInput)
+          resolve request = do
+            previous <- get
+            put $ previous <> [request]
+            return $
+              Right $
+                ExternalInput
+                  (opaqueBytes $ if request == unused then "unused" else "rendered")
+                  "stable"
+          runtime = CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+          codecRequest = evaluationRequest testSpec "source" Map.empty
+          (result, resolvedRequests) =
+            runState (evaluateCodec runtime codecRequest Nothing) []
+      (revealBytes . (.renderedBytes) <$> result) `shouldBe` Right "rendered"
+      ((.cacheScope) <$> result) `shouldBe` Right CommandCacheOnly
+      resolvedRequests `shouldBe` [requested]
+
+    specify "requires owner-only storage for effectful codecs" $ do
+      let implementation =
+            codecImplementationWithEffects
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\inputs -> CodecDone $ Right $ revealBytes inputs.rawSource)
+              Nothing
+              EvaluatePurely
+          runtime :: CodecRuntime Identity
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              NormalEvaluation
+              (const $ pure $ Left "unexpected external input")
+      ( either
+          (Left . formatCodecError)
+          Right
+          (validateCodecProtectedStorage runtime "route" testSpec False)
+        )
+        `shouldBe` Left "Route route codec test requires an owner-only destination mode."
+      validateCodecProtectedStorage runtime "route" testSpec True
+        `shouldBe` Right ()
+
+    specify "runs effectful reverse and validates it through effectful forward" $ do
+      let decrypt = ExternalInputRequest "decrypt"
+          encrypt = ExternalInputRequest "encrypt"
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition reversibleName "1" ReflectReAdd)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              ( \inputs ->
+                  CodecRequest decrypt $ \input ->
+                    CodecDone $
+                      if revealBytes inputs.rawSource == "ciphertext"
+                        then Right $ revealBytes input.value
+                        else Left "unexpected ciphertext"
+              )
+              ( Just $ \_ deployed ->
+                  CodecRequest encrypt $ \_ ->
+                    CodecDone $
+                      if revealBytes deployed == "plaintext"
+                        then Right "ciphertext"
+                        else Left "unexpected plaintext"
+              )
+              EvaluatePurely
+          resolve
+            :: ExternalInputRequest
+            -> State [ExternalInputRequest] (Either Text ExternalInput)
+          resolve request = do
+            previous <- get
+            put $ previous <> [request]
+            return $
+              Right $
+                ExternalInput
+                  (opaqueBytes $ if request == decrypt then "plaintext" else "ignored")
+                  "stable"
+          runtime = CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+          codecRequest = evaluationRequest reversibleSpec "old" Map.empty
+          (result, resolvedRequests) =
+            runState (reflectCodec runtime codecRequest $ opaqueBytes "plaintext") []
+      (revealBytes <$> result) `shouldBe` Right "ciphertext"
+      resolvedRequests `shouldBe` [encrypt, decrypt]
+
+    specify "does not run an effectful cached-only codec from a dry-run cache" $ do
+      let requested = ExternalInputRequest "dynamic"
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ -> CodecRequest requested $ const $ CodecDone $ Right "rendered")
+              Nothing
+              CachedOnly
+          resolve
+            :: ExternalInputRequest
+            -> State Int (Either Text ExternalInput)
+          resolve _ = do
+            count <- get
+            put $ count + 1
+            return $ Right $ ExternalInput (opaqueBytes "secret") "stable"
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              DryRunEvaluation
+              resolve
+          cache = CodecCacheEntry "untrusted" $ opaqueBytes "cached"
+          codecRequest = evaluationRequest testSpec "source" Map.empty
+          (result, resolutionCount) =
+            runState (evaluateCodec runtime codecRequest $ Just cache) 0
+      either formatCodecError (const "unexpected success") result
+        `shouldBe` "Route route codec test cannot run during dry-run without a valid cache."
+      resolutionCount `shouldBe` 0
 
     specify "does not resolve external inputs to validate a dry-run cache" $ hedgehog $ do
       cacheKey <- forAll $ Gen.bytes $ Range.linear 0 256

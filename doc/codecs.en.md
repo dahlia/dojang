@@ -5,11 +5,12 @@ A route codec transforms a repository file before Dojang writes it to the
 intermediate snapshot and destination.  The repository keeps the raw source;
 the intermediate snapshot keeps the rendered bytes.
 
-Dojang includes two codecs.  `identity` copies bytes without changing them and
+Dojang includes five codecs.  `identity` copies bytes without changing them and
 remains the default for every existing manifest.  `template` renders a
-deterministic text template.  Other codec names can be used only when an
-embedding application registers an implementation.  A secret codec is not part
-of this release.
+deterministic text template.  The sensitive codecs `encrypted`,
+`encrypted-re-add`, and `secret-template` call a manifest-declared backend
+through a narrow binary protocol.  Other names require an implementation
+registered by an embedding application.
 
 
 Manifest syntax
@@ -115,6 +116,127 @@ reflection is rejected even with `--force`; edit the repository template
 instead.
 
 
+Sensitive codec backends
+------------------------
+
+Declare a reusable backend in the manifest, then refer to its key from a
+sensitive codec:
+
+~~~~ toml
+[codec-backends.age]
+command = "$HOME/.local/bin/dojang-age-backend"
+version = "age-1.2-profile-3"
+timeout-seconds = 30
+options = { identity = "work" }
+~~~~
+
+The command path must expand to an absolute path.  Dojang starts it directly,
+without a shell or arguments, with an empty environment and the repository
+root as its working directory.  Backend declarations are unavailable on
+Windows until their process and owner-only storage behavior can be verified
+there.
+
+Standard input starts with one UTF-8 JSON line.  It identifies protocol
+`dojang-codec-backend-v1`, the manifest-local backend, declared version,
+operation, and non-secret options.  A lookup also has an `item` field.  The
+newline is followed by the exact binary payload: encrypted source bytes for
+`decrypt`, deployed bytes for `encrypt`, and an empty payload for `lookup`.
+The backend writes only the requested bytes to standard output and exits zero.
+On failure it exits nonzero and may write one JSON object to standard error
+whose `code` is `missing-item`, `invalid-input`, `permission-denied`, or
+`unavailable`.  Dojang discards all other backend output and reports only an
+allowlisted message.
+
+The default timeout is 30 seconds; the manifest can select 1 through 300
+seconds.  Timeout, interruption, start failure, malformed diagnostics, and
+nonzero exit all fail codec evaluation before synchronization begins.  The
+backend receives secrets only through standard input and returns them only on
+standard output.  It is still responsible for avoiding its own logs, crash
+reports, and temporary files.
+
+
+Encrypted codecs
+----------------
+
+`encrypted` stores ciphertext in the repository and deploys the backend's
+decrypted bytes.  Its reflection policy is `reject`.  A sensitive route must
+opt into an owner-only mode:
+
+~~~~ toml
+[[files."ssh/id_ed25519"]]
+when = "always"
+path = "~/.ssh/id_ed25519"
+mode = "private"
+
+[files."ssh/id_ed25519".codec]
+name = "encrypted"
+
+[files."ssh/id_ed25519".codec.config]
+backend = "age"
+~~~~
+
+`encrypted-re-add` uses the same configuration but opts into reflection.  It
+sends changed destination bytes to the backend's `encrypt` operation, then
+decrypts the candidate ciphertext and accepts it only if the result exactly
+matches the destination.  This works with randomized encryption: source delta
+is based on the semantic decrypted bytes, not ciphertext equality.  Use the
+default `encrypted` codec unless destination-to-repository reflection is a
+deliberate part of the workflow.
+
+
+Secret-template codec
+---------------------
+
+`secret-template` extends the deterministic template language with a static
+two-argument function:
+
+~~~~ jinja
+token = {{ secret("vault", "services/example/token") }}
+~~~~
+
+Both arguments must be string literals.  The first names a `codec-backends`
+entry; the second is the backend's item key.  The template stores references,
+not returned values, in the repository.  Lookups are demand-driven, so an
+unselected conditional branch does not contact its backend.  Repeated use of
+one reference during an evaluation reuses the in-memory result.  Reflection is
+always rejected.
+
+The route must declare `mode = "private"` or `mode = "private-executable"`.
+The latter is intended only for deployed files that must be executable.
+
+
+Sensitive-data boundary
+-----------------------
+
+Encrypted repository bytes and secret references may be shared.  Decrypted
+bytes and looked-up values exist in process memory and are written to the
+intermediate snapshot and destination.  Dojang requires an explicit owner-only
+route mode.  It writes new intermediate and destination content through
+owner-only temporary files before publishing it and stores managed target
+baselines below an owner-only transaction directory.  Sensitive codec results
+and dependency metadata are command-scoped rather than written to the ordinary
+codec cache.  Built-in diffs suppress sensitive bodies, and external diff
+programs cannot inspect them.
+
+These permissions are not encryption at rest.  A privileged account, a
+misconfigured backup, swap, a filesystem snapshot, or a backend that writes a
+temporary file can still retain plaintext.  Choose the destination and Dojang
+state locations accordingly.  Protect the backend executable and its key
+material separately.
+
+`--dry-run` never contacts a sensitive backend, even if an old persistent
+codec entry exists.  It reports that the codec needs a valid result instead of
+pretending to know the planned bytes.  Run the command normally only when
+online evaluation is intended.
+
+Backend failure happens before source, intermediate, destination, or machine
+state mutation.  After a timeout or failure, fix backend access and rerun the
+same command.  Do not copy the destination plaintext over encrypted source.
+If plaintext may have escaped through a backend, backup, or crash report,
+rotate the affected secret and re-encrypt the repository source before the
+next apply.
+
+
 Evaluation and caching
 ----------------------
 
@@ -133,11 +255,11 @@ strict platform text.  Machine facts use the environment predicate keys `os`,
 `kernel`, `kernel-release`, and `hostname`.  A custom fact uses the part after
 `fact.` in its predicate name.
 
-The forward and reverse transformations are pure functions.  Both receive the
-route configuration after it passes the codec's validator.  They cannot use the
-application monad, filesystem, terminal, or process APIs.  An embedding performs
-effects only while resolving an external input that the codec declared before
-evaluation.
+Pure codec transformations receive the route configuration after it passes the
+codec's validator.  They cannot use the application monad, filesystem,
+terminal, or process APIs.  Effectful codec programs can request only external
+inputs interpreted by the runtime; the built-in sensitive codecs use that
+boundary for backend operations.
 
 `dojang apply` compares rendered bytes with the intermediate snapshot and the
 concrete destination.  It evaluates once while planning, writes that exact
@@ -150,8 +272,9 @@ transformation and round-trip validation.  Before executing the plan and again
 before each buffered codec write, Dojang verifies that the authoritative file
 still has the bytes used for evaluation.  A mismatch aborts the write.  The
 built-in diff does not expose raw source bytes and reports non-UTF-8 output as a
-binary difference.  An external diff program is rejected when a rendered
-source would otherwise have to be materialized for it.
+binary difference.  Sensitive codec bodies are always suppressed.  An external
+diff program is rejected when rendered or sensitive content would otherwise
+have to be exposed to it.
 
 Machine-state schema version 6 can store the codec name and version, a
 configuration digest, the cache key, and dependency fingerprints.  It does not

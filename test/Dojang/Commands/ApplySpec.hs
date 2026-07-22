@@ -72,11 +72,13 @@ import Dojang.Types.Codec.Evaluate
   , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
   , CodecImplementation (CodecImplementation)
   , CodecInputs (..)
+  , CodecProgram (CodecDone)
   , CodecRequirements (CodecRequirements)
   , CodecRuntime (CodecRuntime)
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , ExternalInput (ExternalInput)
   , ExternalInputRequest (ExternalInputRequest)
+  , codecImplementationWithEffects
   , codecRegistry
   , noCodecInputs
   , opaqueBytes
@@ -324,6 +326,63 @@ spec = sequential $ do
           runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
             `shouldThrow` (== codecError)
           readFile destination `shouldReturn` "preserve"
+
+    it "requires private storage before evaluating a sensitive codec" $
+      withCodecFile $ \appEnv _ intermediate destination spec' -> do
+        let CodecSpec name _ = spec'
+            implementation =
+              codecImplementationWithEffects
+                (CodecDefinition name "sensitive-1" ReflectReject)
+                (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                (const $ CodecDone $ Right "sentinel-secret")
+                Nothing
+                CachedOnly
+            runtime =
+              CodecRuntime
+                (codecRegistry [implementation])
+                NormalEvaluation
+                (const $ return $ Left "unexpected external input")
+        runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+          `shouldThrow` (== codecError)
+        exists intermediate `shouldReturn` False
+        exists destination `shouldReturn` False
+
+    it "protects sensitive intermediate and destination files" $ do
+      let Just codecName = parseCodecName "sensitive-codec"
+          spec' = CodecSpec codecName $ CodecConfiguration mempty
+      withCodecFileWithMode Private mempty spec' $
+        \appEnv _ intermediate destination _ -> do
+          let implementation =
+                codecImplementationWithEffects
+                  (CodecDefinition codecName "sensitive-1" ReflectReject)
+                  (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                  (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                  (const $ CodecDone $ Right "sentinel-secret")
+                  Nothing
+                  CachedOnly
+              runtime =
+                CodecRuntime
+                  (codecRegistry [implementation])
+                  NormalEvaluation
+                  (const $ return $ Left "unexpected external input")
+          runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+            `shouldReturn` ExitSuccess
+          readFile intermediate `shouldReturn` "sentinel-secret"
+          readFile destination `shouldReturn` "sentinel-secret"
+          getPortableMode intermediate
+            `shouldReturn` portableModeFromBits 0o600
+          getPortableMode destination
+            `shouldReturn` portableModeFromBits 0o600
+          Right (Just machineId) <- readMachineId appEnv.stateDirectory
+          let Right repositoryId' =
+                parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+          Right (Just state) <-
+            readRepositoryState appEnv.stateDirectory repositoryId' machineId
+          let [target] = Map.elems state.targetRecords
+          target.codecState `shouldBe` Nothing
+          getPortableMode target.snapshotPath
+            `shouldReturn` portableModeFromBits 0o600
 
     it "renders the built-in template codec with manifest variables" $ do
       let Right variableName = parseManifestVariableName "NAME"
@@ -1051,7 +1110,16 @@ withCodecFileWithSpec
   -> CodecSpec
   -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
   -> IO a
-withCodecFileWithSpec manifestVariables codecSpec action = withTempDir $ \tmpDir _ -> do
+withCodecFileWithSpec = withCodecFileWithMode DefaultMode
+
+
+withCodecFileWithMode
+  :: RouteMode
+  -> ManifestVariableMap
+  -> CodecSpec
+  -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withCodecFileWithMode routeMode manifestVariables codecSpec action = withTempDir $ \tmpDir _ -> do
   sourceDir <- encodeFS "source"
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
@@ -1075,7 +1143,7 @@ withCodecFileWithSpec manifestVariables codecSpec action = withTempDir $ \tmpDir
             , Just $
                 RouteTarget
                   (Substitution "DEST_CODEC")
-                  DefaultMode
+                  routeMode
                   CopyRoute
                   codecSpec
             )

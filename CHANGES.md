@@ -15,6 +15,17 @@ To be released.
     accept only allowlisted structured failure categories.  Binary process
     requests and results redact their byte contents.  [[#45], [#73]]
 
+ -  Added the `encrypted` codec with reject reflection, the opt-in
+    `encrypted-re-add` codec with decrypt-after-encrypt validation, and the
+    `secret-template` codec with demand-driven `secret("backend", "item")`
+    lookups.  These codecs require an explicit `private` or
+    `private-executable` route mode, publish new plaintext through owner-only
+    temporary files, protect state snapshots, keep results command-scoped,
+    suppress diff bodies, and remain offline during dry runs.  File permissions
+    are not encryption at rest.  Backends run without arguments or inherited
+    environment and remain unavailable on Windows pending platform
+    verification.  [[#45], [#73]]
+
  -  Command execution now routes environment reads, platform detection, clocks,
     random identifiers, terminal checks, prompts, output, and child processes
     through explicit interpreters.  Dry runs still accept interactive input but
@@ -253,6 +264,12 @@ To be released.
     backends; use `manifestWithCodecBackends` or
     `ManifestWithCodecBackends` to preserve an explicit registry.  [[#45],
     [#73]]
+
+ -  Added effectful codec programs, backend runtime resolution, encrypted-file
+    implementations, and demand-driven secret-template evaluation.  Existing
+    pure codec constructors remain source compatible.  Effectful
+    implementations are structurally command-scoped because backend request
+    fingerprints do not attest to returned secret values.  [[#45], [#73]]
 
  -  Added `MonadCommandEffect`, `MonadProcessControl`, structured process and
     prompt requests, production and dry-run interpreters, and an exact scripted
