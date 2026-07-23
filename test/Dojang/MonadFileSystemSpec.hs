@@ -363,6 +363,22 @@ spec = do
       original <- Data.ByteString.readFile packageYamlFP
       contents `shouldBe` original
 
+    specify "renameDirectory" $ withTempDir $ \tmpDir _ -> do
+      createDirectory $ tmpDir </> foo
+      writeFile (tmpDir </> foo </> bar) "contents"
+      renameDirectory (tmpDir </> foo) (tmpDir </> baz)
+      isDirectory (tmpDir </> foo) `shouldReturn` False
+      readFile (tmpDir </> baz </> bar) `shouldReturn` "contents"
+
+    specify "renameDirectory refuses an existing destination" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> foo
+        createDirectory $ tmpDir </> baz
+        renameDirectory (tmpDir </> foo) (tmpDir </> baz)
+          `shouldThrow` isAlreadyExistsError
+        isDirectory (tmpDir </> foo) `shouldReturn` True
+        isDirectory (tmpDir </> baz) `shouldReturn` True
+
     specify "createDirectory" $ withTempDir $ \tmpDirP _ -> do
       () <- createDirectory (tmpDirP </> nonExistentP)
       doesDirectoryExist (tmpDirP </> nonExistentP)
@@ -1127,6 +1143,34 @@ spec = do
         ioeGetLocation failToCreate `shouldStartWith` "createDirectories"
         show failToCreate
           `shouldContain` "one of its ancestors is a non-directory file"
+
+    describe "renameDirectory" $ do
+      it "moves a virtual tree without touching the real filesystem" $
+        withTempDir $ \tmpDir _ -> do
+          result <- dryRunIO $ do
+            createDirectory $ tmpDir </> foo
+            writeFile (tmpDir </> foo </> bar) "contents"
+            renameDirectory (tmpDir </> foo) (tmpDir </> baz)
+            (,,)
+              <$> isDirectory (tmpDir </> foo)
+              <*> isDirectory (tmpDir </> baz)
+              <*> readFile (tmpDir </> baz </> bar)
+          result `shouldBe` (False, True, "contents")
+          OsDirectory.doesDirectoryExist (tmpDir </> baz)
+            `shouldReturn` False
+
+      it "refuses an existing virtual destination" $ do
+        Left err <- tryDryRunIO $ do
+          createDirectory nonExistentP
+          createDirectory nonExistentP'
+          renameDirectory nonExistentP nonExistentP'
+        err `shouldSatisfy` isAlreadyExistsError
+
+      it "does not create a destination for a missing source" $ do
+        result <- dryRunIO $ do
+          _ <- tryError $ renameDirectory nonExistentP nonExistentP'
+          isDirectory nonExistentP'
+        result `shouldBe` False
 
     describe "listDirectory" $ do
       it "lists direct children in a directory" $ do

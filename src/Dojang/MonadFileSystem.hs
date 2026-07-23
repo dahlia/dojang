@@ -167,6 +167,37 @@ class (MonadError IOError m) => MonadFileSystem m where
   replaceFile :: (HasCallStack) => OsPath -> OsPath -> m ()
 
 
+  -- | Renames a directory without replacing an existing destination.
+  --
+  -- Filesystem-backed implementations should use an atomic same-filesystem
+  -- rename.  The default implementation preserves observable behavior for
+  -- virtual filesystems by copying the tree and removing the source.
+  renameDirectory
+    :: (HasCallStack)
+    => OsPath
+    -- ^ Existing source directory.
+    -> OsPath
+    -- ^ Destination path, which must not exist.
+    -> m ()
+  renameDirectory source destination = do
+    entries <- listDirectoryRecursively source []
+    createDirectory destination
+    forM_ entries $ \(fileType, relative) -> do
+      let sourceEntry = source </> relative
+          destinationEntry = destination </> relative
+      case fileType of
+        Directory -> createDirectory destinationEntry
+        File -> copyFileWithMetadata sourceEntry destinationEntry
+        Symlink -> do
+          target <- readSymlinkTarget sourceEntry
+          directoryLink <- isDirectory sourceEntry
+          createSymbolicLink
+            target
+            destinationEntry
+            (if directoryLink then Directory else File)
+    removeDirectoryRecursively source
+
+
   -- | Writes a uniquely named temporary file in the given directory.
   --
   -- The returned path belongs to the caller, which should replace or remove
@@ -578,6 +609,16 @@ instance MonadFileSystem IO where
 
 
   replaceFile = replaceFileIO
+
+
+  renameDirectory source destination = do
+    destinationExists <- doesPathExist destination
+    when destinationExists $ do
+      destination' <- decodePath destination
+      throwError $
+        mkIOError alreadyExistsErrorType "renameDirectory" Nothing (Just destination')
+          `ioeSetErrorString` "destination already exists"
+    OsDirectory.renameDirectory source destination
 
 
   copyFileWithMetadata = OsDirectory.copyFileWithMetadata
