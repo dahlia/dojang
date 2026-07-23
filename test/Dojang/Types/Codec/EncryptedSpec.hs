@@ -33,6 +33,7 @@ import Dojang.Types.Codec.Evaluate
   , EvaluatedCodec (..)
   , EvaluationMode (NormalEvaluation)
   , ExternalInput (ExternalInput)
+  , ExternalInputFailure (CodecBackendReportedFailure)
   , ExternalInputRequest (BackendInputRequest)
   , codecReflectPolicy
   , codecRegistry
@@ -43,7 +44,8 @@ import Dojang.Types.Codec.Evaluate
   , revealBytes
   )
 import Dojang.Types.CodecBackend.Protocol
-  ( BackendOperation (Decrypt, Encrypt)
+  ( BackendFailure (BackendPermissionDenied)
+  , BackendOperation (Decrypt, Encrypt)
   )
 
 
@@ -101,6 +103,25 @@ spec = describe "encrypted codecs" $ do
               Nothing
     show request `shouldNotContain` "do-not-print-secret"
     show result `shouldNotContain` "do-not-print-secret"
+
+  specify "preserves sanitized backend failure categories" $ do
+    let brokenRuntime =
+          CodecRuntime
+            (codecRegistry [encryptedCodecImplementation])
+            NormalEvaluation
+            ( const $
+                pure $
+                  Left $
+                    CodecBackendReportedFailure BackendPermissionDenied
+            )
+        result =
+          runIdentity $
+            evaluateCodec
+              brokenRuntime
+              (evaluationRequest encryptedCodecName "ciphertext")
+              Nothing
+    either formatCodecError (const "unexpected success") result
+      `shouldBe` "Route route codec encrypted could not resolve declared input backend:vault:decrypt. The backend denied access to the request."
 
   specify "rejects unknown encrypted codec configuration" $ do
     let spec' =

@@ -17,7 +17,7 @@ import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 import Dojang.CommandEffect
   ( BinaryProcessRequest (BinaryProcessRequest)
   , BinaryProcessResult (..)
-  , CommandEffect (BinaryProcessRun)
+  , CommandEffect (BinaryProcessRun, HostPlatformRead)
   , CommandEffectKind (CodecBackendExecution)
   , CommandEffectResponse (..)
   , redactedProcessBytes
@@ -30,6 +30,7 @@ import Dojang.Types.Codec.BackendRuntime
   )
 import Dojang.Types.Codec.Evaluate
   ( ExternalInput (..)
+  , ExternalInputFailure (..)
   , ExternalInputRequest (BackendInputRequest)
   , opaqueBytes
   , revealBytes
@@ -137,6 +138,50 @@ spec = describe "codec backend protocol" $ do
           revealBytes (input.value) === output
           effects === [BinaryProcessRun processRequest]
 
+  it "resolves an absolute backend into the expected process request" $ do
+    let backend =
+          CodecBackend
+            (PathSeparator (Root Nothing) $ BareComponent "configured-backend")
+            "backend-v1"
+            17
+            (CodecBackendOptions $ Map.singleton "profile" $ CodecString "work")
+        protocolRequest =
+          BackendProtocolRequest
+            "vault"
+            "backend-v1"
+            Decrypt
+            (Map.singleton "profile" $ CodecString "work")
+        processRequest =
+          BinaryProcessRequest
+            "/configured-backend"
+            (Just "/repository")
+            []
+            (redactedProcessBytes $ encodeBackendStandardInput protocolRequest "ciphertext")
+            17
+        responses =
+          [ PlatformValue "linux"
+          , BinaryProcessValue $
+              BinaryProcessCompleted
+                ExitSuccess
+                (redactedProcessBytes "plaintext")
+                (redactedProcessBytes "")
+          ]
+        variableGetter _ = pure $ VariableLookup Nothing [] Map.empty
+    result <-
+      runCommandEffectTest responses $
+        resolveCodecBackendInput
+          (Map.singleton "vault" backend)
+          variableGetter
+          (unsafeEncodeUtf "/repository")
+          (BackendInputRequest "vault" Decrypt $ opaqueBytes "ciphertext")
+    case result of
+      Left err -> fail $ show err
+      Right (Left err, _) -> fail $ show err
+      Right (Right input, effects) -> do
+        revealBytes input.value `shouldBe` "plaintext"
+        effects
+          `shouldBe` [HostPlatformRead, BinaryProcessRun processRequest]
+
   it "maps backend process failures to redacted diagnostics" $ do
     let backend =
           CodecBackend
@@ -159,16 +204,16 @@ spec = describe "codec backend protocol" $ do
                 (ExitFailure 2)
                 (redactedProcessBytes "leaked output")
                 (redactedProcessBytes "{\"code\":\"permission-denied\",\"detail\":\"secret\"}")
-            , "The backend denied access to the request."
+            , CodecBackendReportedFailure BackendPermissionDenied
             )
-          , (BinaryProcessTimedOut, "The codec backend timed out.")
+          , (BinaryProcessTimedOut, CodecBackendTimeout)
           ,
             ( BinaryProcessStartFailed "secret"
-            , "The codec backend could not be started."
+            , CodecBackendStartFailure
             )
           ,
             ( BinaryProcessUnavailable CodecBackendExecution
-            , "Codec backend execution is unavailable."
+            , CodecBackendExecutionUnavailable
             )
           ]
     mapM_
@@ -245,10 +290,10 @@ spec = describe "codec backend protocol" $ do
       unexpandable <-
         resolveWith warningGetter "linux" $ Map.singleton "vault" warningBackend
       fmap fst windows
-        `shouldBe` Right (Left "Sensitive codec backends are not supported on Windows.")
+        `shouldBe` Right (Left CodecBackendUnsupportedPlatform)
       fmap fst undeclared
-        `shouldBe` Right (Left "The selected codec backend is not declared.")
+        `shouldBe` Right (Left CodecBackendNotDeclared)
       fmap fst relative
-        `shouldBe` Right (Left "The codec backend command is not absolute.")
+        `shouldBe` Right (Left CodecBackendCommandNotAbsolute)
       fmap fst unexpandable
-        `shouldBe` Right (Left "The codec backend command could not be expanded.")
+        `shouldBe` Right (Left CodecBackendCommandExpansionFailure)

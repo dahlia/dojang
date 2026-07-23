@@ -31,6 +31,7 @@ import Dojang.MonadFileSystem
   )
 import Dojang.Types.Codec.Evaluate
   ( ExternalInput (ExternalInput)
+  , ExternalInputFailure (..)
   , ExternalInputRequest (..)
   , OpaqueBytes
   , opaqueBytes
@@ -46,7 +47,6 @@ import Dojang.Types.CodecBackend.Protocol
   , BackendProtocolRequest (BackendProtocolRequest)
   , decodeBackendFailure
   , encodeBackendStandardInput
-  , formatBackendFailure
   )
 import Dojang.Types.FilePathExpression.Expansion
   ( VariableGetter
@@ -65,15 +65,15 @@ resolveCodecBackendInput
   -> VariableGetter m
   -> OsPath
   -> ExternalInputRequest
-  -> m (Either Text ExternalInput)
+  -> m (Either ExternalInputFailure ExternalInput)
 resolveCodecBackendInput _ _ _ (ExternalInputRequest _) =
-  return $ Left "The declared external input has no codec backend."
+  return $ Left NoCodecBackend
 resolveCodecBackendInput backends variableGetter sourcePath (BackendInputRequest backendName operation payload) = do
   platform <- hostPlatform
   if platform == "mingw32" || platform == "win32"
-    then return $ Left "Sensitive codec backends are not supported on Windows."
+    then return $ Left CodecBackendUnsupportedPlatform
     else case Map.lookup backendName backends of
-      Nothing -> return $ Left "The selected codec backend is not declared."
+      Nothing -> return $ Left CodecBackendNotDeclared
       Just backend -> do
         (command, warnings, _) <-
           expandFilePathWithVariables
@@ -81,10 +81,10 @@ resolveCodecBackendInput backends variableGetter sourcePath (BackendInputRequest
             variableGetter
             encodePathText
         if not $ null warnings
-          then return $ Left "The codec backend command could not be expanded."
+          then return $ Left CodecBackendCommandExpansionFailure
           else
             if not $ isAbsolute command
-              then return $ Left "The codec backend command is not absolute."
+              then return $ Left CodecBackendCommandNotAbsolute
               else do
                 root <- makeAbsolute sourcePath
                 executable <- decodePath $ normalise command
@@ -116,7 +116,7 @@ executeCodecBackendProcess
   -- ^ Requested backend operation.
   -> OpaqueBytes
   -- ^ Exact binary payload, kept redacted in effect values.
-  -> m (Either Text ExternalInput)
+  -> m (Either ExternalInputFailure ExternalInput)
 executeCodecBackendProcess
   backendName
   backend
@@ -149,11 +149,14 @@ executeCodecBackendProcess
                (opaqueBytes bytes)
                (backendFingerprint protocolRequest)
       BinaryProcessCompleted _ _ stderr ->
-        Left $ formatBackendFailure $ decodeBackendFailure $ revealProcessBytes stderr
-      BinaryProcessStartFailed _ -> Left "The codec backend could not be started."
-      BinaryProcessIOFailed _ -> Left "The codec backend failed during I/O."
-      BinaryProcessTimedOut -> Left "The codec backend timed out."
-      BinaryProcessUnavailable _ -> Left "Codec backend execution is unavailable."
+        Left $
+          CodecBackendReportedFailure $
+            decodeBackendFailure $
+              revealProcessBytes stderr
+      BinaryProcessStartFailed _ -> Left CodecBackendStartFailure
+      BinaryProcessIOFailed _ -> Left CodecBackendIOFailure
+      BinaryProcessTimedOut -> Left CodecBackendTimeout
+      BinaryProcessUnavailable _ -> Left CodecBackendExecutionUnavailable
 
 
 backendFingerprint :: BackendProtocolRequest -> Text

@@ -34,6 +34,7 @@ module Dojang.Types.Codec.Evaluate
   , EvaluationMode (..)
   , EvaluatedCodec (..)
   , ExternalInput (..)
+  , ExternalInputFailure (..)
   , ExternalInputRequest (..)
   , OpaqueBytes
   , codecRegistry
@@ -88,7 +89,9 @@ import Dojang.Types.Codec
   , renderCodecName
   )
 import Dojang.Types.CodecBackend.Protocol
-  ( BackendOperation (Decrypt, Encrypt, Lookup)
+  ( BackendFailure
+  , BackendOperation (Decrypt, Encrypt, Lookup)
+  , formatBackendFailure
   )
 
 
@@ -203,6 +206,59 @@ data ExternalInput = ExternalInput
   -- returned value, so effectful codec results are never persistently cached.
   }
   deriving (Eq, Show)
+
+
+-- | Failure while resolving an external codec input.
+--
+-- Opaque failures retain their reason for equality without rendering it.
+-- Backend failures use closed categories whose public messages cannot expose
+-- backend stderr or secret payloads.
+data ExternalInputFailure
+  = -- | Untrusted resolver failure that must remain hidden.
+    OpaqueExternalInputFailure Text
+  | -- | The request does not identify a codec backend.
+    NoCodecBackend
+  | -- | Sensitive codec backends are unavailable on the current platform.
+    CodecBackendUnsupportedPlatform
+  | -- | The requested backend is absent from the manifest.
+    CodecBackendNotDeclared
+  | -- | The backend command could not be expanded safely.
+    CodecBackendCommandExpansionFailure
+  | -- | The expanded backend command is not absolute.
+    CodecBackendCommandNotAbsolute
+  | -- | Allowlisted diagnostic reported by the backend protocol.
+    CodecBackendReportedFailure BackendFailure
+  | -- | The backend process could not be started.
+    CodecBackendStartFailure
+  | -- | The backend process failed during stream I/O.
+    CodecBackendIOFailure
+  | -- | The backend exceeded its declared hard timeout.
+    CodecBackendTimeout
+  | -- | Command effects do not permit backend execution.
+    CodecBackendExecutionUnavailable
+  deriving (Eq)
+
+
+instance Show ExternalInputFailure where
+  show (OpaqueExternalInputFailure _) =
+    "OpaqueExternalInputFailure <redacted>"
+  show NoCodecBackend = "NoCodecBackend"
+  show CodecBackendUnsupportedPlatform = "CodecBackendUnsupportedPlatform"
+  show CodecBackendNotDeclared = "CodecBackendNotDeclared"
+  show CodecBackendCommandExpansionFailure =
+    "CodecBackendCommandExpansionFailure"
+  show CodecBackendCommandNotAbsolute = "CodecBackendCommandNotAbsolute"
+  show (CodecBackendReportedFailure failure) =
+    "CodecBackendReportedFailure " <> show failure
+  show CodecBackendStartFailure = "CodecBackendStartFailure"
+  show CodecBackendIOFailure = "CodecBackendIOFailure"
+  show CodecBackendTimeout = "CodecBackendTimeout"
+  show CodecBackendExecutionUnavailable =
+    "CodecBackendExecutionUnavailable"
+
+
+instance IsString ExternalInputFailure where
+  fromString = OpaqueExternalInputFailure . Text.pack
 
 
 -- | A pure description of a codec transformation that may request controlled
@@ -464,7 +520,7 @@ data CodecRuntime m = CodecRuntime
   , mode :: EvaluationMode
   -- ^ Normal or dry-run execution.
   , resolveExternalInput
-      :: ExternalInputRequest -> m (Either Text ExternalInput)
+      :: ExternalInputRequest -> m (Either ExternalInputFailure ExternalInput)
   -- ^ Controlled resolver for declared external inputs.
   }
 
@@ -551,7 +607,7 @@ data CodecErrorKind
   | InvalidConfiguration CodecFailure
   | InvalidSource CodecFailure
   | MissingInput Text
-  | ExternalInputFailure Text Text
+  | ExternalInputResolutionFailure Text ExternalInputFailure
   | EvaluationFailure CodecFailure
   | DryRunCacheRequired
   | UnsupportedSourceType Text
@@ -788,7 +844,8 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
   rawSource = revealBytes request.rawSource
   CodecDefinition _ version _ = implementation.definition
   reusableCache
-    | implementation.cacheScope == PersistentCache = cached
+    | effectiveCacheScope implementation requirements == PersistentCache =
+        cached
     | otherwise = Nothing
   cacheKey dependencies =
     codecCacheKey request.codec version rawSource dependencies
@@ -798,9 +855,18 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
       key
       dependencies
       implementation.definition
-      implementation.cacheScope
+      (effectiveCacheScope implementation requirements)
       inputs
       requirements
+
+
+effectiveCacheScope :: CodecImplementation -> CodecRequirements -> CacheScope
+effectiveCacheScope implementation requirements
+  | any backendInput requirements.externalInputs = CommandCacheOnly
+  | otherwise = implementation.cacheScope
+ where
+  backendInput BackendInputRequest{} = True
+  backendInput _ = False
 
 
 -- | Evaluates a codec with the resolved inputs captured by an earlier
@@ -873,7 +939,7 @@ reevaluateCodec runtime request previous =
                     key
                     dependencies
                     implementation.definition
-                    implementation.cacheScope
+                    (effectiveCacheScope implementation requirements)
                     inputs'
                     requirements
  where
@@ -943,7 +1009,9 @@ runCodecProgram runtime request failureKind = go [] Map.empty
             return $
               Left $
                 CodecError request.routeName codecName $
-                  ExternalInputFailure (requestName externalRequest) reason
+                  ExternalInputResolutionFailure
+                    (requestName externalRequest)
+                    reason
           Right input -> continue input
    where
     continue input =
@@ -1136,6 +1204,13 @@ reflectEvaluatedCodecWithEvaluation
 reflectEvaluatedCodecWithEvaluation runtime request evaluated deployed =
   case Map.lookup codecName runtime.registry of
     Nothing -> return $ Left $ CodecError request.routeName codecName UnknownCodec
+    Just implementation
+      | implementation.definition /= evaluated.definition ->
+          return $
+            Left $
+              CodecError request.routeName codecName $
+                InvalidConfiguration
+                  "command-scoped evaluation does not match the codec"
     Just implementation -> case implementation.validateConfiguration configuration of
       Left reason ->
         return $
@@ -1400,7 +1475,7 @@ validateReversedSource
                    key
                    allDependencies
                    implementation.definition
-                   implementation.cacheScope
+                   (effectiveCacheScope implementation requirements)
                    inputs'
                    requirements
                )
@@ -1583,7 +1658,7 @@ resolveInputs runtime request requirements = case selectTextInputs of
       Left reason ->
         Left $
           CodecError request.routeName codecName $
-            ExternalInputFailure (requestName externalRequest) reason
+            ExternalInputResolutionFailure (requestName externalRequest) reason
       Right input -> Right (externalRequest, input)
   resolveExternals [] = return $ Right []
   resolveExternals (externalRequest : externalRequests) = do
@@ -1674,8 +1749,11 @@ formatCodecError (CodecError routeName codecName kind) =
     InvalidConfiguration _ -> " has invalid configuration."
     InvalidSource failure -> formatSourceFailure failure
     MissingInput dependency -> " is missing declared input " <> dependency <> "."
-    ExternalInputFailure dependency _ ->
-      " could not resolve declared input " <> dependency <> "."
+    ExternalInputResolutionFailure dependency failure ->
+      " could not resolve declared input "
+        <> dependency
+        <> "."
+        <> formatExternalInputFailure failure
     EvaluationFailure failure -> formatEvaluationFailure failure
     DryRunCacheRequired -> " cannot run during dry-run without a valid cache."
     UnsupportedSourceType sourceType ->
@@ -1686,6 +1764,24 @@ formatCodecError (CodecError routeName codecName kind) =
     ReverseValidationFailure -> " failed reverse validation."
     ProtectedStorageRequired -> " requires an owner-only destination mode."
  where
+  formatExternalInputFailure failure = case failure of
+    OpaqueExternalInputFailure _ -> ""
+    NoCodecBackend -> " The declared external input has no codec backend."
+    CodecBackendUnsupportedPlatform ->
+      " Sensitive codec backends are not supported on Windows."
+    CodecBackendNotDeclared -> " The selected codec backend is not declared."
+    CodecBackendCommandExpansionFailure ->
+      " The codec backend command could not be expanded."
+    CodecBackendCommandNotAbsolute ->
+      " The codec backend command is not absolute."
+    CodecBackendReportedFailure backendFailure ->
+      " " <> formatBackendFailure backendFailure
+    CodecBackendStartFailure ->
+      " The codec backend could not be started."
+    CodecBackendIOFailure -> " The codec backend failed during I/O."
+    CodecBackendTimeout -> " The codec backend timed out."
+    CodecBackendExecutionUnavailable ->
+      " Codec backend execution is unavailable."
   at :: CodecSourcePosition -> Text
   at position =
     " at line "

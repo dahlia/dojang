@@ -5,6 +5,7 @@
 
 module Dojang.Types.Codec.SecretTemplateSpec (spec) where
 
+import Control.Exception (evaluate)
 import Control.Monad.State.Strict (State, get, put, runState)
 import Data.ByteString qualified as ByteString
 import Data.Map.Strict qualified as Map
@@ -27,6 +28,7 @@ import Dojang.Types.Codec.Evaluate
   , EvaluatedCodec (..)
   , EvaluationMode (NormalEvaluation)
   , ExternalInput (ExternalInput)
+  , ExternalInputFailure (OpaqueExternalInputFailure)
   , ExternalInputRequest (BackendInputRequest)
   , codecRegistry
   , evaluateCodec
@@ -117,6 +119,34 @@ spec = describe "secret-template codec" $ do
         (revealBytes . (.renderedBytes) <$> result)
           `shouldBe` Right selectedSecret
 
+  specify "stops retrying a resolved secret marker used as a variable" $ do
+    let marker =
+          "secret-request:c5ce29af0d151ab9b1156ee2423d8f601b1c757889781ce5ca26cc25c6668954"
+        source =
+          "{{ vars[\""
+            <> marker
+            <> "\"] if facts.selected == \"true\" else secret(\"vault\", \"item\") }}"
+        request =
+          CodecEvaluationRequest
+            "route"
+            secretTemplateCodecSpec
+            (opaqueBytes source)
+            (Map.singleton "selected" "true")
+            Map.empty
+        (result, requests) =
+          runState (evaluateCodec (runtime "secret") request Nothing) []
+    completed <-
+      timeout 1000000 $
+        evaluate $
+          either formatCodecError (const "unexpected success") result
+    case completed of
+      Nothing -> expectationFailure "secret-template evaluation did not terminate"
+      Just message -> do
+        message
+          `shouldBe` "Route route codec secret-template is missing template input vars.secret-request:c5ce29af0d151ab9b1156ee2423d8f601b1c757889781ce5ca26cc25c6668954 at line 1, column 8."
+        requests
+          `shouldBe` [BackendInputRequest "vault" (Lookup "item") $ opaqueBytes ""]
+
   specify "rejects dynamic secret references before lookup" $ do
     let request =
           CodecEvaluationRequest
@@ -148,7 +178,8 @@ spec = describe "secret-template codec" $ do
     requests `shouldBe` []
 
   specify "redacts secret values from failures" $ do
-    let sentinel = "do-not-print-secret"
+    let sentinel :: Text
+        sentinel = "do-not-print-secret"
         request =
           CodecEvaluationRequest
             "route"
@@ -160,7 +191,7 @@ spec = describe "secret-template codec" $ do
           CodecRuntime
             (codecRegistry [secretTemplateCodecImplementation])
             NormalEvaluation
-            (const $ pure $ Left sentinel)
+            (const $ pure $ Left $ OpaqueExternalInputFailure sentinel)
         result = fst $ runState (evaluateCodec brokenRuntime request Nothing) []
     show result `shouldNotContain` "do-not-print-secret"
     show (BackendInputRequest "vault" (Lookup sentinel) $ opaqueBytes "")
@@ -190,7 +221,7 @@ runtime secret =
  where
   resolve
     :: ExternalInputRequest
-    -> State [ExternalInputRequest] (Either Text ExternalInput)
+    -> State [ExternalInputRequest] (Either ExternalInputFailure ExternalInput)
   resolve request@(BackendInputRequest "vault" (Lookup _) payload)
     | ByteString.null $ revealBytes payload = do
         previous <- get

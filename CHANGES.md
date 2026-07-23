@@ -12,8 +12,9 @@ To be released.
     `[codec-backends]`.  Each backend has a shell-free executable path, stable
     version, bounded timeout, and non-secret options.  The new backend protocol
     types frame one JSON header line followed by the exact binary payload and
-    accept only allowlisted structured failure categories.  Binary process
-    requests and results redact their byte contents.  [[#45], [#73]]
+    accept only allowlisted structured failure categories.  Codec errors
+    preserve those categories without exposing backend diagnostics.  Binary
+    process requests and results redact their byte contents.  [[#45], [#73]]
 
  -  Added the `encrypted` codec with reject reflection, the opt-in
     `encrypted-re-add` codec with decrypt-after-encrypt validation, and the
@@ -269,7 +270,12 @@ To be released.
 
  -  Added effectful codec programs, backend runtime resolution, encrypted-file
     implementations, and demand-driven secret-template evaluation.  Existing
-    pure codec constructors remain source compatible.  Effectful
+    pure codec constructors remain source compatible.
+    `CodecRuntime.resolveExternalInput` now returns `ExternalInputFailure`;
+    embedding resolvers should use `OpaqueExternalInputFailure` for untrusted
+    details.  Evaluations with declared backend inputs are command-scoped
+    regardless of the implementation's cache setting, and captured inputs
+    cannot be reflected through another codec definition.  Effectful
     implementations are structurally command-scoped because backend request
     fingerprints do not attest to returned secret values.  [[#45], [#73]]
 

@@ -493,8 +493,10 @@ renderSecretTemplateWith secrets inputs = case prepared of
          Right _ -> SecretRendered $ encodeUtf8 output
          Left runtimeError ->
            case missingIndex runtimeError >>= (`Map.lookup` analysis.secretReferences) of
-             Just reference -> SecretNeeded reference.backend reference.item
-             Nothing ->
+             Just reference
+               | Map.notMember (reference.backend, reference.item) secrets ->
+                   SecretNeeded reference.backend reference.item
+             _ ->
                SecretRenderFailed $
                  runtimeFailure analysis.lookupReferences runtimeError
  where
