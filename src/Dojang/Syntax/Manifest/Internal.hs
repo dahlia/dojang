@@ -7,6 +7,7 @@
 
 module Dojang.Syntax.Manifest.Internal
   ( FileRoute' (..)
+  , CodecBackend' (..)
   , FileRouteBranch' (..)
   , FileRouteMap'
   , EnvironmentPredicate' (..)
@@ -556,6 +557,7 @@ data Manifest' = Manifest'
   { repositoryId :: Maybe Text
   , monikers :: MonikerMap'
   , variables :: ManifestVariableMap'
+  , codecBackends :: Map Text CodecBackend'
   , dirs :: FileRouteMap'
   , files :: FileRouteMap'
   , ignores :: IgnoreMap'
@@ -571,6 +573,7 @@ instance FromValue Manifest' where
         <$> optKey "repository-id"
         <*> (fromMaybe Map.empty <$> optKey "monikers")
         <*> (fromMaybe Map.empty <$> optKey "vars")
+        <*> (fromMaybe Map.empty <$> optKey "codec-backends")
         <*> (fromMaybe Map.empty <$> optKey "dirs")
         <*> (fromMaybe Map.empty <$> optKey "files")
         <*> (fromMaybe Map.empty <$> optKey "ignores")
@@ -589,6 +592,10 @@ instance ToTable Manifest' where
                then []
                else [("vars", toValue manifest.variables)]
            )
+        ++ ( if Map.null manifest.codecBackends
+               then []
+               else [("codec-backends", toValue manifest.codecBackends)]
+           )
         ++ [ ("monikers", toValue manifest.monikers)
            , ("dirs", toValue manifest.dirs)
            , ("files", toValue manifest.files)
@@ -599,3 +606,41 @@ instance ToTable Manifest' where
     maybeField :: (ToValue a) => String -> Maybe a -> [(String, Value)]
     maybeField key (Just value) = [(key, toValue value)]
     maybeField _ Nothing = []
+
+
+data CodecBackend' = CodecBackend'
+  { backendCommand :: Text
+  , backendVersion :: Text
+  , backendTimeoutSeconds :: Maybe Integer
+  , backendOptions :: Map Text CodecValue
+  }
+  deriving (Eq, Show)
+
+
+instance FromValue CodecBackend' where
+  fromValue =
+    parseTableFromValue $
+      CodecBackend'
+        <$> FromValue.reqKey "command"
+        <*> FromValue.reqKey "version"
+        <*> optKey "timeout-seconds"
+        <*> (fromMaybe Map.empty <$> optKey "options")
+
+
+instance ToValue CodecBackend' where
+  toValue = defaultTableToValue
+
+
+instance ToTable CodecBackend' where
+  toTable backend =
+    table $
+      [ ("command", toValue backend.backendCommand)
+      , ("version", toValue backend.backendVersion)
+      ]
+        ++ maybe
+          []
+          (\seconds -> [("timeout-seconds", toValue seconds)])
+          backend.backendTimeoutSeconds
+        ++ if Map.null backend.backendOptions
+          then []
+          else [("options", toValue backend.backendOptions)]

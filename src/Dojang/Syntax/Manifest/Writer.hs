@@ -38,6 +38,7 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (writeFile)
   )
 import Dojang.Syntax.EnvironmentPredicate.Writer (writeEnvironmentPredicate)
+import Dojang.Syntax.FilePathExpression.Parser (parseFilePathExpression)
 import Dojang.Syntax.Manifest.Internal
   ( EnvironmentPredicate' (..)
   , FileRoute' (CompactFileRoute, DetailedFileRoute)
@@ -58,6 +59,11 @@ import Dojang.Types.Codec
   ( CodecSpec (..)
   , identityCodecSpec
   , renderCodecName
+  )
+import Dojang.Types.CodecBackend
+  ( CodecBackend (..)
+  , CodecBackendOptions (CodecBackendOptions)
+  , defaultCodecBackendTimeoutSeconds
   )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
@@ -117,6 +123,8 @@ data WriteError
     ModeOnSymlinkRoute OsPath RouteMode
   | -- | A symlink-kind route target declares a non-identity codec.
     CodecOnSymlinkRoute OsPath Text
+  | -- | A codec backend violates an invariant accepted by the parser.
+    InvalidCodecBackend Text Text
   deriving (Eq, Show)
 
 
@@ -159,6 +167,11 @@ formatWriteError (CodecOnSymlinkRoute route codec) =
     <> " declares codec "
     <> codec
     <> " on a symlink-kind target, which cannot render repository bytes."
+formatWriteError (InvalidCodecBackend name reason) =
+  "Invalid codec backend "
+    <> (if Text.null name then "<empty>" else name)
+    <> ": "
+    <> reason
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -194,6 +207,7 @@ writeManifest
 writeManifest manifest = do
   validateVariables manifest.monikers manifest.variables
   validateHooks manifest.hooks
+  validateCodecBackends manifest.codecBackends
   validateRouteMetadata manifest.fileRoutes
   pure $
     "#:schema "
@@ -206,10 +220,11 @@ writeManifest manifest = do
   order [] field = case field of
     "repository-id" -> Left 0
     "vars" -> Left 1
-    "dirs" -> Left 2
-    "files" -> Left 3
-    "ignores" -> Left 4
-    "monikers" -> Left 5
+    "codec-backends" -> Left 2
+    "dirs" -> Left 3
+    "files" -> Left 4
+    "ignores" -> Left 5
+    "monikers" -> Left 6
     _ -> Right field
   order _ field = Right field
   validateHooks hookMap =
@@ -231,6 +246,23 @@ writeManifest manifest = do
       Nothing -> Right ()
       Just moniker ->
         Left $ UnrepresentableVariableMoniker variableName moniker
+  validateCodecBackends backends =
+    mapM_ (uncurry validateCodecBackend) $
+      Data.Map.Strict.toAscList backends
+  validateCodecBackend :: Text -> CodecBackend -> Either WriteError ()
+  validateCodecBackend name backend
+    | Text.null name = invalid "Backend names must be nonempty."
+    | Text.null backend.version = invalid "Versions must be nonempty."
+    | backend.timeoutSeconds < 1 || backend.timeoutSeconds > 300 =
+        invalid "Timeouts must be between 1 and 300 seconds."
+    | Text.null command = invalid "Commands must be nonempty."
+    | Left _ <- parseFilePathExpression fieldName command =
+        invalid "Commands must be valid file path expressions."
+    | otherwise = Right ()
+   where
+    command = toPathText backend.command
+    fieldName = "codec-backends." <> unpack name <> ".command"
+    invalid = Left . InvalidCodecBackend name
   validateRouteMetadata :: FileRouteMap -> Either WriteError ()
   validateRouteMetadata routes =
     sequence_
@@ -274,6 +306,7 @@ mapManifest' manifest =
     (repositoryIdText <$> manifest.repositoryId)
     monikers'
     variables'
+    codecBackends'
     dirs
     files
     ignores
@@ -290,6 +323,21 @@ mapManifest' manifest =
       [ (decodePath path, pattern)
       | (path, pattern) <- Data.Map.Strict.toList manifest.ignorePatterns
       ]
+  codecBackends' :: Data.Map.Strict.Map Text Internal.CodecBackend'
+  codecBackends' = fmap mapCodecBackend manifest.codecBackends
+  mapCodecBackend :: CodecBackend -> Internal.CodecBackend'
+  mapCodecBackend backend =
+    Internal.CodecBackend'
+      { Internal.backendCommand = toPathText backend.command
+      , Internal.backendVersion = backend.version
+      , Internal.backendTimeoutSeconds =
+          if backend.timeoutSeconds == defaultCodecBackendTimeoutSeconds
+            then Nothing
+            else Just $ fromIntegral backend.timeoutSeconds
+      , Internal.backendOptions =
+          case backend.options of
+            CodecBackendOptions values -> values
+      }
   hooks' :: Maybe Hooks'
   hooks' =
     if Data.Map.Strict.null manifest.hooks

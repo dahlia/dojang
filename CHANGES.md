@@ -8,6 +8,26 @@ To be released.
 
 ### Command-line interface
 
+ -  Manifests can declare reusable sensitive-codec commands in
+    `[codec-backends]`.  Each backend has a shell-free executable path, stable
+    version, bounded timeout, and non-secret options.  The new backend protocol
+    types frame one JSON header line followed by the exact binary payload and
+    accept only allowlisted structured failure categories.  Codec errors
+    preserve those categories without exposing backend diagnostics.  Binary
+    process requests and results redact their byte contents.  [[#45], [#73]]
+
+ -  Added the `encrypted` codec with reject reflection, the opt-in
+    `encrypted-re-add` codec with decrypt-after-encrypt validation, and the
+    `secret-template` codec with demand-driven `secret("backend", "item")`
+    lookups.  These codecs require an explicit `private` or
+    `private-executable` route mode, publish new plaintext through owner-only
+    temporary files, protect state snapshots, keep results command-scoped,
+    suppress diff bodies, and remain offline during dry runs.  File permissions
+    are not encryption at rest.  Backends run without arguments or inherited
+    environment, and a timeout or interruption terminates the entire backend
+    process group.  Backends remain unavailable on Windows pending platform
+    verification.  [[#45], [#73]]
+
  -  Command execution now routes environment reads, platform detection, clocks,
     random identifiers, terminal checks, prompts, output, and child processes
     through explicit interpreters.  Dry runs still accept interactive input but
@@ -222,6 +242,7 @@ To be released.
 [#42]: https://github.com/dahlia/dojang/issues/42
 [#43]: https://github.com/dahlia/dojang/issues/43
 [#44]: https://github.com/dahlia/dojang/issues/44
+[#45]: https://github.com/dahlia/dojang/issues/45
 [#46]: https://github.com/dahlia/dojang/issues/46
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
@@ -235,8 +256,28 @@ To be released.
 [#70]: https://github.com/dahlia/dojang/pull/70
 [#71]: https://github.com/dahlia/dojang/pull/71
 [#72]: https://github.com/dahlia/dojang/pull/72
+[#73]: https://github.com/dahlia/dojang/pull/73
 
 ### Haskell API
+
+ -  Added `CodecBackend`, binary backend protocol framing, redacted binary
+    process requests and results, and a timeout-aware command-effect boundary.
+    Manifest writers reject backend declarations that the parser would reject.
+    The six-argument `Manifest` pattern remains available for manifests without
+    backends; use `manifestWithCodecBackends` or
+    `ManifestWithCodecBackends` to preserve an explicit registry.  [[#45],
+    [#73]]
+
+ -  Added effectful codec programs, backend runtime resolution, encrypted-file
+    implementations, and demand-driven secret-template evaluation.  Existing
+    pure codec constructors remain source compatible.
+    `CodecRuntime.resolveExternalInput` now returns `ExternalInputFailure`;
+    embedding resolvers should use `OpaqueExternalInputFailure` for untrusted
+    details.  Evaluations with declared backend inputs are command-scoped
+    regardless of the implementation's cache setting, and captured inputs
+    cannot be reflected through another codec definition.  Effectful
+    implementations are structurally command-scoped because backend request
+    fingerprints do not attest to returned secret values.  [[#45], [#73]]
 
  -  Added `MonadCommandEffect`, `MonadProcessControl`, structured process and
     prompt requests, production and dry-run interpreters, and an exact scripted

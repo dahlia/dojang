@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -8,6 +9,11 @@
 module Dojang.Types.TargetTrackingSpec (spec) where
 
 import Control.Exception qualified as Exception
+import Control.Monad.Except
+  ( ExceptT
+  , MonadError (catchError, throwError)
+  , runExceptT
+  )
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Either (isLeft)
@@ -19,7 +25,6 @@ import System.Directory.OsPath qualified
 import System.Info (os)
 
 import Control.Monad (when)
-import Control.Monad.Except (catchError)
 import Dojang.Types.ManagedTarget
   ( TargetFingerprint (SymlinkFingerprint)
   )
@@ -67,7 +72,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
-  , RouteMode (DefaultMode)
+  , RouteMode (DefaultMode, Private, PrivateExecutable)
   )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
@@ -77,6 +82,13 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Manifest (manifest)
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
+
+
+#ifdef mingw32_HOST_OS
+import Dojang.Types.RouteMetadata (PortableMode (..))
+#else
+import Dojang.Types.RouteMetadata (PortableMode (..), portableModeFromBits)
+#endif
 import Dojang.Types.TargetTracking
   ( managedTargetId
   , newTargetSnapshotTransaction
@@ -109,6 +121,119 @@ spec = do
           Just target <-
             observeManagedTarget repository transaction Applied now managed
           isAbsolute target.destinationPath `shouldBe` True
+
+    it "protects target transactions and sensitive file snapshots" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let route = managed.route
+            protected = managed{route = route{mode = Private}}
+            intermediate = protected.correspondence.intermediate.path
+            destination = protected.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        writeFile intermediate "managed"
+        writeFile destination "managed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        getPortableMode transaction
+          `shouldReturn` expectedPrivateDirectoryMode
+        now <- getCurrentTime
+        Just target <-
+          observeManagedTarget repository transaction Applied now protected
+        getPortableMode target.snapshotPath
+          `shouldReturn` expectedPrivateFileMode
+        getPortableMode (takeDirectory target.snapshotPath)
+          `shouldReturn` expectedPrivateDirectoryMode
+
+    it "keeps private executable file snapshots executable" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let route = managed.route
+            protected = managed{route = route{mode = PrivateExecutable}}
+            intermediate = protected.correspondence.intermediate.path
+            destination = protected.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        writeFile intermediate "managed"
+        writeFile destination "managed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        Just target <-
+          observeManagedTarget repository transaction Applied now protected
+        getPortableMode target.snapshotPath
+          `shouldReturn` expectedPrivateExecutableFileMode
+        getPortableMode (takeDirectory target.snapshotPath)
+          `shouldReturn` expectedPrivateDirectoryMode
+
+    it "protects sensitive directory snapshots" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let route = managed.route
+            intermediate = managed.correspondence.intermediate.path
+            destination = managed.correspondence.destination.path
+            directoryEntry path = FileEntry path Directory
+            protected =
+              managed
+                { route =
+                    RouteResult
+                      route.sourcePath
+                      route.routeName
+                      route.destinationPath
+                      FileSystem.Directory
+                      Private
+                      route.kind
+                      route.routeDefinition
+                      route.routeProvenance
+                      route.codec
+                , correspondence =
+                    FileCorrespondence
+                      (directoryEntry managed.correspondence.source.path)
+                      Unchanged
+                      (directoryEntry intermediate)
+                      (directoryEntry destination)
+                      Unchanged
+                }
+        createDirectories intermediate
+        createDirectories destination
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        Just target <-
+          observeManagedTarget repository transaction Applied now protected
+        getPortableMode target.snapshotPath
+          `shouldReturn` expectedPrivateDirectoryMode
+
+    it "does not publish a private snapshot before its mode is narrowed" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let route = managed.route
+            protected = managed{route = route{mode = Private}}
+            intermediate = protected.correspondence.intermediate.path
+            destination = protected.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        writeFile intermediate "managed"
+        writeFile destination "managed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        outcome <-
+          runFailingPrivateModeIO $
+            observeManagedTarget
+              repository
+              transaction
+              Applied
+              now
+              protected
+        outcome `shouldSatisfy` isLeft
+        entries <- listDirectoryRecursively transaction []
+        [entry | (FileSystem.File, entry) <- entries] `shouldBe` []
 
     it "distinguishes arbitrary surrogate-escaped destination bytes" $
       hedgehog $ do
@@ -681,3 +806,87 @@ fixtureRepositoryAt root = do
       (root </> repositoryName)
       (root </> snapshotName)
       (manifest mempty mempty mempty mempty mempty)
+
+
+newtype FailingPrivateModeIO a
+  = FailingPrivateModeIO (ExceptT IOError IO a)
+  deriving (Functor, Applicative, Monad, MonadError IOError)
+
+
+runFailingPrivateModeIO
+  :: FailingPrivateModeIO a
+  -> IO (Either IOError a)
+runFailingPrivateModeIO (FailingPrivateModeIO action) = runExceptT action
+
+
+instance MonadFileSystem FailingPrivateModeIO where
+  encodePath value = FailingPrivateModeIO $ liftIO (encodePath value :: IO OsPath)
+  decodePath value = FailingPrivateModeIO $ liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory =
+    FailingPrivateModeIO $ liftIO (getCurrentDirectory :: IO OsPath)
+  getHomeDirectory = FailingPrivateModeIO $ liftIO (getHomeDirectory :: IO OsPath)
+  exists value = FailingPrivateModeIO $ liftIO (exists value :: IO Bool)
+  isFile value = FailingPrivateModeIO $ liftIO (isFile value :: IO Bool)
+  isRegularFile value =
+    FailingPrivateModeIO $ liftIO (isRegularFile value :: IO Bool)
+  isDirectory value = FailingPrivateModeIO $ liftIO (isDirectory value :: IO Bool)
+  isSymlink value = FailingPrivateModeIO $ liftIO (isSymlink value :: IO Bool)
+  readFile value = FailingPrivateModeIO $ liftIO (readFile value)
+  writeFile path contents =
+    FailingPrivateModeIO $ liftIO (writeFile path contents :: IO ())
+  replaceFile source destination =
+    FailingPrivateModeIO $
+      liftIO (replaceFile source destination :: IO ())
+  writeTemporaryFile directory template contents =
+    FailingPrivateModeIO $
+      liftIO (writeTemporaryFile directory template contents :: IO OsPath)
+  withFileLock _ action = action
+  canonicalizePath value =
+    FailingPrivateModeIO $ liftIO (canonicalizePath value :: IO OsPath)
+  readSymlinkTarget value =
+    FailingPrivateModeIO $ liftIO (readSymlinkTarget value :: IO OsPath)
+  copyFile source destination =
+    FailingPrivateModeIO $ liftIO (copyFile source destination :: IO ())
+  copyFileWithMetadata source destination =
+    FailingPrivateModeIO $
+      liftIO (copyFileWithMetadata source destination :: IO ())
+  copyFilePermissions source destination =
+    FailingPrivateModeIO $
+      liftIO (copyFilePermissions source destination :: IO ())
+  createDirectory value =
+    FailingPrivateModeIO $ liftIO (createDirectory value :: IO ())
+  removeFile value = FailingPrivateModeIO $ liftIO (removeFile value :: IO ())
+  removeDirectory value =
+    FailingPrivateModeIO $ liftIO (removeDirectory value :: IO ())
+  listDirectory value =
+    FailingPrivateModeIO $ liftIO (listDirectory value :: IO [OsPath])
+  getFileSize value =
+    FailingPrivateModeIO $ liftIO (getFileSize value :: IO Integer)
+  getPortableMode value =
+    FailingPrivateModeIO $ liftIO (getPortableMode value)
+  setPortableMode path bits
+    | bits == 0o600 = throwError $ userError "injected private-mode failure"
+    | otherwise =
+        FailingPrivateModeIO $ liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable =
+    FailingPrivateModeIO $
+      liftIO (setPortableWritable path writable :: IO ())
+  createSymbolicLink target link fileType =
+    FailingPrivateModeIO $
+      liftIO (createSymbolicLink target link fileType :: IO ())
+
+#ifdef mingw32_HOST_OS
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = PortableMode Nothing True
+expectedPrivateExecutableFileMode :: PortableMode
+expectedPrivateExecutableFileMode = PortableMode Nothing True
+expectedPrivateDirectoryMode :: PortableMode
+expectedPrivateDirectoryMode = PortableMode Nothing True
+#else
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = portableModeFromBits 0o600
+expectedPrivateExecutableFileMode :: PortableMode
+expectedPrivateExecutableFileMode = portableModeFromBits 0o700
+expectedPrivateDirectoryMode :: PortableMode
+expectedPrivateDirectoryMode = portableModeFromBits 0o700
+#endif

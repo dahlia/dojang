@@ -7,7 +7,10 @@
 
 -- | Deterministic, source-aware text-template codec.
 module Dojang.Types.Codec.Template
-  ( templateCodecDefinition
+  ( secretReferenceKey
+  , secretTemplateCodecImplementation
+  , secretTemplateCodecSpec
+  , templateCodecDefinition
   , templateCodecImplementation
   , templateCodecSpec
   ) where
@@ -15,8 +18,15 @@ module Dojang.Types.Codec.Template
 import Control.Monad (foldM)
 import Control.Monad.Identity (runIdentity)
 import Control.Monad.Writer (Writer, runWriter)
+import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Builder
+  ( byteString
+  , toLazyByteString
+  , word64BE
+  )
+import Data.ByteString.Lazy qualified as LazyByteString
 import Data.CaseInsensitive (foldCase)
 import Data.Char (chr, isAlphaNum, isSpace)
 import Data.HashMap.Strict qualified as HashMap
@@ -28,13 +38,18 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
+import Numeric (showHex)
 import System.OsString qualified as OsString
 import Text.Ginger.AST
   ( Expression (..)
   , Statement (..)
   , Template (..)
   )
-import Text.Ginger.GVal (GVal (..), ToGVal (toGVal))
+import Text.Ginger.GVal
+  ( GVal (..)
+  , ToGVal (toGVal)
+  , fromFunction
+  )
 import Text.Ginger.Parse
   ( ParserError (..)
   , ParserOptions (..)
@@ -56,25 +71,35 @@ import Prelude hiding (reverse)
 import Dojang.Types.Codec
   ( CodecConfiguration (CodecConfiguration)
   , CodecDefinition (CodecDefinition)
+  , CodecName
   , CodecSpec (CodecSpec)
   , ReflectPolicy (ReflectReject)
+  , parseCodecName
   , templateCodecName
   )
 import Dojang.Types.Codec.Evaluate
   ( CacheScope (PersistentCache)
-  , CodecDryRunPolicy (EvaluatePurely)
+  , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
   , CodecFailure (..)
   , CodecFailureCategory (..)
   , CodecImplementation
   , CodecInputPresence (DeferredInput)
   , CodecInputSelection (..)
   , CodecInputs (..)
+  , CodecProgram (CodecDone, CodecRequest)
   , CodecRequirements (CodecRequirements)
   , CodecSourcePosition (CodecSourcePosition)
+  , ExternalInput (..)
+  , ExternalInputRequest (BackendInputRequest)
   , OpaqueBytes
+  , codecImplementationWithEffects
   , codecImplementationWithSourceRequirements
   , noCodecInputs
+  , opaqueBytes
   , revealBytes
+  )
+import Dojang.Types.CodecBackend.Protocol
+  ( BackendOperation (Lookup)
   )
 
 
@@ -105,10 +130,54 @@ templateCodecImplementation =
     EvaluatePurely
 
 
+-- | Serializable specification selecting the secret-backed template codec.
+secretTemplateCodecSpec :: CodecSpec
+secretTemplateCodecSpec =
+  CodecSpec secretTemplateCodecName $ CodecConfiguration Map.empty
+
+
+-- | Secret-backed template implementation with command-scoped results and no
+-- destination-to-source reflection.
+secretTemplateCodecImplementation :: CodecImplementation
+secretTemplateCodecImplementation =
+  codecImplementationWithEffects
+    (CodecDefinition secretTemplateCodecName "1" ReflectReject)
+    validateSecretTemplateConfiguration
+    secretTemplateRequirements
+    renderSecretTemplate
+    Nothing
+    CachedOnly
+
+
+secretTemplateCodecName :: CodecName
+secretTemplateCodecName = case parseCodecName "secret-template" of
+  Just name -> name
+  Nothing -> error "The built-in secret-template codec name is nonempty."
+
+
+validateSecretTemplateConfiguration
+  :: CodecConfiguration -> Either CodecFailure CodecRequirements
+validateSecretTemplateConfiguration configuration
+  | configuration == CodecConfiguration Map.empty =
+      Right $ CodecRequirements noCodecInputs templateVariableInputs []
+  | otherwise = Left "secret-template does not accept configuration"
+
+
+secretTemplateRequirements
+  :: CodecConfiguration
+  -> OpaqueBytes
+  -> Either CodecFailure CodecRequirements
+secretTemplateRequirements _ source = do
+  template <- parseTemplate source
+  analysis <- validateTemplate template
+  Right $ CodecRequirements analysis.facts analysis.variables []
+
+
 data Analysis = Analysis
   { facts :: CodecInputSelection
   , variables :: CodecInputSelection
   , lookupReferences :: Map CodecSourcePosition LookupReference
+  , secretReferences :: Map Text SecretReference
   }
 
 
@@ -118,7 +187,14 @@ data LookupReference
 
 
 emptyAnalysis :: Analysis
-emptyAnalysis = Analysis noCodecInputs templateVariableInputs Map.empty
+emptyAnalysis = Analysis noCodecInputs templateVariableInputs Map.empty Map.empty
+
+
+data SecretReference = SecretReference
+  { backend :: Text
+  , item :: Text
+  , position :: CodecSourcePosition
+  }
 
 
 templateVariableInputs :: CodecInputSelection
@@ -129,6 +205,7 @@ requirementsFor :: OpaqueBytes -> Either CodecFailure CodecRequirements
 requirementsFor source = do
   template <- parseTemplate source
   analysis <- validateTemplate template
+  rejectSecretReferences analysis
   return $ CodecRequirements analysis.facts analysis.variables []
 
 
@@ -246,18 +323,21 @@ validateExpression locals expression analysis = case expression of
   BoolLiteralE _ _ -> Right analysis
   NullLiteralE _ -> Right analysis
   VarE _ name
+    | name == "secret" -> unsupported $ expressionPosition expression
     | name == "vars" ->
         Right $
           Analysis
             analysis.facts
             (includeAll analysis.variables)
             analysis.lookupReferences
+            analysis.secretReferences
     | name == "facts" ->
         Right $
           Analysis
             (includeAll analysis.facts)
             analysis.variables
             analysis.lookupReferences
+            analysis.secretReferences
     | name `Set.member` locals || name `Set.member` allowedFunctions ->
         Right analysis
     | otherwise -> unsupported $ expressionPosition expression
@@ -274,6 +354,7 @@ validateExpression locals expression analysis = case expression of
               analysis.facts
               (selectName id name analysis.variables)
               analysis.lookupReferences
+              analysis.secretReferences
     | namespace == "facts" ->
         Right $
           recordLookup (StaticLookup namespace name) position $
@@ -281,6 +362,7 @@ validateExpression locals expression analysis = case expression of
               (selectName foldCase name analysis.facts)
               analysis.variables
               analysis.lookupReferences
+              analysis.secretReferences
   MemberLookupE position (VarE _ namespace) index
     | namespace == "vars" -> do
         withIndex <-
@@ -289,6 +371,7 @@ validateExpression locals expression analysis = case expression of
               analysis.facts
               (includeAll analysis.variables)
               analysis.lookupReferences
+              analysis.secretReferences
         Right $ recordLookup (DynamicLookup namespace) position withIndex
     | namespace == "facts" -> do
         withIndex <-
@@ -297,9 +380,12 @@ validateExpression locals expression analysis = case expression of
               (includeAll analysis.facts)
               analysis.variables
               analysis.lookupReferences
+              analysis.secretReferences
         Right $ recordLookup (DynamicLookup namespace) position withIndex
   MemberLookupE _ base index ->
     validateExpression locals base analysis >>= validateExpression locals index
+  CallE position (VarE _ "secret") arguments ->
+    validateSecretReference position arguments analysis
   CallE position (VarE _ name) arguments
     | name `Set.member` allowedFunctions ->
         foldM
@@ -341,10 +427,161 @@ recordLookup reference position analysis =
     }
 
 
+validateSecretReference
+  :: SourcePos
+  -> [(Maybe Text, Expression SourcePos)]
+  -> Analysis
+  -> Either CodecFailure Analysis
+validateSecretReference position arguments analysis = case arguments of
+  [ (Nothing, StringLiteralE _ backend)
+    , (Nothing, StringLiteralE _ item)
+    ]
+      | not (Text.null backend)
+      , not (Text.null item) ->
+          Right $
+            analysis
+              { secretReferences =
+                  Map.insert
+                    (secretReferenceKey backend item)
+                    (SecretReference backend item $ sourcePosition position)
+                    analysis.secretReferences
+              }
+  _ -> unsupported position
+
+
+rejectSecretReferences :: Analysis -> Either CodecFailure ()
+rejectSecretReferences analysis = case Map.elems analysis.secretReferences of
+  [] -> Right ()
+  reference : _ -> unsupportedPosition reference.position
+ where
+  unsupportedPosition = Left . failureAt UnsupportedSourceSyntax
+
+
+data SecretRenderResult
+  = SecretRendered ByteString
+  | SecretNeeded Text Text
+  | SecretRenderFailed CodecFailure
+
+
+renderSecretTemplate :: CodecInputs -> CodecProgram ByteString
+renderSecretTemplate inputs = go Map.empty
+ where
+  go secrets = case renderSecretTemplateWith secrets inputs of
+    SecretRendered bytes -> CodecDone $ Right bytes
+    SecretRenderFailed failure -> CodecDone $ Left failure
+    SecretNeeded backend item ->
+      CodecRequest
+        (BackendInputRequest backend (Lookup item) $ opaqueBytes "")
+        (\input -> go $ Map.insert (backend, item) (revealBytes input.value) secrets)
+
+
+renderSecretTemplateWith
+  :: Map (Text, Text) ByteString
+  -> CodecInputs
+  -> SecretRenderResult
+renderSecretTemplateWith secrets inputs = case prepared of
+  Left failure -> SecretRenderFailed failure
+  Right (template, analysis, variables, facts, decodedSecrets) ->
+    let baseContext = makeContextText $ const $ toGVal ("" :: Text)
+        context =
+          baseContext
+            { contextLookup =
+                lookupSecretValue variables facts decodedSecrets
+            , contextWarn = throwHere
+            }
+        (result, output) = runWriter $ runGingerT context template
+    in case result of
+         Right _ -> SecretRendered $ encodeUtf8 output
+         Left runtimeError ->
+           case secretRequestMarker runtimeError
+             >>= (`Map.lookup` analysis.secretReferences) of
+             Just reference
+               | Map.notMember (reference.backend, reference.item) secrets ->
+                   SecretNeeded reference.backend reference.item
+             _ ->
+               SecretRenderFailed $
+                 runtimeFailure analysis.lookupReferences runtimeError
+ where
+  prepared = do
+    template <- parseTemplate inputs.rawSource
+    analysis <- validateTemplate template
+    variables <- Map.traverseWithKey decodeNativeText inputs.variables
+    decodedSecrets <- Map.traverseWithKey decodeSecretText secrets
+    let facts = fmap decodeUtf8Lenient inputs.facts
+    Right (template, analysis, variables, facts, decodedSecrets)
+
+
+lookupSecretValue
+  :: Map Text Text
+  -> Map Text Text
+  -> Map (Text, Text) Text
+  -> Text
+  -> Run SourcePos (Writer Text) Text (GVal (Run SourcePos (Writer Text) Text))
+lookupSecretValue variables facts secrets name = case name of
+  "secret" -> return $ fromFunction $ secretFunction secrets
+  _ -> lookupValue variables facts name
+
+
+secretFunction
+  :: Map (Text, Text) Text
+  -> [ ( Maybe Text
+       , GVal (Run SourcePos (Writer Text) Text)
+       )
+     ]
+  -> Run SourcePos (Writer Text) Text (GVal (Run SourcePos (Writer Text) Text))
+secretFunction secrets arguments = case arguments of
+  [(Nothing, backend), (Nothing, item)] ->
+    let reference = (backend.asText, item.asText)
+    in case Map.lookup reference secrets of
+         Just value -> return $ toGVal value
+         Nothing ->
+           throwHere $
+             ArgumentsError
+               (Just secretRequestErrorName)
+               (secretReferenceKey backend.asText item.asText)
+  _ -> throwHere $ IndexError "invalid-secret-reference"
+
+
+decodeSecretText :: (Text, Text) -> ByteString -> Either CodecFailure Text
+decodeSecretText _ bytes = case decodeUtf8' bytes of
+  Left _ -> Left $ CodecInputEncodingFailure "secret value"
+  Right value -> Right value
+
+
+-- | Derives the opaque runtime marker for one static secret reference.
+secretReferenceKey
+  :: Text
+  -- ^ Nonempty codec backend name.
+  -> Text
+  -- ^ Nonempty backend item name.
+  -> Text
+  -- ^ Deterministic marker used only to correlate a secret runtime request.
+secretReferenceKey backend item =
+  "secret-request:"
+    <> digestText
+      ( LazyByteString.toStrict $
+          toLazyByteString $
+            encodeComponent backend <> encodeComponent item
+      )
+ where
+  encodeComponent value =
+    let bytes = encodeUtf8 value
+    in word64BE (fromIntegral $ ByteString.length bytes) <> byteString bytes
+
+
+digestText :: ByteString -> Text
+digestText = Text.pack . concatMap byteHex . ByteString.unpack . SHA256.hash
+ where
+  byteHex byte = case showHex byte "" of
+    [digit] -> ['0', digit]
+    digits -> digits
+
+
 renderTemplate :: CodecInputs -> Either CodecFailure ByteString
 renderTemplate inputs = do
   template <- parseTemplate inputs.rawSource
   analysis <- validateTemplate template
+  rejectSecretReferences analysis
   variables <- Map.traverseWithKey decodeNativeText inputs.variables
   let factValues = fmap decodeUtf8Lenient inputs.facts
       baseContext = makeContextText $ const $ toGVal ("" :: Text)
@@ -423,6 +660,18 @@ runtimeFailure lookupReferences runtimeError =
       MissingSourceInput $
         maybe "<dynamic>" renderLookupReference $
           Map.lookup position lookupReferences
+
+
+secretRequestErrorName :: Text
+secretRequestErrorName = "dojang-secret-request"
+
+
+secretRequestMarker :: RuntimeError p -> Maybe Text
+secretRequestMarker runtimeError = case runtimeError of
+  ArgumentsError (Just name) marker
+    | name == secretRequestErrorName -> Just marker
+  RuntimeErrorAt _ nested -> secretRequestMarker nested
+  _ -> Nothing
 
 
 renderLookupReference :: LookupReference -> Text
@@ -616,6 +865,7 @@ allowedFunctions =
     , "ratio"
     , "reverse"
     , "round"
+    , "secret"
     , "slice"
     , "sort"
     , "split"

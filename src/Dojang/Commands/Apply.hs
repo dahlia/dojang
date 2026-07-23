@@ -481,10 +481,20 @@ printSyncOp (CopyFile src dst) = do
   pathStyle <- pathStyleFor StandardError
   printStderr
     ("Copy " <> pathStyle src <> " to " <> pathStyle dst <> "...")
+printSyncOp (CopyPrivateFile src dst) = do
+  pathStyle <- pathStyleFor StandardError
+  printStderr
+    ("Copy " <> pathStyle src <> " to " <> pathStyle dst <> "...")
 printSyncOp (WriteContent _ dst) = do
   pathStyle <- pathStyleFor StandardError
   printStderr ("Write rendered content to " <> pathStyle dst <> "...")
 printSyncOp (WriteContentGuarded _ _ dst) = do
+  pathStyle <- pathStyleFor StandardError
+  printStderr ("Write rendered content to " <> pathStyle dst <> "...")
+printSyncOp (WritePrivateContent _ dst) = do
+  pathStyle <- pathStyleFor StandardError
+  printStderr ("Write rendered content to " <> pathStyle dst <> "...")
+printSyncOp (WritePrivateContentGuarded _ _ dst) = do
   pathStyle <- pathStyleFor StandardError
   printStderr ("Write rendered content to " <> pathStyle dst <> "...")
 printSyncOp (CreateDir path) = do

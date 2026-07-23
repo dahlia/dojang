@@ -1,18 +1,34 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordUpdate #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Types.Manifest
   ( IgnoreMap
-  , Manifest (..)
+  , Manifest
+    ( Manifest
+    , ManifestWithCodecBackends
+    , codecBackends
+    , fileRoutes
+    , hooks
+    , ignorePatterns
+    , monikers
+    , repositoryId
+    , variables
+    )
   , manifest
+  , manifestWithCodecBackends
   , manifestWithVariables
   ) where
 
 import Data.Map.Strict (Map, fromList, toAscList, toList)
+import Data.Map.Strict qualified as Map
 import System.FilePattern (FilePattern)
 import System.OsPath (OsPath, normalise)
 
 import Dojang.MonadFileSystem (FileType (..))
+import Dojang.Types.CodecBackend (CodecBackendMap)
 import Dojang.Types.FilePathExpression (FilePathExpression)
 import Dojang.Types.FileRoute (FileRoute, fileRoute)
 import Dojang.Types.FileRouteMap (FileRouteMap)
@@ -29,22 +45,83 @@ type IgnoreMap = Map OsPath [FilePattern]
 
 -- | A manifest of the directory routes and the definitions of monikers that
 -- are used to resolve them.
-data Manifest = Manifest
+data Manifest = ManifestWithCodecBackends
   { repositoryId :: Maybe RepositoryId
-  -- ^ The stable identity of the repository.  Legacy manifests omit it until
-  -- they are explicitly migrated.
+  -- ^ Stable repository identity, omitted by legacy manifests.
   , monikers :: MonikerMap
-  -- ^ The definitions of monikers that are used to resolve the directory routes.
+  -- ^ Named environment predicates used by routes and variables.
   , variables :: ManifestVariableMap
   -- ^ Declarative values available to file-path expressions.
   , fileRoutes :: FileRouteMap
-  -- ^ The directory routes that are resolved by the monikers.
+  -- ^ File and directory routes selected by environment predicates.
   , ignorePatterns :: IgnoreMap
-  -- ^ The file patterns that should be ignored for each directory route.
+  -- ^ Ignore patterns keyed by directory route.
+  , codecBackends :: CodecBackendMap
+  -- ^ Reusable external backends for sensitive route codecs.
   , hooks :: HookMap
-  -- ^ The hooks to run before and after applying.
+  -- ^ Hooks run before and after supported commands.
   }
   deriving (Eq, Show)
+
+
+-- | Constructs a manifest without external codec backends.
+--
+-- Use 'manifestWithCodecBackends' when a backend registry is required.
+pattern Manifest
+  :: Maybe RepositoryId
+  -- ^ Optional stable repository identity.
+  -> MonikerMap
+  -- ^ Named environment predicates.
+  -> ManifestVariableMap
+  -- ^ Declarative manifest variables.
+  -> FileRouteMap
+  -- ^ File and directory routes.
+  -> IgnoreMap
+  -- ^ Ignore patterns keyed by directory route.
+  -> HookMap
+  -- ^ Hooks run around supported commands.
+  -> Manifest
+  -- ^ Manifest whose codec backend registry is empty.
+pattern Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks <-
+  ManifestWithCodecBackends
+    repositoryId
+    monikers
+    variables
+    fileRoutes
+    ignorePatterns
+    (Map.null -> True)
+    hooks
+ where
+  Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks =
+    ManifestWithCodecBackends
+      repositoryId
+      monikers
+      variables
+      fileRoutes
+      ignorePatterns
+      mempty
+      hooks
+
+
+-- | Constructs a manifest with an explicit codec backend registry.
+manifestWithCodecBackends
+  :: Maybe RepositoryId
+  -- ^ Optional stable repository identity.
+  -> MonikerMap
+  -- ^ Named environment predicates.
+  -> ManifestVariableMap
+  -- ^ Declarative manifest variables.
+  -> FileRouteMap
+  -- ^ File and directory routes.
+  -> IgnoreMap
+  -- ^ Ignore patterns keyed by directory route.
+  -> CodecBackendMap
+  -- ^ Reusable external codec backends.
+  -> HookMap
+  -- ^ Hooks run around supported commands.
+  -> Manifest
+  -- ^ Manifest containing the supplied backend registry.
+manifestWithCodecBackends = ManifestWithCodecBackends
 
 
 -- | Makes a 'Manifest' from definitions of monikers and directory routes.
@@ -98,13 +175,12 @@ manifestWithVariables
   ignorePatterns'
   hooks' =
     Manifest
-      { repositoryId = Nothing
-      , monikers = monikers'
-      , variables = variables'
-      , fileRoutes = fromList $ files ++ dirs
-      , ignorePatterns = ignores
-      , hooks = hooks'
-      }
+      Nothing
+      monikers'
+      variables'
+      (fromList $ files ++ dirs)
+      ignores
+      hooks'
    where
     files :: [(OsPath, FileRoute)]
     files = do
@@ -117,6 +193,6 @@ manifestWithVariables
     ignores :: IgnoreMap
     ignores =
       fromList
-        [ (normalise p, pattern)
-        | (p, pattern) <- toAscList ignorePatterns'
+        [ (normalise p, patterns)
+        | (p, patterns) <- toAscList ignorePatterns'
         ]

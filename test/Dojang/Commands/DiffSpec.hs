@@ -14,12 +14,13 @@ import Data.Text (Text)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (findExecutable)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Exit (ExitCode (ExitFailure, ExitSuccess))
+import System.Exit (ExitCode (ExitSuccess))
 import System.IO (SeekMode (AbsoluteSeek), hClose, hFlush, hSeek, stdout)
 import System.IO.Temp (withSystemTempFile)
+import System.Info (os)
 import System.OsPath (OsPath, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn)
+import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
 import Prelude hiding (writeFile)
 
 import Dojang.App (App, AppEnv (..), runAppWithoutLogging)
@@ -28,6 +29,7 @@ import Dojang.Commands.Diff
   ( DiffMode (Both, Destination, Source)
   , diffWithCodecRuntime
   )
+import Dojang.ExitCodes (codecError)
 import Dojang.MonadFileSystem
   ( FileType (File)
   , MonadFileSystem (createDirectories, decodePath, writeFile)
@@ -47,9 +49,11 @@ import Dojang.Types.Codec.Evaluate
   , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
   , CodecImplementation (CodecImplementation)
   , CodecInputs (..)
+  , CodecProgram (CodecDone)
   , CodecRequirements (CodecRequirements)
   , CodecRuntime (CodecRuntime)
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
+  , codecImplementationWithEffects
   , codecRegistry
   , identityCodecRuntime
   , noCodecInputs
@@ -60,7 +64,7 @@ import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
 import Dojang.Types.FileRoute
   ( FileRoute
   , RouteKind (CopyRoute)
-  , RouteMode (DefaultMode)
+  , RouteMode (DefaultMode, Private)
   , RouteTarget (RouteTarget)
   , fileRoutePreservingOrder
   )
@@ -94,6 +98,55 @@ spec = sequential $ describe "diff" $ do
         appEnv
         (diffWithCodecRuntime runtime Source Nothing [source])
         `shouldReturn` ExitSuccess
+
+  it "suppresses rendered plaintext for a sensitive codec" $
+    withSensitiveCodecFile $ \appEnv source codecSpec -> do
+      let CodecSpec name _ = codecSpec
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition name "sensitive-1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (const $ CodecDone $ Right "decrypted-secret")
+              Nothing
+              EvaluatePurely
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              NormalEvaluation
+              (const $ return $ Left "unexpected external input")
+      (output, result) <-
+        captureStdout $
+          runAppWithoutLogging
+            appEnv
+            (diffWithCodecRuntime runtime Source Nothing [source])
+      result `shouldBe` ExitSuccess
+      ByteString.isInfixOf "decrypted-secret" output `shouldBe` False
+      let lineEnding = if os == "mingw32" then "\r\n" else "\n"
+      output
+        `shouldBe` "Sensitive codec content differs; diff suppressed."
+          <> lineEnding
+
+  it "rejects an unprotected sensitive destination-only diff" $
+    withCodecFile "previous-plaintext" $ \appEnv _ destination codecSpec -> do
+      let CodecSpec name _ = codecSpec
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition name "sensitive-1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (const $ CodecDone $ Right "decrypted-secret")
+              Nothing
+              EvaluatePurely
+          runtime =
+            CodecRuntime
+              (codecRegistry [implementation])
+              NormalEvaluation
+              (const $ return $ Left "unexpected external input")
+      runAppWithoutLogging
+        appEnv
+        (diffWithCodecRuntime runtime Destination Nothing [destination])
+        `shouldThrow` (== codecError)
 
   it "reuses a persisted codec cache in dry-run diff" $
     withCodecFile "" $ \appEnv source _ codecSpec -> do
@@ -165,7 +218,7 @@ spec = sequential $ describe "diff" $ do
             runAppWithoutLogging
               appEnv
               (diffWithCodecRuntime runtime Source (Just programPath) [])
-      result `shouldBe` Left (ExitFailure 39)
+      result `shouldBe` Left codecError
       output `shouldBe` ""
 
 
@@ -216,6 +269,28 @@ withCodecFile intermediateContents action =
     writeFile destination intermediateContents
     withEnvVar "DEST" (Just destination) $
       action appEnv source destination codecSpec
+
+
+withSensitiveCodecFile
+  :: (AppEnv -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withSensitiveCodecFile action =
+  withRepository $ \tmpDir repository intermediateDir manifestPath appEnv -> do
+    routeName <- encodeFS "sensitive-file"
+    destinationName <- encodeFS "sensitive-destination"
+    let source = repository </> routeName
+        intermediate = repository </> intermediateDir </> routeName
+        destination = tmpDir </> destinationName
+        Just codecName = parseCodecName "sensitive-codec"
+        codecSpec = CodecSpec codecName $ CodecConfiguration mempty
+        route = fileRouteWithMode Private routeName "DEST" codecSpec
+        manifest' = baseManifest $ Map.singleton routeName route
+    writeManifestFile manifest' manifestPath
+    writeFile source "encrypted-source"
+    writeFile intermediate "previous-plaintext"
+    writeFile destination "previous-plaintext"
+    withEnvVar "DEST" (Just destination) $
+      action appEnv source codecSpec
 
 
 withEqualBinarySource :: (AppEnv -> OsPath -> IO a) -> IO a
@@ -322,7 +397,11 @@ withMixedCodecFiles action =
 
 
 fileRoute :: OsPath -> Text -> CodecSpec -> FileRoute
-fileRoute _ variable codecSpec =
+fileRoute = fileRouteWithMode DefaultMode
+
+
+fileRouteWithMode :: RouteMode -> OsPath -> Text -> CodecSpec -> FileRoute
+fileRouteWithMode mode _ variable codecSpec =
   fileRoutePreservingOrder
     (const Nothing)
     [
@@ -330,7 +409,7 @@ fileRoute _ variable codecSpec =
       , Just $
           RouteTarget
             (Substitution variable)
-            DefaultMode
+            mode
             CopyRoute
             codecSpec
       )
@@ -340,7 +419,7 @@ fileRoute _ variable codecSpec =
 
 baseManifest :: Map.Map OsPath FileRoute -> Manifest
 baseManifest routes =
-  Manifest
+  ManifestWithCodecBackends
     { Manifest.repositoryId =
         either (const Nothing) Just $
           parseRepositoryId "823e4567-e89b-42d3-a456-426614174000"
@@ -348,6 +427,7 @@ baseManifest routes =
     , variables = mempty
     , fileRoutes = routes
     , ignorePatterns = mempty
+    , codecBackends = mempty
     , hooks = mempty
     }
 

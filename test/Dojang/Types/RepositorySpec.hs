@@ -94,7 +94,7 @@ spec = do
     let monikers = [(any', Always)] :: MonikerMap
     let dirRoute expr = fileRoute monikers [(any', Just expr)] Directory
     let manifest =
-          Manifest
+          ManifestWithCodecBackends
             { repositoryId = Nothing
             , monikers = monikers
             , variables = mempty
@@ -121,6 +121,7 @@ spec = do
             , ignorePatterns =
                 [ (foo, ["bar"])
                 ]
+            , codecBackends = mempty
             , hooks = mempty
             }
     let repo =
@@ -207,12 +208,13 @@ spec = do
             [(Always, Just $ routeTarget $ Substitution "DESTINATION")]
             Directory
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { repositoryId = Nothing
             , monikers = mempty
             , variables = variables
             , fileRoutes = Map.singleton foo route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
         repo = Repository (root </> src) (root </> src </> inter) manifest'
@@ -272,12 +274,13 @@ spec = do
             ]
             Directory
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { repositoryId = Nothing
             , monikers = mempty
             , variables = mempty
             , fileRoutes = [(foo, privateRoute), (bar, linkRoute)]
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
         repo = Repository (root </> src) (root </> src </> inter) manifest'
@@ -306,12 +309,13 @@ spec = do
             ]
             Directory
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { repositoryId = Nothing
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton foo route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
         repo = Repository (root </> src) (root </> src </> inter) manifest'
@@ -361,12 +365,13 @@ spec = do
         let route =
               fileRoute monikers [(any', Just $ Substitution "VALUE")] File
         let manifest =
-              Manifest
+              ManifestWithCodecBackends
                 { repositoryId = Nothing
                 , monikers = monikers
                 , variables = mempty
                 , fileRoutes = [(foo, route)]
                 , ignorePatterns = mempty
+                , codecBackends = mempty
                 , hooks = mempty
                 }
         let repo = Repository (root </> src) (root </> inter) manifest

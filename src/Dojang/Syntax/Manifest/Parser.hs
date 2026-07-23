@@ -19,7 +19,7 @@ import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty (toList)
 import qualified Data.List.NonEmpty as NonEmpty
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.String (IsString (fromString))
 import Data.Void (Void)
 import qualified System.FilePath.Windows as Windows
@@ -35,8 +35,10 @@ import Data.Map.Strict as Map
   , fromList
   , fromListWith
   , toList
+  , traverseWithKey
   )
 import Data.Text (Text, intercalate, pack, unpack)
+import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8')
 import System.FilePattern (FilePattern)
 import System.OsPath
@@ -74,6 +76,12 @@ import Dojang.Syntax.Manifest.Internal
   )
 import qualified Dojang.Syntax.Manifest.Internal as Internal
 import Dojang.Types.Codec (identityCodecSpec)
+import Dojang.Types.CodecBackend
+  ( CodecBackend (CodecBackend)
+  , CodecBackendMap
+  , CodecBackendOptions (CodecBackendOptions)
+  , defaultCodecBackendTimeoutSeconds
+  )
 import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (..)
   , normalizePredicate
@@ -101,7 +109,7 @@ import Dojang.Types.Hook
   , renderHookId
   , validateHookConfiguration
   )
-import Dojang.Types.Manifest (Manifest (Manifest))
+import Dojang.Types.Manifest (Manifest, manifestWithCodecBackends)
 import Dojang.Types.ManifestVariable
   ( ManifestVariable
   , ManifestVariableMap
@@ -143,6 +151,8 @@ data Error
     RepositoryIdError Text
   | -- | A hook has an invalid identity or execution policy.
     HookConfigurationError Text
+  | -- | A codec backend declaration is invalid.
+    CodecBackendConfigurationError Text Text
 
 
 -- | An error in a branch of a detailed file route.
@@ -314,6 +324,8 @@ formatErrors (DuplicateNormalizedRoutePathError firstPath secondPath) =
   ]
 formatErrors (RepositoryIdError message) = [message]
 formatErrors (HookConfigurationError message) = [message]
+formatErrors (CodecBackendConfigurationError name message) =
+  ["Codec backend " <> name <> " " <> message]
 
 
 mapManifest :: Manifest' -> Either Error Manifest
@@ -329,17 +341,21 @@ mapManifest manifest' =
             case mapFileRouteMap monikers' manifest'.dirs manifest'.files of
               Left e -> Left e
               Right fileRoutes' ->
-                case mapHooks monikers' manifest'.hooks of
+                case mapCodecBackends manifest'.codecBackends of
                   Left e -> Left e
-                  Right hooks' ->
-                    Right $
-                      Manifest
-                        repositoryId'
-                        monikers'
-                        variables'
-                        fileRoutes'
-                        ignores'
-                        hooks'
+                  Right codecBackends' ->
+                    case mapHooks monikers' manifest'.hooks of
+                      Left e -> Left e
+                      Right hooks' ->
+                        Right $
+                          manifestWithCodecBackends
+                            repositoryId'
+                            monikers'
+                            variables'
+                            fileRoutes'
+                            ignores'
+                            codecBackends'
+                            hooks'
  where
   repositoryIdResult =
     traverse
@@ -353,6 +369,38 @@ mapManifest manifest' =
       [ (encodePath path, pattern)
       | (path, pattern) <- Map.toList manifest'.ignores
       ]
+
+
+mapCodecBackends
+  :: Map Text Internal.CodecBackend'
+  -> Either Error CodecBackendMap
+mapCodecBackends = Map.traverseWithKey mapBackend
+ where
+  mapBackend :: Text -> Internal.CodecBackend' -> Either Error CodecBackend
+  mapBackend name backend
+    | Text.null name = invalid "must have a nonempty name."
+    | Text.null backend.backendVersion = invalid "must have a nonempty version."
+    | timeout < 1 || timeout > 300 =
+        invalid "timeout-seconds must be between 1 and 300."
+    | Text.null backend.backendCommand = invalid "must have a nonempty command."
+    | otherwise = do
+        command <-
+          first FilePathExpressionError $
+            parseFilePathExpression
+              ("codec-backends." <> unpack name <> ".command")
+              backend.backendCommand
+        Right $
+          CodecBackend
+            command
+            backend.backendVersion
+            (fromInteger timeout)
+            (CodecBackendOptions backend.backendOptions)
+   where
+    timeout =
+      fromMaybe
+        (fromIntegral defaultCodecBackendTimeoutSeconds)
+        backend.backendTimeoutSeconds
+    invalid = Left . CodecBackendConfigurationError name
 
 
 mapMonikerMap :: MonikerMap' -> Either Error MonikerMap

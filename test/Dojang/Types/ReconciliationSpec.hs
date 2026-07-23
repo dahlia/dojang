@@ -153,13 +153,19 @@ applyModelOperations = foldl' applyOperation
     RemoveLink path -> Map.insert path ModelMissing state
     CopyFile sourcePath destinationPath ->
       Map.insert destinationPath (state Map.! sourcePath) state
+    CopyPrivateFile sourcePath destinationPath ->
+      Map.insert destinationPath (state Map.! sourcePath) state
     CreateDir path -> Map.insert path ModelDirectory state
     CreateDirs path -> Map.insert path ModelDirectory state
     SetEntryMode _ _ _ -> state
     CreateSymlink _ _ _ -> state
     RemoveDirsExcept path _ -> Map.insert path ModelMissing state
     WriteContent _ destinationPath -> Map.insert destinationPath (ModelFile 0) state
+    WritePrivateContent _ destinationPath ->
+      Map.insert destinationPath (ModelFile 0) state
     WriteContentGuarded _ _ destinationPath ->
+      Map.insert destinationPath (ModelFile 0) state
+    WritePrivateContentGuarded _ _ destinationPath ->
       Map.insert destinationPath (ModelFile 0) state
 
 
@@ -189,6 +195,7 @@ swapInput input =
     , destinationRouteState = input.destinationRouteState
     , declaredDestinationMode = input.declaredDestinationMode
     , observedDestinationMode = input.observedDestinationMode
+    , observedIntermediateMode = input.observedIntermediateMode
     , destinationKind = input.destinationKind
     , routeFileType = input.routeFileType
     , protectedDestinations = input.protectedDestinations
@@ -221,6 +228,7 @@ makeInput paths sourceStat intermediateStat destinationStat sourceDelta destinat
     , destinationRouteState = routeState
     , declaredDestinationMode = DefaultMode
     , observedDestinationMode = Nothing
+    , observedIntermediateMode = Nothing
     , destinationKind = CopyRoute
     , routeFileType = FileSystem.File
     , protectedDestinations = []
@@ -913,6 +921,14 @@ spec = do
           input
             { declaredDestinationMode = declared
             , observedDestinationMode = observed
+            , observedIntermediateMode =
+                Just $
+                  portableModeFromBits $ case (declared, input.correspondence.intermediate.stat) of
+                    (Private, Directory) -> 0o700
+                    (Private, _) -> 0o600
+                    (ReadOnly, Directory) -> 0o555
+                    (ReadOnly, _) -> 0o444
+                    _ -> 0o644
             }
     let unchangedFile =
           makeInput
@@ -944,6 +960,18 @@ spec = do
       ((.outcome) <$> plan.items) `shouldBe` [NoChange]
       plan.operations `shouldBe` []
 
+    it "plans an owner-only mode for a drifted intermediate snapshot" $ do
+      let input =
+            (withMode Private observed600 unchangedFile)
+              { observedIntermediateMode = observed644
+              }
+      let plan =
+            planReconciliation SourceToDestination RefuseConflicts [input]
+      plan.operations
+        `shouldBe` [ PlannedSyncOp IntermediateReplica $
+                       SetEntryMode paths.intermediate Private FileSystem.File
+                   ]
+
     it "plans nothing for the default mode" $ do
       let input = withMode DefaultMode observed644 unchangedFile
       let plan =
@@ -951,7 +979,7 @@ spec = do
       ((.outcome) <$> plan.items) `shouldBe` [NoChange]
       plan.operations `shouldBe` []
 
-    it "applies the declared mode after content operations" $ do
+    it "writes owner-only content before applying the final mode" $ do
       let changedFile =
             makeInput
               paths
@@ -973,12 +1001,20 @@ spec = do
           mode `shouldBe` Private
           fileType `shouldBe` FileSystem.File
         other -> fail $ "Unexpected destination ops: " <> show other
-      -- Content copies precede the mode change:
+      -- The private copy is already owner-only before the final mode change:
       destinationOps
         `shouldSatisfy` any
           ( \case
-              CopyFile _ _ -> True
+              CopyPrivateFile _ _ -> True
               _ -> False
+          )
+      destinationOps
+        `shouldSatisfy` all
+          ( \case
+              CopyFile _ _ -> False
+              WriteContent _ _ -> False
+              WriteContentGuarded _ _ _ -> False
+              _ -> True
           )
 
     it "targets the destination even when reflecting" $ do
@@ -1108,6 +1144,7 @@ spec = do
         FileSystem.setPortableWritable destinationPath True
 
     it "rejects stale buffered content before any mutation" $ hedgehog $ do
+      privateWrite <- forAll Gen.bool
       expected <- forAll $ Gen.bytes $ linear 0 256
       rendered <- forAll $ Gen.bytes $ linear 0 256
       victimContents <- forAll $ Gen.bytes $ linear 0 256
@@ -1121,6 +1158,18 @@ spec = do
             destinationPath = tmpDir </> destinationName
             staleGuard =
               ContentGuard authoritative $ opaqueBytes expected
+            guardedWrite =
+              if privateWrite
+                then
+                  WritePrivateContentGuarded
+                    (opaqueBytes rendered)
+                    staleGuard
+                    destinationPath
+                else
+                  WriteContentGuarded
+                    (opaqueBytes rendered)
+                    staleGuard
+                    destinationPath
         FileSystem.writeFile authoritative $ expected <> "\0"
         FileSystem.writeFile victim victimContents
         FileSystem.writeFile destinationPath destinationContents
@@ -1131,10 +1180,7 @@ spec = do
               (const $ return ())
               ( manualPlan
                   [ RemoveFile victim
-                  , WriteContentGuarded
-                      (opaqueBytes rendered)
-                      staleGuard
-                      destinationPath
+                  , guardedWrite
                   ]
               )
         victimAfter <- FileSystem.readFile victim
@@ -1359,6 +1405,16 @@ spec = do
         FileSystem.readFile renderedPath
       observed === bytes
 
+    it "creates protected content with owner-only permissions immediately" $
+      withTempDir $ \tmpDir _ -> do
+        renderedName <- encodeFS "rendered"
+        let renderedPath = tmpDir </> renderedName
+        executeSyncOp $
+          WritePrivateContent (opaqueBytes "sentinel-secret") renderedPath
+        FileSystem.readFile renderedPath `shouldReturn` "sentinel-secret"
+        FileSystem.getPortableMode renderedPath
+          `shouldReturn` expectedPrivateFileMode
+
     it "interprets every synchronization operation" $ withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source-file"
       parentName <- encodeFS "parent"
@@ -1526,6 +1582,15 @@ spec = do
           `shouldThrow` (\e -> ioeGetFileName e == Just sourcePath)
         FileSystem.readFile failurePaths.intermediate
           `shouldReturn` "recovery"
+
+#ifdef mingw32_HOST_OS
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = PortableMode Nothing True
+#else
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = portableModeFromBits 0o600
+#endif
+
 
 -- Making the container unreadable is only expressible on POSIX, where a
 -- directory stripped of its execute bit blocks the restoration of the

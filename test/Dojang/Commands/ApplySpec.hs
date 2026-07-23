@@ -72,11 +72,13 @@ import Dojang.Types.Codec.Evaluate
   , CodecDryRunPolicy (CachedOnly, EvaluatePurely)
   , CodecImplementation (CodecImplementation)
   , CodecInputs (..)
+  , CodecProgram (CodecDone)
   , CodecRequirements (CodecRequirements)
   , CodecRuntime (CodecRuntime)
   , EvaluationMode (DryRunEvaluation, NormalEvaluation)
   , ExternalInput (ExternalInput)
   , ExternalInputRequest (ExternalInputRequest)
+  , codecImplementationWithEffects
   , codecRegistry
   , noCodecInputs
   , opaqueBytes
@@ -324,6 +326,63 @@ spec = sequential $ do
           runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
             `shouldThrow` (== codecError)
           readFile destination `shouldReturn` "preserve"
+
+    it "requires private storage before evaluating a sensitive codec" $
+      withCodecFile $ \appEnv _ intermediate destination spec' -> do
+        let CodecSpec name _ = spec'
+            implementation =
+              codecImplementationWithEffects
+                (CodecDefinition name "sensitive-1" ReflectReject)
+                (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                (const $ CodecDone $ Right "sentinel-secret")
+                Nothing
+                CachedOnly
+            runtime =
+              CodecRuntime
+                (codecRegistry [implementation])
+                NormalEvaluation
+                (const $ return $ Left "unexpected external input")
+        runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+          `shouldThrow` (== codecError)
+        exists intermediate `shouldReturn` False
+        exists destination `shouldReturn` False
+
+    it "protects sensitive intermediate and destination files" $ do
+      let Just codecName = parseCodecName "sensitive-codec"
+          spec' = CodecSpec codecName $ CodecConfiguration mempty
+      withCodecFileWithMode Private mempty spec' $
+        \appEnv _ intermediate destination _ -> do
+          let implementation =
+                codecImplementationWithEffects
+                  (CodecDefinition codecName "sensitive-1" ReflectReject)
+                  (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                  (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                  (const $ CodecDone $ Right "sentinel-secret")
+                  Nothing
+                  CachedOnly
+              runtime =
+                CodecRuntime
+                  (codecRegistry [implementation])
+                  NormalEvaluation
+                  (const $ return $ Left "unexpected external input")
+          runAppWithoutLogging appEnv (applyWithCodecRuntime runtime True [])
+            `shouldReturn` ExitSuccess
+          readFile intermediate `shouldReturn` "sentinel-secret"
+          readFile destination `shouldReturn` "sentinel-secret"
+          getPortableMode intermediate
+            `shouldReturn` expectedPrivateFileMode
+          getPortableMode destination
+            `shouldReturn` expectedPrivateFileMode
+          Right (Just machineId) <- readMachineId appEnv.stateDirectory
+          let Right repositoryId' =
+                parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+          Right (Just state) <-
+            readRepositoryState appEnv.stateDirectory repositoryId' machineId
+          let [target] = Map.elems state.targetRecords
+          target.codecState `shouldBe` Nothing
+          getPortableMode target.snapshotPath
+            `shouldReturn` expectedPrivateFileMode
 
     it "renders the built-in template codec with manifest variables" $ do
       let Right variableName = parseManifestVariableName "NAME"
@@ -692,7 +751,7 @@ spec = sequential $ do
           observedMode <- getPortableMode destination
           return (result, observedMode)
         result `shouldBe` ExitSuccess
-        observedMode `shouldBe` reconciledPrivateFileMode
+        observedMode `shouldBe` expectedPrivateFileMode
 
     it "rejects traversing route names before mutating destinations" $
       withTempDir $ \tmpDir _ -> do
@@ -851,7 +910,7 @@ withDebugTargetedCodecFiles action = withTempDir $ \tmpDir _ -> do
           ]
           File
       manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
@@ -861,6 +920,7 @@ withDebugTargetedCodecFiles action = withTempDir $ \tmpDir _ -> do
                 , (routeB, route "DEST_B" unrelatedSpec)
                 ]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
       appEnv =
@@ -961,7 +1021,7 @@ withSharedSourceCodecRoutes action = withTempDir $ \root _ -> do
           ]
           fileType
       manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId
           , monikers = mempty
           , variables = mempty
@@ -971,6 +1031,7 @@ withSharedSourceCodecRoutes action = withTempDir $ \root _ -> do
                 , (childRoute, route "CHILD_DEST" childCodec File)
                 ]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
       appEnv =
@@ -1049,7 +1110,16 @@ withCodecFileWithSpec
   -> CodecSpec
   -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
   -> IO a
-withCodecFileWithSpec manifestVariables codecSpec action = withTempDir $ \tmpDir _ -> do
+withCodecFileWithSpec = withCodecFileWithMode DefaultMode
+
+
+withCodecFileWithMode
+  :: RouteMode
+  -> ManifestVariableMap
+  -> CodecSpec
+  -> (AppEnv -> OsPath -> OsPath -> OsPath -> CodecSpec -> IO a)
+  -> IO a
+withCodecFileWithMode routeMode manifestVariables codecSpec action = withTempDir $ \tmpDir _ -> do
   sourceDir <- encodeFS "source"
   intermediateDir <- encodeFS ".dojang"
   manifestFilename <- encodeFS "dojang.toml"
@@ -1073,19 +1143,20 @@ withCodecFileWithSpec manifestVariables codecSpec action = withTempDir $ \tmpDir
             , Just $
                 RouteTarget
                   (Substitution "DEST_CODEC")
-                  DefaultMode
+                  routeMode
                   CopyRoute
                   codecSpec
             )
           ]
           File
       manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = manifestVariables
           , fileRoutes = Map.singleton routeName route
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
       appEnv =
@@ -1182,12 +1253,13 @@ withPrivateModeFile action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1249,12 +1321,13 @@ withKindSwitchRoute action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifestOf kind' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, routeOf kind')]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1318,12 +1391,13 @@ withSymlinkRoute action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1384,12 +1458,13 @@ withPrivateModeDirectory action = withTempDir $ \tmpDir _ -> do
           ]
           Directory
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -1483,15 +1558,14 @@ withTrackedIgnoredFile action = withTempDir $ \tmpDir _ -> do
     ]
     $ action appEnv intermediate destination
 
--- Windows cannot observe POSIX permission bits, so a pre-existing
--- writable file already satisfies the declared private mode there and
--- no mode reconciliation is planned.
+-- Windows cannot observe POSIX permission bits, so private files expose
+-- only the owner-writable bit included in mode 0600.
 #ifdef mingw32_HOST_OS
-reconciledPrivateFileMode :: PortableMode
-reconciledPrivateFileMode = PortableMode Nothing True
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = PortableMode Nothing True
 #else
-reconciledPrivateFileMode :: PortableMode
-reconciledPrivateFileMode = portableModeFromBits 0o600
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = portableModeFromBits 0o600
 #endif
 
 

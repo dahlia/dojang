@@ -1156,8 +1156,11 @@ reflectCorrespondences
       RemoveFile path -> path
       RemoveLink path -> path
       CopyFile _ path -> path
+      CopyPrivateFile _ path -> path
       WriteContent _ path -> path
+      WritePrivateContent _ path -> path
       WriteContentGuarded _ _ path -> path
+      WritePrivateContentGuarded _ _ path -> path
       CreateDir path -> path
       CreateDirs path -> path
       CreateSymlink _ path _ -> path
@@ -1308,10 +1311,20 @@ logSyncOp (CopyFile source destination) = do
   source' <- decodePath source
   destination' <- decodePath destination
   $(logDebug) $ "Copy file: " <> pack source' <> " -> " <> pack destination'
+logSyncOp (CopyPrivateFile source destination) = do
+  source' <- decodePath source
+  destination' <- decodePath destination
+  $(logDebug) $ "Copy file: " <> pack source' <> " -> " <> pack destination'
 logSyncOp (WriteContent _ destination) = do
   destination' <- decodePath destination
   $(logDebug) $ "Write rendered content: " <> pack destination'
 logSyncOp (WriteContentGuarded _ _ destination) = do
+  destination' <- decodePath destination
+  $(logDebug) $ "Write rendered content: " <> pack destination'
+logSyncOp (WritePrivateContent _ destination) = do
+  destination' <- decodePath destination
+  $(logDebug) $ "Write rendered content: " <> pack destination'
+logSyncOp (WritePrivateContentGuarded _ _ destination) = do
   destination' <- decodePath destination
   $(logDebug) $ "Write rendered content: " <> pack destination'
 logSyncOp (CreateDir path) = do

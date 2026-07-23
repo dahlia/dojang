@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
@@ -14,7 +16,9 @@
 -- production, dry-run, and test interpreters can therefore make different
 -- guarantees about which effects are allowed to reach the host.
 module Dojang.CommandEffect
-  ( CommandEffect (..)
+  ( BinaryProcessRequest (..)
+  , BinaryProcessResult (..)
+  , CommandEffect (..)
   , CommandEffectError (..)
   , CommandEffectKind (..)
   , CommandEffectResponse (..)
@@ -24,6 +28,7 @@ module Dojang.CommandEffect
   , OutputStream (..)
   , ProcessRequest (..)
   , ProcessResult (..)
+  , RedactedProcessBytes
   , PromptRequest (..)
   , PromptResult (..)
   , StandardStream (..)
@@ -43,19 +48,26 @@ module Dojang.CommandEffect
   , promptIO
   , runCommandEffectTest
   , runProcessIO
+  , runBinaryProcessIO
+  , redactedProcessBytes
+  , revealProcessBytes
   , selectPrompt
   , startProcessIO
   , startedProcess
   , writeStreamIO
   ) where
 
+import Control.Concurrent.Async (concurrently)
 import Control.Exception (mask, onException, throwIO)
+import Control.Monad (void)
 import Control.Monad.Catch qualified as MonadCatch
 import Control.Monad.Except (ExceptT (..), MonadError (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT (..), ask)
 import Control.Monad.State.Strict (StateT)
 import Control.Monad.Trans.Class (lift)
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Text (Text, pack, unpack)
 import Data.Text.IO qualified as TextIO
@@ -63,20 +75,23 @@ import Data.Time (UTCTime, getCurrentTime)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
 import System.Environment qualified as Environment
-import System.Exit (ExitCode)
-import System.IO (Handle, stderr, stdin, stdout)
+import System.Exit (ExitCode (ExitSuccess))
+import System.IO (Handle, hClose, stderr, stdin, stdout)
 import System.IO.Error (tryIOError)
 import System.Info qualified
 import System.Process
   ( CreateProcess (..)
+  , Pid
   , ProcessHandle
   , StdStream (CreatePipe, Inherit)
   , createProcess
+  , getPid
   , proc
   , readCreateProcessWithExitCode
   , terminateProcess
   , waitForProcess
   )
+import System.Timeout (timeout)
 import Prelude hiding (readFile, writeFile)
 
 import FortyTwo.Prompts.Confirm qualified as FortyTwo
@@ -92,6 +107,17 @@ import Dojang.MonadFileSystem
   )
 import Dojang.Types.Environment (Environment)
 import Dojang.Types.Environment.Current qualified as CurrentEnvironment
+
+
+#ifndef mingw32_HOST_OS
+import Control.Concurrent (threadDelay)
+import Control.Exception (uninterruptibleMask_)
+import System.Posix.Signals
+  ( sigKILL
+  , sigTERM
+  , signalProcessGroup
+  )
+#endif
 
 
 -- | A standard process stream exposed to command code.
@@ -154,6 +180,55 @@ data ProcessResult
   deriving (Eq, Show)
 
 
+-- | Binary process bytes whose 'Show' instance reveals only their length.
+newtype RedactedProcessBytes = RedactedProcessBytes ByteString
+  deriving (Eq, Ord)
+
+
+instance Show RedactedProcessBytes where
+  show (RedactedProcessBytes bytes) =
+    "<redacted bytes: " <> show (ByteString.length bytes) <> ">"
+
+
+-- | Protects bytes before they enter a command-effect request or response.
+redactedProcessBytes :: ByteString -> RedactedProcessBytes
+redactedProcessBytes = RedactedProcessBytes
+
+
+-- | Reveals bytes only at the backend protocol boundary.
+revealProcessBytes :: RedactedProcessBytes -> ByteString
+revealProcessBytes (RedactedProcessBytes bytes) = bytes
+
+
+-- | A shell-free, binary process request for a codec backend.
+data BinaryProcessRequest = BinaryProcessRequest
+  { binaryExecutable :: FilePath
+  -- ^ Absolute executable path.
+  , binaryWorkingDirectory :: Maybe FilePath
+  -- ^ Repository root used as the child working directory.
+  , binaryEnvironment :: [(String, String)]
+  -- ^ Complete child environment.  An empty list is intentionally hermetic.
+  , binaryStandardInput :: RedactedProcessBytes
+  -- ^ Protocol header and payload written to standard input.
+  , binaryTimeoutSeconds :: Int
+  -- ^ Positive execution timeout in seconds.
+  }
+  deriving (Eq, Show)
+
+
+-- | Result of a binary codec backend process.
+data BinaryProcessResult
+  = BinaryProcessCompleted
+      ExitCode
+      RedactedProcessBytes
+      RedactedProcessBytes
+  | BinaryProcessStartFailed Text
+  | BinaryProcessIOFailed Text
+  | BinaryProcessTimedOut
+  | BinaryProcessUnavailable CommandEffectKind
+  deriving (Eq, Show)
+
+
 -- | A child process started by @m@ that can be awaited or cancelled.
 data StartedProcess m = StartedProcess (m ProcessResult) (m ())
 
@@ -171,7 +246,10 @@ hoistStartedProcess transform (StartedProcess await cancel) =
 
 
 -- | An effect that cannot be silently simulated.
-data CommandEffectKind = ProcessExecution | PromptInteraction
+data CommandEffectKind
+  = ProcessExecution
+  | CodecBackendExecution
+  | PromptInteraction
   deriving (Eq, Ord, Show)
 
 
@@ -187,6 +265,7 @@ data CommandEffect
   | StreamWrite OutputStream Text
   | Prompted PromptRequest
   | ProcessRun ProcessRequest
+  | BinaryProcessRun BinaryProcessRequest
   | ProcessStart ProcessRequest
   | ProcessAwait Int
   | ProcessCancel Int
@@ -204,6 +283,7 @@ data CommandEffectResponse
   | TerminalValue Bool
   | PromptValue PromptResult
   | ProcessValue ProcessResult
+  | BinaryProcessValue BinaryProcessResult
   | ProcessStartedValue
   | ProcessCancellationConfirmed
   | ExecutionRequired CommandEffectKind
@@ -261,6 +341,10 @@ class (Monad m) => MonadCommandEffect m where
 
   -- | Runs a process according to a structured request.
   runProcess :: ProcessRequest -> m ProcessResult
+
+
+  -- | Runs a binary codec backend through the dedicated process boundary.
+  runBinaryProcess :: BinaryProcessRequest -> m BinaryProcessResult
 
 
   -- | Aborts the current command with a public exit status.
@@ -454,6 +538,12 @@ instance MonadCommandEffect CommandEffectTest where
     ProcessValue value -> Just value
     ExecutionRequired ProcessExecution -> Just $ ProcessUnavailable ProcessExecution
     _ -> Nothing
+  runBinaryProcess request =
+    respond (BinaryProcessRun request) $ \response -> case response of
+      BinaryProcessValue value -> Just value
+      ExecutionRequired CodecBackendExecution ->
+        Just $ BinaryProcessUnavailable CodecBackendExecution
+      _ -> Nothing
   abortCommand = throwCommandEffectError . CommandAborted
 
 
@@ -516,6 +606,7 @@ instance MonadCommandEffect IO where
   writeStream = writeStreamIO
   prompt = promptIO
   runProcess = runProcessIO
+  runBinaryProcess = runBinaryProcessIO
   abortCommand = throwIO
 
 
@@ -552,6 +643,7 @@ instance (MonadCommandEffect m) => MonadCommandEffect (ReaderT r m) where
   writeStream stream = lift . writeStream stream
   prompt = lift . prompt
   runProcess = lift . runProcess
+  runBinaryProcess = lift . runBinaryProcess
   abortCommand = lift . abortCommand
 
 
@@ -566,6 +658,7 @@ instance (MonadCommandEffect m) => MonadCommandEffect (ExceptT e m) where
   writeStream stream = lift . writeStream stream
   prompt = lift . prompt
   runProcess = lift . runProcess
+  runBinaryProcess = lift . runBinaryProcess
   abortCommand = lift . abortCommand
 
 
@@ -580,6 +673,7 @@ instance (MonadCommandEffect m) => MonadCommandEffect (StateT s m) where
   writeStream stream = lift . writeStream stream
   prompt = lift . prompt
   runProcess = lift . runProcess
+  runBinaryProcess = lift . runBinaryProcess
   abortCommand = lift . abortCommand
 
 
@@ -609,6 +703,123 @@ runProcessIO request
             Right code -> ProcessCompleted code "" ""
 
 
+-- | Runs a binary codec backend with captured streams and a hard timeout.
+runBinaryProcessIO :: BinaryProcessRequest -> IO BinaryProcessResult
+runBinaryProcessIO request
+  | request.binaryTimeoutSeconds <= 0 =
+      return $ BinaryProcessIOFailed "Backend timeout must be positive."
+runBinaryProcessIO request = mask $ \restore -> do
+  started <- tryIOError $ createProcess $ toBinaryCreateProcess request
+  case started of
+    Left err -> return $ BinaryProcessStartFailed $ pack $ show err
+    Right (Just input, Just output, Just errors, handle) -> do
+      processId <- getPid handle
+      let process = (processId, input, output, errors, handle)
+          writeInput = do
+            written <-
+              tryIOError $
+                ByteString.hPut input $
+                  revealProcessBytes request.binaryStandardInput
+            closed <- tryIOError $ hClose input
+            return $ written >> closed
+          run = do
+            (written, (out, err)) <-
+              concurrently
+                writeInput
+                ( concurrently
+                    (ByteString.hGetContents output)
+                    (ByteString.hGetContents errors)
+                )
+            code <- waitForProcess handle
+            return (code, written, out, err)
+      result <-
+        tryIOError
+          (restore $ timeout (request.binaryTimeoutSeconds * 1000000) run)
+          `onException` cleanupBinaryProcess process
+      case result of
+        Left err -> do
+          cleanupBinaryProcess process
+          return $ BinaryProcessIOFailed $ pack $ show err
+        Right Nothing -> do
+          cleanupBinaryProcess process
+          return BinaryProcessTimedOut
+        Right (Just (code, written, out, err)) -> do
+          cleanupCompletedBinaryProcess process
+          case (code, written) of
+            (ExitSuccess, Left writeError) ->
+              return $ BinaryProcessIOFailed $ pack $ show writeError
+            _ ->
+              return $
+                BinaryProcessCompleted
+                  code
+                  (redactedProcessBytes out)
+                  (redactedProcessBytes err)
+    Right _ -> return $ BinaryProcessIOFailed "Failed to capture backend streams."
+
+
+cleanupBinaryProcess
+  :: (Maybe Pid, Handle, Handle, Handle, ProcessHandle)
+  -> IO ()
+cleanupBinaryProcess (processId, input, output, errors, handle) = do
+  mapM_ closeBinaryHandle [input, output, errors]
+  cleanupBinaryProcessHandle processId handle
+
+
+cleanupCompletedBinaryProcess
+  :: (Maybe Pid, Handle, Handle, Handle, ProcessHandle)
+  -> IO ()
+cleanupCompletedBinaryProcess (processId, input, output, errors, handle) = do
+  mapM_ closeBinaryHandle [input, output, errors]
+  cleanupCompletedBinaryProcessHandle processId handle
+
+
+cleanupCompletedBinaryProcessHandle :: Maybe Pid -> ProcessHandle -> IO ()
+#ifndef mingw32_HOST_OS
+cleanupCompletedBinaryProcessHandle processId handle = do
+  uninterruptibleMask_ $
+    mapM_
+      (\pid -> void $ tryIOError $ signalProcessGroup sigKILL pid)
+      processId
+  void $ tryIOError $ waitForProcess handle
+#else
+cleanupCompletedBinaryProcessHandle _ handle =
+  void $ tryIOError $ waitForProcess handle
+#endif
+
+
+cleanupBinaryProcessHandle :: Maybe Pid -> ProcessHandle -> IO ()
+#ifndef mingw32_HOST_OS
+cleanupBinaryProcessHandle processId handle = do
+  uninterruptibleMask_ $ do
+    mapM_
+      (\pid -> void $ tryIOError $ signalProcessGroup sigTERM pid)
+      processId
+    threadDelay binaryProcessTerminationGraceTime
+    mapM_
+      (\pid -> void $ tryIOError $ signalProcessGroup sigKILL pid)
+      processId
+  void $
+    timeout binaryProcessTerminationGraceTime $
+      tryIOError $
+        waitForProcess handle
+#else
+cleanupBinaryProcessHandle _ handle = do
+  void $ tryIOError $ terminateProcess handle
+  void $
+    timeout binaryProcessTerminationGraceTime $
+      tryIOError $
+        waitForProcess handle
+#endif
+
+
+binaryProcessTerminationGraceTime :: Int
+binaryProcessTerminationGraceTime = 2000000
+
+
+closeBinaryHandle :: Handle -> IO ()
+closeBinaryHandle = void . tryIOError . hClose
+
+
 instance MonadCommandEffect DryRunIO where
   lookupEnvironmentVariable = liftIO . lookupEnvironmentVariableIO
   processEnvironment = liftIO processEnvironmentIO
@@ -620,6 +831,8 @@ instance MonadCommandEffect DryRunIO where
   writeStream stream = liftIO . writeStreamIO stream
   prompt = liftIO . promptIO
   runProcess _ = return $ ProcessUnavailable ProcessExecution
+  runBinaryProcess _ =
+    return $ BinaryProcessUnavailable CodecBackendExecution
   abortCommand = liftIO . throwIO
 
 
@@ -695,6 +908,19 @@ toCreateProcess request =
     , std_out = if request.captureOutput then CreatePipe else Inherit
     , std_err = if request.captureOutput then CreatePipe else Inherit
     , delegate_ctlc = True
+    }
+
+
+toBinaryCreateProcess :: BinaryProcessRequest -> CreateProcess
+toBinaryCreateProcess request =
+  (proc request.binaryExecutable [])
+    { cwd = request.binaryWorkingDirectory
+    , env = Just request.binaryEnvironment
+    , std_in = CreatePipe
+    , std_out = CreatePipe
+    , std_err = CreatePipe
+    , create_group = True
+    , delegate_ctlc = False
     }
 
 

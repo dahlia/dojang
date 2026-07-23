@@ -642,12 +642,13 @@ withSymlinkRouteDestinationFile action = withTempDir $ \tmpDir _ -> do
           ]
           File
   let manifest' =
-        Manifest
+        ManifestWithCodecBackends
           { Manifest.repositoryId = Just repositoryId'
           , monikers = mempty
           , variables = mempty
           , fileRoutes = Map.fromList [(routeName, route)]
           , ignorePatterns = mempty
+          , codecBackends = mempty
           , hooks = mempty
           }
   let appEnv =
@@ -837,12 +838,13 @@ withConvergedIgnoredCodecFile action =
             ]
             Directory
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = Map.singleton routeName ["*"]
+            , codecBackends = mempty
             , hooks = mempty
             }
         implementation =
@@ -1004,12 +1006,13 @@ withOwnerlessIgnoredRejectDestination action =
             ]
             Directory
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = Map.singleton routeName ["*"]
+            , codecBackends = mempty
             , hooks = mempty
             }
     createDirectories destinationRoot
@@ -1048,12 +1051,13 @@ withRenderedEquivalentChanges action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1094,12 +1098,13 @@ withChangedRejectDirectory action =
             ]
             Directory
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     createDirectories sourceRoot
@@ -1142,12 +1147,13 @@ withReAddDirectoryDestination action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1187,12 +1193,13 @@ withIdentityCodecDirectoryDestination action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1234,12 +1241,13 @@ withIdentityCodecSymlinkDestination action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1279,12 +1287,13 @@ withReAddFile action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1320,12 +1329,13 @@ withConvergedReAddFile action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1365,12 +1375,13 @@ withRotatingReAddFile deployed action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1412,12 +1423,13 @@ withCaseVariantRotatingReAddFile action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1463,12 +1475,13 @@ withMissingReAddFileWithVariables variables action =
             ]
             File
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = variables
             , fileRoutes = Map.singleton routeName route
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     writeManifestFile manifest' manifestPath
@@ -1512,7 +1525,7 @@ withSharedSourceReAddRoutes action =
             ]
             fileType
         manifest' =
-          Manifest
+          ManifestWithCodecBackends
             { Manifest.repositoryId = Just repositoryId
             , monikers = mempty
             , variables = mempty
@@ -1522,6 +1535,7 @@ withSharedSourceReAddRoutes action =
                   , (childRoute, route "CHILD_DEST" File)
                   ]
             , ignorePatterns = mempty
+            , codecBackends = mempty
             , hooks = mempty
             }
     createDirectories sourceTree

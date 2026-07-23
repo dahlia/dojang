@@ -6,8 +6,8 @@
 그 설정 파일들이 실제 기기에 어떻게 적용되어야 할지를 설정합니다.
 
 확장자에서 미루어 짐작할 수 있듯 [TOML] 형식으로 되어 있으며,
-크게 `vars`, `dirs`, `files`, `monikers`, `ignores`, `hooks` 여섯 구획으로
-나뉩니다.
+크게 `vars`, `dirs`, `files`, `monikers`, `ignores`, `codec-backends`, `hooks`
+일곱 구획으로 나뉩니다.
 본 문서에서는 독자가 TOML의 기본적인 문법을 안다는 전제로 설명합니다.
 
 [TOML]: https://toml.io/
@@ -28,6 +28,35 @@ repository-id = "123e4567-e89b-42d3-a456-426614174000"
 사용해 각 기기의 저장소별 [머신 상태]를 분리합니다.
 
 [머신 상태]: machine-state.ko.md
+
+
+코덱 백엔드
+-----------
+
+선택 사항인 `codec-backends` 테이블은 내장 암호화 코덱과 비밀 값 템플릿 코덱이
+사용할 명령을 선언합니다.  각 키는 선언 파일 안에서 쓰는 백엔드 이름입니다.
+
+~~~~ toml
+[codec-backends.vault]
+command = "$HOME/.local/bin/dojang-vault"
+version = "2026-07"
+timeout-seconds = 45
+options = { profile = "work", strict = true }
+~~~~
+
+`command`는 파일 경로 표현식이며 절대 실행 파일 경로로 확장되어야 합니다.
+`version`은 백엔드 운영자가 정하는 비어 있지 않은 식별자입니다.  백엔드 동작이나
+키 자료가 바뀌면 이 값도 바꾸세요.  선택 사항인 `timeout-seconds`는 1부터
+300까지 쓸 수 있으며 기본값은 30입니다.  `options`에는 코덱 설정 값을 쓸 수
+있지만 비밀 값을 넣으면 안 됩니다.  이 값은 프로토콜 헤더로 전달되고 진단
+식별값에 영향을 줄 수 있습니다.
+
+Dojang은 셸, 인자, 상속받은 환경 없이 백엔드를 실행하며 저장소 루트를 작업
+디렉터리로 사용합니다.  이번 릴리스에서는 Windows에서 비밀 값 코덱 백엔드를 쓸
+수 없습니다.  프로토콜, 보안 경계, 복구 절차는 [코덱 백엔드 프로토콜]을
+참고하세요.
+
+[코덱 백엔드 프로토콜]: codecs.ko.md#코덱-백엔드
 
 
 모니커
@@ -289,6 +318,9 @@ kind = "symlink"
 배포 링크에는 `identity`만 쓸 수 있습니다.
 내장 `template` 코덱에는 별도 설정이 없으며 UTF-8 원본에서 `vars` 아래의 선언
 변수와 `facts` 아래의 머신 정보를 사용해 렌더링합니다.
+`encrypted`, `encrypted-re-add`, `secret-template`은 이름을 지정한
+`codec-backends` 선언을 사용하며 `mode = "private"` 또는
+`mode = "private-executable"`을 요구합니다.
 
 설정 값, 캐시, 모의 실행 동작, 반영 정책은 [경로 규칙 코덱]을 참고하세요.
 
