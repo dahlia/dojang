@@ -1,0 +1,118 @@
+Bootstrapping a repository
+==========================
+
+`dojang init --from SOURCE` brings an existing repository onto a new machine,
+enrolls that machine, and offers to run the first `dojang apply`.  Acquisition
+happens in a temporary directory beside the destination.  Dojang checks the
+staged *dojang.toml* before publishing the repository, so an invalid or
+incomplete source does not replace the destination.
+
+The destination must not exist or must be an empty directory.  It is the current
+directory unless `-r`/`--repository-dir` selects another path.
+
+
+Local directories and archives
+------------------------------
+
+Local directories need no transport option:
+
+~~~~ console
+$ dojang -r ~/.dotfiles init --from /media/backup/dotfiles
+~~~~
+
+Dojang copies symbolic links as links instead of following them.  It also
+accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
+
+~~~~ console
+$ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
+~~~~
+
+Archive entries are validated before extraction.  Absolute paths, parent
+traversal, backslash paths, links, and conflicting entries are rejected.
+
+
+External transports
+-------------------
+
+Git, HTTPS clients, and other network tools are configured as machine-local
+external transports.  Dojang starts the configured executable directly,
+without a shell.  The source and staging destination each occupy one complete
+argument, so spaces and shell metacharacters remain data.
+
+The default configuration file is:
+
+ -  Linux and other POSIX systems:
+    *$XDG\_CONFIG\_HOME/dojang/transports.toml*, or
+    *~/.config/dojang/transports.toml* when `XDG_CONFIG_HOME` is unset or
+    relative
+ -  macOS: *~/Library/Application Support/dojang/transports.toml*
+ -  Windows: *%APPDATA%\\dojang\\transports.toml*, falling back to
+    *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml*
+
+For example, this configuration adds a Git transport:
+
+~~~~ toml
+[transports.git]
+command = ["git", "clone", "--", "{source}", "{destination}"]
+inherit-environment = ["HOME", "PATH", "SSH_AUTH_SOCK"]
+
+[transports.git.environment]
+GIT_TERMINAL_PROMPT = "1"
+~~~~
+
+Each command must contain exactly one whole-argument `{source}` placeholder and
+one whole-argument `{destination}` placeholder.  The executable cannot contain
+a placeholder.  A transport receives no host environment variables unless
+their names appear in `inherit-environment`; values in `environment` override
+inherited values.  Keep credentials out of this file.
+
+Use the transport by name:
+
+~~~~ console
+$ dojang -r ~/.dotfiles init \
+>   --from git@github.com:USER/dotfiles.git \
+>   --transport git
+~~~~
+
+Use `--transport-file PATH` with `--transport NAME` to select another
+configuration file.  Transport names are case-sensitive.  They begin with an
+ASCII letter and may contain ASCII letters, digits, hyphens, and underscores.
+The names `directory` and `archive` are reserved.
+
+
+Enrollment and the first apply
+------------------------------
+
+After acquisition, `dojang init` validates the manifest and enrolls the current
+machine.  It accepts the same `--fact KEY=VALUE` and `--facts-file PATH`
+options as ordinary repository initialization.  Dojang then asks whether to
+apply the repository.  Declining leaves a valid, enrolled checkout without
+changing target files.
+
+Noninteractive bootstrap requires explicit approval:
+
+~~~~ console
+$ dojang -r ~/.dotfiles init \
+>   --from /media/backup/dotfiles.tar.gz \
+>   --no-interactive \
+>   --yes
+~~~~
+
+`--yes` accepts only the first mutating apply.  It does not bypass manifest,
+fact, destination, transport, or archive validation.
+
+
+Previewing a bootstrap
+----------------------
+
+Put the global `--dry-run` option before `init`:
+
+~~~~ console
+$ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
+~~~~
+
+A dry run does not publish the repository, save enrollment, or apply files.
+For an external transport, Dojang prints the redacted executable request but
+does not start the program.  Because no files are fetched, that dry run cannot
+validate the remote manifest.  Run a real bootstrap to perform the staged
+manifest check.

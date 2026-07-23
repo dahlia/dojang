@@ -8,6 +8,25 @@ To be released.
 
 ### Command-line interface
 
+ -  Added `dojang init --from SOURCE` to acquire, validate, enroll, and
+    optionally apply an existing repository in one command.  Local directories
+    and `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives work without
+    configuration.  Machine-local external transports can run Git or another
+    executable without a shell, with whole-argument source and destination
+    placeholders and an explicit environment allowlist.  Acquisition is staged
+    beside the destination, rejects unsafe archive entries, requires an absent
+    or empty destination, and cleans unpublished work after failure.  A dry run
+    does not start an external transport.  Noninteractive bootstrap requires
+    both `--no-interactive` and `--yes`.  [[#47], [#74]]
+
+ -  Added verified release installers for Linux and macOS on x86-64 and
+    AArch64, and for Windows on x86-64.  Installers download the release's
+    *SHA256SUMS* file and reject an archive before installation when its
+    checksum does not match.  Linux container images are built and tested with
+    checksum-pinned official GHCup, GHC, and Stack artifacts for both
+    architectures.  The release binary is statically linked, and the workflow
+    runs the final image before packaging its executable.  [[#47], [#74]]
+
  -  Manifests can declare reusable sensitive-codec commands in
     `[codec-backends]`.  Each backend has a shell-free executable path, stable
     version, bounded timeout, and non-secret options.  The new backend protocol
@@ -244,6 +263,7 @@ To be released.
 [#44]: https://github.com/dahlia/dojang/issues/44
 [#45]: https://github.com/dahlia/dojang/issues/45
 [#46]: https://github.com/dahlia/dojang/issues/46
+[#47]: https://github.com/dahlia/dojang/issues/47
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
@@ -257,6 +277,7 @@ To be released.
 [#71]: https://github.com/dahlia/dojang/pull/71
 [#72]: https://github.com/dahlia/dojang/pull/72
 [#73]: https://github.com/dahlia/dojang/pull/73
+[#74]: https://github.com/dahlia/dojang/pull/74
 
 ### Haskell API
 

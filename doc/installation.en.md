@@ -4,6 +4,34 @@ Installation
 This article explains how to install Dojang.
 
 
+Verified release installer
+--------------------------
+
+The release installer downloads the executable and the release's
+*SHA256SUMS* file.  It verifies the selected archive before installing
+anything.
+
+On Linux or macOS:
+
+~~~~ console
+$ curl -fsSL https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh | sh
+~~~~
+
+The POSIX installer supports x86-64 and AArch64.  It installs to
+*~/.local/bin* by default.
+
+On x86-64 Windows, run this in PowerShell:
+
+~~~~ powershell
+irm https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 | iex
+~~~~
+
+Set `DOJANG_INSTALL_DIR` to choose another directory.  To install a specific
+release instead of the latest one, set `DOJANG_INSTALL_VERSION`, for example
+to `0.3.0`, before running the script.  Download and inspect the installer
+first if your security policy does not allow piping a remote script to a shell.
+
+
 Homebrew (macOS & Linux)
 ------------------------
 
@@ -48,6 +76,26 @@ $ mise use -g github:dahlia/dojang
 ~~~~
 
 [mise]: https://mise.jdx.dev/
+
+
+Container image and static Linux executable
+-------------------------------------------
+
+Linux releases also publish a multi-architecture container image for x86-64
+and AArch64.  To check a tagged image:
+
+~~~~ console
+$ docker run --rm ghcr.io/dahlia/dojang:0.3.0 version
+~~~~
+
+The image contains a statically linked executable.  You can extract it on a
+Linux machine with the same architecture as the image:
+
+~~~~ console
+$ docker run --rm --entrypoint cat ghcr.io/dahlia/dojang:0.3.0 \
+>   /usr/local/bin/dojang > dojang
+$ chmod +x dojang
+~~~~
 
 
 Build it manually

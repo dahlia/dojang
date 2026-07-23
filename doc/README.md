@@ -17,6 +17,7 @@ These docs describe how to use it:
 
  -  [Getting started](start.en.md)
  -  [Installation](installation.en.md)
+ -  [Bootstrapping a repository](bootstrap.en.md)
  -  [The Cookbook](cookbook/README.en.md)
 
 There are also reference docs for various topics:

@@ -16,6 +16,7 @@ Dojang, 크로스플랫폼 닷파일 관리자
 
  -  [시작하기](start.ko.md)
  -  [설치](installation.ko.md)
+ -  [저장소 부트스트랩](bootstrap.ko.md)
  -  [레시피 책](cookbook/README.ko.md)
 
 그 밖에 세부 주제별 참조 문서들도 있습니다.

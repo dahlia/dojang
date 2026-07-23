@@ -4,6 +4,34 @@
 이 문서에서는 Dojang을 설치하는 방법들을 설명합니다.
 
 
+검증 설치 스크립트
+------------------
+
+릴리스 설치 스크립트는 실행 파일과 해당 릴리스의 *SHA256SUMS* 파일을
+다운로드합니다.  선택한 아카이브의 체크섬을 확인한 뒤 설치합니다.
+
+Linux 또는 macOS에서는 다음 명령을 실행합니다.
+
+~~~~ console
+$ curl -fsSL https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh | sh
+~~~~
+
+POSIX 설치 스크립트는 x86-64와 AArch64를 지원하며, 기본 설치 경로는
+*~/.local/bin*입니다.
+
+x86-64 Windows에서는 PowerShell에서 다음 명령을 실행합니다.
+
+~~~~ powershell
+irm https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 | iex
+~~~~
+
+다른 디렉터리를 선택하려면 `DOJANG_INSTALL_DIR`을 설정하세요.  최신 버전 대신
+특정 릴리스를 설치하려면 스크립트를 실행하기 전에
+`DOJANG_INSTALL_VERSION`을 `0.3.0` 같은 값으로 설정합니다.  보안 정책상 원격
+스크립트를 셸로 바로 보낼 수 없다면, 먼저 설치 스크립트를 다운로드하여 내용을
+확인하세요.
+
+
 Homebrew (macOS 및 Linux)
 -------------------------
 
@@ -48,6 +76,26 @@ $ mise use -g github:dahlia/dojang
 ~~~~
 
 [mise]: https://mise.jdx.dev/
+
+
+컨테이너 이미지와 정적 Linux 실행 파일
+--------------------------------------
+
+Linux 릴리스는 x86-64 및 AArch64용 멀티 아키텍처 컨테이너 이미지도
+게시합니다.  태그가 붙은 이미지는 다음처럼 확인할 수 있습니다.
+
+~~~~ console
+$ docker run --rm ghcr.io/dahlia/dojang:0.3.0 version
+~~~~
+
+이미지에는 정적으로 링크된 실행 파일이 들어 있습니다.  이미지와 같은 프로세서
+아키텍처를 사용하는 Linux 머신에서는 다음처럼 꺼낼 수 있습니다.
+
+~~~~ console
+$ docker run --rm --entrypoint cat ghcr.io/dahlia/dojang:0.3.0 \
+>   /usr/local/bin/dojang > dojang
+$ chmod +x dojang
+~~~~
 
 
 직접 빌드하기
