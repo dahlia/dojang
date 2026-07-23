@@ -17,7 +17,7 @@ module Dojang.Types.TargetTracking
   ) where
 
 import Control.Monad (unless, when)
-import Control.Monad.Except (MonadError (throwError))
+import Control.Monad.Except (MonadError (catchError, throwError))
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Builder
@@ -521,19 +521,42 @@ materializeSnapshot
 materializeSnapshot source destination mode fingerprint = do
   case fingerprint of
     FileFingerprint _ _ -> do
-      createDirectories $ takeDirectory destination
-      copyFileWithMetadata source destination
-      protectSnapshotDirectory
+      let directory = takeDirectory destination
+      createDirectories directory
+      protectSnapshotDirectory directory
+      copySnapshotFile
       protectSnapshotFile
-    DirectoryFingerprint -> createDirectories destination
+    DirectoryFingerprint -> do
+      createDirectories destination
+      protectSnapshotDirectory destination
     -- The stored link target in the state record is the snapshot; hosts
     -- that cannot create links must still be able to hold the record:
     SymlinkFingerprint _ -> return ()
  where
-  protectSnapshotDirectory = case mode of
+  copySnapshotFile = case mode of
+    Private -> copyPrivateSnapshotFile
+    PrivateExecutable -> copyPrivateSnapshotFile
+    _ -> copyFileWithMetadata source destination
+  copyPrivateSnapshotFile = do
+    let directory = takeDirectory destination
+    temporary <-
+      writeTemporaryFile
+        directory
+        "dojang-private-snapshot.tmp"
+        ByteString.empty
+    ( do
+        copyFileWithMetadata source temporary
+        setPortableMode temporary 0o600
+        replaceFile temporary destination
+      )
+      `catchError` \err -> do
+        temporaryExists <- exists temporary
+        when temporaryExists $ removeFile temporary
+        throwError err
+  protectSnapshotDirectory directory = case mode of
     Private ->
-      setPortableMode (takeDirectory destination) 0o700
-    PrivateExecutable -> setPortableMode (takeDirectory destination) 0o700
+      setPortableMode directory 0o700
+    PrivateExecutable -> setPortableMode directory 0o700
     _ -> return ()
   protectSnapshotFile = case mode of
     Private -> setPortableMode destination 0o600
