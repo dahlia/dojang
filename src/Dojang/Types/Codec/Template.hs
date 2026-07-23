@@ -7,7 +7,8 @@
 
 -- | Deterministic, source-aware text-template codec.
 module Dojang.Types.Codec.Template
-  ( secretTemplateCodecImplementation
+  ( secretReferenceKey
+  , secretTemplateCodecImplementation
   , secretTemplateCodecSpec
   , templateCodecDefinition
   , templateCodecImplementation
@@ -492,7 +493,8 @@ renderSecretTemplateWith secrets inputs = case prepared of
     in case result of
          Right _ -> SecretRendered $ encodeUtf8 output
          Left runtimeError ->
-           case missingIndex runtimeError >>= (`Map.lookup` analysis.secretReferences) of
+           case secretRequestMarker runtimeError
+             >>= (`Map.lookup` analysis.secretReferences) of
              Just reference
                | Map.notMember (reference.backend, reference.item) secrets ->
                    SecretNeeded reference.backend reference.item
@@ -534,8 +536,9 @@ secretFunction secrets arguments = case arguments of
          Just value -> return $ toGVal value
          Nothing ->
            throwHere $
-             IndexError $
-               secretReferenceKey backend.asText item.asText
+             ArgumentsError
+               (Just secretRequestErrorName)
+               (secretReferenceKey backend.asText item.asText)
   _ -> throwHere $ IndexError "invalid-secret-reference"
 
 
@@ -545,7 +548,14 @@ decodeSecretText _ bytes = case decodeUtf8' bytes of
   Right value -> Right value
 
 
-secretReferenceKey :: Text -> Text -> Text
+-- | Derives the opaque runtime marker for one static secret reference.
+secretReferenceKey
+  :: Text
+  -- ^ Nonempty codec backend name.
+  -> Text
+  -- ^ Nonempty backend item name.
+  -> Text
+  -- ^ Deterministic marker used only to correlate a secret runtime request.
 secretReferenceKey backend item =
   "secret-request:"
     <> digestText
@@ -650,6 +660,18 @@ runtimeFailure lookupReferences runtimeError =
       MissingSourceInput $
         maybe "<dynamic>" renderLookupReference $
           Map.lookup position lookupReferences
+
+
+secretRequestErrorName :: Text
+secretRequestErrorName = "dojang-secret-request"
+
+
+secretRequestMarker :: RuntimeError p -> Maybe Text
+secretRequestMarker runtimeError = case runtimeError of
+  ArgumentsError (Just name) marker
+    | name == secretRequestErrorName -> Just marker
+  RuntimeErrorAt _ nested -> secretRequestMarker nested
+  _ -> Nothing
 
 
 renderLookupReference :: LookupReference -> Text

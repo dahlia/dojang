@@ -41,6 +41,7 @@ import Dojang.Types.Codec.SecretTemplate
   ( secretTemplateCodecImplementation
   , secretTemplateCodecSpec
   )
+import Dojang.Types.Codec.Template (secretReferenceKey)
 import Dojang.Types.CodecBackend.Protocol
   ( BackendOperation (Lookup)
   )
@@ -119,9 +120,8 @@ spec = describe "secret-template codec" $ do
         (revealBytes . (.renderedBytes) <$> result)
           `shouldBe` Right selectedSecret
 
-  specify "stops retrying a resolved secret marker used as a variable" $ do
-    let marker =
-          "secret-request:c5ce29af0d151ab9b1156ee2423d8f601b1c757889781ce5ca26cc25c6668954"
+  specify "does not treat a missing variable as a secret request" $ do
+    let marker = secretReferenceKey "vault" "item"
         source =
           "{{ vars[\""
             <> marker
@@ -130,7 +130,7 @@ spec = describe "secret-template codec" $ do
           CodecEvaluationRequest
             "route"
             secretTemplateCodecSpec
-            (opaqueBytes source)
+            (opaqueBytes $ encodeUtf8 source)
             (Map.singleton "selected" "true")
             Map.empty
         (result, requests) =
@@ -143,9 +143,11 @@ spec = describe "secret-template codec" $ do
       Nothing -> expectationFailure "secret-template evaluation did not terminate"
       Just message -> do
         message
-          `shouldBe` "Route route codec secret-template is missing template input vars.secret-request:c5ce29af0d151ab9b1156ee2423d8f601b1c757889781ce5ca26cc25c6668954 at line 1, column 8."
-        requests
-          `shouldBe` [BackendInputRequest "vault" (Lookup "item") $ opaqueBytes ""]
+          `shouldBe` ( "Route route codec secret-template is missing template input vars."
+                         <> marker
+                         <> " at line 1, column 8."
+                     )
+        requests `shouldBe` []
 
   specify "rejects dynamic secret references before lookup" $ do
     let request =
