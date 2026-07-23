@@ -14,7 +14,7 @@ import Data.Text (Text)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (findExecutable)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Exit (ExitCode (ExitFailure, ExitSuccess))
+import System.Exit (ExitCode (ExitSuccess))
 import System.IO (SeekMode (AbsoluteSeek), hClose, hFlush, hSeek, stdout)
 import System.IO.Temp (withSystemTempFile)
 import System.Info (os)
@@ -29,6 +29,7 @@ import Dojang.Commands.Diff
   ( DiffMode (Both, Destination, Source)
   , diffWithCodecRuntime
   )
+import Dojang.ExitCodes (codecError)
 import Dojang.MonadFileSystem
   ( FileType (File)
   , MonadFileSystem (createDirectories, decodePath, writeFile)
@@ -145,7 +146,7 @@ spec = sequential $ describe "diff" $ do
       runAppWithoutLogging
         appEnv
         (diffWithCodecRuntime runtime Destination Nothing [destination])
-        `shouldThrow` (== ExitFailure 39)
+        `shouldThrow` (== codecError)
 
   it "reuses a persisted codec cache in dry-run diff" $
     withCodecFile "" $ \appEnv source _ codecSpec -> do
@@ -217,7 +218,7 @@ spec = sequential $ describe "diff" $ do
             runAppWithoutLogging
               appEnv
               (diffWithCodecRuntime runtime Source (Just programPath) [])
-      result `shouldBe` Left (ExitFailure 39)
+      result `shouldBe` Left codecError
       output `shouldBe` ""
 
 
