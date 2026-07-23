@@ -290,7 +290,7 @@ spec = do
       when (System.Info.os /= "mingw32") $ do
         let request =
               BinaryProcessRequest
-                "/bin/false"
+                "/usr/bin/false"
                 Nothing
                 []
                 (redactedProcessBytes $ ByteString.replicate (1024 * 1024) 97)

@@ -371,9 +371,9 @@ spec = sequential $ do
           readFile intermediate `shouldReturn` "sentinel-secret"
           readFile destination `shouldReturn` "sentinel-secret"
           getPortableMode intermediate
-            `shouldReturn` portableModeFromBits 0o600
+            `shouldReturn` expectedPrivateFileMode
           getPortableMode destination
-            `shouldReturn` portableModeFromBits 0o600
+            `shouldReturn` expectedPrivateFileMode
           Right (Just machineId) <- readMachineId appEnv.stateDirectory
           let Right repositoryId' =
                 parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
@@ -382,7 +382,7 @@ spec = sequential $ do
           let [target] = Map.elems state.targetRecords
           target.codecState `shouldBe` Nothing
           getPortableMode target.snapshotPath
-            `shouldReturn` portableModeFromBits 0o600
+            `shouldReturn` expectedPrivateFileMode
 
     it "renders the built-in template codec with manifest variables" $ do
       let Right variableName = parseManifestVariableName "NAME"
@@ -751,7 +751,7 @@ spec = sequential $ do
           observedMode <- getPortableMode destination
           return (result, observedMode)
         result `shouldBe` ExitSuccess
-        observedMode `shouldBe` reconciledPrivateFileMode
+        observedMode `shouldBe` expectedPrivateFileMode
 
     it "rejects traversing route names before mutating destinations" $
       withTempDir $ \tmpDir _ -> do
@@ -1558,15 +1558,14 @@ withTrackedIgnoredFile action = withTempDir $ \tmpDir _ -> do
     ]
     $ action appEnv intermediate destination
 
--- Windows cannot observe POSIX permission bits, so a pre-existing
--- writable file already satisfies the declared private mode there and
--- no mode reconciliation is planned.
+-- Windows cannot observe POSIX permission bits, so private files expose
+-- only the owner-writable bit included in mode 0600.
 #ifdef mingw32_HOST_OS
-reconciledPrivateFileMode :: PortableMode
-reconciledPrivateFileMode = PortableMode Nothing True
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = PortableMode Nothing True
 #else
-reconciledPrivateFileMode :: PortableMode
-reconciledPrivateFileMode = portableModeFromBits 0o600
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = portableModeFromBits 0o600
 #endif
 
 

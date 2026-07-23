@@ -17,6 +17,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.IO (SeekMode (AbsoluteSeek), hClose, hFlush, hSeek, stdout)
 import System.IO.Temp (withSystemTempFile)
+import System.Info (os)
 import System.OsPath (OsPath, encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty (shouldBe, shouldReturn, shouldThrow)
@@ -120,7 +121,10 @@ spec = sequential $ describe "diff" $ do
             (diffWithCodecRuntime runtime Source Nothing [source])
       result `shouldBe` ExitSuccess
       ByteString.isInfixOf "decrypted-secret" output `shouldBe` False
-      output `shouldBe` "Sensitive codec content differs; diff suppressed.\n"
+      let lineEnding = if os == "mingw32" then "\r\n" else "\n"
+      output
+        `shouldBe` "Sensitive codec content differs; diff suppressed."
+          <> lineEnding
 
   it "rejects an unprotected sensitive destination-only diff" $
     withCodecFile "previous-plaintext" $ \appEnv _ destination codecSpec -> do
