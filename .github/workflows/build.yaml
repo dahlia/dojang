@@ -275,6 +275,10 @@ jobs:
         mkdir -p "$RUNNER_TEMP/sdist/"
         mv "$(stack path --dist-dir)"/dojang-*.tar.gz \
           "$RUNNER_TEMP/sdist/"
+        (
+          cd "$RUNNER_TEMP/dist/"
+          sha256sum dojang-* > SHA256SUMS
+        )
     - run: ls -al ${{ runner.temp }}/dist/
     - run: ls -al ${{ runner.temp }}/sdist/
     - id: lookup-version
@@ -306,7 +310,9 @@ jobs:
         name: Dojang ${{ steps.lookup-version.outputs.result }}
         generate_release_notes: false
         discussion_category_name: Announcements
-        files: ${{ runner.temp }}/dist/dojang-*
+        files: |
+          ${{ runner.temp }}/dist/dojang-*
+          ${{ runner.temp }}/dist/SHA256SUMS
     - if: github.ref_type == 'tag'
       env:
         HACKAGE_API_KEY: ${{ secrets.HACKAGE_API_KEY }}
