@@ -713,7 +713,8 @@ runBinaryProcessIO request = mask $ \restore -> do
   case started of
     Left err -> return $ BinaryProcessStartFailed $ pack $ show err
     Right (Just input, Just output, Just errors, handle) -> do
-      let process = (input, output, errors, handle)
+      processId <- getPid handle
+      let process = (processId, input, output, errors, handle)
           writeInput = do
             written <-
               tryIOError $
@@ -742,25 +743,48 @@ runBinaryProcessIO request = mask $ \restore -> do
         Right Nothing -> do
           cleanupBinaryProcess process
           return BinaryProcessTimedOut
-        Right (Just (code, written, out, err)) -> case (code, written) of
-          (ExitSuccess, Left writeError) ->
-            return $ BinaryProcessIOFailed $ pack $ show writeError
-          _ ->
-            return $
-              BinaryProcessCompleted
-                code
-                (redactedProcessBytes out)
-                (redactedProcessBytes err)
+        Right (Just (code, written, out, err)) -> do
+          cleanupCompletedBinaryProcess process
+          case (code, written) of
+            (ExitSuccess, Left writeError) ->
+              return $ BinaryProcessIOFailed $ pack $ show writeError
+            _ ->
+              return $
+                BinaryProcessCompleted
+                  code
+                  (redactedProcessBytes out)
+                  (redactedProcessBytes err)
     Right _ -> return $ BinaryProcessIOFailed "Failed to capture backend streams."
 
 
 cleanupBinaryProcess
-  :: (Handle, Handle, Handle, ProcessHandle)
+  :: (Maybe Pid, Handle, Handle, Handle, ProcessHandle)
   -> IO ()
-cleanupBinaryProcess (input, output, errors, handle) = do
-  processId <- getPid handle
+cleanupBinaryProcess (processId, input, output, errors, handle) = do
   mapM_ closeBinaryHandle [input, output, errors]
   cleanupBinaryProcessHandle processId handle
+
+
+cleanupCompletedBinaryProcess
+  :: (Maybe Pid, Handle, Handle, Handle, ProcessHandle)
+  -> IO ()
+cleanupCompletedBinaryProcess (processId, input, output, errors, handle) = do
+  mapM_ closeBinaryHandle [input, output, errors]
+  cleanupCompletedBinaryProcessHandle processId handle
+
+
+cleanupCompletedBinaryProcessHandle :: Maybe Pid -> ProcessHandle -> IO ()
+#ifndef mingw32_HOST_OS
+cleanupCompletedBinaryProcessHandle processId handle = do
+  uninterruptibleMask_ $
+    mapM_
+      (\pid -> void $ tryIOError $ signalProcessGroup sigKILL pid)
+      processId
+  void $ tryIOError $ waitForProcess handle
+#else
+cleanupCompletedBinaryProcessHandle _ handle =
+  void $ tryIOError $ waitForProcess handle
+#endif
 
 
 cleanupBinaryProcessHandle :: Maybe Pid -> ProcessHandle -> IO ()

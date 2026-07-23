@@ -355,6 +355,55 @@ spec = do
           after <- FileSystem.readFile heartbeatPath
           after `shouldBe` before
 
+    it "terminates backend descendants after a normal parent exit" $ do
+      when (System.Info.os /= "mingw32") $
+        withTempDir $ \tmpDir tmpPath -> do
+          scriptName <- encodeFS "backend.sh"
+          heartbeatName <- encodeFS "heartbeat"
+          let scriptPath = tmpDir </> scriptName
+              heartbeatPath = tmpDir </> heartbeatName
+              heartbeatFile = tmpPath <> "/heartbeat"
+              script =
+                ByteString.Char8.pack $
+                  "#!/bin/sh\n"
+                    <> "PATH=/bin:/usr/bin\n"
+                    <> "export PATH\n"
+                    <> "(\n"
+                    <> "  exec </dev/null >/dev/null 2>/dev/null\n"
+                    <> "  trap '' TERM\n"
+                    <> "  i=0\n"
+                    <> "  while [ \"$i\" -lt 100 ]; do\n"
+                    <> "    printf x >> '"
+                    <> heartbeatFile
+                    <> "'\n"
+                    <> "    i=$((i + 1))\n"
+                    <> "    sleep 0.05\n"
+                    <> "  done\n"
+                    <> ") &\n"
+                    <> "while [ ! -s '"
+                    <> heartbeatFile
+                    <> "' ]; do sleep 0.01; done\n"
+                    <> "exit 0\n"
+              request =
+                BinaryProcessRequest
+                  (tmpPath <> "/backend.sh")
+                  Nothing
+                  []
+                  (redactedProcessBytes ByteString.empty)
+                  5
+          FileSystem.writeFile scriptPath script
+          FileSystem.setPortableMode scriptPath 0o700
+          result <- runBinaryProcessIO request
+          result
+            `shouldBe` BinaryProcessCompleted
+              ExitSuccess
+              (redactedProcessBytes ByteString.empty)
+              (redactedProcessBytes ByteString.empty)
+          before <- FileSystem.readFile heartbeatPath
+          threadDelay 300000
+          after <- FileSystem.readFile heartbeatPath
+          after `shouldBe` before
+
     it
       "keeps Ctrl-C interruptible while a backend runs"
       testBinaryProcessInterruptibility
