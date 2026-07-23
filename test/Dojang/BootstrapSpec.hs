@@ -105,6 +105,20 @@ spec = do
         readFile (destination </> manifestName)
           `shouldReturn` "repository-id = \"test\"\n"
 
+    it "publishes into an existing empty destination" $
+      withTempDir $ \tmpDir _ -> do
+        stagingName <- encodeFS "staging"
+        destinationName <- encodeFS "destination"
+        manifestName <- encodeFS "dojang.toml"
+        let staging = tmpDir </> stagingName
+            destination = tmpDir </> destinationName
+        createDirectory staging
+        createDirectory destination
+        writeFile (staging </> manifestName) "manifest"
+        publishStagedDirectory staging destination
+        isDirectory staging `shouldReturn` False
+        readFile (destination </> manifestName) `shouldReturn` "manifest"
+
     symlinkSpecs
 
     it "reports missing and unsupported local sources" $

@@ -21,6 +21,7 @@ module Dojang.App
   , LogStr
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
+  , catchCommandExit
   , currentEnvironment'
   , currentEnvironmentWithFacts
   , clearLegacyFirstApplyHistory
@@ -221,6 +222,24 @@ newtype App i v = App
     , MonadReader AppEnv
     , MonadLogger
     )
+
+
+-- | Handles an exit requested by a command while preserving the current
+-- application environment and logger.
+catchCommandExit
+  :: (Monad i)
+  => App i a
+  -- ^ Command action to run.
+  -> (ExitCode -> App i a)
+  -- ^ Handler for an exit requested by the action.
+  -> App i a
+catchCommandExit action handler = App $ ReaderT $ \appEnv ->
+  ExceptT $ do
+    result <- runExceptT $ runReaderT action.unApp appEnv
+    case result of
+      Left exitCode ->
+        runExceptT $ runReaderT (handler exitCode).unApp appEnv
+      Right value -> return $ Right value
 
 
 instance

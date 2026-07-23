@@ -124,6 +124,22 @@ spec = do
       result <- evalIO $ runCommandEffectTest script action
       result === Right (map Just names, expectedEvents)
 
+    it "replays arbitrary complete process environments" $ hedgehog $ do
+      environment <-
+        forAll $
+          Gen.list
+            (Range.linear 0 100)
+            ( (,)
+                <$> Gen.string (Range.linear 0 30) Gen.unicode
+                <*> Gen.string (Range.linear 0 100) Gen.unicode
+            )
+      result <-
+        evalIO $
+          runCommandEffectTest
+            [ProcessEnvironmentValue environment]
+            processEnvironment
+      result === Right (environment, [ProcessEnvironmentRead])
+
     it "replays arbitrary host platform identifiers" $ hedgehog $ do
       platform <-
         forAll $ Gen.string (Range.linear 0 30) Gen.unicode
@@ -444,6 +460,17 @@ spec = do
           runCommandEffectTest [ProcessValue completed] $
             runProcess request
       result === Right (completed, [ProcessRun request])
+
+    it "redacts process environment values from diagnostics" $ do
+      let request =
+            emptyProcessRequest
+              { executable = "transport"
+              , environment = Just [("TOKEN", "super-secret")]
+              }
+          rendered = show request
+      rendered `shouldSatisfy` isInfixOf "TOKEN"
+      rendered `shouldSatisfy` \value ->
+        not $ isInfixOf "super-secret" value
 
     it "separates arbitrary process starts from waits" $ hedgehog $ do
       code <- forAll $ Gen.int (Range.linear 1 255)

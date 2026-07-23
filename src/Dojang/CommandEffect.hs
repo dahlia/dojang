@@ -162,7 +162,26 @@ data ProcessRequest = ProcessRequest
   , captureOutput :: Bool
   -- ^ Whether stdout and stderr should be captured.
   }
-  deriving (Eq, Show)
+  deriving (Eq)
+
+
+instance Show ProcessRequest where
+  show request =
+    "ProcessRequest {executable = "
+      <> show request.executable
+      <> ", arguments = "
+      <> show request.arguments
+      <> ", workingDirectory = "
+      <> show request.workingDirectory
+      <> ", environment = "
+      <> show
+        ( fmap
+            (fmap $ \(name, _) -> (name, "<redacted>" :: String))
+            request.environment
+        )
+      <> ", captureOutput = "
+      <> show request.captureOutput
+      <> "}"
 
 
 -- | A process request with inherited environment and streams.

@@ -25,7 +25,7 @@ import Codec.Compression.GZip qualified as GZip
 import Control.Applicative ((<|>))
 import Control.DeepSeq (NFData, force)
 import Control.Exception (SomeException, displayException, evaluate)
-import Control.Monad (forM_)
+import Control.Monad (forM_, unless, when)
 import Control.Monad.Catch (MonadCatch, try)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
@@ -205,11 +205,22 @@ stageBuiltinSource (ArchiveSource format source) staging = do
       return $ Right ()
 
 
--- | Publishes a fully validated staging tree using the filesystem's directory
--- rename operation. The destination must not already exist.
+-- | Publishes a fully validated staging tree. A missing destination is created
+-- with an atomic directory rename. An existing empty destination keeps its
+-- directory identity, which is required when it is the process's current
+-- working directory.
 publishStagedDirectory
   :: (MonadFileSystem m) => OsPath -> OsPath -> m ()
-publishStagedDirectory = renameDirectory
+publishStagedDirectory staging destination = do
+  destinationExists <- exists destination
+  if not destinationExists
+    then renameDirectory staging destination
+    else do
+      destinationEntries <- listDirectory destination
+      unless (null destinationEntries) $
+        throwError $
+          userError "bootstrap destination is not empty"
+      copyDirectoryContents staging destination
 
 
 copyDirectoryTree
@@ -218,19 +229,59 @@ copyDirectoryTree source destination = do
   entries <- listDirectoryRecursively source []
   createDirectory destination
   cleanupStagingOnError destination $
-    forM_ entries $ \(fileType, relative) -> do
-      let sourceEntry = source </> relative
-          destinationEntry = destination </> relative
-      case fileType of
-        Directory -> createDirectory destinationEntry
-        File -> copyFileWithMetadata sourceEntry destinationEntry
-        Symlink -> do
-          target <- readSymlinkTarget sourceEntry
-          directoryLink <- isDirectory sourceEntry
-          createSymbolicLink
-            target
-            destinationEntry
-            (if directoryLink then Directory else File)
+    copyDirectoryEntries source destination entries
+
+
+copyDirectoryContents
+  :: (MonadFileSystem m) => OsPath -> OsPath -> m ()
+copyDirectoryContents source destination = do
+  entries <- listDirectoryRecursively source []
+  topLevelEntries <- listDirectory source
+  cleanupDestinationOnError destination topLevelEntries $ do
+    copyDirectoryEntries source destination entries
+    removeDirectoryRecursively source
+
+
+copyDirectoryEntries
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> [(FileType, OsPath)]
+  -> m ()
+copyDirectoryEntries source destination entries =
+  forM_ entries $ \(fileType, relative) -> do
+    let sourceEntry = source </> relative
+        destinationEntry = destination </> relative
+    case fileType of
+      Directory -> createDirectory destinationEntry
+      File -> copyFileWithMetadata sourceEntry destinationEntry
+      Symlink -> do
+        target <- readSymlinkTarget sourceEntry
+        directoryLink <- isDirectory sourceEntry
+        createSymbolicLink
+          target
+          destinationEntry
+          (if directoryLink then Directory else File)
+
+
+cleanupDestinationOnError
+  :: (MonadFileSystem m) => OsPath -> [OsPath] -> m a -> m a
+cleanupDestinationOnError destination entries action =
+  action `catchError` \err -> do
+    forM_ entries $ \entry ->
+      removeAnyEntry (destination </> entry)
+        `catchError` const (return ())
+    throwError err
+
+
+removeAnyEntry :: (MonadFileSystem m) => OsPath -> m ()
+removeAnyEntry path = do
+  symbolicLink <- isSymlink path
+  directory <- isDirectory path
+  present <- exists path
+  if directory && not symbolicLink
+    then removeDirectoryRecursively path
+    else when (symbolicLink || present) $ removeFile path
 
 
 cleanupStagingOnError
