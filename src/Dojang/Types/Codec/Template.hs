@@ -20,6 +20,12 @@ import Control.Monad.Writer (Writer, runWriter)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Builder
+  ( byteString
+  , toLazyByteString
+  , word64BE
+  )
+import Data.ByteString.Lazy qualified as LazyByteString
 import Data.CaseInsensitive (foldCase)
 import Data.Char (chr, isAlphaNum, isSpace)
 import Data.HashMap.Strict qualified as HashMap
@@ -539,7 +545,16 @@ decodeSecretText _ bytes = case decodeUtf8' bytes of
 
 secretReferenceKey :: Text -> Text -> Text
 secretReferenceKey backend item =
-  "secret-request:" <> digestText (encodeUtf8 backend <> "\0" <> encodeUtf8 item)
+  "secret-request:"
+    <> digestText
+      ( LazyByteString.toStrict $
+          toLazyByteString $
+            encodeComponent backend <> encodeComponent item
+      )
+ where
+  encodeComponent value =
+    let bytes = encodeUtf8 value
+    in word64BE (fromIntegral $ ByteString.length bytes) <> byteString bytes
 
 
 digestText :: ByteString -> Text

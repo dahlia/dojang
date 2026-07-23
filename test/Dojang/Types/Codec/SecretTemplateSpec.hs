@@ -12,8 +12,13 @@ import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import System.Timeout (timeout)
 import Test.Hspec (Spec, describe, specify)
-import Test.Hspec.Expectations.Pretty (shouldBe, shouldNotContain)
+import Test.Hspec.Expectations.Pretty
+  ( expectationFailure
+  , shouldBe
+  , shouldNotContain
+  )
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.Types.Codec.Evaluate
@@ -76,6 +81,41 @@ spec = describe "secret-template codec" $ do
     (revealBytes . (.renderedBytes) <$> result)
       === Right (encodeUtf8 secret <> encodeUtf8 secret)
     requests === [BackendInputRequest "vault" (Lookup "item") $ opaqueBytes ""]
+
+  specify "distinguishes NUL bytes across secret reference components" $ do
+    let selectedRequest =
+          BackendInputRequest "a" (Lookup "\NULb") $ opaqueBytes ""
+        selectedSecret = "selected-secret"
+        source =
+          "{{ secret(\"a\", \"\NULb\") if facts.selected == \"true\" else secret(\"a\NUL\", \"b\") }}"
+        request =
+          CodecEvaluationRequest
+            "route"
+            secretTemplateCodecSpec
+            (opaqueBytes source)
+            (Map.singleton "selected" "true")
+            Map.empty
+        codecRuntime =
+          CodecRuntime
+            (codecRegistry [secretTemplateCodecImplementation])
+            NormalEvaluation
+            ( \externalRequest ->
+                pure $
+                  Right $
+                    ExternalInput
+                      ( opaqueBytes $
+                          if externalRequest == selectedRequest
+                            then selectedSecret
+                            else "unselected-secret"
+                      )
+                      "backend-v1"
+            )
+    completed <- timeout 1000000 $ evaluateCodec codecRuntime request Nothing
+    case completed of
+      Nothing -> expectationFailure "secret-template evaluation did not terminate"
+      Just result ->
+        (revealBytes . (.renderedBytes) <$> result)
+          `shouldBe` Right selectedSecret
 
   specify "rejects dynamic secret references before lookup" $ do
     let request =

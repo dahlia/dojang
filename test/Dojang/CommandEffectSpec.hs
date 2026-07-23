@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
@@ -5,6 +6,8 @@
 
 module Dojang.CommandEffectSpec (spec) where
 
+import Control.Concurrent (forkIO, myThreadId, threadDelay, throwTo)
+import Control.Exception (AsyncException (UserInterrupt), finally, try)
 import Control.Monad (void, when)
 import Control.Monad.Except (catchError, throwError)
 import Data.ByteString qualified as ByteString
@@ -16,6 +19,7 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.Exit (ExitCode (..))
 import System.Info qualified
+import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 
@@ -42,6 +46,65 @@ import Dojang.CommandEffect
   , runCommandEffectTest
   )
 import Dojang.MonadFileSystem (dryRunIO)
+import Dojang.MonadFileSystem qualified as FileSystem
+import Dojang.TestUtils (withTempDir)
+
+
+#ifndef mingw32_HOST_OS
+import System.Posix.Signals
+  ( Handler (Catch)
+  , installHandler
+  , raiseSignal
+  , sigINT
+  )
+#endif
+
+
+interruptProcess :: IO ()
+#ifndef mingw32_HOST_OS
+interruptProcess = raiseSignal sigINT
+#else
+interruptProcess = return ()
+#endif
+
+
+testBinaryProcessInterruptibility :: IO ()
+#ifndef mingw32_HOST_OS
+testBinaryProcessInterruptibility =
+  withTempDir $ \tmpDir tmpPath -> do
+    scriptName <- encodeFS "backend.sh"
+    let scriptPath = tmpDir </> scriptName
+        script =
+          ByteString.Char8.pack $
+            "#!/bin/sh\n"
+              <> "PATH=/bin:/usr/bin\n"
+              <> "export PATH\n"
+              <> "while :; do sleep 1; done\n"
+        request =
+          BinaryProcessRequest
+            (tmpPath <> "/backend.sh")
+            Nothing
+            []
+            (redactedProcessBytes ByteString.empty)
+            1
+    FileSystem.writeFile scriptPath script
+    FileSystem.setPortableMode scriptPath 0o700
+    testThread <- myThreadId
+    previousHandler <-
+      installHandler
+        sigINT
+        (Catch $ throwTo testThread UserInterrupt)
+        Nothing
+    void $ forkIO $ threadDelay 100000 >> interruptProcess
+    result <-
+      ( try (runBinaryProcessIO request)
+          :: IO (Either AsyncException BinaryProcessResult)
+      )
+        `finally` void (installHandler sigINT previousHandler Nothing)
+    result `shouldBe` Left UserInterrupt
+#else
+testBinaryProcessInterruptibility = return ()
+#endif
 
 
 spec :: Spec
@@ -249,6 +312,51 @@ spec = do
         result <- runBinaryProcessIO request
         result `shouldBe` BinaryProcessTimedOut
 
+    it "terminates backend descendants at the hard timeout" $ do
+      when (System.Info.os /= "mingw32") $
+        withTempDir $ \tmpDir tmpPath -> do
+          scriptName <- encodeFS "backend.sh"
+          heartbeatName <- encodeFS "heartbeat"
+          let scriptPath = tmpDir </> scriptName
+              heartbeatPath = tmpDir </> heartbeatName
+              heartbeatFile = tmpPath <> "/heartbeat"
+              script =
+                ByteString.Char8.pack $
+                  "#!/bin/sh\n"
+                    <> "PATH=/bin:/usr/bin\n"
+                    <> "export PATH\n"
+                    <> "(\n"
+                    <> "  trap '' TERM\n"
+                    <> "  i=0\n"
+                    <> "  while [ \"$i\" -lt 100 ]; do\n"
+                    <> "    printf x >> '"
+                    <> heartbeatFile
+                    <> "'\n"
+                    <> "    i=$((i + 1))\n"
+                    <> "    sleep 0.05\n"
+                    <> "  done\n"
+                    <> ") &\n"
+                    <> "wait\n"
+              request =
+                BinaryProcessRequest
+                  (tmpPath <> "/backend.sh")
+                  Nothing
+                  []
+                  (redactedProcessBytes ByteString.empty)
+                  1
+          FileSystem.writeFile scriptPath script
+          FileSystem.setPortableMode scriptPath 0o700
+          result <- runBinaryProcessIO request
+          result `shouldBe` BinaryProcessTimedOut
+          before <- FileSystem.readFile heartbeatPath
+          threadDelay 300000
+          after <- FileSystem.readFile heartbeatPath
+          after `shouldBe` before
+
+    it
+      "keeps Ctrl-C interruptible while a backend runs"
+      testBinaryProcessInterruptibility
+
     it "rejects non-positive binary process timeouts" $ do
       let request =
             BinaryProcessRequest
@@ -288,7 +396,8 @@ spec = do
 
     it "separates arbitrary process starts from waits" $ hedgehog $ do
       code <- forAll $ Gen.int (Range.linear 1 255)
-      let request = emptyProcessRequest{executable = "hook", arguments = [show code]}
+      let request =
+            emptyProcessRequest{executable = "hook", arguments = [show code]}
           completed = ProcessCompleted (ExitFailure code) "" ""
       result <-
         evalIO $
@@ -303,7 +412,8 @@ spec = do
 
     it "records arbitrary process cancellation" $ hedgehog $ do
       argument <- forAll $ Gen.string (Range.linear 0 30) Gen.unicode
-      let request = emptyProcessRequest{executable = "hook", arguments = [argument]}
+      let request =
+            emptyProcessRequest{executable = "hook", arguments = [argument]}
       result <-
         evalIO
           $ runCommandEffectTest

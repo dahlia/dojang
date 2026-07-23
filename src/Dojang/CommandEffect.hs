@@ -57,8 +57,9 @@ module Dojang.CommandEffect
   , writeStreamIO
   ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently)
-import Control.Exception (mask, onException, throwIO)
+import Control.Exception (mask, onException, throwIO, uninterruptibleMask_)
 import Control.Monad (void)
 import Control.Monad.Catch qualified as MonadCatch
 import Control.Monad.Except (ExceptT (..), MonadError (..), runExceptT)
@@ -81,6 +82,7 @@ import System.IO.Error (tryIOError)
 import System.Info qualified
 import System.Process
   ( CreateProcess (..)
+  , Pid
   , ProcessHandle
   , StdStream (CreatePipe, Inherit)
   , createProcess
@@ -109,7 +111,11 @@ import Dojang.Types.Environment.Current qualified as CurrentEnvironment
 
 
 #ifndef mingw32_HOST_OS
-import System.Posix.Signals (sigKILL, signalProcess)
+import System.Posix.Signals
+  ( sigKILL
+  , sigTERM
+  , signalProcessGroup
+  )
 #endif
 
 
@@ -753,19 +759,36 @@ cleanupBinaryProcess
 cleanupBinaryProcess (input, output, errors, handle) = do
   processId <- getPid handle
   mapM_ closeBinaryHandle [input, output, errors]
-  void $ tryIOError $ terminateProcess handle
-  stopped <- timeout 2000000 $ tryIOError $ waitForProcess handle
-  case stopped of
-    Just _ -> return ()
-    Nothing -> do
+  cleanupBinaryProcessHandle processId handle
+
+
+cleanupBinaryProcessHandle :: Maybe Pid -> ProcessHandle -> IO ()
 #ifndef mingw32_HOST_OS
-      mapM_
-        (\pid -> void $ tryIOError $ signalProcess sigKILL pid)
-        processId
-      void $ timeout 2000000 $ tryIOError $ waitForProcess handle
+cleanupBinaryProcessHandle processId handle = do
+  uninterruptibleMask_ $ do
+    mapM_
+      (\pid -> void $ tryIOError $ signalProcessGroup sigTERM pid)
+      processId
+    threadDelay binaryProcessTerminationGraceTime
+    mapM_
+      (\pid -> void $ tryIOError $ signalProcessGroup sigKILL pid)
+      processId
+  void $
+    timeout binaryProcessTerminationGraceTime $
+      tryIOError $
+        waitForProcess handle
 #else
-      return ()
+cleanupBinaryProcessHandle _ handle = do
+  void $ tryIOError $ terminateProcess handle
+  void $
+    timeout binaryProcessTerminationGraceTime $
+      tryIOError $
+        waitForProcess handle
 #endif
+
+
+binaryProcessTerminationGraceTime :: Int
+binaryProcessTerminationGraceTime = 2000000
 
 
 closeBinaryHandle :: Handle -> IO ()
@@ -871,7 +894,8 @@ toBinaryCreateProcess request =
     , std_in = CreatePipe
     , std_out = CreatePipe
     , std_err = CreatePipe
-    , delegate_ctlc = True
+    , create_group = True
+    , delegate_ctlc = False
     }
 
 

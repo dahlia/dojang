@@ -23,7 +23,8 @@ To be released.
     temporary files, protect state snapshots, keep results command-scoped,
     suppress diff bodies, and remain offline during dry runs.  File permissions
     are not encryption at rest.  Backends run without arguments or inherited
-    environment and remain unavailable on Windows pending platform
+    environment, and a timeout or interruption terminates the entire backend
+    process group.  Backends remain unavailable on Windows pending platform
     verification.  [[#45], [#73]]
 
  -  Command execution now routes environment reads, platform detection, clocks,
