@@ -10,6 +10,7 @@ import Data.Map.Strict qualified as Map
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
+import System.Info (os)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
@@ -139,9 +140,15 @@ spec = describe "codec backend protocol" $ do
           effects === [BinaryProcessRun processRequest]
 
   it "resolves an absolute backend into the expected process request" $ do
-    let backend =
+    let windows = os == "mingw32"
+        configuredRoot = Root $ if windows then Just 'C' else Nothing
+        configuredBackend =
+          if windows then "C:\\configured-backend" else "/configured-backend"
+        repositoryPath =
+          if windows then "C:\\repository" else "/repository"
+        backend =
           CodecBackend
-            (PathSeparator (Root Nothing) $ BareComponent "configured-backend")
+            (PathSeparator configuredRoot $ BareComponent "configured-backend")
             "backend-v1"
             17
             (CodecBackendOptions $ Map.singleton "profile" $ CodecString "work")
@@ -153,8 +160,8 @@ spec = describe "codec backend protocol" $ do
             (Map.singleton "profile" $ CodecString "work")
         processRequest =
           BinaryProcessRequest
-            "/configured-backend"
-            (Just "/repository")
+            configuredBackend
+            (Just repositoryPath)
             []
             (redactedProcessBytes $ encodeBackendStandardInput protocolRequest "ciphertext")
             17
@@ -172,7 +179,7 @@ spec = describe "codec backend protocol" $ do
         resolveCodecBackendInput
           (Map.singleton "vault" backend)
           variableGetter
-          (unsafeEncodeUtf "/repository")
+          (unsafeEncodeUtf repositoryPath)
           (BackendInputRequest "vault" Decrypt $ opaqueBytes "ciphertext")
     case result of
       Left err -> fail $ show err

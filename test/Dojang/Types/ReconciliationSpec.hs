@@ -1413,7 +1413,7 @@ spec = do
           WritePrivateContent (opaqueBytes "sentinel-secret") renderedPath
         FileSystem.readFile renderedPath `shouldReturn` "sentinel-secret"
         FileSystem.getPortableMode renderedPath
-          `shouldReturn` portableModeFromBits 0o600
+          `shouldReturn` expectedPrivateFileMode
 
     it "interprets every synchronization operation" $ withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source-file"
@@ -1582,6 +1582,15 @@ spec = do
           `shouldThrow` (\e -> ioeGetFileName e == Just sourcePath)
         FileSystem.readFile failurePaths.intermediate
           `shouldReturn` "recovery"
+
+#ifdef mingw32_HOST_OS
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = PortableMode Nothing True
+#else
+expectedPrivateFileMode :: PortableMode
+expectedPrivateFileMode = portableModeFromBits 0o600
+#endif
+
 
 -- Making the container unreadable is only expressible on POSIX, where a
 -- directory stripped of its execute bit blocks the restoration of the
