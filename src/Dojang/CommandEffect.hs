@@ -57,9 +57,8 @@ module Dojang.CommandEffect
   , writeStreamIO
   ) where
 
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently)
-import Control.Exception (mask, onException, throwIO, uninterruptibleMask_)
+import Control.Exception (mask, onException, throwIO)
 import Control.Monad (void)
 import Control.Monad.Catch qualified as MonadCatch
 import Control.Monad.Except (ExceptT (..), MonadError (..), runExceptT)
@@ -111,6 +110,8 @@ import Dojang.Types.Environment.Current qualified as CurrentEnvironment
 
 
 #ifndef mingw32_HOST_OS
+import Control.Concurrent (threadDelay)
+import Control.Exception (uninterruptibleMask_)
 import System.Posix.Signals
   ( sigKILL
   , sigTERM
