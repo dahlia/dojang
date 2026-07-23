@@ -86,7 +86,7 @@ import Dojang.Types.Hook
   , renderHookId
   )
 import Dojang.Types.Manifest
-  ( Manifest (Manifest)
+  ( Manifest (Manifest, ManifestWithCodecBackends)
   , manifestWithCodecBackends
   )
 import Dojang.Types.ManifestVariable
@@ -250,6 +250,36 @@ spec = do
       Left err -> annotateShow (formatErrors err) >> assert False
       Right (parsed, _) -> parsed === manifest'
 
+  specify "does not match backend manifests through the legacy pattern" $ do
+    let backend =
+          CodecBackend
+            (BareComponent "backend")
+            "1"
+            30
+            (CodecBackendOptions Map.empty)
+        manifest' =
+          manifestWithCodecBackends
+            Nothing
+            HashMap.empty
+            Map.empty
+            Map.empty
+            Map.empty
+            (Map.singleton "vault" backend)
+            Map.empty
+        legacyManifest =
+          manifestWithCodecBackends
+            Nothing
+            HashMap.empty
+            Map.empty
+            Map.empty
+            Map.empty
+            Map.empty
+            Map.empty
+        legacyMatches value =
+          [() | Manifest _ _ _ _ _ _ <- [value]]
+    legacyMatches manifest' `shouldBe` []
+    legacyMatches legacyManifest `shouldBe` [()]
+
   specify "rejects arbitrary invalid codec backend declarations" $ hedgehog $ do
     invalidField <- forAll $ Hedgehog.int $ Range.linear 0 4
     invalidTimeout <-
@@ -401,7 +431,15 @@ spec = do
     case readManifest toml of
       Left err -> annotateShow (formatErrors err) >> assert False
       Right
-        ( parsed@(Manifest repositoryId' monikers' variables' routes' ignores' hooks')
+        ( parsed@( ManifestWithCodecBackends
+                     repositoryId'
+                     monikers'
+                     variables'
+                     routes'
+                     ignores'
+                     backends'
+                     hooks'
+                   )
           , _
           ) -> do
           annotateShow parsed
@@ -416,6 +454,7 @@ spec = do
           variables' === variables
           Map.map routeShape routes' === Map.map routeShape routes
           ignores' === ignores
+          backends' === Map.empty
           hooks' === hooks
 
   specify "writes route metadata losslessly" $ do

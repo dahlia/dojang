@@ -1,5 +1,7 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordUpdate #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Dojang.Types.Manifest
@@ -21,6 +23,7 @@ module Dojang.Types.Manifest
   ) where
 
 import Data.Map.Strict (Map, fromList, toAscList, toList)
+import Data.Map.Strict qualified as Map
 import System.FilePattern (FilePattern)
 import System.OsPath (OsPath, normalise)
 
@@ -66,12 +69,19 @@ data Manifest = ManifestWithCodecBackends
 -- Use 'manifestWithCodecBackends' when a backend registry is required.
 pattern Manifest
   :: Maybe RepositoryId
+  -- ^ Optional stable repository identity.
   -> MonikerMap
+  -- ^ Named environment predicates.
   -> ManifestVariableMap
+  -- ^ Declarative manifest variables.
   -> FileRouteMap
+  -- ^ File and directory routes.
   -> IgnoreMap
+  -- ^ Ignore patterns keyed by directory route.
   -> HookMap
+  -- ^ Hooks run around supported commands.
   -> Manifest
+  -- ^ Manifest whose codec backend registry is empty.
 pattern Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks <-
   ManifestWithCodecBackends
     repositoryId
@@ -79,7 +89,7 @@ pattern Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks
     variables
     fileRoutes
     ignorePatterns
-    _
+    (Map.null -> True)
     hooks
  where
   Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks =
@@ -93,19 +103,24 @@ pattern Manifest repositoryId monikers variables fileRoutes ignorePatterns hooks
       hooks
 
 
-{-# COMPLETE Manifest #-}
-
-
 -- | Constructs a manifest with an explicit codec backend registry.
 manifestWithCodecBackends
   :: Maybe RepositoryId
+  -- ^ Optional stable repository identity.
   -> MonikerMap
+  -- ^ Named environment predicates.
   -> ManifestVariableMap
+  -- ^ Declarative manifest variables.
   -> FileRouteMap
+  -- ^ File and directory routes.
   -> IgnoreMap
+  -- ^ Ignore patterns keyed by directory route.
   -> CodecBackendMap
+  -- ^ Reusable external codec backends.
   -> HookMap
+  -- ^ Hooks run around supported commands.
   -> Manifest
+  -- ^ Manifest containing the supplied backend registry.
 manifestWithCodecBackends = ManifestWithCodecBackends
 
 

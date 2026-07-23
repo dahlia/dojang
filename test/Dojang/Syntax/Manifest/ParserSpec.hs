@@ -449,14 +449,18 @@ spec = do
             ]
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        [ (show predicate, toPathText . (.expression) <$> path)
-          | (predicate, path) <- route.predicates
-          ]
-          `shouldBe` [ (show $ Architecture "x86_64", Just "architecture-first")
-                     , (show $ OperatingSystem "linux", Just "operating-system-second")
-                     ]
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          [ (show predicate, toPathText . (.expression) <$> path)
+            | (predicate, path) <- route.predicates
+            ]
+            `shouldBe` [ (show $ Architecture "x86_64", Just "architecture-first")
+                       , (show $ OperatingSystem "linux", Just "operating-system-second")
+                       ]
+          backends `shouldBe` Map.empty
 
   specify "reads reusable codec backend declarations" $ do
     let source =
@@ -509,13 +513,17 @@ spec = do
             "{ when = \"os = plan9 || always\", path = \"target\" }"
     case readManifest toml of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        route.predicates `shouldBe` [(Always, Just "target")]
-        dispatch
-          (emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0")
-          route
-          `shouldBe` ([Just "target"], [])
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          route.predicates `shouldBe` [(Always, Just "target")]
+          dispatch
+            (emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0")
+            route
+            `shouldBe` ([Just "target"], [])
+          backends `shouldBe` Map.empty
 
   specify "rejects a detailed branch without a condition" $ do
     expectDetailedRouteError
@@ -557,10 +565,14 @@ spec = do
           readManifest $ detailedManifest "{ when = \"always\", path = \"\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        route.predicates
-          `shouldBe` [(Always, Just $ routeTarget $ BareComponent "")]
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          route.predicates
+            `shouldBe` [(Always, Just $ routeTarget $ BareComponent "")]
+          backends `shouldBe` Map.empty
 
   specify "identifies invalid detailed branch paths" $ do
     let result =
@@ -578,20 +590,24 @@ spec = do
               "{ moniker = \"known\", path = \"target\", mode = \"private\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        let Right known = parseMonikerName "known"
-        route.predicates
-          `shouldBe` [
-                       ( Moniker known
-                       , Just $
-                           RouteTarget
-                             (BareComponent "target")
-                             Private
-                             CopyRoute
-                             identityCodecSpec
-                       )
-                     ]
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          let Right known = parseMonikerName "known"
+          route.predicates
+            `shouldBe` [
+                         ( Moniker known
+                         , Just $
+                             RouteTarget
+                               (BareComponent "target")
+                               Private
+                               CopyRoute
+                               identityCodecSpec
+                         )
+                       ]
+          backends `shouldBe` Map.empty
 
   specify "reads a declared kind in a detailed branch" $ do
     let result =
@@ -600,19 +616,23 @@ spec = do
               "{ when = \"always\", path = \"target\", kind = \"symlink\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        route.predicates
-          `shouldBe` [
-                       ( Always
-                       , Just $
-                           RouteTarget
-                             (BareComponent "target")
-                             DefaultMode
-                             SymlinkRoute
-                             identityCodecSpec
-                       )
-                     ]
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          route.predicates
+            `shouldBe` [
+                         ( Always
+                         , Just $
+                             RouteTarget
+                               (BareComponent "target")
+                               DefaultMode
+                               SymlinkRoute
+                               identityCodecSpec
+                         )
+                       ]
+          backends `shouldBe` Map.empty
 
   specify "reads explicit default metadata in a detailed branch" $ do
     let result =
@@ -622,10 +642,14 @@ spec = do
               \, mode = \"default\", kind = \"copy\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        route.predicates
-          `shouldBe` [(Always, Just $ routeTarget $ BareComponent "target")]
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          route.predicates
+            `shouldBe` [(Always, Just $ routeTarget $ BareComponent "target")]
+          backends `shouldBe` Map.empty
 
   specify "rejects an unknown mode in a detailed branch" $ do
     expectDetailedRouteError
@@ -700,19 +724,23 @@ spec = do
               \, kind = \"symlink\", mode = \"default\" }"
     case result of
       Left err -> expectationFailure $ show $ unpack <$> formatErrors err
-      Right (Manifest _ _ _ routes _ _, _) -> do
-        let Just route = Map.lookup foo routes
-        route.predicates
-          `shouldBe` [
-                       ( Always
-                       , Just $
-                           RouteTarget
-                             (BareComponent "target")
-                             DefaultMode
-                             SymlinkRoute
-                             identityCodecSpec
-                       )
-                     ]
+      Right
+        ( ManifestWithCodecBackends _ _ _ routes _ backends _
+          , _
+          ) -> do
+          let Just route = Map.lookup foo routes
+          route.predicates
+            `shouldBe` [
+                         ( Always
+                         , Just $
+                             RouteTarget
+                               (BareComponent "target")
+                               DefaultMode
+                               SymlinkRoute
+                               identityCodecSpec
+                         )
+                       ]
+          backends `shouldBe` Map.empty
 
   specify "rejects metadata on a null route branch" $ do
     expectDetailedRouteError

@@ -66,7 +66,13 @@ data BackendFailure
 
 
 -- | Encodes one UTF-8 JSON header line followed by the exact binary payload.
-encodeBackendStandardInput :: BackendProtocolRequest -> ByteString -> ByteString
+encodeBackendStandardInput
+  :: BackendProtocolRequest
+  -- ^ Safe request metadata encoded in the JSON header.
+  -> ByteString
+  -- ^ Exact binary payload appended after the header newline.
+  -> ByteString
+  -- ^ Framed standard input containing the header, newline, and payload.
 encodeBackendStandardInput request payload =
   LazyByteString.toStrict (encode $ requestHeader request) <> "\n" <> payload
 
@@ -108,7 +114,11 @@ instance FromJSON BackendDiagnostic where
 
 
 -- | Parses only an allowlisted diagnostic code and discards all other stderr.
-decodeBackendFailure :: ByteString -> BackendFailure
+decodeBackendFailure
+  :: ByteString
+  -- ^ Backend standard error containing a diagnostic JSON object.
+  -> BackendFailure
+  -- ^ Allowlisted failure category, or 'BackendProtocolFailure' when invalid.
 decodeBackendFailure bytes = case eitherDecodeStrict' bytes of
   Left _ -> BackendProtocolFailure
   Right (BackendDiagnostic code) -> case code of
@@ -120,7 +130,11 @@ decodeBackendFailure bytes = case eitherDecodeStrict' bytes of
 
 
 -- | Formats a public diagnostic that never includes backend output.
-formatBackendFailure :: BackendFailure -> Text
+formatBackendFailure
+  :: BackendFailure
+  -- ^ Sanitized backend failure category.
+  -> Text
+  -- ^ Public message that does not retain arbitrary backend diagnostics.
 formatBackendFailure = \case
   BackendMissingItem -> "The requested backend item does not exist."
   BackendInvalidInput -> "The backend rejected the supplied input."

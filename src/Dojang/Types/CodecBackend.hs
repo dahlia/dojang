@@ -39,6 +39,9 @@ data CodecBackend = CodecBackend
 type CodecBackendMap = Map Text CodecBackend
 
 
--- | Default backend timeout when a declaration omits @timeout-seconds@.
+-- | The default maximum backend execution time, in seconds.
+--
+-- The value is @30@ seconds and applies when a declaration omits
+-- @timeout-seconds@.
 defaultCodecBackendTimeoutSeconds :: Int
 defaultCodecBackendTimeoutSeconds = 30
