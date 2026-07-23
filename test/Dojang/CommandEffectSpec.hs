@@ -6,8 +6,13 @@
 
 module Dojang.CommandEffectSpec (spec) where
 
+
+#ifndef mingw32_HOST_OS
 import Control.Concurrent (forkIO, myThreadId, threadDelay, throwTo)
 import Control.Exception (AsyncException (UserInterrupt), finally, try)
+#else
+import Control.Concurrent (threadDelay)
+#endif
 import Control.Monad (void, when)
 import Control.Monad.Except (catchError, throwError)
 import Data.ByteString qualified as ByteString
@@ -59,12 +64,9 @@ import System.Posix.Signals
   )
 #endif
 
-
-interruptProcess :: IO ()
 #ifndef mingw32_HOST_OS
+interruptProcess :: IO ()
 interruptProcess = raiseSignal sigINT
-#else
-interruptProcess = return ()
 #endif
 
 
