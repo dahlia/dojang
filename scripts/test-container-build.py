@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Checks the pinned, multi-architecture container build contract."""
+
+from pathlib import Path
+import re
+import unittest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+DOCKERFILE = REPOSITORY_ROOT / "Dockerfile"
+BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "build.yaml"
+
+
+class ContainerBuildTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.contents = DOCKERFILE.read_text(encoding="utf-8")
+        cls.workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_pins_official_tool_versions_and_checksums(self) -> None:
+        expected_values = (
+            "GHCUP_VERSION=0.1.40.0",
+            "GHCUP_METADATA_COMMIT=4ad95215c0f869d5da04ff05e70b60027e20547f",
+            "GHCUP_METADATA_SHA256=a4db470bb1fa67e71df84acd24b023779a9d6c4633d3e6ca90976ee1529e7922",
+            "GHC_VERSION=9.10.3",
+            "STACK_VERSION=3.11.1",
+            "70ca52b73ee796f5c43b4259f7fcedc2a0d60d85a6a9ed40a82ea8553fca34a0",
+            "86df64134ab8ca6d4e8b0980e94fc36a447ff09ea823885034a3dd5617e840f3",
+            "0253c087da23aabfb6521e741cd3a35d3fcde201d74e34cd293b2bbde722432d",
+            "4866d3b241c59860f2f6eaa2a5e96632113e57100b911ff8aa936665cc0045fe",
+            "1fda71e657cd8d355625cc66b61b352699279dfee2664c014a392163bd19a952",
+            "1617ae9976a5cd38ad4daec583b026b589eb45d5482afb045cd4ca8c8d0de6d0",
+        )
+        for value in expected_values:
+            with self.subTest(value=value):
+                self.assertIn(value, self.contents)
+        self.assertGreaterEqual(self.contents.count("sha256sum -c"), 4)
+
+    def test_uses_verified_binaries_without_a_remote_shell_pipe(self) -> None:
+        self.assertNotRegex(self.contents, re.compile(r"curl[^\n|]*\|\s*(ba)?sh"))
+        self.assertIn("ghcup -o -n install ghc -u", self.contents)
+        self.assertIn("ghcup -o set ghc", self.contents)
+        self.assertNotIn("ghcup-metadata/master", self.contents)
+        self.assertIn("--system-ghc", self.contents)
+        self.assertIn("--no-install-ghc", self.contents)
+
+    def test_builds_and_tests_with_stack(self) -> None:
+        self.assertRegex(self.contents, re.compile(r"\bstack test\b"))
+        self.assertNotIn("cabal v2-update", self.contents)
+        self.assertNotIn("cabal v2-install", self.contents)
+
+    def test_runs_tests_as_an_unprivileged_user(self) -> None:
+        self.assertIn("adduser -D builder", self.contents)
+        self.assertIn("USER builder", self.contents)
+        self.assertIn('ENV HOME="/home/builder"', self.contents)
+        self.assertIn("--mount=type=tmpfs,target=/tmp", self.contents)
+        self.assertIn('TMPDIR="/tmp" stack test', self.contents)
+        self.assertIn("ln -s /bin/false /usr/bin/false", self.contents)
+
+    def test_release_workflow_extracts_and_checks_entrypoint_image(self) -> None:
+        self.assertIn("docker run --rm --entrypoint cat", self.workflow)
+        self.assertIn(
+            'docker run --rm "$image" version', self.workflow
+        )
+        self.assertIn("test -s", self.workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()

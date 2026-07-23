@@ -182,9 +182,12 @@ jobs:
         else
           tag="git-$GITHUB_SHA"
         fi
-        docker run "ghcr.io/$GITHUB_REPOSITORY:$tag-$ARCH" \
-          cat /usr/local/bin/dojang \
+        image="ghcr.io/$GITHUB_REPOSITORY:$tag-$ARCH"
+        docker run --rm "$image" version
+        docker run --rm --entrypoint cat "$image" \
+          /usr/local/bin/dojang \
             > "$RUNNER_TEMP/dojang-bins/dojang"
+        test -s "$RUNNER_TEMP/dojang-bins/dojang"
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins"
         mv dojang-*.tar.xz "$RUNNER_TEMP/"

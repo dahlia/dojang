@@ -49,6 +49,7 @@ depends = [
   "schema:check",
   "effects:check",
   "test:installers",
+  "test:container-config",
 ]
 
 [tasks.fmt]
@@ -80,6 +81,10 @@ run = "stack test --fast"
 [tasks."test:installers"]
 description = "Test verified release installers"
 run = "python3 scripts/test-installers.py"
+
+[tasks."test:container-config"]
+description = "Test the pinned container build configuration"
+run = "python3 scripts/test-container-build.py"
 
 [tasks.run]
 description = "Run the Dojang"
