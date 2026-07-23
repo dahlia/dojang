@@ -273,7 +273,8 @@ data CodecInputs = CodecInputs
   , variables :: Map Text ByteString
   -- ^ Only the variables declared by the codec.
   , externalInputs :: Map ExternalInputRequest ExternalInput
-  -- ^ Only the external inputs declared by the codec.
+  -- ^ Declared and dynamically requested command-scoped inputs.  Values may
+  -- contain secret bytes and remain redacted by 'Show'.
   }
   deriving (Eq)
 
@@ -520,7 +521,8 @@ data EvaluatedCodec = EvaluatedCodec
   , cacheScope :: CacheScope
   -- ^ Permitted cache lifetime.
   , resolvedInputs :: CodecInputs
-  -- ^ Exact command-scoped inputs used to produce 'renderedBytes'.
+  -- ^ Exact command-scoped declared and dynamic inputs used to produce
+  -- 'renderedBytes'.
   , requirements :: CodecRequirements
   -- ^ Source-derived input selection used for this evaluation.
   }
@@ -724,7 +726,7 @@ evaluateCodecWithImplementation
 evaluateCodecWithImplementation runtime request requirements implementation cached
   | runtime.mode == DryRunEvaluation
   , implementation.dryRunPolicy == CachedOnly
-  , Nothing <- cached =
+  , Nothing <- reusableCache =
       return $
         Left $
           CodecError request.routeName codecName DryRunCacheRequired
@@ -741,7 +743,7 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
         Right (inputs, dependencies) -> do
           let staticDependencies = nub dependencies
               staticKey = cacheKey staticDependencies
-          case (implementation.forwardProgram, cached) of
+          case (implementation.forwardProgram, reusableCache) of
             (Nothing, Just entry)
               | entry.cacheKey == staticKey ->
                   return $
@@ -756,15 +758,16 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
             _ -> do
               rendered <- runForward runtime request implementation inputs
               return $ do
-                (bytes, dynamicDependencies) <- rendered
+                (bytes, dynamicDependencies, dynamicInputs) <- rendered
                 let allDependencies = nub $ dependencies <> dynamicDependencies
                     key = cacheKey allDependencies
-                case cached of
+                    inputs' = captureExternalInputs inputs dynamicInputs
+                case reusableCache of
                   Just entry
                     | entry.cacheKey == key ->
                         Right $
                           makeResult
-                            inputs
+                            inputs'
                             allDependencies
                             key
                             entry.renderedBytes
@@ -776,7 +779,7 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
                     | otherwise ->
                         Right $
                           makeResult
-                            inputs
+                            inputs'
                             allDependencies
                             key
                             (opaqueBytes bytes)
@@ -784,6 +787,9 @@ evaluateCodecWithImplementation runtime request requirements implementation cach
   CodecSpec codecName _ = request.codec
   rawSource = revealBytes request.rawSource
   CodecDefinition _ version _ = implementation.definition
+  reusableCache
+    | implementation.cacheScope == PersistentCache = cached
+    | otherwise = Nothing
   cacheKey dependencies =
     codecCacheKey request.codec version rawSource dependencies
   makeResult inputs dependencies key renderedBytes =
@@ -851,9 +857,10 @@ reevaluateCodec runtime request previous =
                       previousInputs.externalInputs
               rendered <- runForward runtime request implementation inputs
               return $ do
-                (bytes, dynamicDependencies) <- rendered
+                (bytes, dynamicDependencies, dynamicInputs) <- rendered
                 let CodecDefinition _ version _ = implementation.definition
                     dependencies = nub $ previous.dependencies <> dynamicDependencies
+                    inputs' = captureExternalInputs inputs dynamicInputs
                     key =
                       codecCacheKey
                         request.codec
@@ -867,7 +874,7 @@ reevaluateCodec runtime request previous =
                     dependencies
                     implementation.definition
                     implementation.cacheScope
-                    inputs
+                    inputs'
                     requirements
  where
   CodecSpec codecName configuration = request.codec
@@ -879,7 +886,11 @@ runForward
   -> CodecEvaluationRequest
   -> CodecImplementation
   -> CodecInputs
-  -> m (Either CodecError (ByteString, [CodecDependency]))
+  -> m
+       ( Either
+           CodecError
+           (ByteString, [CodecDependency], Map ExternalInputRequest ExternalInput)
+       )
 runForward runtime request implementation inputs =
   case implementation.forwardProgram of
     Nothing ->
@@ -888,14 +899,14 @@ runForward runtime request implementation inputs =
           Left $
             CodecError request.routeName codecName $
               EvaluationFailure reason
-        Right bytes -> Right (bytes, [])
+        Right bytes -> Right (bytes, [], Map.empty)
     Just _
       | runtime.mode == DryRunEvaluation
       , implementation.dryRunPolicy == CachedOnly ->
           return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
     Just program ->
       runCodecProgram
-        runtime
+        (reuseExternalInputs runtime inputs.externalInputs)
         request
         EvaluationFailure
         (program inputs)
@@ -909,31 +920,41 @@ runCodecProgram
   -> CodecEvaluationRequest
   -> (CodecFailure -> CodecErrorKind)
   -> CodecProgram a
-  -> m (Either CodecError (a, [CodecDependency]))
-runCodecProgram runtime request failureKind = go []
+  -> m
+       ( Either
+           CodecError
+           (a, [CodecDependency], Map ExternalInputRequest ExternalInput)
+       )
+runCodecProgram runtime request failureKind = go [] Map.empty
  where
   CodecSpec codecName _ = request.codec
-  go dependencies (CodecDone result) =
+  go dependencies dynamicInputs (CodecDone result) =
     return $ case result of
       Left failure ->
         Left $ CodecError request.routeName codecName $ failureKind failure
-      Right value -> Right (value, reverse dependencies)
-  go dependencies (CodecRequest externalRequest continuation) = do
-    resolved <- runtime.resolveExternalInput externalRequest
-    case resolved of
-      Left reason ->
-        return $
-          Left $
-            CodecError request.routeName codecName $
-              ExternalInputFailure (requestName externalRequest) reason
-      Right input ->
-        go
-          ( CodecDependency
-              ("external:" <> requestName externalRequest)
-              input.fingerprint
-              : dependencies
-          )
-          (continuation input)
+      Right value -> Right (value, reverse dependencies, dynamicInputs)
+  go dependencies dynamicInputs (CodecRequest externalRequest continuation) = do
+    case Map.lookup externalRequest dynamicInputs of
+      Just input -> continue input
+      Nothing -> do
+        resolved <- runtime.resolveExternalInput externalRequest
+        case resolved of
+          Left reason ->
+            return $
+              Left $
+                CodecError request.routeName codecName $
+                  ExternalInputFailure (requestName externalRequest) reason
+          Right input -> continue input
+   where
+    continue input =
+      go
+        ( CodecDependency
+            ("external:" <> requestName externalRequest)
+            input.fingerprint
+            : dependencies
+        )
+        (Map.insert externalRequest input dynamicInputs)
+        (continuation input)
 
 
 -- | Reconstructs repository bytes according to a codec's reflection policy.
@@ -1174,15 +1195,16 @@ reverseWithInputs runtime request implementation requirements inputs dependencie
     reversed <- reverseSource runtime request implementation inputs deployed
     case reversed of
       Left err -> return $ Left err
-      Right (source, reverseDependencies) -> do
+      Right (source, reverseDependencies, reverseInputs) -> do
         let source' = opaqueBytes source
+            capturedInputs = captureExternalInputs inputs reverseInputs
             candidateInputs =
               CodecInputs
                 source'
-                inputs.configuration
-                inputs.facts
-                inputs.variables
-                inputs.externalInputs
+                capturedInputs.configuration
+                capturedInputs.facts
+                capturedInputs.variables
+                capturedInputs.externalInputs
             candidateRequest =
               CodecEvaluationRequest
                 request.routeName
@@ -1233,8 +1255,9 @@ reverseWithoutSourceWithInputs
       reversed <- reverseSource runtime request implementation inputs deployed
       case reversed of
         Left err -> return $ Left err
-        Right (source, reverseDependencies) -> do
+        Right (source, reverseDependencies, reverseInputs) -> do
           let source' = opaqueBytes source
+              capturedInputs = captureExternalInputs inputs reverseInputs
               candidateRequest =
                 CodecEvaluationRequest
                   request.routeName
@@ -1255,7 +1278,7 @@ reverseWithoutSourceWithInputs
                       variables
               resolved <-
                 resolveInputs
-                  (reuseExternalInputs runtime inputs.externalInputs)
+                  (reuseExternalInputs runtime capturedInputs.externalInputs)
                   resolvedRequest
                   candidateRequirements
               case resolved of
@@ -1267,7 +1290,7 @@ reverseWithoutSourceWithInputs
                       resolvedRequest
                       implementation
                       candidateRequirements
-                      candidateInputs
+                      (captureExternalInputs candidateInputs reverseInputs)
                       (nub $ dependencies <> reverseDependencies)
                       deployed
                       source
@@ -1287,6 +1310,19 @@ reuseExternalInputs runtime existing =
     }
 
 
+captureExternalInputs
+  :: CodecInputs
+  -> Map ExternalInputRequest ExternalInput
+  -> CodecInputs
+captureExternalInputs inputs dynamicInputs =
+  CodecInputs
+    inputs.rawSource
+    inputs.configuration
+    inputs.facts
+    inputs.variables
+    (Map.union dynamicInputs inputs.externalInputs)
+
+
 reverseSource
   :: (Monad m)
   => CodecRuntime m
@@ -1294,7 +1330,11 @@ reverseSource
   -> CodecImplementation
   -> CodecInputs
   -> OpaqueBytes
-  -> m (Either CodecError (ByteString, [CodecDependency]))
+  -> m
+       ( Either
+           CodecError
+           (ByteString, [CodecDependency], Map ExternalInputRequest ExternalInput)
+       )
 reverseSource runtime request implementation inputs deployed =
   case implementation.reverseProgram of
     Just _
@@ -1302,7 +1342,11 @@ reverseSource runtime request implementation inputs deployed =
       , implementation.dryRunPolicy == CachedOnly ->
           return $ Left $ CodecError request.routeName codecName DryRunCacheRequired
     Just program ->
-      runCodecProgram runtime request ReverseFailure $ program inputs deployed
+      runCodecProgram
+        (reuseExternalInputs runtime inputs.externalInputs)
+        request
+        ReverseFailure
+        (program inputs deployed)
     Nothing -> case implementation.reverse of
       Nothing -> return $ Left $ CodecError request.routeName codecName ReverseUnavailable
       Just reverseCodec -> return $ case reverseCodec inputs deployed of
@@ -1310,7 +1354,7 @@ reverseSource runtime request implementation inputs deployed =
           Left $
             CodecError request.routeName codecName $
               ReverseFailure reason
-        Right source -> Right (source, [])
+        Right source -> Right (source, [], Map.empty)
  where
   CodecSpec codecName _ = request.codec
 
@@ -1337,8 +1381,9 @@ validateReversedSource
   source = do
     rendered <- runForward runtime request implementation inputs
     return $ do
-      (bytes, dynamicDependencies) <- rendered
+      (bytes, dynamicDependencies, dynamicInputs) <- rendered
       let allDependencies = nub $ dependencies <> dynamicDependencies
+          inputs' = captureExternalInputs inputs dynamicInputs
       if bytes == revealBytes deployed
         then
           let CodecDefinition _ version _ = implementation.definition
@@ -1356,7 +1401,7 @@ validateReversedSource
                    allDependencies
                    implementation.definition
                    implementation.cacheScope
-                   inputs
+                   inputs'
                    requirements
                )
         else

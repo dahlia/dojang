@@ -60,7 +60,9 @@ import Dojang.Types.EnvironmentPredicate
   ( EnvironmentPredicate (Always, Architecture, Moniker, OperatingSystem, Or)
   , normalizePredicate
   )
-import Dojang.Types.FilePathExpression (FilePathExpression (BareComponent))
+import Dojang.Types.FilePathExpression
+  ( FilePathExpression (BareComponent, Substitution)
+  )
 import Dojang.Types.FileRoute
   ( FileRoute (FileRoute)
   , RouteKind (CopyRoute, SymlinkRoute)
@@ -247,6 +249,41 @@ spec = do
     case readManifest toml of
       Left err -> annotateShow (formatErrors err) >> assert False
       Right (parsed, _) -> parsed === manifest'
+
+  specify "rejects arbitrary invalid codec backend declarations" $ hedgehog $ do
+    invalidField <- forAll $ Hedgehog.int $ Range.linear 0 4
+    invalidTimeout <-
+      forAll $
+        Hedgehog.choice
+          [ Hedgehog.int $ Range.linear (-1000) 0
+          , Hedgehog.int $ Range.linear 301 1000
+          ]
+    let name = if invalidField == 0 then "" else "backend"
+        version = if invalidField == 1 then "" else "1"
+        timeoutSeconds = if invalidField == 2 then invalidTimeout else 30
+        command =
+          case invalidField of
+            3 -> BareComponent ""
+            4 -> Substitution ""
+            _ -> BareComponent "backend"
+        backend =
+          CodecBackend
+            command
+            version
+            timeoutSeconds
+            (CodecBackendOptions Map.empty)
+        manifest' =
+          manifestWithCodecBackends
+            Nothing
+            HashMap.empty
+            Map.empty
+            Map.empty
+            Map.empty
+            (Map.singleton name backend)
+            Map.empty
+    case writeManifest manifest' of
+      Left _ -> assert True
+      Right source -> annotate (unpack source) >> assert False
 
   specify "rejects arbitrary invalid hook policy configurations" $ hedgehog $ do
     invalidKind <-

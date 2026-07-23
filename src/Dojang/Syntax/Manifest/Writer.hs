@@ -38,6 +38,7 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (writeFile)
   )
 import Dojang.Syntax.EnvironmentPredicate.Writer (writeEnvironmentPredicate)
+import Dojang.Syntax.FilePathExpression.Parser (parseFilePathExpression)
 import Dojang.Syntax.Manifest.Internal
   ( EnvironmentPredicate' (..)
   , FileRoute' (CompactFileRoute, DetailedFileRoute)
@@ -122,6 +123,8 @@ data WriteError
     ModeOnSymlinkRoute OsPath RouteMode
   | -- | A symlink-kind route target declares a non-identity codec.
     CodecOnSymlinkRoute OsPath Text
+  | -- | A codec backend violates an invariant accepted by the parser.
+    InvalidCodecBackend Text Text
   deriving (Eq, Show)
 
 
@@ -164,6 +167,11 @@ formatWriteError (CodecOnSymlinkRoute route codec) =
     <> " declares codec "
     <> codec
     <> " on a symlink-kind target, which cannot render repository bytes."
+formatWriteError (InvalidCodecBackend name reason) =
+  "Invalid codec backend "
+    <> (if Text.null name then "<empty>" else name)
+    <> ": "
+    <> reason
 
 
 -- | Adds a repository identity while preserving the rest of a manifest.
@@ -199,6 +207,7 @@ writeManifest
 writeManifest manifest = do
   validateVariables manifest.monikers manifest.variables
   validateHooks manifest.hooks
+  validateCodecBackends manifest.codecBackends
   validateRouteMetadata manifest.fileRoutes
   pure $
     "#:schema "
@@ -237,6 +246,23 @@ writeManifest manifest = do
       Nothing -> Right ()
       Just moniker ->
         Left $ UnrepresentableVariableMoniker variableName moniker
+  validateCodecBackends backends =
+    mapM_ (uncurry validateCodecBackend) $
+      Data.Map.Strict.toAscList backends
+  validateCodecBackend :: Text -> CodecBackend -> Either WriteError ()
+  validateCodecBackend name backend
+    | Text.null name = invalid "Backend names must be nonempty."
+    | Text.null backend.version = invalid "Versions must be nonempty."
+    | backend.timeoutSeconds < 1 || backend.timeoutSeconds > 300 =
+        invalid "Timeouts must be between 1 and 300 seconds."
+    | Text.null command = invalid "Commands must be nonempty."
+    | Left _ <- parseFilePathExpression fieldName command =
+        invalid "Commands must be valid file path expressions."
+    | otherwise = Right ()
+   where
+    command = toPathText backend.command
+    fieldName = "codec-backends." <> unpack name <> ".command"
+    invalid = Left . InvalidCodecBackend name
   validateRouteMetadata :: FileRouteMap -> Either WriteError ()
   validateRouteMetadata routes =
     sequence_

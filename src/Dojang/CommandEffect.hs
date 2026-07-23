@@ -759,7 +759,9 @@ cleanupBinaryProcess (input, output, errors, handle) = do
     Just _ -> return ()
     Nothing -> do
 #ifndef mingw32_HOST_OS
-      mapM_ (signalProcess sigKILL) processId
+      mapM_
+        (\pid -> void $ tryIOError $ signalProcess sigKILL pid)
+        processId
       void $ timeout 2000000 $ tryIOError $ waitForProcess handle
 #else
       return ()

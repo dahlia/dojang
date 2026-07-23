@@ -260,6 +260,7 @@ To be released.
 
  -  Added `CodecBackend`, binary backend protocol framing, redacted binary
     process requests and results, and a timeout-aware command-effect boundary.
+    Manifest writers reject backend declarations that the parser would reject.
     The six-argument `Manifest` pattern remains available for manifests without
     backends; use `manifestWithCodecBackends` or
     `ManifestWithCodecBackends` to preserve an explicit registry.  [[#45],

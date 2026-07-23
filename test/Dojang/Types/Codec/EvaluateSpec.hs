@@ -65,6 +65,7 @@ import Dojang.Types.Codec.Evaluate
   , reevaluateCodec
   , reflectCodec
   , reflectCodecWithoutSourceWithEvaluation
+  , reflectEvaluatedCodecWithEvaluation
   , requiredCodecInputs
   , revealBytes
   , validateCodecProtectedStorage
@@ -416,6 +417,201 @@ spec = do
       (revealBytes . (.renderedBytes) <$> result) `shouldBe` Right "rendered"
       ((.cacheScope) <$> result) `shouldBe` Right CommandCacheOnly
       resolvedRequests `shouldBe` [requested]
+
+    specify "reuses repeated dynamic requests within one evaluation" $
+      hedgehog $ do
+        firstSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+        secondSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+        let firstValue = "first:" <> firstSuffix
+            secondValue = "second:" <> secondSuffix
+            requested = ExternalInputRequest "repeated"
+            implementation =
+              codecImplementationWithEffects
+                (CodecDefinition testName "1" ReflectReject)
+                (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+                ( \_ ->
+                    CodecRequest requested $ \firstInput ->
+                      CodecRequest requested $ \secondInput ->
+                        CodecDone $
+                          Right $
+                            revealBytes firstInput.value
+                              <> revealBytes secondInput.value
+                )
+                Nothing
+                EvaluatePurely
+            resolve
+              :: ExternalInputRequest
+              -> State [ByteString] (Either Text ExternalInput)
+            resolve _ = do
+              values <- get
+              case values of
+                [] -> return $ Left "unexpected extra resolution"
+                value : rest -> do
+                  put rest
+                  return $ Right $ ExternalInput (opaqueBytes value) "stable"
+            runtime =
+              CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+            request = evaluationRequest testSpec "source" Map.empty
+            (result, remaining) =
+              runState
+                (evaluateCodec runtime request Nothing)
+                [firstValue, secondValue]
+        (revealBytes . (.renderedBytes) <$> result)
+          === Right (firstValue <> firstValue)
+        remaining === [secondValue]
+
+    specify "ignores persistent bytes for command-scoped codecs" $ hedgehog $ do
+      oldSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+      freshSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+      let oldBytes = "old:" <> oldSuffix
+          freshBytes = "fresh:" <> freshSuffix
+          requested = ExternalInputRequest "dynamic"
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              ( \_ ->
+                  CodecRequest requested $ \input ->
+                    CodecDone $ Right $ revealBytes input.value
+              )
+              Nothing
+              EvaluatePurely
+          resolve
+            :: ExternalInputRequest
+            -> State [ByteString] (Either Text ExternalInput)
+          resolve _ = do
+            values <- get
+            case values of
+              [] -> return $ Left "unexpected extra resolution"
+              value : rest -> do
+                put rest
+                return $ Right $ ExternalInput (opaqueBytes value) "stable"
+          runtime = CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+          request = evaluationRequest testSpec "source" Map.empty
+          action = do
+            first <- evaluateCodec runtime request Nothing
+            case first of
+              Left err -> return $ Left err
+              Right evaluated ->
+                evaluateCodec
+                  runtime
+                  request
+                  (Just $ CodecCacheEntry evaluated.cacheKey evaluated.renderedBytes)
+          (result, remaining) = runState action [oldBytes, freshBytes]
+      (revealBytes . (.renderedBytes) <$> result) === Right freshBytes
+      remaining === []
+
+    specify "reuses dynamic inputs during re-evaluation" $ hedgehog $ do
+      secret <- forAll $ Gen.bytes $ Range.linear 0 4096
+      source <- forAll $ Gen.bytes $ Range.linear 0 4096
+      changedSource <- forAll $ Gen.bytes $ Range.linear 0 4096
+      let requested = ExternalInputRequest "dynamic"
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition testName "1" ReflectReject)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              ( \inputs ->
+                  CodecRequest requested $ \input ->
+                    CodecDone $
+                      Right $
+                        revealBytes input.value <> revealBytes inputs.rawSource
+              )
+              Nothing
+              EvaluatePurely
+          resolve
+            :: ExternalInputRequest
+            -> State Int (Either Text ExternalInput)
+          resolve _ = do
+            count <- get
+            put $ count + 1
+            return $
+              if count == 0
+                then Right $ ExternalInput (opaqueBytes secret) "stable"
+                else Left "dynamic input was resolved again"
+          runtime = CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+          firstRequest = evaluationRequest testSpec source Map.empty
+          secondRequest = evaluationRequest testSpec changedSource Map.empty
+          action = do
+            first <- evaluateCodec runtime firstRequest Nothing
+            case first of
+              Left err -> return $ Left err
+              Right evaluated -> reevaluateCodec runtime secondRequest evaluated
+          (result, resolutionCount) = runState action 0
+      (revealBytes . (.renderedBytes) <$> result)
+        === Right (secret <> changedSource)
+      resolutionCount === 1
+
+    specify "retains dynamic inputs through re-add reflection" $ hedgehog $ do
+      oldPlaintext <- forAll $ Gen.bytes $ Range.linear 0 4096
+      deployed <- forAll $ Gen.bytes $ Range.linear 0 4096
+      sourceSuffix <- forAll $ Gen.bytes $ Range.linear 0 4096
+      let oldSource = "old-source"
+          newSource = "new-source:" <> sourceSuffix
+          decryptOld = ExternalInputRequest "decrypt-old"
+          encrypt = ExternalInputRequest "encrypt"
+          decryptNew = ExternalInputRequest "decrypt-new"
+          implementation =
+            codecImplementationWithEffects
+              (CodecDefinition reversibleName "1" ReflectReAdd)
+              (const $ Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              (\_ _ -> Right $ CodecRequirements noCodecInputs noCodecInputs [])
+              ( \inputs ->
+                  let request =
+                        if revealBytes inputs.rawSource == oldSource
+                          then decryptOld
+                          else decryptNew
+                  in CodecRequest request $ \input ->
+                       CodecDone $ Right $ revealBytes input.value
+              )
+              ( Just $ \_ _ ->
+                  CodecRequest encrypt $ \input ->
+                    CodecDone $ Right $ revealBytes input.value
+              )
+              EvaluatePurely
+          resolve
+            :: ExternalInputRequest
+            -> State
+                 [(ExternalInputRequest, ExternalInput)]
+                 (Either Text ExternalInput)
+          resolve request = do
+            queued <- get
+            case queued of
+              (expected, input) : rest
+                | request == expected -> put rest >> return (Right input)
+              _ -> return $ Left "dynamic input was resolved out of sequence"
+          runtime = CodecRuntime (codecRegistry [implementation]) NormalEvaluation resolve
+          firstRequest = evaluationRequest reversibleSpec oldSource Map.empty
+          nextRequest = evaluationRequest reversibleSpec newSource Map.empty
+          action = do
+            first <- evaluateCodec runtime firstRequest Nothing
+            case first of
+              Left err -> return $ Left $ formatCodecError err
+              Right evaluated -> do
+                reflected <-
+                  reflectEvaluatedCodecWithEvaluation
+                    runtime
+                    firstRequest
+                    evaluated
+                    (opaqueBytes deployed)
+                case reflected of
+                  Left err -> return $ Left $ formatCodecError err
+                  Right (_, Nothing) -> return $ Left "missing re-add snapshot"
+                  Right (_, Just snapshot) -> do
+                    reevaluated <- reevaluateCodec runtime nextRequest snapshot
+                    return $ case reevaluated of
+                      Left err -> Left $ formatCodecError err
+                      Right value -> Right value
+          resolutions =
+            [ (decryptOld, ExternalInput (opaqueBytes oldPlaintext) "old")
+            , (encrypt, ExternalInput (opaqueBytes newSource) "encrypted")
+            , (decryptNew, ExternalInput (opaqueBytes deployed) "new")
+            ]
+          (result, remaining) = runState action resolutions
+      (revealBytes . (.renderedBytes) <$> result) === Right deployed
+      remaining === []
 
     specify "requires owner-only storage for effectful codecs" $ do
       let implementation =
