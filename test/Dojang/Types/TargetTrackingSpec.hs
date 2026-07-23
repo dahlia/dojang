@@ -72,7 +72,7 @@ import Dojang.Types.Context
   )
 import Dojang.Types.FileRoute
   ( RouteKind (CopyRoute, SymlinkRoute)
-  , RouteMode (DefaultMode, Private)
+  , RouteMode (DefaultMode, Private, PrivateExecutable)
   )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
@@ -143,6 +143,28 @@ spec = do
           observeManagedTarget repository transaction Applied now protected
         getPortableMode target.snapshotPath
           `shouldReturn` expectedPrivateFileMode
+        getPortableMode (takeDirectory target.snapshotPath)
+          `shouldReturn` expectedPrivateDirectoryMode
+
+    it "keeps private executable file snapshots executable" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let route = managed.route
+            protected = managed{route = route{mode = PrivateExecutable}}
+            intermediate = protected.correspondence.intermediate.path
+            destination = protected.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        writeFile intermediate "managed"
+        writeFile destination "managed"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        Just target <-
+          observeManagedTarget repository transaction Applied now protected
+        getPortableMode target.snapshotPath
+          `shouldReturn` expectedPrivateExecutableFileMode
         getPortableMode (takeDirectory target.snapshotPath)
           `shouldReturn` expectedPrivateDirectoryMode
 
@@ -856,11 +878,15 @@ instance MonadFileSystem FailingPrivateModeIO where
 #ifdef mingw32_HOST_OS
 expectedPrivateFileMode :: PortableMode
 expectedPrivateFileMode = PortableMode Nothing True
+expectedPrivateExecutableFileMode :: PortableMode
+expectedPrivateExecutableFileMode = PortableMode Nothing True
 expectedPrivateDirectoryMode :: PortableMode
 expectedPrivateDirectoryMode = PortableMode Nothing True
 #else
 expectedPrivateFileMode :: PortableMode
 expectedPrivateFileMode = portableModeFromBits 0o600
+expectedPrivateExecutableFileMode :: PortableMode
+expectedPrivateExecutableFileMode = portableModeFromBits 0o700
 expectedPrivateDirectoryMode :: PortableMode
 expectedPrivateDirectoryMode = portableModeFromBits 0o700
 #endif

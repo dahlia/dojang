@@ -521,7 +521,6 @@ materializeSnapshot
 materializeSnapshot source destination mode fingerprint = do
   case fingerprint of
     FileFingerprint _ _ -> do
-      let directory = takeDirectory destination
       createDirectories directory
       protectSnapshotDirectory directory
       copySnapshotFile
@@ -533,12 +532,12 @@ materializeSnapshot source destination mode fingerprint = do
     -- that cannot create links must still be able to hold the record:
     SymlinkFingerprint _ -> return ()
  where
+  directory = takeDirectory destination
   copySnapshotFile = case mode of
     Private -> copyPrivateSnapshotFile
     PrivateExecutable -> copyPrivateSnapshotFile
     _ -> copyFileWithMetadata source destination
   copyPrivateSnapshotFile = do
-    let directory = takeDirectory destination
     temporary <-
       writeTemporaryFile
         directory
@@ -553,14 +552,14 @@ materializeSnapshot source destination mode fingerprint = do
         temporaryExists <- exists temporary
         when temporaryExists $ removeFile temporary
         throwError err
-  protectSnapshotDirectory directory = case mode of
+  protectSnapshotDirectory snapshotDirectory = case mode of
     Private ->
-      setPortableMode directory 0o700
-    PrivateExecutable -> setPortableMode directory 0o700
+      setPortableMode snapshotDirectory 0o700
+    PrivateExecutable -> setPortableMode snapshotDirectory 0o700
     _ -> return ()
   protectSnapshotFile = case mode of
     Private -> setPortableMode destination 0o600
-    PrivateExecutable -> setPortableMode destination 0o600
+    PrivateExecutable -> setPortableMode destination 0o700
     _ -> return ()
 
 
