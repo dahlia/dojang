@@ -59,6 +59,7 @@ import GHC.Generics (Generic)
 import System.FilePath.Posix qualified as Posix
 import System.OsPath
   ( OsPath
+  , joinPath
   , splitDirectories
   , takeDirectory
   , (</>)
@@ -129,7 +130,8 @@ data StagedMode = StagedMode FilePath FileType PortableMode
   deriving (Eq, Show, Generic)
 
 
-data PublishedEntry = PublishedEntry FileType OsPath FileIdentity
+data PublishedEntry
+  = PublishedEntry FileType OsPath OsPath OsPath FileIdentity
 
 
 -- | Permission metadata retained until a staged source is published.
@@ -429,9 +431,14 @@ copyDirectoryContents retainedMetadata source destination = do
   let publishedMetadata =
         withoutRootMetadata $
           overlayStagedMetadata retainedMetadata sourceMetadata
-  withDirectoryEntriesNoReplace source destination entries $ \_ -> do
-    removeDirectory source
-    applyStagedMetadata destination publishedMetadata
+  withDirectoryEntriesNoReplace
+    source
+    destination
+    entries
+    (applyStagedMetadata source publishedMetadata)
+    $ \modeFailures _ -> do
+      removeDirectory source
+      return modeFailures
 
 
 copyDirectoryEntries
@@ -467,15 +474,40 @@ withDirectoryEntriesNoReplace
   => OsPath
   -> OsPath
   -> [(FileType, OsPath)]
-  -> ([PublishedEntry] -> m a)
+  -> m preparation
+  -> (preparation -> [PublishedEntry] -> m a)
   -> m a
-withDirectoryEntriesNoReplace source destination entries action =
-  identifyEntries entries >>= moveTopLevelEntries []
+withDirectoryEntriesNoReplace source destination entries prepare action = do
+  rollbackDirectory <- createRollbackDirectory
+  identified <-
+    identifyEntries rollbackDirectory $ zip [0 ..] entries
+  prepared <-
+    prepare `catchError` \err -> do
+      removeDirectory rollbackDirectory `catchError` const (return ())
+      throwError err
+  moveTopLevelEntries rollbackDirectory prepared [] identified
  where
-  identifyEntries =
-    mapM $ \(fileType, relative) ->
+  createRollbackDirectory = do
+    temporary <-
+      writeTemporaryFile
+        (takeDirectory source)
+        ".dojang-bootstrap-rollback-"
+        ""
+    removeFile temporary
+    createPrivateDirectory temporary
+    return temporary
+
+  identifyEntries rollbackDirectory =
+    mapM $ \(index, (fileType, relative)) -> do
+      quarantineName <- encodePath $ show (index :: Int)
       getFileIdentity (source </> relative) >>= \case
-        Just identity -> return (fileType, relative, identity)
+        Just identity ->
+          return
+            ( fileType
+            , relative
+            , rollbackDirectory </> quarantineName
+            , identity
+            )
         Nothing -> do
           path <- decodePath relative
           throwError $
@@ -489,61 +521,239 @@ withDirectoryEntriesNoReplace source destination entries action =
 
   topLevelEntries identified =
     [ (fileType, relative)
-    | (fileType, relative, _) <- identified
+    | (fileType, relative, _, _) <- identified
     , relative == topLevel relative
     ]
 
   publishedEntries identified relative =
-    [ PublishedEntry fileType (destination </> entry) identity
-    | (fileType, entry, identity) <- identified
+    [ PublishedEntry
+        fileType
+        entry
+        (destination </> entry)
+        quarantine
+        identity
+    | (fileType, entry, quarantine, identity) <- identified
     , topLevel entry == relative
     ]
 
-  moveTopLevelEntries created identified =
-    moveEntries created identified $ topLevelEntries identified
+  moveTopLevelEntries rollbackDirectory prepared created identified =
+    moveEntries
+      rollbackDirectory
+      prepared
+      created
+      identified
+      (topLevelEntries identified)
 
-  moveEntries created _ [] = action created
-  moveEntries created identified ((fileType, relative) : remaining) =
-    mask $ \restore -> do
-      let published = publishedEntries identified relative
-          cleanup = cleanupPublishedEntries published
-          continue =
-            restore $
-              moveEntries (created <> published) identified remaining
-          handleException (err :: SomeException)
-            | Just (_ :: IOError) <- fromException err = throwM err
-            | otherwise = cleanup >> throwM err
-      renameEntry
-        fileType
-        (source </> relative)
-        (destination </> relative)
-      (continue `catch` handleException)
-        `catchError` \err -> cleanup >> throwError err
+  moveEntries rollbackDirectory prepared created _ [] = do
+    result <- action prepared created
+    removeDirectory rollbackDirectory
+    return result
+  moveEntries
+    rollbackDirectory
+    prepared
+    created
+    identified
+    ((fileType, relative) : remaining) =
+      mask $ \restore -> do
+        let published = publishedEntries identified relative
+            cleanup = cleanupPublishedEntries published
+            continue =
+              restore $
+                moveEntries
+                  rollbackDirectory
+                  prepared
+                  (created <> published)
+                  identified
+                  remaining
+            handleException (err :: SomeException)
+              | Just (_ :: IOError) <- fromException err = throwM err
+              | otherwise = cleanup >> throwM err
+        renameEntry
+          fileType
+          (source </> relative)
+          (destination </> relative)
+        (continue `catch` handleException)
+          `catchError` \err -> cleanup >> throwError err
 
 
 cleanupPublishedEntries
   :: (MonadFileSystem m) => [PublishedEntry] -> m ()
-cleanupPublishedEntries = mapM_ cleanupPublishedEntry . reverse
+cleanupPublishedEntries [] = return ()
+cleanupPublishedEntries
+  ( root@(PublishedEntry rootType rootRelative rootPath rootQuarantine rootIdentity)
+      : descendants
+    ) = do
+    quarantined <- quarantineEntry root
+    when quarantined $ do
+      currentIdentity <-
+        getFileIdentity rootQuarantine
+          `catchError` const (return Nothing)
+      if currentIdentity /= Just rootIdentity
+        then renameEntry rootType rootQuarantine rootPath
+        else case rootType of
+          Directory -> do
+            rootMode <- getPortableMode rootQuarantine
+            widenDirectoryForCleanup rootQuarantine
+            (safeDirectories, directoryModes) <-
+              preparePublishedDirectories
+                rootRelative
+                rootQuarantine
+                (Set.singleton rootRelative)
+                [(rootRelative, rootMode)]
+                descendants
+            forM_ (reverse descendants) $ \entry ->
+              when
+                (publishedEntryParent entry `Set.member` safeDirectories)
+                $ cleanupPublishedEntry
+                  rootRelative
+                  rootQuarantine
+                  directoryModes
+                  entry
+            removePublishedEntry
+              Directory
+              rootPath
+              rootQuarantine
+              (Just rootMode)
+          File ->
+            removePublishedEntry File rootPath rootQuarantine Nothing
+          Symlink ->
+            removePublishedEntry Symlink rootPath rootQuarantine Nothing
 
 
-cleanupPublishedEntry :: (MonadFileSystem m) => PublishedEntry -> m ()
-cleanupPublishedEntry (PublishedEntry fileType path expectedIdentity) = do
-  currentIdentity <-
-    getFileIdentity path `catchError` const (return Nothing)
-  when (currentIdentity == Just expectedIdentity) $
-    removePublishedEntry fileType path
+preparePublishedDirectories
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> Set.Set OsPath
+  -> [(OsPath, PortableMode)]
+  -> [PublishedEntry]
+  -> m (Set.Set OsPath, [(OsPath, PortableMode)])
+preparePublishedDirectories _ _ safe modes [] =
+  return (safe, modes)
+preparePublishedDirectories
+  rootRelative
+  rootQuarantine
+  safe
+  modes
+  (entry@(PublishedEntry fileType relative _ quarantine expectedIdentity) : rest)
+    | fileType /= Directory
+        || publishedEntryParent entry `Set.notMember` safe =
+        preparePublishedDirectories
+          rootRelative
+          rootQuarantine
+          safe
+          modes
+          rest
+    | otherwise = do
+        let path =
+              relocatedPublishedPath rootRelative rootQuarantine relative
+        quarantined <-
+          catchError
+            (renameEntry Directory path quarantine >> return True)
+            (const $ return False)
+        if not quarantined
+          then continue safe modes
+          else do
+            currentIdentity <-
+              getFileIdentity quarantine
+                `catchError` const (return Nothing)
+            if currentIdentity /= Just expectedIdentity
+              then renameEntry Directory quarantine path >> continue safe modes
+              else do
+                mode <- getPortableMode quarantine
+                widenDirectoryForCleanup quarantine
+                renameEntry Directory quarantine path
+                continue
+                  (Set.insert relative safe)
+                  ((relative, mode) : modes)
+   where
+    continue safe' modes' =
+      preparePublishedDirectories
+        rootRelative
+        rootQuarantine
+        safe'
+        modes'
+        rest
+
+
+publishedEntryParent :: PublishedEntry -> OsPath
+publishedEntryParent (PublishedEntry _ relative _ _ _) =
+  takeDirectory relative
+
+
+relocatedPublishedPath :: OsPath -> OsPath -> OsPath -> OsPath
+relocatedPublishedPath rootRelative rootQuarantine relative =
+  case drop
+    (length $ splitDirectories rootRelative)
+    (splitDirectories relative) of
+    [] -> rootQuarantine
+    components -> rootQuarantine </> joinPath components
+
+
+quarantineEntry :: (MonadFileSystem m) => PublishedEntry -> m Bool
+quarantineEntry (PublishedEntry fileType _ path quarantine _) =
+  catchError
+    (renameEntry fileType path quarantine >> return True)
+    (const $ return False)
+
+
+cleanupPublishedEntry
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> [(OsPath, PortableMode)]
+  -> PublishedEntry
+  -> m ()
+cleanupPublishedEntry
+  rootRelative
+  rootQuarantine
+  directoryModes
+  (PublishedEntry fileType relative _ quarantine expectedIdentity) = do
+    let path =
+          relocatedPublishedPath rootRelative rootQuarantine relative
+    quarantined <-
+      catchError
+        (renameEntry fileType path quarantine >> return True)
+        (const $ return False)
+    when quarantined $ do
+      currentIdentity <-
+        getFileIdentity quarantine `catchError` const (return Nothing)
+      if currentIdentity == Just expectedIdentity
+        then
+          removePublishedEntry
+            fileType
+            path
+            quarantine
+            (lookup relative directoryModes)
+        else renameEntry fileType quarantine path
 
 
 removePublishedEntry
-  :: (MonadFileSystem m) => FileType -> OsPath -> m ()
-removePublishedEntry fileType path =
+  :: (MonadFileSystem m)
+  => FileType
+  -> OsPath
+  -> OsPath
+  -> Maybe PortableMode
+  -> m ()
+removePublishedEntry fileType published quarantine originalMode =
   case fileType of
-    Directory ->
-      removeDirectory path `catchError` const (return ())
-    File ->
-      removeFile path `catchError` const (return ())
-    Symlink ->
-      removeFile path `catchError` const (return ())
+    Directory -> do
+      mode <- maybe (getPortableMode quarantine) return originalMode
+      widenDirectoryForCleanup quarantine
+      entries <- listDirectory quarantine
+      if null entries
+        then removeDirectory quarantine
+        else do
+          restored <- restorePortableMode quarantine mode
+          unless restored $
+            throwError $
+              userError
+                "bootstrap rollback could not restore directory permissions"
+          renameEntry Directory quarantine published
+    File -> do
+      setPortableWritable quarantine True
+      removeFile quarantine
+    Symlink -> removeFile quarantine
 
 
 cleanupStagingOnError
@@ -878,7 +1088,10 @@ zipEntryKind entry
   directoryPath = "/" `isSuffixOf` Zip.eRelativePath entry
   inferredKind
     | directoryPath = ZipDirectory
+    | dosDirectory = ZipDirectory
     | otherwise = ZipRegularFile
+  dosDirectory =
+    Zip.eExternalFileAttributes entry .&. 0x10 /= 0
   unixFileType =
     (Zip.eExternalFileAttributes entry `shiftR` 16) .&. 0o170000
 

@@ -19,12 +19,16 @@ directory exchange.  If atomic exchange is unavailable, bootstrap rejects that
 existing destination instead of using a race-prone fallback.  The current
 directory keeps its identity by moving each complete top-level staging entry
 with an atomic no-replace rename.  If another process creates an entry first,
-bootstrap fails without overwriting it.  Bootstrap captures entry identities
-before publication, so cleanup removes only unchanged entries that it moved.
-Entries replaced by another process are preserved, and interruption triggers
-the same rollback.  Windows does not currently provide directory exchange
-through Dojang, so use an absent non-current-directory destination or run
-bootstrap from inside an existing empty destination.
+bootstrap fails without overwriting it.  Stored permissions are restored while
+the entries are still private in staging.  Bootstrap captures entry identities
+before publication, and rollback atomically moves entries back into private
+quarantine before validating those identities and deleting anything.  Entries
+replaced by another process are restored instead, and interruption triggers the
+same rollback.  If a concurrent replacement cannot be restored safely, Dojang
+keeps the private staging tree and reports its location instead of deleting the
+recovery data.  Windows does not currently provide directory exchange through
+Dojang, so use an absent non-current-directory destination or run bootstrap
+from inside an existing empty destination.
 
 
 Local directories and archives
@@ -58,11 +62,13 @@ components, and entries that collide case-insensitively or after Unicode
 normalization are rejected.  This collision check includes parent directories
 that an archive leaves implicit.  Unix ZIP entries that declare FIFOs, sockets,
 devices, or another unsupported type are also rejected rather than converted
-into regular files.  Archive input is limited to 16 MiB, expanded file contents
-to 64 MiB, and the entry count to 10,000.  Compressed tar decoding is bounded as
-well, so malformed or highly compressed input cannot expand without limit.  On
-POSIX systems, stored permission bits, including executable bits, are restored
-when the destination filesystem supports them.
+into regular files.  ZIP directory entries marked with the DOS directory
+attribute are accepted even when their names omit the conventional trailing
+slash.  Archive input is limited to 16 MiB, expanded file contents to 64 MiB,
+and the entry count to 10,000.  Compressed tar decoding is bounded as well, so
+malformed or highly compressed input cannot expand without limit.  On POSIX
+systems, stored permission bits, including executable bits, are restored when
+the destination filesystem supports them.
 Bootstrap verifies the resulting permissions instead of assuming that a
 successful filesystem call restored every bit.  If exact restoration is
 unavailable, bootstrap publishes the contents and warns that the permissions

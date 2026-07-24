@@ -76,6 +76,7 @@
 | overwrite                    | 덮어쓰기, 덮어쓰다         |                                                                                              |
 | portable mode                | 이식 가능한 모드           | `mode` 필드 값(`private` 등)은 그대로 씁니다.                                                |
 | provenance                   | 결정 근거                  | 단순한 출처를 뜻할 때는 “출처”로 쓸 수 있습니다.                                             |
+| quarantine                   | 격리 영역                  | 롤백 중 파일 시스템 항목을 안전하게 검사하는 비공개 임시 영역을 뜻합니다.                    |
 | record                       | 레코드, 기록하다           | 명사와 동사를 구분합니다.                                                                    |
 | reflection, reflect          | 반영, 반영하다             | 명령 이름 `dojang reflect`는 그대로 씁니다.                                                  |
 | reflection policy            | 반영 정책                  | 코덱 구현이 `identity`, `reject`, `re-add` 중 하나로 정합니다.                               |
