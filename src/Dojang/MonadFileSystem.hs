@@ -8,6 +8,7 @@
 
 module Dojang.MonadFileSystem
   ( DryRunIO
+  , FileIdentity
   , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
@@ -97,6 +98,7 @@ import Foreign.C.String (CString)
 import Foreign.C.Types (CUInt (CUInt))
 import System.Posix.Internals qualified as PosixInternal
 #endif
+import System.Posix.Directory qualified as PosixDirectory
 import System.Posix.Files qualified as Posix
 import System.Posix.IO qualified as Posix
 #endif
@@ -131,6 +133,15 @@ data FileType
     File
   | -- | A symbolic link.
     Symlink
+  deriving (Eq, Ord, Show)
+
+
+-- | A stable identity for one filesystem entry.
+--
+-- Symbolic links are identified without following them.  The representation
+-- is intentionally opaque so callers can compare identities but cannot depend
+-- on platform-specific device, volume, inode, or file-index details.
+data FileIdentity = FileIdentity Integer Integer
   deriving (Eq, Ord, Show)
 
 
@@ -234,8 +245,10 @@ class (MonadError IOError m) => MonadFileSystem m where
   --
   -- This has the same source-validation contract as 'copyRegularFile', but
   -- creation of the destination must be atomic for filesystem-backed
-  -- implementations.  Returns 'False' without creating the destination when
-  -- the opened source is not a regular file.
+  -- implementations.  If creation or copying fails, including because of an
+  -- asynchronous exception, the implementation must remove any destination it
+  -- created.  Returns 'False' without creating the destination when the opened
+  -- source is not a regular file.
   copyRegularFileNoReplace
     :: (HasCallStack)
     => OsPath
@@ -378,6 +391,16 @@ class (MonadError IOError m) => MonadFileSystem m where
   createDirectory :: (HasCallStack) => OsPath -> m ()
 
 
+  -- | Creates a directory that is accessible only to the current user.
+  --
+  -- Filesystem-backed POSIX implementations must apply the restrictive mode
+  -- atomically with creation so that no wider-permission window is observable.
+  createPrivateDirectory :: (HasCallStack) => OsPath -> m ()
+  createPrivateDirectory path = do
+    createDirectory path
+    setPortableMode path 0o700
+
+
   -- | Creates a directory at the given path, including all parent directories.
   createDirectories :: (HasCallStack) => OsPath -> m ()
   createDirectories path =
@@ -466,6 +489,14 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
   -- a directory, then it throws an 'IOError'.
   getFileSize :: (HasCallStack) => OsPath -> m Integer
+
+
+  -- | Gets a stable identity for an entry without following symbolic links.
+  --
+  -- Returns 'Nothing' when the entry does not exist or the interpreter cannot
+  -- represent filesystem identities.
+  getFileIdentity :: (HasCallStack) => OsPath -> m (Maybe FileIdentity)
+  getFileIdentity _ = return Nothing
 
 
   -- | Observes the portable permission state of a filesystem entry without
@@ -650,6 +681,38 @@ readRegularFileIO path =
   withRegularFileHandleIO path Data.ByteString.hGetContents
 
 
+getFileIdentityIO :: OsPath -> IO (Maybe FileIdentity)
+getFileIdentityIO path = do
+  path' <- decodeFS path
+  ( Just
+      <$> Exception.bracket
+        ( Win32.createFile
+            path'
+            Win32.gENERIC_NONE
+            ( Win32.fILE_SHARE_READ
+                .|. Win32.fILE_SHARE_WRITE
+                .|. Win32.fILE_SHARE_DELETE
+            )
+            Nothing
+            Win32.oPEN_EXISTING
+            (Win32.fILE_FLAG_BACKUP_SEMANTICS .|. fileFlagOpenReparsePoint)
+            Nothing
+        )
+        Win32.closeHandle
+        ( \handle -> do
+            information <- Win32.getFileInformationByHandle handle
+            return $
+              FileIdentity
+                (fromIntegral information.bhfiVolumeSerialNumber)
+                (fromIntegral information.bhfiFileIndex)
+        )
+    )
+    `catchError` \err ->
+      if isDoesNotExistError err then return Nothing else throwError err
+ where
+  fileFlagOpenReparsePoint = 0x00200000
+
+
 getPortableModeIO :: OsPath -> IO PortableMode
 getPortableModeIO path = do
   permissions <- OsDirectory.getPermissions path
@@ -670,6 +733,10 @@ setPortableWritableIO path writable' = do
   permissions <- OsDirectory.getPermissions path
   OsDirectory.setPermissions path $
     Directory.setOwnerWritable writable' permissions
+
+
+createPrivateDirectoryIO :: OsPath -> IO ()
+createPrivateDirectoryIO = OsDirectory.createDirectory
 
 
 renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
@@ -728,6 +795,21 @@ readRegularFileIO path =
   withRegularFileHandleIO path Data.ByteString.hGetContents
 
 
+getFileIdentityIO :: OsPath -> IO (Maybe FileIdentity)
+getFileIdentityIO path = do
+  path' <- decodeFS path
+  ( do
+      status <- Posix.getSymbolicLinkStatus path'
+      return $
+        Just $
+          FileIdentity
+            (fromIntegral $ Posix.deviceID status)
+            (fromIntegral $ Posix.fileID status)
+    )
+    `catchError` \err ->
+      if isDoesNotExistError err then return Nothing else throwError err
+
+
 getPortableModeIO :: OsPath -> IO PortableMode
 getPortableModeIO path = do
   path' <- decodeFS path
@@ -749,6 +831,12 @@ setPortableWritableIO path writable' = do
     if writable'
       then mode .|. 0o200
       else mode .&. complement 0o200
+
+
+createPrivateDirectoryIO :: OsPath -> IO ()
+createPrivateDirectoryIO path = do
+  path' <- decodeFS path
+  PosixDirectory.createDirectory path' 0o700
 
 
 renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
@@ -1004,6 +1092,9 @@ instance MonadFileSystem IO where
   createDirectory = OsDirectory.createDirectory
 
 
+  createPrivateDirectory = createPrivateDirectoryIO
+
+
   removeFile = OsDirectory.removeFile
 
 
@@ -1038,6 +1129,9 @@ instance MonadFileSystem IO where
         mkIOError InappropriateType "getFileSize" Nothing (Just path')
           `ioeSetErrorString` "it is a directory"
     OsDirectory.getFileSize path
+
+
+  getFileIdentity = getFileIdentityIO
 
 
   copyFile = OsDirectory.copyFile
@@ -1552,6 +1646,11 @@ instance MonadFileSystem DryRunIO where
         `ioeSetErrorString` "destination is already a directory"
 
 
+  createPrivateDirectory path = do
+    createDirectory path
+    setPortableMode path 0o700
+
+
   removeFile path = do
     oFiles <- gets overlaidFiles
     path' <- decodePath path
@@ -1807,6 +1906,15 @@ instance MonadFileSystem DryRunIO where
         Nothing
         (Just pathFP)
         `ioeSetErrorString` "not a regular file, but a directory"
+
+
+  getFileIdentity path = do
+    oFiles <- gets overlaidFiles
+    case oFiles !? normalise path of
+      Just ((_, Gone) :| _) -> return Nothing
+      Just ((sequenceNumber, _) :| _) ->
+        return $ Just $ FileIdentity (-1) $ fromIntegral sequenceNumber
+      Nothing -> liftIO $ getFileIdentityIO path
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns the result.

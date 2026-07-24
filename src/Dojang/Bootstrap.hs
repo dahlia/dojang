@@ -37,7 +37,7 @@ import Control.Exception
   , throwIO
   )
 import Control.Monad (forM, forM_, unless, void, when)
-import Control.Monad.Catch (MonadCatch, try)
+import Control.Monad.Catch (MonadCatch, MonadMask, catch, mask, throwM, try)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (shiftR, (.&.), (.|.))
@@ -66,7 +66,8 @@ import Text.Read (readMaybe)
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.MonadFileSystem
-  ( FileType (..)
+  ( FileIdentity
+  , FileType (..)
   , MonadFileSystem (..)
   )
 import Dojang.Types.RouteMetadata
@@ -122,6 +123,9 @@ data StagedEntry
 
 data StagedMode = StagedMode FilePath FileType PortableMode
   deriving (Eq, Show, Generic)
+
+
+data PublishedEntry = PublishedEntry FileType OsPath FileIdentity
 
 
 -- | Permission metadata retained until a staged source is published.
@@ -248,7 +252,7 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
               return $ Left $ InvalidArchive $ Text.pack $ displayException err
         Right (Left err) -> return $ Left err
         Right (Right entries) -> do
-          createDirectory staging
+          createPrivateDirectory staging
           cleanupStagingOnError staging $ do
             forM_ entries $ \case
               StagedDirectory "" _ -> return ()
@@ -268,7 +272,7 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
 -- destination is the process's current working directory, its directory
 -- identity is preserved instead.
 publishStagedDirectory
-  :: (MonadFileSystem m) => OsPath -> OsPath -> m ()
+  :: (MonadFileSystem m, MonadMask m) => OsPath -> OsPath -> m ()
 publishStagedDirectory staging destination =
   void $
     publishStagedDirectoryWithMetadata
@@ -286,7 +290,7 @@ publishStagedDirectory staging destination =
 -- permissions the destination filesystem could not represent; their contents
 -- are still published.
 publishStagedDirectoryWithMetadata
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadMask m)
   => StagedMetadata
   -> OsPath
   -> OsPath
@@ -377,7 +381,7 @@ copyDirectoryTree source destination = do
     Left err -> return $ Left err
     Right () -> do
       metadata <- captureStagedMetadata source entries
-      createDirectory destination
+      createPrivateDirectory destination
       cleanupStagingOnError destination $
         copyDirectoryEntries source destination entries
       return $ Right metadata
@@ -401,7 +405,7 @@ validateDirectoryEntries source (_ : remaining) =
 
 
 copyDirectoryContents
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadMask m)
   => StagedMetadata
   -> OsPath
   -> OsPath
@@ -412,17 +416,10 @@ copyDirectoryContents retainedMetadata source destination = do
   let publishedMetadata =
         withoutRootMetadata $
           overlayStagedMetadata retainedMetadata sourceMetadata
-  createdEntries <-
-    copyDirectoryEntriesNoReplace source destination entries
-  ( do
-      widenStagedMetadata source sourceMetadata
-      removeDirectoryRecursively source
-      modeFailures <- applyStagedMetadata destination publishedMetadata
-      return modeFailures
-    )
-    `catchError` \err -> do
-      cleanupPublishedEntries createdEntries
-      throwError err
+  withDirectoryEntriesNoReplace source destination entries $ \_ -> do
+    widenStagedMetadata source sourceMetadata
+    removeDirectoryRecursively source
+    applyStagedMetadata destination publishedMetadata
 
 
 copyDirectoryEntries
@@ -453,16 +450,31 @@ copyDirectoryEntries source destination entries =
           (if directoryLink then Directory else File)
 
 
-copyDirectoryEntriesNoReplace
-  :: (MonadFileSystem m)
+withDirectoryEntriesNoReplace
+  :: (MonadFileSystem m, MonadMask m)
   => OsPath
   -> OsPath
   -> [(FileType, OsPath)]
-  -> m [(FileType, OsPath)]
-copyDirectoryEntriesNoReplace source destination = copyEntries []
+  -> ([PublishedEntry] -> m a)
+  -> m a
+withDirectoryEntriesNoReplace source destination entries action =
+  copyEntries [] entries
  where
-  copyEntries created [] = return created
-  copyEntries created ((fileType, relative) : remaining) = do
+  copyEntries created [] = action created
+  copyEntries created ((fileType, relative) : remaining) =
+    mask $ \restore -> do
+      published <- createPublishedEntry fileType relative
+      let cleanup = cleanupPublishedEntry published
+          continue =
+            restore $
+              copyEntries (published : created) remaining
+          handleException (err :: SomeException)
+            | Just (_ :: IOError) <- fromException err = throwM err
+            | otherwise = cleanup >> throwM err
+      (continue `catch` handleException)
+        `catchError` \err -> cleanup >> throwError err
+
+  createPublishedEntry fileType relative = do
     let sourceEntry = source </> relative
         destinationEntry = destination </> relative
         createEntry = case fileType of
@@ -482,23 +494,36 @@ copyDirectoryEntriesNoReplace source destination = copyEntries []
               target
               destinationEntry
               (if directoryLink then Directory else File)
-    createEntry `catchError` \err -> do
-      cleanupPublishedEntries created
-      throwError err
-    copyEntries ((fileType, destinationEntry) : created) remaining
+    createEntry
+    getFileIdentity destinationEntry >>= \case
+      Just identity ->
+        return $ PublishedEntry fileType destinationEntry identity
+      Nothing -> do
+        removePublishedEntry fileType destinationEntry
+        path <- decodePath relative
+        throwError $
+          userError $
+            "filesystem cannot identify published bootstrap entry: " <> path
 
 
-cleanupPublishedEntries
-  :: (MonadFileSystem m) => [(FileType, OsPath)] -> m ()
-cleanupPublishedEntries entries =
-  forM_ entries $ \(fileType, path) ->
-    case fileType of
-      Directory ->
-        removeDirectory path `catchError` const (return ())
-      File ->
-        removeFile path `catchError` const (return ())
-      Symlink ->
-        removeFile path `catchError` const (return ())
+cleanupPublishedEntry :: (MonadFileSystem m) => PublishedEntry -> m ()
+cleanupPublishedEntry (PublishedEntry fileType path expectedIdentity) = do
+  currentIdentity <-
+    getFileIdentity path `catchError` const (return Nothing)
+  when (currentIdentity == Just expectedIdentity) $
+    removePublishedEntry fileType path
+
+
+removePublishedEntry
+  :: (MonadFileSystem m) => FileType -> OsPath -> m ()
+removePublishedEntry fileType path =
+  case fileType of
+    Directory ->
+      removeDirectory path `catchError` const (return ())
+    File ->
+      removeFile path `catchError` const (return ())
+    Symlink ->
+      removeFile path `catchError` const (return ())
 
 
 cleanupStagingOnError

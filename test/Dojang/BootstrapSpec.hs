@@ -25,7 +25,7 @@ import Hedgehog.Range qualified as Range
 import Control.Exception (AsyncException (UserInterrupt), throw)
 import Control.Exception qualified as Exception
 import Control.Monad (unless, when)
-import Control.Monad.Catch (MonadCatch, MonadThrow)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except
   ( ExceptT (..)
   , MonadError (throwError)
@@ -74,7 +74,8 @@ import Dojang.Bootstrap
   )
 #endif
 import Dojang.MonadFileSystem
-  ( MonadFileSystem (..)
+  ( FileIdentity
+  , MonadFileSystem (..)
   )
 import Dojang.TestUtils (withTempDir)
 
@@ -740,6 +741,39 @@ archiveModeSpecs = do
         === portableModeFromBits
           (if existingDestination then destinationMode else sourceMode)
 
+  it "keeps arbitrary staged contents owner-only before publication" $
+    hedgehog $ do
+      sourceKind <- forAll Gen.bool
+      contents <- forAll $ Gen.bytes $ Range.linear 0 4096
+      observed <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            archiveName <- encodeFS "repository.tar"
+            stagingName <- encodeFS "staging"
+            manifestName <- encodeFS "dojang.toml"
+            let source = tmpDir </> sourceName
+                archivePath = tmpDir </> archiveName
+                staging = tmpDir </> stagingName
+            builtin <-
+              if sourceKind
+                then do
+                  createDirectory source
+                  writeFile (source </> manifestName) contents
+                  return $ DirectorySource source
+                else do
+                  writeFile archivePath $
+                    LazyByteString.toStrict $
+                      Tar.write
+                        [ tarFileEntry
+                            "dojang.toml"
+                            (LazyByteString.fromStrict contents)
+                        ]
+                  return $ ArchiveSource TarArchive archivePath
+            Right _ <- stageBuiltinSourceWithMetadata builtin staging
+            getPortableMode staging
+      observed === portableModeFromBits 0o700
+
   it "uses default permissions when a Unix zip omits external attributes" $
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "repository.zip"
@@ -800,6 +834,42 @@ archiveModeSpecs = do
       getPortableMode (destination </> privateName </> fileName)
         `shouldReturn` portableModeFromBits 0o400
       setPortableMode (destination </> privateName) 0o700
+
+  it "rolls back before restrictive modes when staging removal fails" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "repository.tar"
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          directoryEntry =
+            (Tar.directoryEntry $ tarPath "private")
+              { Tar.entryPermissions = 0o500
+              }
+          fileEntry =
+            (tarFileEntry "private/config" "contents")
+              { Tar.entryPermissions = 0o400
+              }
+      writeFile archivePath $
+        LazyByteString.toStrict $
+          Tar.write [directoryEntry, fileEntry]
+      Right metadata <-
+        stageBuiltinSourceWithMetadata
+          (ArchiveSource TarArchive archivePath)
+          staging
+      createDirectory destination
+      published <-
+        runCurrentDirectoryIOWithRace
+          destination
+          (FailStagingRemoval staging)
+          ( publishStagedDirectoryWithMetadata
+              metadata
+              staging
+              destination
+          )
+      published `shouldSatisfy` isLeft
+      listDirectory destination `shouldReturn` []
 
   it "does not report a discarded source root mode" $
     withTempDir $ \tmpDir _ -> do
@@ -1063,6 +1133,7 @@ newtype FailingModeIO a
     , MonadIO
     , MonadThrow
     , MonadCatch
+    , MonadMask
     , MonadError IOError
     )
 
@@ -1110,10 +1181,14 @@ instance MonadFileSystem FailingModeIO where
   copyFilePermissions source destination =
     liftIO (copyFilePermissions source destination :: IO ())
   createDirectory value = liftIO (createDirectory value :: IO ())
+  createPrivateDirectory value =
+    liftIO (createPrivateDirectory value :: IO ())
   removeFile value = liftIO (removeFile value :: IO ())
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getFileIdentity value =
+    liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
   getPortableMode value = do
     path <- liftIO (decodePath value :: IO FilePath)
     case FilePath.takeFileName path of
@@ -1133,9 +1208,16 @@ instance MonadFileSystem FailingModeIO where
     liftIO (createSymbolicLink target link fileType :: IO ())
 
 
+data CurrentDirectoryRace
+  = CreateBeforeCopy OsPath ByteString.ByteString
+  | ReplaceThenFail OsPath OsPath ByteString.ByteString
+  | InterruptBeforeCopy OsPath
+  | FailStagingRemoval OsPath
+
+
 newtype CurrentDirectoryIO a
   = CurrentDirectoryIO
-      (ReaderT (OsPath, Maybe (OsPath, ByteString.ByteString)) (ExceptT IOError IO) a)
+      (ReaderT (OsPath, Maybe CurrentDirectoryRace) (ExceptT IOError IO) a)
   deriving
     ( Functor
     , Applicative
@@ -1143,6 +1225,7 @@ newtype CurrentDirectoryIO a
     , MonadIO
     , MonadThrow
     , MonadCatch
+    , MonadMask
     , MonadError IOError
     )
 
@@ -1155,19 +1238,17 @@ runCurrentDirectoryIO currentDirectory (CurrentDirectoryIO action) =
 
 runCurrentDirectoryIOWithRace
   :: OsPath
-  -> OsPath
-  -> ByteString.ByteString
+  -> CurrentDirectoryRace
   -> CurrentDirectoryIO a
   -> IO (Either IOError a)
 runCurrentDirectoryIOWithRace
   currentDirectory
-  racedPath
-  racedContents
+  race
   (CurrentDirectoryIO action) =
     runExceptT $
       runReaderT
         action
-        (currentDirectory, Just (racedPath, racedContents))
+        (currentDirectory, Just race)
 
 
 liftCurrentDirectoryIO :: IO a -> CurrentDirectoryIO a
@@ -1192,19 +1273,28 @@ instance MonadFileSystem CurrentDirectoryIO where
   copyRegularFileNoReplace source destination = do
     (_, racedEntry) <- CurrentDirectoryIO ask
     case racedEntry of
-      Just (racedPath, racedContents)
+      Just (CreateBeforeCopy racedPath racedContents)
         | destination == racedPath ->
             liftIO $ do
               present <- exists destination
               unless present $
                 writeFile destination racedContents
+      Just (ReplaceThenFail trigger replacedPath replacement)
+        | destination == trigger -> do
+            liftIO $ do
+              removeFile replacedPath
+              writeFile replacedPath replacement
+            throwError $ userError "injected publication failure"
+      Just (InterruptBeforeCopy trigger)
+        | destination == trigger ->
+            liftIO $ Exception.throwIO UserInterrupt
       _ -> return ()
     liftCurrentDirectoryIO $
       copyRegularFileNoReplace source destination
   writeFile path contents = do
     (_, racedEntry) <- CurrentDirectoryIO ask
     case racedEntry of
-      Just (racedPath, racedContents)
+      Just (CreateBeforeCopy racedPath racedContents)
         | path == racedPath ->
             liftIO $ do
               present <- exists path
@@ -1228,12 +1318,22 @@ instance MonadFileSystem CurrentDirectoryIO where
   copyFilePermissions source destination =
     liftIO (copyFilePermissions source destination :: IO ())
   createDirectory value = liftIO (createDirectory value :: IO ())
+  createPrivateDirectory value =
+    liftIO (createPrivateDirectory value :: IO ())
   removeFile value =
     liftCurrentDirectoryIO (removeFile value :: IO ())
   removeDirectory value =
-    liftCurrentDirectoryIO (removeDirectory value :: IO ())
+    do
+      (_, racedEntry) <- CurrentDirectoryIO ask
+      case racedEntry of
+        Just (FailStagingRemoval staging)
+          | value == staging ->
+              throwError $ userError "injected staging removal failure"
+        _ -> liftCurrentDirectoryIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getFileIdentity value =
+    liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
   getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
   setPortableMode path mode =
     liftIO (setPortableMode path mode :: IO ())
@@ -1395,8 +1495,7 @@ symlinkSpecs = do
             result <-
               runCurrentDirectoryIOWithRace
                 destination
-                victim
-                concurrentContents
+                (CreateBeforeCopy victim concurrentContents)
                 (publishStagedDirectory staging destination)
             contents <- readFile victim
             ownedExists <- exists owned
@@ -1404,4 +1503,63 @@ symlinkSpecs = do
       isLeft published === True
       observedContents === concurrentContents
       ownedFileExists === False
+
+  it "preserves arbitrary entries replaced before CWD rollback" $
+    hedgehog $ do
+      replacementContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (published, observedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            ownedName <- encodeFS "owned"
+            nestedName <- encodeFS "nested"
+            triggerName <- encodeFS "trigger"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                owned = destination </> ownedName
+                stagedNested = staging </> nestedName
+                trigger = destination </> nestedName </> triggerName
+            createDirectory staging
+            createDirectory stagedNested
+            createDirectory destination
+            writeFile (staging </> ownedName) "bootstrap"
+            writeFile (stagedNested </> triggerName) "trigger"
+            result <-
+              runCurrentDirectoryIOWithRace
+                destination
+                (ReplaceThenFail trigger owned replacementContents)
+                (publishStagedDirectory staging destination)
+            contents <- readFile owned
+            return (result, contents)
+      isLeft published === True
+      observedContents === replacementContents
+
+  it "rolls back CWD publication interrupted between entries" $
+    withTempDir $ \tmpDir _ -> do
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      ownedName <- encodeFS "owned"
+      nestedName <- encodeFS "nested"
+      triggerName <- encodeFS "trigger"
+      let staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          owned = destination </> ownedName
+          stagedNested = staging </> nestedName
+          trigger = destination </> nestedName </> triggerName
+      createDirectory staging
+      createDirectory stagedNested
+      createDirectory destination
+      writeFile (staging </> ownedName) "bootstrap"
+      writeFile (stagedNested </> triggerName) "trigger"
+      interrupted <-
+        Exception.try $
+          runCurrentDirectoryIOWithRace
+            destination
+            (InterruptBeforeCopy trigger)
+            (publishStagedDirectory staging destination)
+      interrupted `shouldBe` Left UserInterrupt
+      exists owned `shouldReturn` False
+      exists (destination </> nestedName) `shouldReturn` False
 #endif

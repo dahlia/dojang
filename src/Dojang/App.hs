@@ -294,10 +294,12 @@ instance
   copyFileWithMetadata src = App . lift . lift . lift . copyFileWithMetadata src
   copyFilePermissions src = App . lift . lift . lift . copyFilePermissions src
   createDirectory = App . lift . lift . lift . createDirectory
+  createPrivateDirectory = App . lift . lift . lift . createPrivateDirectory
   removeFile = App . lift . lift . lift . removeFile
   removeDirectory = App . lift . lift . lift . removeDirectory
   listDirectory = App . lift . lift . lift . listDirectory
   getFileSize = App . lift . lift . lift . getFileSize
+  getFileIdentity = App . lift . lift . lift . getFileIdentity
   getPortableMode = App . lift . lift . lift . getPortableMode
   setPortableMode path = App . lift . lift . lift . setPortableMode path
   setPortableWritable path = App . lift . lift . lift . setPortableWritable path

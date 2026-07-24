@@ -3,9 +3,9 @@ Bootstrapping a repository
 
 `dojang init --from SOURCE` brings an existing repository onto a new machine,
 enrolls that machine, and offers to run the first `dojang apply`.  Acquisition
-happens in a temporary directory beside the destination.  Dojang checks the
-staged *dojang.toml* before publishing the repository, so an invalid or
-incomplete source does not replace the destination.
+happens in an owner-only temporary directory beside the destination.  Dojang
+checks the staged *dojang.toml* before publishing the repository, so an invalid
+or incomplete source does not replace the destination.
 
 The destination must not exist or must be an empty directory.  It is the current
 directory unless `-r`/`--repository-dir` selects another path.  Publication
@@ -18,7 +18,8 @@ destination as a whole.  Dojang fails closed when that operation is unavailable
 instead of falling back to a race-prone rename.  When publishing into the
 current directory, each entry is created without replacement.  If another
 process creates an entry first, bootstrap fails without overwriting it; cleanup
-removes only entries created by bootstrap.
+removes only unchanged entries created by bootstrap.  Entries replaced by
+another process are preserved, and interruption triggers the same rollback.
 
 
 Local directories and archives

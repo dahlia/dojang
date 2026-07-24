@@ -14,11 +14,12 @@ To be released.
     configuration.  Machine-local external transports can run Git or another
     executable without a shell, with whole-argument source and destination
     placeholders and an explicit environment allowlist.  Acquisition is staged
-    beside the destination, rejects unsafe archive entries, including names
-    that are reserved or invalid on Windows, and rejects paths that collide
-    after case folding or Unicode normalization.  It preserves recorded POSIX
-    permissions where the destination filesystem supports them, requires an
-    absent or empty destination, and cleans unpublished work after failure.
+    beside the destination in an owner-only directory, rejects unsafe archive
+    entries, including names that are reserved or invalid on Windows, and
+    rejects paths that collide after case folding or Unicode normalization.  It
+    preserves recorded POSIX permissions where the destination filesystem
+    supports them, requires an absent or empty destination, and cleans
+    unpublished work after failure.
     Archive sources must resolve to regular files, so FIFOs and other special
     files are rejected without blocking.  Unsupported permission metadata
     produces a warning without discarding the acquired contents.  An absent or
@@ -27,7 +28,9 @@ To be released.
     refuses a destination replaced by a symbolic link or concurrently created
     during the final rename.  Publication into the current working directory
     also creates every entry without replacement, and rollback removes only
-    entries created by Dojang, preserving files raced into the directory.
+    unchanged entries created by Dojang, preserving files raced into or
+    replaced within the directory.  Rollback also runs when publication is
+    interrupted.
     Filesystems without an atomic no-replace rename cannot publish a
     non-current-directory destination and are rejected rather than using a
     race-prone fallback.  A dry run does not start an external transport and

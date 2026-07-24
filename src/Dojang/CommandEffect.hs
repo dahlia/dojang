@@ -477,10 +477,12 @@ instance MonadFileSystem CommandEffectTest where
   copyFilePermissions source =
     liftCommandEffectBase . copyFilePermissions source
   createDirectory = liftCommandEffectBase . createDirectory
+  createPrivateDirectory = liftCommandEffectBase . createPrivateDirectory
   removeFile = liftCommandEffectBase . removeFile
   removeDirectory = liftCommandEffectBase . removeDirectory
   listDirectory = liftCommandEffectBase . listDirectory
   getFileSize = liftCommandEffectBase . getFileSize
+  getFileIdentity = liftCommandEffectBase . getFileIdentity
   getPortableMode = liftCommandEffectBase . getPortableMode
   setPortableMode path = liftCommandEffectBase . setPortableMode path
   setPortableWritable path = liftCommandEffectBase . setPortableWritable path
