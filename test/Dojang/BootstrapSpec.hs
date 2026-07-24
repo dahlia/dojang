@@ -21,6 +21,7 @@ import Hedgehog (assert, evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.FilePath.Posix qualified as Posix
+import System.Info (os)
 
 
 #ifndef mingw32_HOST_OS
@@ -214,7 +215,7 @@ spec = do
         readFile (destination </> manifestName)
           `shouldReturn` "repository-id = \"test\"\n"
 
-    it "publishes into an existing empty destination" $
+    it "honors atomic exchange support for an existing empty destination" $
       withTempDir $ \tmpDir _ -> do
         stagingName <- encodeFS "staging"
         destinationName <- encodeFS "destination"
@@ -224,9 +225,16 @@ spec = do
         createDirectory staging
         createDirectory destination
         writeFile (staging </> manifestName) "manifest"
-        publishStagedDirectory staging destination
-        isDirectory staging `shouldReturn` False
-        readFile (destination </> manifestName) `shouldReturn` "manifest"
+        if os == "mingw32"
+          then do
+            publishStagedDirectory staging destination
+              `shouldThrow` anyIOException
+            listDirectory destination `shouldReturn` []
+            readFile (staging </> manifestName) `shouldReturn` "manifest"
+          else do
+            publishStagedDirectory staging destination
+            isDirectory staging `shouldReturn` False
+            readFile (destination </> manifestName) `shouldReturn` "manifest"
 
     symlinkSpecs
 
