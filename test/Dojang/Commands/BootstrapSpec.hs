@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -206,6 +207,8 @@ spec = do
           Left err -> fail $ "Unexpected state error: " <> show err
         fmap (.firstApplied) states `shouldBe` [True]
 
+    nativeSourcePathSpec
+
     it "publishes into an existing empty destination" $
       withBootstrapFixture $ \_ sourceText destination _ home appEnv -> do
         manifestName <- encodeFS "dojang.toml"
@@ -378,7 +381,7 @@ spec = do
 
 
 withBootstrapFixture
-  :: (OsPath -> Text.Text -> OsPath -> OsPath -> OsPath -> AppEnv -> IO a)
+  :: (OsPath -> FilePath -> OsPath -> OsPath -> OsPath -> AppEnv -> IO a)
   -> IO a
 withBootstrapFixture action =
   withTempDir $ \tmp _ -> do
@@ -405,7 +408,7 @@ withBootstrapFixture action =
     createDirectory source
     createDirectory home
     writeFile (source </> manifestName) validManifest
-    sourceText <- Text.pack <$> decodeFS source
+    sourceText <- decodeFS source
     action source sourceText destination stateRoot home appEnv
 
 
@@ -479,7 +482,7 @@ externalTransportSpec =
                 <> ", \"{source}\", \"{destination}\", "
                 <> show markerPath
                 <> "]\n"
-        sourceText <- Text.pack <$> decodeFS source
+        sourceText <- decodeFS source
         (dryRunOutput, dryRunResult) <-
           captureStderr $
             withHome home $
@@ -518,6 +521,7 @@ externalTransportSpec =
         readFile (destination </> manifestName)
           `shouldReturn` validManifest
         exists marker `shouldReturn` True
+
         exists (tmp </> pwnedName) `shouldReturn` False
 
         failureDestinationName <- encodeFS "failure destination"
@@ -557,6 +561,36 @@ externalTransportSpec =
         exists failureStateRoot `shouldReturn` False
         entries <- traverse decodeFS =<< listDirectory tmp
         entries `shouldSatisfy` all (not . isPrefixOf ".dojang-bootstrap-")
+
+#ifdef mingw32_HOST_OS
+nativeSourcePathSpec :: Spec
+nativeSourcePathSpec = return ()
+#else
+nativeSourcePathSpec :: Spec
+nativeSourcePathSpec =
+  it "preserves non-UTF-8 bytes in a local source path" $
+    withBootstrapFixture $ \source _ destination _ home appEnv -> do
+      sourceName <- encodeFS $ "source-" <> [toEnum 0xdc80]
+      let nativeSource = takeDirectory source </> sourceName
+      renameDirectory source nativeSource
+      sourceArgument <- decodeFS nativeSource
+      result <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            bootstrap
+              sourceArgument
+              Nothing
+              Nothing
+              []
+              True
+              True
+              Nothing
+              []
+      result `shouldBe` ExitSuccess
+      manifestName <- encodeFS "dojang.toml"
+      readFile (destination </> manifestName)
+        `shouldReturn` validManifest
+#endif
 
 
 captureStderr :: IO a -> IO (ByteString, a)

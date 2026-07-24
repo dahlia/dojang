@@ -311,13 +311,12 @@ cmdP stateRoot defaultRepoPath =
                           )
                     )
                   <*> optional
-                    ( pack
-                        <$> strOption
-                          ( long "from"
-                              <> metavar "SOURCE"
-                              <> help
-                                "Acquire an existing repository from SOURCE"
-                          )
+                    ( strOption
+                        ( long "from"
+                            <> metavar "SOURCE"
+                            <> help
+                              "Acquire an existing repository from SOURCE"
+                        )
                     )
                   <*> optional
                     ( pack

@@ -28,7 +28,7 @@ import Control.Monad.Except
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
-import Data.Bits (shiftL, (.|.))
+import Data.Bits (shiftL, (.&.), (.|.))
 import Data.Word (Word32)
 import System.Directory.OsPath qualified
 import System.FilePath qualified as FilePath
@@ -255,6 +255,25 @@ spec = do
           )
           cases
 
+    it "ignores the conventional tar root directory entry" $
+      withTempDir $ \tmpDir _ -> do
+        archiveName <- encodeFS "repository.tar"
+        stagingName <- encodeFS "staging"
+        manifestName <- encodeFS "dojang.toml"
+        let archivePath = tmpDir </> archiveName
+            staging = tmpDir </> stagingName
+        writeFile archivePath $
+          LazyByteString.toStrict $
+            Tar.write
+              [ Tar.directoryEntry $ tarPath "./"
+              , tarFileEntry "./dojang.toml" "manifest"
+              ]
+        stageBuiltinSource
+          (ArchiveSource TarArchive archivePath)
+          staging
+          `shouldReturn` Right ()
+        readFile (staging </> manifestName) `shouldReturn` "manifest"
+
     archiveModeSpecs
     archiveSpecialFileSpecs
 
@@ -304,6 +323,43 @@ spec = do
           evalIO $
             withTempDir $ \tmpDir _ -> do
               archiveName <- encodeFS "collision.tar"
+              stagingName <- encodeFS "staging"
+              let archivePath = tmpDir </> archiveName
+                  staging = tmpDir </> stagingName
+              writeFile archivePath $
+                LazyByteString.toStrict $
+                  Tar.write
+                    [ tarFileEntry firstPath "first"
+                    , tarFileEntry secondPath "second"
+                    ]
+              result <-
+                stageBuiltinSource
+                  (ArchiveSource TarArchive archivePath)
+                  staging
+              stagingExists <- isDirectory staging
+              return (isConflictingArchive result, stagingExists)
+        conflicting === (True, False)
+
+    it "rejects arbitrary collisions among implicit archive directories" $
+      hedgehog $ do
+        directory <-
+          forAll $
+            Gen.string
+              (Range.linear 1 40)
+              (Gen.element ['a' .. 'z'])
+        cased <-
+          forAll $
+            traverse
+              (\character -> Gen.element [toLower character, toUpper character])
+              directory
+        let firstDirectory = fmap toLower cased
+            secondDirectory = fmap toUpper cased
+            firstPath = firstDirectory <> "/first"
+            secondPath = secondDirectory <> "/second"
+        conflicting <-
+          evalIO $
+            withTempDir $ \tmpDir _ -> do
+              archiveName <- encodeFS "implicit-collision.tar"
               stagingName <- encodeFS "staging"
               let archivePath = tmpDir </> archiveName
                   staging = tmpDir </> stagingName
@@ -612,6 +668,26 @@ archiveModeSpecs = do
         `shouldReturn` portableModeFromBits 0o400
       setPortableMode (destination </> privateName) 0o700
 
+  it "preserves arbitrary restrictive destination root permissions" $
+    hedgehog $ do
+      destinationMode <-
+        forAll $ (0o700 .|.) <$> Gen.word (Range.linear 0 0o77)
+      observed <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            setPortableMode destination destinationMode
+            publishStagedDirectory staging destination
+            getPortableMode destination
+      observed === portableModeFromBits destinationMode
+
   it "publishes contents when the filesystem cannot restore modes" $
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "repository.tar"
@@ -641,6 +717,66 @@ archiveModeSpecs = do
         `shouldReturn` "#!/bin/sh\n"
       isDirectory staging `shouldReturn` False
 
+  it "reports modes that the filesystem only partially restores" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "repository.tar"
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      partialName <- encodeFS "partially-restored"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          entry =
+            (tarFileEntry "partially-restored" "contents")
+              { Tar.entryPermissions = 0o700
+              }
+      writeFile archivePath $
+        LazyByteString.toStrict $
+          Tar.write [entry]
+      Right (Right metadata) <-
+        runFailingModeIO $
+          stageBuiltinSourceWithMetadata
+            (ArchiveSource TarArchive archivePath)
+            staging
+      published <-
+        runFailingModeIO $
+          publishStagedDirectoryWithMetadata
+            metadata
+            staging
+            destination
+      published `shouldBe` Right ["partially-restored"]
+      readFile (destination </> partialName) `shouldReturn` "contents"
+
+  it "reports archive modes unavailable on writability-only filesystems" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "repository.tar"
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      limitedName <- encodeFS "writability-only"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          entry =
+            (tarFileEntry "writability-only" "contents")
+              { Tar.entryPermissions = 0o700
+              }
+      writeFile archivePath $
+        LazyByteString.toStrict $
+          Tar.write [entry]
+      Right (Right metadata) <-
+        runFailingModeIO $
+          stageBuiltinSourceWithMetadata
+            (ArchiveSource TarArchive archivePath)
+            staging
+      published <-
+        runFailingModeIO $
+          publishStagedDirectoryWithMetadata
+            metadata
+            staging
+            destination
+      published `shouldBe` Right ["writability-only"]
+      readFile (destination </> limitedName) `shouldReturn` "contents"
+
   it "restores an existing empty destination when its rename fails" $
     withTempDir $ \tmpDir _ -> do
       stagingName <- encodeFS "staging"
@@ -650,7 +786,7 @@ archiveModeSpecs = do
           destination = tmpDir </> destinationName
       createDirectory staging
       createDirectory destination
-      setPortableMode destination 0o750
+      setPortableMode destination 0o600
       writeFile (staging </> manifestName) "manifest"
       result <-
         runFailingModeIO $
@@ -662,8 +798,11 @@ archiveModeSpecs = do
       isDirectory destination `shouldReturn` True
       listDirectory destination `shouldReturn` []
       getPortableMode destination
-        `shouldReturn` portableModeFromBits 0o750
+        `shouldReturn` portableModeFromBits 0o600
       isDirectory staging `shouldReturn` True
+      stagingMode <- getPortableMode staging
+      fmap (.&. 0o700) stagingMode.posixBits
+        `shouldBe` Just 0o700
 
 
 archiveSpecialFileSpecs :: Spec
@@ -757,7 +896,13 @@ instance MonadFileSystem FailingModeIO where
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
-  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  getPortableMode value = do
+    path <- liftIO (decodePath value :: IO FilePath)
+    case FilePath.takeFileName path of
+      "partially-restored" -> return $ portableModeFromBits 0o600
+      "writability-only" ->
+        return PortableMode{posixBits = Nothing, writable = True}
+      _ -> liftIO (getPortableMode value :: IO PortableMode)
   setPortableMode path mode = do
     path' <- liftIO (decodePath path :: IO FilePath)
     if FilePath.takeFileName path' == "script"

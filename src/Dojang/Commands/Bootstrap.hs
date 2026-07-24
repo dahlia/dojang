@@ -85,7 +85,7 @@ import Dojang.Types.Transport
 -- validating that acquisition-only options are used with @--from@.
 initialize
   :: (MonadFileSystem i, AppEffects i)
-  => Maybe Text
+  => Maybe FilePath
   -- ^ Optional bootstrap source.
   -> Maybe Text
   -- ^ Optional external transport name.
@@ -129,7 +129,7 @@ initialize source transport transportFile presets noInteractive acceptApply fact
 -- apply flow.
 bootstrap
   :: (MonadFileSystem i, AppEffects i)
-  => Text
+  => FilePath
   -- ^ Local source path or opaque external-transport source.
   -> Maybe Text
   -- ^ Explicit external transport name.
@@ -188,7 +188,7 @@ normalizeBootstrapDestination =
 
 bootstrapInto
   :: (MonadFileSystem i, AppEffects i)
-  => Text
+  => FilePath
   -> Maybe Text
   -> Maybe OsPath
   -> Bool
@@ -287,11 +287,11 @@ newStagingPath destination = do
 
 acquireBuiltin
   :: (MonadFileSystem i, AppEffects i)
-  => Text
+  => FilePath
   -> OsPath
   -> App i (Maybe StagedMetadata)
 acquireBuiltin source staging = do
-  sourcePath <- encodePath $ Text.unpack source
+  sourcePath <- encodePath source
   detected <- detectBuiltinSource sourcePath
   builtin <- either reportAcquisitionError return detected
   printAcquisition sourcePath staging
@@ -301,7 +301,7 @@ acquireBuiltin source staging = do
 
 acquireExternal
   :: (MonadFileSystem i, AppEffects i)
-  => Text
+  => FilePath
   -> Text
   -> Maybe OsPath
   -> OsPath
@@ -331,19 +331,20 @@ acquireExternal source name requestedConfig staging = do
       Right value -> return value
   hostEnvironment <- processEnvironment
   stagingPath <- decodePath staging
-  let request =
+  let sourceText = Text.pack source
+      request =
         makeTransportProcessRequest
           platform
           hostEnvironment
           transport
-          source
+          sourceText
           stagingPath
   dryRunEnabled <- asks (.dryRun)
   if dryRunEnabled
     then do
       printStderr $
         "Would run external transport: "
-          <> Text.pack (show $ redactTransportSource source request)
+          <> Text.pack (show $ redactTransportSource sourceText request)
           <> "."
       return Nothing
     else do

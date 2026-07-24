@@ -37,10 +37,14 @@ reading them.
 Archive entries are validated before extraction.  Absolute paths, parent
 traversal, backslash paths, links, Windows-reserved or invalid filename
 components, and entries that collide case-insensitively or after Unicode
-normalization are rejected.  On POSIX systems, stored permission bits,
+normalization are rejected.  This collision check includes parent directories
+that an archive leaves implicit.  On POSIX systems, stored permission bits,
 including executable bits, are restored when the destination filesystem
-supports them.  If it does not, bootstrap publishes the contents and warns
-that the permissions could not be restored.
+supports them.  Bootstrap verifies the resulting permissions instead of
+assuming that a successful filesystem call restored every bit.  If exact
+restoration is unavailable, bootstrap publishes the contents and warns that
+the permissions could not be restored.  When replacing an existing empty
+destination, its root directory keeps its original permissions.
 
 
 External transports

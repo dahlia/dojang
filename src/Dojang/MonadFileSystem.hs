@@ -16,6 +16,7 @@ module Dojang.MonadFileSystem
   ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Exception qualified as Exception
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO (liftIO))
@@ -75,8 +76,9 @@ import Dojang.Types.RouteMetadata
   )
 
 
-#ifndef mingw32_HOST_OS
-import Control.Exception qualified as Exception
+#ifdef mingw32_HOST_OS
+import System.IO (IOMode (ReadMode), hIsSeekable, openBinaryFile)
+#else
 import System.Posix.Files qualified as Posix
 import System.Posix.IO qualified as Posix
 #endif
@@ -523,11 +525,16 @@ isRegularFileIO path =
 
 readRegularFileIO :: OsPath -> IO (Maybe ByteString)
 readRegularFileIO path = do
-  resolved <- OsDirectory.canonicalizePath path
-  regularFile <- isRegularFileIO resolved
-  if regularFile
-    then Just <$> (decodeFS path >>= Data.ByteString.readFile)
-    else return Nothing
+  path' <- decodeFS path
+  Exception.bracket
+    (openBinaryFile path' ReadMode)
+    hClose
+    ( \handle -> do
+        regularFile <- hIsSeekable handle
+        if regularFile
+          then Just <$> Data.ByteString.hGetContents handle
+          else return Nothing
+    )
 
 
 getPortableModeIO :: OsPath -> IO PortableMode

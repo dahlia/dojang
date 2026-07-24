@@ -43,6 +43,7 @@ import Data.List (dropWhileEnd, inits, isSuffixOf, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down (Down))
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8')
@@ -61,7 +62,10 @@ import Dojang.MonadFileSystem
   ( FileType (..)
   , MonadFileSystem (..)
   )
-import Dojang.Types.RouteMetadata (PortableMode (..))
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , portableModeFromBits
+  )
 
 
 -- | Archive formats supported without an external transport.
@@ -107,7 +111,7 @@ data StagedEntry
   deriving (Eq, Show, Generic, NFData)
 
 
-data StagedMode = StagedMode FilePath FileType Word
+data StagedMode = StagedMode FilePath FileType PortableMode
   deriving (Eq, Show, Generic)
 
 
@@ -301,9 +305,19 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
         else do
           destinationMode <- getPortableMode destination
           modeFailures <- applyStagedMetadata staging metadata
+          rootModeRestored <- restorePortableMode staging destinationMode
+          unless rootModeRestored $ do
+            widenDirectoryForCleanup staging
+              `catchError` const (return ())
+            widenStagedMetadata staging metadata
+              `catchError` const (return ())
+            throwError $
+              userError "bootstrap destination permissions could not be preserved"
           removeDirectory destination
           renameDirectory staging destination
             `catchError` \err -> do
+              widenDirectoryForCleanup staging
+                `catchError` const (return ())
               widenStagedMetadata staging metadata
                 `catchError` const (return ())
               restoreEmptyDestination destination destinationMode
@@ -446,7 +460,7 @@ decodeArchive format bytes = do
 validateEntryLayout
   :: [StagedEntry] -> Either AcquisitionError ()
 validateEntryLayout entries =
-  case duplicatePaths <> fileAncestors of
+  case duplicatePaths <> directoryAliases <> fileAncestors of
     conflict : _ -> Left $ ConflictingArchiveEntry conflict
     [] -> Right ()
  where
@@ -465,6 +479,19 @@ validateEntryLayout entries =
   pathGroups =
     Map.fromListWith (<>) $
       fmap (\path -> (archivePathKey path, [path])) paths
+  directoryAliases =
+    [ path
+    | group <- Map.elems directoryGroups
+    , let spellings = Set.fromList group
+    , Set.size spellings > 1
+    , path : _ <- [Set.toAscList spellings]
+    ]
+  directoryGroups =
+    Map.fromListWith (<>) $
+      [ (archivePathKey path, [path])
+      | entry <- entries
+      , path <- entryDirectoryPaths entry
+      ]
   fileAncestors =
     [ filePath
     | path <- paths
@@ -478,6 +505,10 @@ validateEntryLayout entries =
         (drop 1 $ inits components)
    where
     components = Posix.splitDirectories path
+  entryDirectoryPaths (StagedDirectory path _) =
+    path : properAncestors path
+  entryDirectoryPaths (StagedFile path _ _) =
+    properAncestors path
 
 
 archivePathKey :: FilePath -> Text
@@ -503,7 +534,8 @@ metadataFromEntries entries =
   StagedMetadata
     [ StagedMode (entryPath entry) (entryType entry) mode
     | entry <- entries
-    , Just mode <- [entryMode entry]
+    , Just bits <- [entryMode entry]
+    , let mode = portableModeFromBits bits
     ]
 
 
@@ -523,10 +555,8 @@ captureStagedMetadata source entries =
  where
   capture (Symlink, _) = return []
   capture (fileType, relative) = do
-    PortableMode posixBits writable <-
-      getPortableMode $ source </> relative
+    mode <- getPortableMode $ source </> relative
     path <- decodePath relative
-    let mode = fromMaybe (if writable then 0o200 else 0) posixBits
     return [StagedMode path fileType mode]
 
 
@@ -562,8 +592,12 @@ applyStagedMetadata root (StagedMetadata modes) =
       (sortOn (Down . stagedModeDepth) modes)
       ( \(StagedMode path _ mode) -> do
           encoded <- encodePath path
-          (setPortableMode (root </> encoded) mode >> return Nothing)
-            `catchError` const (return $ Just path)
+          catchError
+            ( do
+                restored <- restorePortableMode (root </> encoded) mode
+                return $ if restored then Nothing else Just path
+            )
+            (const $ return $ Just path)
       )
 
 
@@ -572,10 +606,14 @@ widenStagedMetadata
 widenStagedMetadata root (StagedMetadata modes) =
   forM_ (sortOn stagedModeDepth modes) $ \(StagedMode path fileType mode) -> do
     encoded <- encodePath path
-    setPortableMode
-      (root </> encoded)
-      (mode .|. ownerAccess fileType)
-      `catchError` const (return ())
+    let entry = root </> encoded
+    case mode of
+      PortableMode (Just bits) _ ->
+        setPortableMode entry (bits .|. ownerAccess fileType)
+          `catchError` const (return ())
+      PortableMode Nothing _ ->
+        setPortableWritable entry True
+          `catchError` const (return ())
  where
   ownerAccess Directory = 0o700
   ownerAccess _ = 0o600
@@ -584,6 +622,26 @@ widenStagedMetadata root (StagedMetadata modes) =
 stagedModeDepth :: StagedMode -> Int
 stagedModeDepth (StagedMode path _ _) =
   length $ Posix.splitDirectories path
+
+
+restorePortableMode
+  :: (MonadFileSystem m) => OsPath -> PortableMode -> m Bool
+restorePortableMode path mode = do
+  case mode of
+    PortableMode (Just bits) _ -> setPortableMode path bits
+    PortableMode Nothing writable -> setPortableWritable path writable
+  restored <- getPortableMode path
+  return $ restored == mode
+
+
+widenDirectoryForCleanup :: (MonadFileSystem m) => OsPath -> m ()
+widenDirectoryForCleanup path = do
+  mode <- getPortableMode path
+  case mode of
+    PortableMode (Just bits) _ ->
+      setPortableMode path $ bits .|. 0o700
+    PortableMode Nothing _ ->
+      setPortableWritable path True
 
 
 cleanupRestricted
@@ -651,6 +709,10 @@ decodeTar = go Nothing . Tar.decodeLongNames . Tar.read
         headers <- parsePaxHeaders contents
         let path = Text.unpack <$> Map.lookup "path" headers
         go (path <|> pendingPath) remaining
+      Tar.Directory
+        | isTarRootDirectory
+            (fromMaybe (TarEntry.entryTarPath entry) pendingPath) ->
+            go Nothing remaining
       _ -> do
         decoded <-
           decodeEntry
@@ -671,6 +733,7 @@ decodeTar = go Nothing . Tar.decodeLongNames . Tar.read
       _ -> Left $ UnsupportedArchiveEntry archivePath
   archivePermissions entry =
     fromIntegral (TarEntry.entryPermissions entry) .&. 0o777
+  isTarRootDirectory path = path == "." || path == "./"
 
 
 parsePaxHeaders
