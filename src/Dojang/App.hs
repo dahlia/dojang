@@ -274,12 +274,16 @@ instance
   isSymlink = App . lift . lift . lift . isSymlink
   readFile = App . lift . lift . lift . readFile
   readRegularFile = App . lift . lift . lift . readRegularFile
+  readRegularFileBounded limit =
+    App . lift . lift . lift . readRegularFileBounded limit
   copyRegularFile src = App . lift . lift . lift . copyRegularFile src
   copyRegularFileNoReplace src =
     App . lift . lift . lift . copyRegularFileNoReplace src
   writeFile dst = App . lift . lift . lift . writeFile dst
   replaceFile src = App . lift . lift . lift . replaceFile src
   renameDirectory src = App . lift . lift . lift . renameDirectory src
+  exchangeDirectories src =
+    App . lift . lift . lift . exchangeDirectories src
   writeTemporaryFile directory template contents =
     App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
   withFileLock lockPath action = App $ ReaderT $ \appEnv ->
@@ -290,6 +294,7 @@ instance
           logger
   canonicalizePath = App . lift . lift . lift . canonicalizePath
   readSymlinkTarget = App . lift . lift . lift . readSymlinkTarget
+  getSymbolicLinkType = App . lift . lift . lift . getSymbolicLinkType
   copyFile src = App . lift . lift . lift . copyFile src
   copyFileWithMetadata src = App . lift . lift . lift . copyFileWithMetadata src
   copyFilePermissions src = App . lift . lift . lift . copyFilePermissions src

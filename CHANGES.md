@@ -23,13 +23,14 @@ To be released.
     Archive sources must resolve to regular files, so FIFOs and other special
     files are rejected without blocking.  Unsupported permission metadata
     produces a warning without discarding the acquired contents.  An absent or
-    existing empty destination is published with an atomic filesystem rename,
-    except that the current working directory keeps its identity.  Publication
-    refuses a destination replaced by a symbolic link or concurrently created
-    during the final rename.  Publication into the current working directory
-    also creates every entry without replacement, and rollback removes only
-    unchanged entries created by Dojang, preserving files raced into or
-    replaced within the directory.  Rollback also runs when publication is
+    missing destination is published with an atomic no-replace rename.  An
+    existing empty destination is atomically exchanged where supported;
+    otherwise its identity is preserved and its entries are created without
+    replacement.  Publication refuses a destination replaced by a symbolic
+    link or concurrently changed during the final exchange.  The same
+    entrywise path preserves the current working directory.  Rollback removes
+    only unchanged entries created by Dojang, preserving files raced into or
+    replaced within the directory, and also runs when publication is
     interrupted.
     Filesystems without an atomic no-replace rename cannot publish a
     non-current-directory destination and are rejected rather than using a
@@ -42,8 +43,13 @@ To be released.
     directory source is a symbolic link, while an existing empty destination
     keeps its original root permissions after publication.  Permission
     restoration is verified after it is applied, so partial filesystem support
-    produces the documented warning.  Noninteractive bootstrap requires both
-    `--no-interactive` and `--yes`.  [[#47], [#74]]
+    produces the documented warning.  External transports run beneath an
+    owner-only staging parent.  Archive input is limited to 16 MiB, expanded
+    file contents to 64 MiB, and entry counts to 10,000, including bounded gzip
+    decoding.  Broken Windows directory links retain their intrinsic link
+    type, and interrupted publication widens restrictive staging before
+    cleanup.  Noninteractive bootstrap requires both `--no-interactive` and
+    `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

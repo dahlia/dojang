@@ -469,9 +469,15 @@ externalTransportSpec =
                 False
         createDirectory source
         createDirectory home
+        setPortableMode tmp 0o755
         writeFile (source </> manifestName) validManifest
         writeFile script $
-          "#!/bin/sh\n/bin/touch -- \"$3\"\nexec /bin/cp -R -- \"$1\" \"$2\"\n"
+          "#!/bin/sh\n"
+            <> "test -n \"$(find \"$(dirname -- \"$2\")\""
+            <> " -prune -perm 0700 -print)\""
+            <> " || exit 24\n"
+            <> "/bin/touch -- \"$3\"\n"
+            <> "exec /bin/cp -R -- \"$1\" \"$2\"\n"
         setPortableMode script 0o755
         scriptPath <- decodeFS script
         markerPath <- decodeFS marker

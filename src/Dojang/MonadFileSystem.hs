@@ -7,7 +7,8 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 
 module Dojang.MonadFileSystem
-  ( DryRunIO
+  ( BoundedFileRead (..)
+  , DryRunIO
   , FileIdentity
   , FileType (..)
   , MonadFileSystem (..)
@@ -58,7 +59,8 @@ import Control.Monad.State.Strict
   )
 import Data.ByteString (ByteString)
 import Data.ByteString qualified
-  ( hGetContents
+  ( concat
+  , hGetContents
   , hGetSome
   , hPut
   , length
@@ -145,6 +147,17 @@ data FileIdentity = FileIdentity Integer Integer
   deriving (Eq, Ord, Show)
 
 
+-- | The result of reading a regular file with an explicit byte limit.
+data BoundedFileRead
+  = -- | The opened path was not a regular file.
+    NotRegularFile
+  | -- | The regular file was larger than the requested limit.
+    FileSizeLimitExceeded
+  | -- | Complete contents of a regular file within the requested limit.
+    BoundedFileContents ByteString
+  deriving (Eq, Show)
+
+
 -- | A monad that can perform filesystem operations.  It's also based on
 -- 'OsPath' instead of 'FilePath'.
 class (MonadError IOError m) => MonadFileSystem m where
@@ -218,6 +231,24 @@ class (MonadError IOError m) => MonadFileSystem m where
             if resolvedRegularFile
               then Just <$> readFile path
               else return Nothing
+
+
+  -- | Reads a regular file without consuming more than the given number of
+  -- bytes.
+  --
+  -- The source-validation guarantees are the same as 'readRegularFile'.
+  -- Filesystem-backed implementations should enforce the bound while reading
+  -- from the validated handle, rather than inspecting the pathname first.
+  readRegularFileBounded
+    :: (HasCallStack) => Int -> OsPath -> m BoundedFileRead
+  readRegularFileBounded limit path = do
+    result <- readRegularFile path
+    case result of
+      Nothing -> return NotRegularFile
+      Just contents
+        | Data.ByteString.length contents > limit ->
+            return FileSizeLimitExceeded
+        | otherwise -> return $ BoundedFileContents contents
 
 
   -- | Copies a regular file without following a concurrent replacement to a
@@ -309,12 +340,22 @@ class (MonadError IOError m) => MonadFileSystem m where
         File -> copyFileWithMetadata sourceEntry destinationEntry
         Symlink -> do
           target <- readSymlinkTarget sourceEntry
-          directoryLink <- isDirectory sourceEntry
+          linkType <- getSymbolicLinkType sourceEntry
           createSymbolicLink
             target
             destinationEntry
-            (if directoryLink then Directory else File)
+            linkType
     removeDirectoryRecursively source
+
+
+  -- | Atomically swaps two existing directories when the filesystem supports
+  -- that operation.
+  --
+  -- Returns 'False' without changing either path when no atomic exchange
+  -- primitive is available.  A successful exchange returns 'True'.
+  exchangeDirectories
+    :: (HasCallStack) => OsPath -> OsPath -> m Bool
+  exchangeDirectories _ _ = return False
 
 
   -- | Writes a uniquely named temporary file in the given directory.
@@ -346,6 +387,16 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- symbolic link (i.e., resolved from the directory that contains the
   -- symbolic link).
   readSymlinkTarget :: OsPath -> m OsPath
+
+
+  -- | Gets the intrinsic file-or-directory type of a symbolic link.
+  --
+  -- This matters on Windows, where the link type is recorded independently
+  -- of whether its target currently exists.  The path must be a symbolic link.
+  getSymbolicLinkType :: (HasCallStack) => OsPath -> m FileType
+  getSymbolicLinkType path = do
+    directoryLink <- isDirectory path
+    return $ if directoryLink then Directory else File
 
 
   -- | Copies a file from one path to another.
@@ -600,6 +651,10 @@ renameNoreplace :: CUInt
 renameNoreplace = 1
 
 
+renameExchange :: CUInt
+renameExchange = 2
+
+
 foreign import ccall unsafe "renameat2"
   c_renameat2
     :: CInt
@@ -611,6 +666,10 @@ foreign import ccall unsafe "renameat2"
 #elif defined(darwin_HOST_OS)
 renameExcl :: CUInt
 renameExcl = 4
+
+
+renameSwap :: CUInt
+renameSwap = 2
 
 
 foreign import ccall unsafe "renamex_np"
@@ -713,6 +772,16 @@ getFileIdentityIO path = do
   fileFlagOpenReparsePoint = 0x00200000
 
 
+getSymbolicLinkTypeIO :: OsPath -> IO FileType
+getSymbolicLinkTypeIO path = do
+  path' <- decodeFS path
+  attributes <- Win32.getFileAttributes path'
+  return $
+    if attributes .&. Win32.fILE_ATTRIBUTE_DIRECTORY /= 0
+      then Directory
+      else File
+
+
 getPortableModeIO :: OsPath -> IO PortableMode
 getPortableModeIO path = do
   permissions <- OsDirectory.getPermissions path
@@ -741,6 +810,10 @@ createPrivateDirectoryIO = OsDirectory.createDirectory
 
 renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
 renameDirectoryNoReplaceIO = OsDirectory.renameDirectory
+
+
+exchangeDirectoriesIO :: OsPath -> OsPath -> IO Bool
+exchangeDirectoriesIO _ _ = return False
 #else
 replaceFileIO :: OsPath -> OsPath -> IO ()
 replaceFileIO = OsDirectory.renameFile
@@ -808,6 +881,10 @@ getFileIdentityIO path = do
     )
     `catchError` \err ->
       if isDoesNotExistError err then return Nothing else throwError err
+
+
+getSymbolicLinkTypeIO :: OsPath -> IO FileType
+getSymbolicLinkTypeIO _ = return File
 
 
 getPortableModeIO :: OsPath -> IO PortableMode
@@ -895,6 +972,89 @@ throwNoReplaceUnsupported destination =
       (Just destination)
       `ioeSetErrorString` "filesystem lacks atomic no-replace rename"
 #endif
+
+
+exchangeDirectoriesIO :: OsPath -> OsPath -> IO Bool
+#if defined(linux_HOST_OS)
+exchangeDirectoriesIO source destination = do
+  source' <- decodeFS source
+  destination' <- decodeFS destination
+  PosixInternal.withFilePath source' $ \sourcePath ->
+    PosixInternal.withFilePath destination' $ \destinationPath -> do
+      result <-
+        c_renameat2
+          atFdcwd
+          sourcePath
+          atFdcwd
+          destinationPath
+          renameExchange
+      if result == 0
+        then return True
+        else do
+          err <- CError.getErrno
+          if err
+            `elem` [ CError.eINVAL
+                   , CError.eNOSYS
+                   , CError.eNOTSUP
+                   , CError.eOPNOTSUPP
+                   ]
+            then return False
+            else
+              Exception.throwIO $
+                CError.errnoToIOError
+                  "exchangeDirectories"
+                  err
+                  Nothing
+                  (Just destination')
+#elif defined(darwin_HOST_OS)
+exchangeDirectoriesIO source destination = do
+  source' <- decodeFS source
+  destination' <- decodeFS destination
+  PosixInternal.withFilePath source' $ \sourcePath ->
+    PosixInternal.withFilePath destination' $ \destinationPath -> do
+      result <- c_renamex_np sourcePath destinationPath renameSwap
+      if result == 0
+        then return True
+        else do
+          err <- CError.getErrno
+          if err `elem` [CError.eNOTSUP, CError.eOPNOTSUPP]
+            then return False
+            else
+              Exception.throwIO $
+                CError.errnoToIOError
+                  "exchangeDirectories"
+                  err
+                  Nothing
+                  (Just destination')
+#else
+exchangeDirectoriesIO _ _ = return False
+#endif
+
+
+readRegularFileBoundedIO :: Int -> OsPath -> IO BoundedFileRead
+readRegularFileBoundedIO limit path = do
+  result <- withRegularFileHandleIO path $ readHandleBounded limit
+  return $ case result of
+    Nothing -> NotRegularFile
+    Just Nothing -> FileSizeLimitExceeded
+    Just (Just contents) -> BoundedFileContents contents
+
+
+readHandleBounded :: Int -> Handle -> IO (Maybe ByteString)
+readHandleBounded limit handle = go limit []
+ where
+  go remaining chunks = do
+    chunk <-
+      Data.ByteString.hGetSome
+        handle
+        (max 1 $ min 32768 $ remaining + 1)
+    if Data.ByteString.null chunk
+      then return $ Just $ Data.ByteString.concat $ reverse chunks
+      else
+        let chunkLength = Data.ByteString.length chunk
+        in if chunkLength > remaining
+             then return Nothing
+             else go (remaining - chunkLength) (chunk : chunks)
 
 
 copyRegularFileIO :: OsPath -> OsPath -> IO Bool
@@ -1037,6 +1197,9 @@ instance MonadFileSystem IO where
   readRegularFile = readRegularFileIO
 
 
+  readRegularFileBounded = readRegularFileBoundedIO
+
+
   copyRegularFile = copyRegularFileIO
 
 
@@ -1052,6 +1215,9 @@ instance MonadFileSystem IO where
 
 
   renameDirectory = renameDirectoryNoReplaceIO
+
+
+  exchangeDirectories = exchangeDirectoriesIO
 
 
   copyFileWithMetadata = OsDirectory.copyFileWithMetadata
@@ -1087,6 +1253,9 @@ instance MonadFileSystem IO where
 
 
   readSymlinkTarget = getSymbolicLinkTarget
+
+
+  getSymbolicLinkType = getSymbolicLinkTypeIO
 
 
   createDirectory = OsDirectory.createDirectory
@@ -1534,6 +1703,13 @@ instance MonadFileSystem DryRunIO where
         liftIO $
           getSymbolicLinkTarget path
             `mapError` (`ioePrependLocation` "readSymlinkTarget")
+
+
+  getSymbolicLinkType path = do
+    oFiles <- gets overlaidFiles
+    case oFiles !? normalise path of
+      Just ((_, SymlinkTo _ fileType) :| _) -> return fileType
+      _ -> liftIO (getSymbolicLinkType path :: IO FileType)
 
 
   copyFile src dst = do

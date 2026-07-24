@@ -207,16 +207,20 @@ bootstrapInto
   facts
   destination = do
     ensureAvailableDestination destination
-    staging <- newStagingPath destination
-    let cleanup = cleanupStaging staging
+    stagingRoot <- newStagingPath destination
+    repositoryName <- encodePath "repository"
+    let staging = stagingRoot </> repositoryName
+        cleanup = cleanupStaging stagingRoot
     catchCommandExit
       ( onException
-          (bootstrapAction staging)
+          (bootstrapAction stagingRoot staging)
           cleanup
       )
       (\exitCode -> cleanup >> abortCommand exitCode)
    where
-    bootstrapAction staging = do
+    bootstrapAction stagingRoot staging = do
+      createPrivateDirectory stagingRoot
+        `catchError` reportFilesystemError
       acquired <-
         ( case requestedTransport of
             Nothing -> acquireBuiltin source staging
@@ -229,11 +233,12 @@ bootstrapInto
         )
           `catchError` reportFilesystemError
       case acquired of
-        Nothing -> return ExitSuccess
+        Nothing -> cleanupStaging stagingRoot >> return ExitSuccess
         Just metadata -> do
           catchError
             ( validateStaging staging
                 >> publishStaging metadata staging destination
+                >> cleanupStaging stagingRoot
             )
             reportFilesystemError
           enrolled <-
@@ -542,6 +547,8 @@ reportAcquisitionError err =
       "Unsupported directory source entry: " <> Text.pack path <> "."
     ConflictingArchiveEntry path ->
       "Conflicting archive entry: " <> Text.pack path <> "."
+    ArchiveResourceLimitExceeded ->
+      "Bootstrap archive exceeds the safe size or entry-count limit."
 
 
 ensureTransportSucceeded

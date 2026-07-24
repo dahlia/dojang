@@ -460,17 +460,22 @@ instance MonadFileSystem CommandEffectTest where
   isSymlink = liftCommandEffectBase . isSymlink
   readFile = liftCommandEffectBase . readFile
   readRegularFile = liftCommandEffectBase . readRegularFile
+  readRegularFileBounded limit =
+    liftCommandEffectBase . readRegularFileBounded limit
   copyRegularFile source =
     liftCommandEffectBase . copyRegularFile source
   copyRegularFileNoReplace source =
     liftCommandEffectBase . copyRegularFileNoReplace source
   writeFile path = liftCommandEffectBase . writeFile path
   replaceFile source = liftCommandEffectBase . replaceFile source
+  exchangeDirectories source =
+    liftCommandEffectBase . exchangeDirectories source
   writeTemporaryFile directory template =
     liftCommandEffectBase . writeTemporaryFile directory template
   withFileLock _ action = action
   canonicalizePath = liftCommandEffectBase . canonicalizePath
   readSymlinkTarget = liftCommandEffectBase . readSymlinkTarget
+  getSymbolicLinkType = liftCommandEffectBase . getSymbolicLinkType
   copyFile source = liftCommandEffectBase . copyFile source
   copyFileWithMetadata source =
     liftCommandEffectBase . copyFileWithMetadata source

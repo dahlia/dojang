@@ -75,7 +75,9 @@ import Dojang.Bootstrap
 #endif
 import Dojang.MonadFileSystem
   ( FileIdentity
+  , FileType (Directory)
   , MonadFileSystem (..)
+  , dryRunIO
   )
 import Dojang.TestUtils (withTempDir)
 
@@ -212,6 +214,23 @@ spec = do
 
     symlinkSpecs
 
+    it "preserves the intrinsic type of a broken directory link" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "source"
+        stagingName <- encodeFS "staging"
+        linkName <- encodeFS "future-directory"
+        missingName <- encodeFS "missing-directory"
+        let source = tmpDir </> sourceName
+            staging = tmpDir </> stagingName
+        result <-
+          dryRunIO $ do
+            createDirectory source
+            createSymbolicLink missingName (source </> linkName) Directory
+            staged <- stageBuiltinSource (DirectorySource source) staging
+            linkType <- getSymbolicLinkType $ staging </> linkName
+            return (staged, linkType)
+        result `shouldBe` (Right (), Directory)
+
     it "reports missing and unsupported local sources" $
       withTempDir $ \tmpDir _ -> do
         missingName <- encodeFS "missing.zip"
@@ -313,6 +332,27 @@ spec = do
         gzipResult <-
           stageBuiltinSource (ArchiveSource TarGzipArchive gzipPath) staging
         gzipResult `shouldSatisfy` isInvalidArchive
+        isDirectory staging `shouldReturn` False
+
+    it "rejects archives whose declared expansion exceeds the safety limit" $
+      withTempDir $ \tmpDir _ -> do
+        archiveName <- encodeFS "oversized.zip"
+        stagingName <- encodeFS "staging"
+        let archivePath = tmpDir </> archiveName
+            staging = tmpDir </> stagingName
+            oversizedEntry =
+              (Zip.toEntry "large" 0 "x")
+                { Zip.eUncompressedSize = maxBound
+                }
+        writeFile archivePath $
+          LazyByteString.toStrict $
+            Zip.fromArchive $
+              Zip.addEntryToArchive oversizedEntry Zip.emptyArchive
+        result <-
+          stageBuiltinSource
+            (ArchiveSource ZipArchive archivePath)
+            staging
+        result `shouldBe` Left ArchiveResourceLimitExceeded
         isDirectory staging `shouldReturn` False
 
     it "rejects arbitrary case-insensitive path collisions before extraction" $
@@ -1007,7 +1047,7 @@ archiveModeSpecs = do
       published `shouldBe` Right ["writability-only"]
       readFile (destination </> limitedName) `shouldReturn` "contents"
 
-  it "restores an existing empty destination when its rename fails" $
+  it "preserves an existing destination when atomic exchange is unavailable" $
     withTempDir $ \tmpDir _ -> do
       stagingName <- encodeFS "staging"
       destinationName <- encodeFS "failing-rename"
@@ -1017,6 +1057,7 @@ archiveModeSpecs = do
       createDirectory staging
       createDirectory destination
       setPortableMode destination 0o600
+      originalIdentity <- getFileIdentity destination
       writeFile (staging </> manifestName) "manifest"
       result <-
         runFailingModeIO $
@@ -1024,15 +1065,14 @@ archiveModeSpecs = do
             emptyStagedMetadata
             staging
             destination
-      result `shouldSatisfy` either (const True) (const False)
+      result `shouldBe` Right []
       isDirectory destination `shouldReturn` True
-      listDirectory destination `shouldReturn` []
+      getFileIdentity destination `shouldReturn` originalIdentity
       getPortableMode destination
         `shouldReturn` portableModeFromBits 0o600
-      isDirectory staging `shouldReturn` True
-      stagingMode <- getPortableMode staging
-      fmap (.&. 0o700) stagingMode.posixBits
-        `shouldBe` Just 0o700
+      setPortableMode destination 0o700
+      readFile (destination </> manifestName) `shouldReturn` "manifest"
+      isDirectory staging `shouldReturn` False
 
 
 archiveSpecialFileSpecs :: Spec
@@ -1123,6 +1163,38 @@ archiveSpecialFileSpecs = do
       result
         `shouldBe` Just (Left (SourceDoesNotExist archiveFilePath))
 
+  it "widens restrictive staging after interrupted publication" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "repository.tar"
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "interrupted-publish"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          rootEntry =
+            (Tar.directoryEntry $ tarPath "./")
+              { Tar.entryPermissions = 0o000
+              }
+      writeFile archivePath $
+        LazyByteString.toStrict $
+          Tar.write [rootEntry, tarFileEntry "dojang.toml" "manifest"]
+      Right (Right metadata) <-
+        runFailingModeIO $
+          stageBuiltinSourceWithMetadata
+            (ArchiveSource TarArchive archivePath)
+            staging
+      runFailingModeIO
+        ( publishStagedDirectoryWithMetadata
+            metadata
+            staging
+            destination
+        )
+        `shouldThrow` (== UserInterrupt)
+      mode <- getPortableMode staging
+      fmap (.&. 0o700) mode.posixBits `shouldBe` Just 0o700
+      removeDirectoryRecursively staging
+      isDirectory staging `shouldReturn` False
+
 
 newtype FailingModeIO a
   = FailingModeIO (ExceptT IOError IO a)
@@ -1166,9 +1238,11 @@ instance MonadFileSystem FailingModeIO where
     liftIO (replaceFile source destination :: IO ())
   renameDirectory source destination = do
     destinationPath <- liftIO (decodePath destination :: IO FilePath)
-    if FilePath.takeFileName destinationPath == "failing-rename"
-      then throwError $ userError "injected rename failure"
-      else liftIO (renameDirectory source destination :: IO ())
+    case FilePath.takeFileName destinationPath of
+      "failing-rename" ->
+        throwError $ userError "injected rename failure"
+      "interrupted-publish" -> liftIO $ Exception.throwIO UserInterrupt
+      _ -> liftIO (renameDirectory source destination :: IO ())
   writeTemporaryFile directory template contents =
     liftIO (writeTemporaryFile directory template contents :: IO OsPath)
   withFileLock _ action = action

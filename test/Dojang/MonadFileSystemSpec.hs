@@ -29,7 +29,7 @@ import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (readFile, writeFile)
+import Data.ByteString qualified (length, readFile, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
@@ -72,7 +72,8 @@ import Test.Hspec.Expectations.Pretty
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem
-  ( FileType (..)
+  ( BoundedFileRead (..)
+  , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
   , tryDryRunIO
@@ -369,6 +370,19 @@ spec = do
       contents <- Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
       original <- Data.ByteString.readFile packageYamlFP
       contents `shouldBe` original
+
+    specify "readRegularFileBounded enforces arbitrary byte limits" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        limit <- forAll $ Gen.int $ constantFrom 0 0 4096
+        observed <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              writeFile (tmpDir </> foo) contents
+              readRegularFileBounded limit $ tmpDir </> foo
+        if Data.ByteString.length contents > limit
+          then observed === FileSizeLimitExceeded
+          else observed === BoundedFileContents contents
 
     specify "copyRegularFileNoReplace copies arbitrary contents" $
       hedgehog $ do

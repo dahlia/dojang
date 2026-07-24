@@ -66,7 +66,8 @@ import Text.Read (readMaybe)
 import Prelude hiding (readFile, writeFile)
 
 import Dojang.MonadFileSystem
-  ( FileIdentity
+  ( BoundedFileRead (..)
+  , FileIdentity
   , FileType (..)
   , MonadFileSystem (..)
   )
@@ -112,6 +113,8 @@ data AcquisitionError
     UnsupportedSourceEntry FilePath
   | -- | Two entries conflict by path or file type.
     ConflictingArchiveEntry FilePath
+  | -- | The archive exceeds the bounded acquisition resource limits.
+    ArchiveResourceLimitExceeded
   deriving (Eq, Show, Generic, NFData)
 
 
@@ -235,9 +238,11 @@ stageBuiltinSourceWithMetadata (DirectorySource source) staging = do
   copyDirectoryTree source staging
 stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
   sourceName <- decodePath source
-  readRegularFile source >>= \case
-    Nothing -> return $ Left $ SourceDoesNotExist sourceName
-    Just bytes -> do
+  readRegularFileBounded maximumArchiveBytes source >>= \case
+    NotRegularFile -> return $ Left $ SourceDoesNotExist sourceName
+    FileSizeLimitExceeded ->
+      return $ Left ArchiveResourceLimitExceeded
+    BoundedFileContents bytes -> do
       decoded <-
         try $
           liftIO $
@@ -303,10 +308,10 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
   destinationExists <- exists destination
   if not destinationExists
     then do
-      modeFailures <- applyStagedMetadata staging metadata
-      renameDirectory staging destination
-        `catchError` cleanupRestricted staging metadata
-      return modeFailures
+      protectRestrictedStaging staging metadata $ do
+        modeFailures <- applyStagedMetadata staging metadata
+        renameDirectory staging destination
+        return modeFailures
     else do
       destinationEntries <- listDirectory destination
       unless (null destinationEntries) $
@@ -320,27 +325,40 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
           copyDirectoryContents metadata staging current
         else do
           destinationMode <- getPortableMode destination
-          modeFailures <-
-            applyStagedMetadata staging $ withoutRootMetadata metadata
-          rootModeRestored <- restorePortableMode staging destinationMode
-          unless rootModeRestored $ do
-            widenDirectoryForCleanup staging
-              `catchError` const (return ())
-            widenStagedMetadata staging metadata
-              `catchError` const (return ())
-            throwError $
-              userError "bootstrap destination permissions could not be preserved"
-          removeDirectory destination
-          renameDirectory staging destination
-            `catchError` \err -> do
-              widenDirectoryForCleanup staging
-                `catchError` const (return ())
-              widenStagedMetadata staging metadata
-                `catchError` const (return ())
-              restoreEmptyDestination destination destinationMode
-                `catchError` const (return ())
-              throwError err
-          return modeFailures
+          destinationIdentity <- getFileIdentity destination
+          exchanged <-
+            protectRestrictedStaging staging metadata $ do
+              modeFailures <-
+                applyStagedMetadata staging $ withoutRootMetadata metadata
+              rootModeRestored <- restorePortableMode staging destinationMode
+              unless rootModeRestored $
+                throwError $
+                  userError
+                    "bootstrap destination permissions could not be preserved"
+              didExchange <- case destinationIdentity of
+                Nothing -> return False
+                Just _ -> exchangeDirectories staging destination
+              if not didExchange
+                then do
+                  widenDirectoryForCleanup staging
+                  widenStagedMetadata staging metadata
+                  return Nothing
+                else do
+                  validateExchangedDestination
+                    destinationIdentity
+                    staging
+                    destination
+                  widenDirectoryForCleanup staging
+                  removeDirectory staging
+                  return $ Just modeFailures
+          case exchanged of
+            Just modeFailures -> return modeFailures
+            Nothing ->
+              copyIntoExistingDestination
+                destinationMode
+                metadata
+                staging
+                destination
 
 
 resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
@@ -357,16 +375,51 @@ resolvesToRegularFile path = do
           isRegularFile resolved
 
 
-restoreEmptyDestination
-  :: (MonadFileSystem m) => OsPath -> PortableMode -> m ()
-restoreEmptyDestination destination (PortableMode posixBits writable) = do
-  symbolicLink <- isSymlink destination
-  present <- exists destination
-  unless (symbolicLink || present) $ do
-    createDirectory destination
-    case posixBits of
-      Just bits -> setPortableMode destination bits
-      Nothing -> setPortableWritable destination writable
+validateExchangedDestination
+  :: (MonadFileSystem m)
+  => Maybe FileIdentity
+  -> OsPath
+  -> OsPath
+  -> m ()
+validateExchangedDestination expectedIdentity staging destination = do
+  actualIdentity <- getFileIdentity staging
+  unless (actualIdentity == expectedIdentity) $ do
+    restored <- exchangeDirectories staging destination
+    unless restored $
+      throwError $
+        userError "bootstrap destination exchange could not be reversed"
+    throwError $
+      userError "bootstrap destination changed during publication"
+
+
+copyIntoExistingDestination
+  :: (MonadFileSystem m, MonadMask m)
+  => PortableMode
+  -> StagedMetadata
+  -> OsPath
+  -> OsPath
+  -> m [FilePath]
+copyIntoExistingDestination destinationMode metadata staging destination =
+  mask $ \restore -> do
+    widenDirectoryForCleanup destination
+    let restoreDestinationMode = do
+          restored <- restorePortableMode destination destinationMode
+          unless restored $
+            throwError $
+              userError
+                "bootstrap destination permissions could not be preserved"
+        handleException (err :: SomeException) = do
+          restoreDestinationMode `catchError` const (return ())
+          throwM err
+        handleFilesystemError err = do
+          restoreDestinationMode `catchError` const (return ())
+          throwError err
+    modeFailures <-
+      (restore $ copyDirectoryContents metadata staging destination)
+        `catch` handleException
+        `catchError` handleFilesystemError
+    restoreDestinationMode
+    return modeFailures
 
 
 copyDirectoryTree
@@ -443,11 +496,11 @@ copyDirectoryEntries source destination entries =
               "unsupported bootstrap source entry: " <> path
       Symlink -> do
         target <- readSymlinkTarget sourceEntry
-        directoryLink <- isDirectory sourceEntry
+        linkType <- getSymbolicLinkType sourceEntry
         createSymbolicLink
           target
           destinationEntry
-          (if directoryLink then Directory else File)
+          linkType
 
 
 withDirectoryEntriesNoReplace
@@ -489,11 +542,11 @@ withDirectoryEntriesNoReplace source destination entries action =
                   "unsupported bootstrap source entry: " <> path
           Symlink -> do
             target <- readSymlinkTarget sourceEntry
-            directoryLink <- isDirectory sourceEntry
+            linkType <- getSymbolicLinkType sourceEntry
             createSymbolicLink
               target
               destinationEntry
-              (if directoryLink then Directory else File)
+              linkType
     createEntry
     getFileIdentity destinationEntry >>= \case
       Just identity ->
@@ -540,11 +593,45 @@ decodeArchive format bytes = do
   entries <- case format of
     ZipArchive -> decodeZip lazyBytes
     TarArchive -> decodeTar lazyBytes
-    TarGzipArchive -> decodeTar $ GZip.decompress lazyBytes
+    TarGzipArchive -> do
+      decompressed <-
+        boundedLazyBytes maximumDecodedTarBytes $
+          GZip.decompress lazyBytes
+      decodeTar decompressed
   validateEntryLayout entries
   return entries
  where
   lazyBytes = LazyByteString.fromStrict bytes
+
+
+maximumArchiveBytes :: Int
+maximumArchiveBytes = 16 * 1024 * 1024
+
+
+maximumExpandedArchiveBytes :: Integer
+maximumExpandedArchiveBytes = 64 * 1024 * 1024
+
+
+maximumArchiveEntries :: Int
+maximumArchiveEntries = 10000
+
+
+maximumDecodedTarBytes :: Int
+maximumDecodedTarBytes =
+  fromIntegral maximumExpandedArchiveBytes
+    + maximumArchiveEntries * 1024
+    + 1024
+
+
+boundedLazyBytes
+  :: Int
+  -> LazyByteString.ByteString
+  -> Either AcquisitionError LazyByteString.ByteString
+boundedLazyBytes limit bytes =
+  let bounded = LazyByteString.take (fromIntegral limit + 1) bytes
+  in if LazyByteString.length bounded > fromIntegral limit
+       then Left ArchiveResourceLimitExceeded
+       else Right bounded
 
 
 validateEntryLayout
@@ -748,15 +835,22 @@ widenDirectoryForCleanup path = do
       setPortableWritable path True
 
 
-cleanupRestricted
-  :: (MonadFileSystem m)
+protectRestrictedStaging
+  :: (MonadFileSystem m, MonadMask m)
   => OsPath
   -> StagedMetadata
-  -> IOError
   -> m a
-cleanupRestricted root metadata err = do
-  widenStagedMetadata root metadata `catchError` const (return ())
-  throwError err
+  -> m a
+protectRestrictedStaging root metadata action =
+  mask $ \_ ->
+    (action `catch` handleException)
+      `catchError` handleFilesystemError
+ where
+  widen = do
+    widenDirectoryForCleanup root `catchError` const (return ())
+    widenStagedMetadata root metadata `catchError` const (return ())
+  handleException (err :: SomeException) = widen >> throwM err
+  handleFilesystemError err = widen >> throwError err
 
 
 decodeZip
@@ -767,9 +861,16 @@ decodeZip bytes = do
     case Zip.toArchiveOrFail bytes of
       Left err -> Left $ InvalidArchive $ Text.pack err
       Right value -> Right value
-  traverse decodeEntry $ Zip.zEntries archive
+  let entries = Zip.zEntries archive
+  validateResourceUsage $
+    fromIntegral . Zip.eUncompressedSize <$> entries
+  decodeEntries maximumExpandedArchiveBytes entries
  where
-  decodeEntry entry
+  decodeEntries _ [] = Right []
+  decodeEntries remaining (entry : entries) = do
+    (decoded, consumed) <- decodeEntry remaining entry
+    (decoded :) <$> decodeEntries (remaining - consumed) entries
+  decodeEntry remaining entry
     | Zip.isEncryptedEntry entry =
         Left $ UnsupportedArchiveEntry $ Zip.eRelativePath entry
     | Zip.isEntrySymbolicLink entry =
@@ -778,13 +879,17 @@ decodeZip bytes = do
         relative <- normalizeArchiveEntryPath $ Zip.eRelativePath entry
         case zipEntryKind entry of
           ZipDirectory ->
-            Right $ StagedDirectory relative $ zipEntryMode entry
-          ZipRegularFile ->
-            Right $
-              StagedFile
-                relative
-                (LazyByteString.toStrict $ Zip.fromEntry entry)
-                (zipEntryMode entry)
+            Right (StagedDirectory relative (zipEntryMode entry), 0)
+          ZipRegularFile -> do
+            bounded <-
+              boundedLazyBytes
+                (fromIntegral remaining)
+                (Zip.fromEntry entry)
+            let contents = LazyByteString.toStrict bounded
+            Right
+              ( StagedFile relative contents $ zipEntryMode entry
+              , fromIntegral $ ByteString.length contents
+              )
           ZipUnsupported ->
             Left $ UnsupportedArchiveEntry $ Zip.eRelativePath entry
 
@@ -831,17 +936,21 @@ zipCreatorSystem entry =
 decodeTar
   :: LazyByteString.ByteString
   -> Either AcquisitionError [StagedEntry]
-decodeTar = go Nothing . Tar.decodeLongNames . Tar.read
+decodeTar = go 0 0 Nothing . Tar.decodeLongNames . Tar.read
  where
-  go _ Tar.Done = Right []
-  go _ (Tar.Fail err) = Left $ InvalidArchive $ Text.pack $ show err
-  go pendingPath (Tar.Next entry remaining) =
+  go _ _ _ Tar.Done = Right []
+  go _ _ _ (Tar.Fail err) = Left $ InvalidArchive $ Text.pack $ show err
+  go count expanded pendingPath (Tar.Next entry remaining) = do
+    let nextCount = count + 1
+        nextExpanded = expanded + tarEntrySize entry
+    whenResourceLimit nextCount nextExpanded
     case Tar.entryContent entry of
-      Tar.OtherEntryType 'g' _ _ -> go pendingPath remaining
+      Tar.OtherEntryType 'g' _ _ ->
+        go nextCount nextExpanded pendingPath remaining
       Tar.OtherEntryType 'x' contents _ -> do
         headers <- parsePaxHeaders contents
         let path = Text.unpack <$> Map.lookup "path" headers
-        go (path <|> pendingPath) remaining
+        go nextCount nextExpanded (path <|> pendingPath) remaining
       Tar.Directory
         | isTarRootDirectory
             (fromMaybe (TarEntry.entryTarPath entry) pendingPath) ->
@@ -850,13 +959,13 @@ decodeTar = go Nothing . Tar.decodeLongNames . Tar.read
                 (Just $ archivePermissions entry)
                 :
             )
-              <$> go Nothing remaining
+              <$> go nextCount nextExpanded Nothing remaining
       _ -> do
         decoded <-
           decodeEntry
             (fromMaybe (TarEntry.entryTarPath entry) pendingPath)
             entry
-        (decoded :) <$> go Nothing remaining
+        (decoded :) <$> go nextCount nextExpanded Nothing remaining
   decodeEntry archivePath entry = do
     relative <- normalizeArchiveEntryPath archivePath
     case Tar.entryContent entry of
@@ -872,6 +981,25 @@ decodeTar = go Nothing . Tar.decodeLongNames . Tar.read
   archivePermissions entry =
     fromIntegral (TarEntry.entryPermissions entry) .&. 0o777
   isTarRootDirectory path = path == "." || path == "./"
+  tarEntrySize entry =
+    case Tar.entryContent entry of
+      Tar.NormalFile _ size -> fromIntegral size
+      Tar.OtherEntryType _ _ size -> fromIntegral size
+      _ -> 0
+
+
+validateResourceUsage :: [Integer] -> Either AcquisitionError ()
+validateResourceUsage sizes =
+  whenResourceLimit (length sizes) (sum sizes)
+
+
+whenResourceLimit :: Int -> Integer -> Either AcquisitionError ()
+whenResourceLimit count expanded
+  | count > maximumArchiveEntries =
+      Left ArchiveResourceLimitExceeded
+  | expanded > maximumExpandedArchiveBytes =
+      Left ArchiveResourceLimitExceeded
+  | otherwise = Right ()
 
 
 parsePaxHeaders

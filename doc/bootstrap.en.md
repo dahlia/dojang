@@ -9,17 +9,15 @@ or incomplete source does not replace the destination.
 
 The destination must not exist or must be an empty directory.  It is the current
 directory unless `-r`/`--repository-dir` selects another path.  Publication
-refuses a destination that has been replaced by a symbolic link.  Other
-existing empty destinations are replaced atomically; if another process creates
-the destination during publication, Dojang fails instead of replacing it.  The
-current directory keeps its identity.  Publication requires the destination
-filesystem to support an atomic no-replace rename when replacing the
-destination as a whole.  Dojang fails closed when that operation is unavailable
-instead of falling back to a race-prone rename.  When publishing into the
-current directory, each entry is created without replacement.  If another
-process creates an entry first, bootstrap fails without overwriting it; cleanup
-removes only unchanged entries created by bootstrap.  Entries replaced by
-another process are preserved, and interruption triggers the same rollback.
+refuses a destination that has been replaced by a symbolic link.  A missing
+destination is published with an atomic no-replace rename.  An existing empty
+destination is atomically exchanged with staging when the filesystem supports
+directory exchange.  Otherwise, Dojang preserves the existing directory and
+creates each entry without replacement.  The current directory also keeps its
+identity and uses this entrywise path.  If another process creates an entry
+first, bootstrap fails without overwriting it; cleanup removes only unchanged
+entries created by bootstrap.  Entries replaced by another process are
+preserved, and interruption triggers the same rollback.
 
 
 Local directories and archives
@@ -50,8 +48,11 @@ components, and entries that collide case-insensitively or after Unicode
 normalization are rejected.  This collision check includes parent directories
 that an archive leaves implicit.  Unix ZIP entries that declare FIFOs, sockets,
 devices, or another unsupported type are also rejected rather than converted
-into regular files.  On POSIX systems, stored permission bits, including
-executable bits, are restored when the destination filesystem supports them.
+into regular files.  Archive input is limited to 16 MiB, expanded file contents
+to 64 MiB, and the entry count to 10,000.  Compressed tar decoding is bounded as
+well, so malformed or highly compressed input cannot expand without limit.  On
+POSIX systems, stored permission bits, including executable bits, are restored
+when the destination filesystem supports them.
 Bootstrap verifies the resulting permissions instead of assuming that a
 successful filesystem call restored every bit.  If exact restoration is
 unavailable, bootstrap publishes the contents and warns that the permissions
@@ -68,7 +69,10 @@ External transports
 Git, HTTPS clients, and other network tools are configured as machine-local
 external transports.  Dojang starts the configured executable directly,
 without a shell.  The source and staging destination each occupy one complete
-argument, so spaces and shell metacharacters remain data.
+argument, so spaces and shell metacharacters remain data.  The destination
+given to the transport is a child of an owner-only directory, so files created
+with the transport's default permissions are not exposed while acquisition is
+in progress.
 
 The default configuration file is:
 
