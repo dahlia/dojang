@@ -349,7 +349,9 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
               staging
               destination
             widenDirectoryForCleanup staging
-            removeDirectory staging
+            removeDirectory staging `catchError` \err -> do
+              restoreExchangedDestination staging destination
+              throwError err
             return modeFailures
 
 
@@ -375,13 +377,25 @@ validateExchangedDestination
   -> m ()
 validateExchangedDestination expectedIdentity staging destination = do
   actualIdentity <- getFileIdentity staging
-  unless (actualIdentity == expectedIdentity) $ do
-    restored <- exchangeDirectories staging destination
-    unless restored $
+  exchangedEntries <- listDirectory staging
+  unless
+    (actualIdentity == expectedIdentity && null exchangedEntries)
+    $ do
+      restoreExchangedDestination staging destination
       throwError $
-        userError "bootstrap destination exchange could not be reversed"
+        userError "bootstrap destination changed during publication"
+
+
+restoreExchangedDestination
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> m ()
+restoreExchangedDestination staging destination = do
+  restored <- exchangeDirectories staging destination
+  unless restored $
     throwError $
-      userError "bootstrap destination changed during publication"
+      userError "bootstrap destination exchange could not be reversed"
 
 
 copyDirectoryTree

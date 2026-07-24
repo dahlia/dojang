@@ -69,6 +69,7 @@ import Data.ByteString qualified
   , writeFile
   )
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
+import Data.Map.Strict qualified as Map
 import System.Directory qualified as Directory
 import System.Directory.OsPath
   ( doesDirectoryExist
@@ -1067,6 +1068,8 @@ createPrivateDirectoryIO :: OsPath -> IO ()
 createPrivateDirectoryIO path = do
   path' <- decodeFS path
   PosixDirectory.createDirectory path' 0o700
+  Posix.setFileMode path' 0o700
+    `Exception.onException` OsDirectory.removeDirectory path
 
 
 renameEntryNoReplaceIO :: FileType -> OsPath -> OsPath -> IO ()
@@ -1510,6 +1513,8 @@ data DryRunState = DryRunState
   -- A mode change is only effective while no 'Gone' change with a greater
   -- sequence number exists for the same path, since removing and recreating
   -- an entry resets its permissions.
+  , overlaidIdentities :: Map OsPath FileIdentity
+  -- ^ Stable identities explicitly retained across virtual atomic moves.
   , nextSequenceNumber :: SeqNo
   }
 
@@ -1541,7 +1546,13 @@ addChangeToFile path change = modify' $ \state ->
   let oFiles = overlaidFiles state
       nextSeqNo = nextSequenceNumber state
       newOFiles = alter (appendChange nextSeqNo) (normalise path) oFiles
-  in state{overlaidFiles = newOFiles, nextSequenceNumber = nextSeqNo + 1}
+      newOIdentities =
+        Map.delete (normalise path) $ overlaidIdentities state
+  in state
+       { overlaidFiles = newOFiles
+       , overlaidIdentities = newOIdentities
+       , nextSequenceNumber = nextSeqNo + 1
+       }
  where
   appendChange
     :: SeqNo
@@ -1564,6 +1575,106 @@ addModeToFile path mode = modify' $ \state ->
     -> Maybe (NonEmpty (SeqNo, PortableMode))
   appendChange seqNo (Just changes) = Just $ (seqNo, mode) :| toList changes
   appendChange seqNo Nothing = Just $ singleton (seqNo, mode)
+
+
+setOverlaidIdentity :: OsPath -> FileIdentity -> DryRunIO ()
+setOverlaidIdentity path identity =
+  modify' $ \state ->
+    state
+      { overlaidIdentities =
+          Map.insert
+            (normalise path)
+            identity
+            state.overlaidIdentities
+      }
+
+
+captureTreeIdentities
+  :: OsPath -> DryRunIO [(OsPath, Maybe FileIdentity)]
+captureTreeIdentities root = do
+  entries <- listDirectoryRecursively root []
+  forM ((Directory, mempty) : entries) $ \(_, relative) -> do
+    identity <- getFileIdentity $ root </> relative
+    return (relative, identity)
+
+
+restoreTreeIdentities
+  :: OsPath -> [(OsPath, Maybe FileIdentity)] -> DryRunIO ()
+restoreTreeIdentities root identities =
+  forM_ identities $ \(relative, identity) ->
+    forM_ identity $ setOverlaidIdentity $ root </> relative
+
+
+applyDryRunMode :: OsPath -> PortableMode -> DryRunIO ()
+applyDryRunMode path mode =
+  case mode.posixBits of
+    Just bits -> setPortableMode path bits
+    Nothing -> setPortableWritable path mode.writable
+
+
+moveDirectoryTreeInDryRun :: OsPath -> OsPath -> DryRunIO ()
+moveDirectoryTreeInDryRun source destination = do
+  entries <- listDirectoryRecursively source []
+  sourceMode <- getPortableMode source
+  entryModes <-
+    forM entries $ \(fileType, relative) -> do
+      mode <- getPortableMode $ source </> relative
+      return (fileType, relative, mode)
+  createDirectory destination
+  applyDryRunMode destination sourceMode
+  forM_ entryModes $ \(fileType, relative, mode) -> do
+    let sourceEntry = source </> relative
+        destinationEntry = destination </> relative
+    case fileType of
+      Directory -> do
+        createDirectory destinationEntry
+        applyDryRunMode destinationEntry mode
+      File -> do
+        copyFile sourceEntry destinationEntry
+        applyDryRunMode destinationEntry mode
+      Symlink -> do
+        target <- readSymlinkTarget sourceEntry
+        linkType <- getSymbolicLinkType sourceEntry
+        createSymbolicLink target destinationEntry linkType
+  removeDirectoryRecursively source
+
+#if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
+freshExchangePath :: OsPath -> DryRunIO OsPath
+freshExchangePath directory = do
+  sequenceNumber <- gets nextSequenceNumber
+  choose sequenceNumber
+ where
+  choose suffix = do
+    name <- encodePath $ ".dojang-exchange-" <> show suffix
+    let candidate = directory </> name
+    present <- exists candidate
+    symbolicLink <- isSymlink candidate
+    if present || symbolicLink
+      then choose $ suffix + 1
+      else return candidate
+
+
+exchangeDirectoriesDryRun :: OsPath -> OsPath -> DryRunIO Bool
+exchangeDirectoriesDryRun source destination = do
+  originalState <- gets id
+  ( do
+      sourceIdentities <- captureTreeIdentities source
+      destinationIdentities <- captureTreeIdentities destination
+      temporary <- freshExchangePath $ takeDirectory source
+      moveDirectoryTreeInDryRun source temporary
+      moveDirectoryTreeInDryRun destination source
+      moveDirectoryTreeInDryRun temporary destination
+      restoreTreeIdentities source destinationIdentities
+      restoreTreeIdentities destination sourceIdentities
+      return True
+    )
+    `catchError` \err -> do
+      modify' $ const originalState
+      throwError err
+#else
+exchangeDirectoriesDryRun :: OsPath -> OsPath -> DryRunIO Bool
+exchangeDirectoriesDryRun _ _ = return False
+#endif
 
 
 -- | Observes an overlaid entry's portable mode as of the given sequence
@@ -1781,6 +1892,9 @@ instance MonadFileSystem DryRunIO where
     contents <- readFile src
     writeFile dst contents
     removeFile src
+
+
+  exchangeDirectories = exchangeDirectoriesDryRun
 
 
   writeTemporaryFile directory template contents = do
@@ -2202,11 +2316,18 @@ instance MonadFileSystem DryRunIO where
 
   getFileIdentity path = do
     oFiles <- gets overlaidFiles
+    oIdentities <- gets overlaidIdentities
     case oFiles !? normalise path of
       Just ((_, Gone) :| _) -> return Nothing
       Just ((sequenceNumber, _) :| _) ->
-        return $ Just $ FileIdentity (-1) $ fromIntegral sequenceNumber
-      Nothing -> liftIO $ getFileIdentityIO path
+        return $
+          Just $
+            case oIdentities !? normalise path of
+              Just identity -> identity
+              Nothing -> FileIdentity (-1) $ fromIntegral sequenceNumber
+      Nothing -> case oIdentities !? normalise path of
+        Just identity -> return $ Just identity
+        Nothing -> liftIO $ getFileIdentityIO path
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns the result.
@@ -2225,6 +2346,7 @@ dryRunIO' action = do
     DryRunState
       { overlaidFiles = mempty
       , overlaidModes = mempty
+      , overlaidIdentities = mempty
       , nextSequenceNumber = 0
       }
 

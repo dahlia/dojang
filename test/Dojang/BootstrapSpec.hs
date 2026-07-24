@@ -1404,6 +1404,7 @@ instance MonadFileSystem FailingModeIO where
 
 data CurrentDirectoryRace
   = CreateBeforeCopy OsPath ByteString.ByteString
+  | CreateAfterExchange OsPath OsPath ByteString.ByteString
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
   | ReplaceBeforeMode OsPath OsPath
   | ReplaceAfterCopyThenFail
@@ -1554,6 +1555,23 @@ instance MonadFileSystem CurrentDirectoryIO where
         | destination == takeDirectory trigger ->
             liftIO $ Exception.throwIO UserInterrupt
       _ -> move
+  exchangeDirectories source destination = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    concurrentPresent <- case racedEntry of
+      Just (CreateAfterExchange racedDestination concurrentPath _)
+        | destination == racedDestination ->
+            liftIO $ exists concurrentPath
+      _ -> return False
+    exchanged <-
+      liftIO (exchangeDirectories source destination :: IO Bool)
+    case racedEntry of
+      Just (CreateAfterExchange racedDestination concurrentPath contents)
+        | destination == racedDestination
+            && exchanged
+            && not concurrentPresent ->
+            liftIO $ writeFile concurrentPath contents
+      _ -> return ()
+    return exchanged
   writeTemporaryFile directory template contents =
     liftIO (writeTemporaryFile directory template contents :: IO OsPath)
   withFileLock _ action = action
@@ -1872,6 +1890,39 @@ symlinkSpecs = do
       isLeft published === True
       replacementExists === True
       observedContents === replacementContents
+
+  it "preserves arbitrary entries raced into a directory exchange" $
+    hedgehog $ do
+      concurrentContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (published, destinationContents, stagedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            concurrentName <- encodeFS "concurrent"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                concurrent = staging </> concurrentName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                ( CreateAfterExchange
+                    destination
+                    concurrent
+                    concurrentContents
+                )
+                (publishStagedDirectory staging destination)
+            destinationValue <- readFile $ destination </> concurrentName
+            stagingValue <- readFile $ staging </> manifestName
+            return (result, destinationValue, stagingValue)
+      isLeft published === True
+      destinationContents === concurrentContents
+      stagedContents === "manifest"
 
   it "rolls back CWD publication interrupted between entries" $
     withTempDir $ \tmpDir _ -> do

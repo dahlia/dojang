@@ -4,11 +4,12 @@ Bootstrapping a repository
 `dojang init --from SOURCE` brings an existing repository onto a new machine,
 enrolls that machine, and offers to run the first `dojang apply`.  Acquisition
 happens in an owner-only temporary directory beside the destination.  POSIX
-systems apply the private mode during creation, and Windows uses a protected,
-inheritable owner-only ACL.  A filesystem that cannot enforce this protection
-is rejected.  Dojang checks the staged *dojang.toml* before publishing the
-repository, so an invalid or incomplete source does not replace the
-destination.
+systems request the private mode during creation and then reapply it, so even a
+restrictive process umask cannot make the staging directory unusable.  Windows
+uses a protected, inheritable owner-only ACL.  A filesystem that cannot enforce
+this protection is rejected.  Dojang checks the staged *dojang.toml* before
+publishing the repository, so an invalid or incomplete source does not replace
+the destination.
 
 The destination must not exist or must be an empty directory.  It is the current
 directory unless `-r`/`--repository-dir` selects another path.  Publication
@@ -16,19 +17,21 @@ refuses a destination that has been replaced by a symbolic link.  A missing
 destination is published with an atomic no-replace rename.  An existing empty
 destination is atomically exchanged with staging when the filesystem supports
 directory exchange.  If atomic exchange is unavailable, bootstrap rejects that
-existing destination instead of using a race-prone fallback.  The current
-directory keeps its identity by moving each complete top-level staging entry
-with an atomic no-replace rename.  If another process creates an entry first,
-bootstrap fails without overwriting it.  Stored permissions are restored while
-the entries are still private in staging.  Bootstrap captures entry identities
-before publication, and rollback atomically moves entries back into private
-quarantine before validating those identities and deleting anything.  Entries
-replaced by another process are restored instead, and interruption triggers the
-same rollback.  If a concurrent replacement cannot be restored safely, Dojang
-keeps the private staging tree and reports its location instead of deleting the
+existing destination instead of using a race-prone fallback.  If another
+process adds an entry to the old destination during that exchange, bootstrap
+reverses the exchange instead of deleting the entry.  The current directory
+keeps its identity by moving each complete top-level staging entry with an
+atomic no-replace rename.  If another process creates an entry first, bootstrap
+fails without overwriting it.  Stored permissions are restored while the entries
+are still private in staging.  Bootstrap captures entry identities before
+publication, and rollback atomically moves entries back into private quarantine
+before validating those identities and deleting anything.  Entries replaced by
+another process are restored instead, and interruption triggers the same
+rollback.  If a concurrent replacement cannot be restored safely, Dojang keeps
+the private staging tree and reports its location instead of deleting the
 recovery data.  Windows does not currently provide directory exchange through
-Dojang, so use an absent non-current-directory destination or run bootstrap
-from inside an existing empty destination.
+Dojang, so use an absent non-current-directory destination or run bootstrap from
+inside an existing empty destination.
 
 
 Local directories and archives
@@ -163,6 +166,10 @@ $ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 A dry run does not publish the repository, save enrollment, or apply files.
+On Linux and macOS, the in-memory preview models directory exchange, so an
+existing empty destination can be previewed without changing it.  The real
+bootstrap still verifies that the destination filesystem supports the atomic
+operation.
 For an external transport, Dojang redacts the source argument and environment
 values when it prints the executable request, and does not start the program.
 Because no files are fetched, that dry run cannot validate the remote manifest.

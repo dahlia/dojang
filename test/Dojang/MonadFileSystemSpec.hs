@@ -48,7 +48,9 @@ import Control.Concurrent (threadDelay)
 import Control.Exception qualified as Exception
 import Data.Bits ((.&.))
 import Data.Maybe (isJust)
+import System.Exit (ExitCode (ExitSuccess))
 import System.Posix.Files qualified as Posix
+import System.Posix.Process qualified as PosixProcess
 import System.OsPath (decodeFS)
 import System.Timeout (timeout)
 #endif
@@ -114,6 +116,10 @@ posixLockFileSpec = pure ()
 
 posixPortableModeSpec :: Spec
 posixPortableModeSpec = pure ()
+
+
+posixPrivateDirectorySpec :: Spec
+posixPrivateDirectorySpec = pure ()
 
 
 posixDryRunPortableModeSpec :: Spec
@@ -190,6 +196,22 @@ posixPortableModeSpec = do
       (mode' .&. 0o777) `shouldBe` 0o444
 
 
+posixPrivateDirectorySpec :: Spec
+posixPrivateDirectorySpec =
+  specify "createPrivateDirectory overrides a restrictive umask" $
+    withTempDir $ \tmpDir _ -> do
+      privateName <- encodeFS "private"
+      let private = tmpDir </> privateName
+      processId <-
+        PosixProcess.forkProcess $ do
+          _ <- Posix.setFileCreationMask 0o777
+          createPrivateDirectory private :: IO ()
+      status <- PosixProcess.getProcessStatus True False processId
+      status `shouldBe` Just (PosixProcess.Exited ExitSuccess)
+      getPortableMode private
+        `shouldReturn` portableModeFromBits 0o700
+
+
 posixDryRunPortableModeSpec :: Spec
 posixDryRunPortableModeSpec = do
   specify "getPortableMode reads exact bits through the overlay" $
@@ -251,6 +273,41 @@ posixCopyInterruptionSpec =
       finished <- timeout 5000000 $ takeMVar result
       finished `shouldSatisfy` isJust
       readFile destination `shouldReturn` replacement
+#endif
+
+#if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
+dryRunExchangeSpec :: Spec
+dryRunExchangeSpec =
+  describe "exchangeDirectories" $
+    it "swaps virtual trees without touching the real filesystem" $
+      withTempDir $ \tmpDir _ -> do
+        sourceName <- encodeFS "source"
+        destinationName <- encodeFS "destination"
+        sourceFileName <- encodeFS "source-file"
+        destinationFileName <- encodeFS "destination-file"
+        let source = tmpDir </> sourceName
+            destination = tmpDir </> destinationName
+        observed <-
+          dryRunIO $ do
+            createDirectory source
+            createDirectory destination
+            writeFile (source </> sourceFileName) "source"
+            writeFile (destination </> destinationFileName) "destination"
+            sourceIdentity <- getFileIdentity source
+            destinationIdentity <- getFileIdentity destination
+            exchanged <- exchangeDirectories source destination
+            (,,,,)
+              <$> pure exchanged
+              <*> readFile (source </> destinationFileName)
+              <*> readFile (destination </> sourceFileName)
+              <*> ((== destinationIdentity) <$> getFileIdentity source)
+              <*> ((== sourceIdentity) <$> getFileIdentity destination)
+        observed `shouldBe` (True, "destination", "source", True, True)
+        doesPathExist source `shouldReturn` False
+        doesPathExist destination `shouldReturn` False
+#else
+dryRunExchangeSpec :: Spec
+dryRunExchangeSpec = pure ()
 #endif
 
 
@@ -324,6 +381,7 @@ spec = do
       isRegularFile nonExistentP `shouldReturn` False
 
     posixRegularFileSpec
+    posixPrivateDirectorySpec
 
     specify "isDirectory" $ do
       isDirectory packageYamlP `shouldReturn` False
@@ -601,6 +659,8 @@ spec = do
     specify "getHomeDirectory" $ do
       homeDirectory <- OsDirectory.getHomeDirectory
       dryRunIO getHomeDirectory `shouldReturn` homeDirectory
+
+    dryRunExchangeSpec
 
     describe "isFile" $ do
       it "checks an actual file that exists on the real file system" $ do

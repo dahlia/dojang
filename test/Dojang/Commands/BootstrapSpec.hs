@@ -273,6 +273,26 @@ spec = sequential $ do
         exists destination `shouldReturn` False
         exists stateRoot `shouldReturn` False
 
+    it "simulates publication into an existing empty destination" $
+      withBootstrapFixture $ \_ sourceText destination stateRoot home appEnv -> do
+        createDirectory destination
+        result <-
+          withHome home $
+            dryRunIO $
+              runAppWithoutLogging appEnv{dryRun = True} $
+                bootstrap
+                  sourceText
+                  Nothing
+                  Nothing
+                  []
+                  True
+                  True
+                  Nothing
+                  []
+        result `shouldBe` ExitSuccess
+        listDirectory destination `shouldReturn` []
+        exists stateRoot `shouldReturn` False
+
     it "requires --yes before a non-interactive bootstrap mutates anything" $
       withBootstrapFixture $ \_ sourceText destination _ home appEnv -> do
         withHome

@@ -27,9 +27,11 @@ To be released.
     existing empty destination is atomically exchanged where supported and is
     rejected when a safe exchange is unavailable.  Publication refuses a
     destination replaced by a symbolic link or concurrently changed during the
-    final exchange.  The current working directory keeps its identity by
-    moving each complete top-level staging entry with an atomic no-replace
-    rename.  Stored permissions are restored while entries are still private.
+    final exchange.  If an entry is concurrently added to the old destination
+    during exchange, publication reverses the exchange and preserves it.  The
+    current working directory keeps its identity by moving each complete
+    top-level staging entry with an atomic no-replace rename.  Stored
+    permissions are restored while entries are still private.
     Entry identities are captured before publication, and rollback first moves
     entries into private quarantine before validating their identities and
     deleting them.  This preserves files raced into or replaced within the
@@ -37,9 +39,10 @@ To be released.
     concurrent replacement cannot be restored safely, the private recovery
     data is retained instead of deleted.  Filesystems without an atomic
     no-replace rename cannot publish a non-current-directory destination and
-    are rejected rather than using a race-prone fallback.  A dry run does not
-    start an external transport and redacts its source argument and environment
-    values.
+    are rejected rather than using a race-prone fallback.  On Linux and macOS,
+    dry runs model directory exchange in memory, including publication into an
+    existing empty destination.  A dry run does not start an external transport
+    and redacts its source argument and environment values.
     Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
     other unsupported entry types before reading or extraction.  ZIP
     directories marked with the DOS directory attribute are accepted even when
@@ -50,15 +53,16 @@ To be released.
     when the directory source is a symbolic link, while an existing empty
     destination keeps its original root permissions after publication.
     Permission restoration is verified after it is applied, so partial
-    filesystem support produces the documented warning.  External transports
-    run beneath an owner-only staging parent.  Windows creates that parent with
-    a protected, inheritable owner-only ACL and rejects filesystems that cannot
-    enforce persistent ACLs.  Archive input is limited to 16 MiB, expanded file
-    contents to 64 MiB, and entry counts to 10,000, including bounded gzip
-    decoding.  Broken Windows directory links retain their intrinsic link type,
-    and interrupted publication widens restrictive staging before cleanup.
-    Noninteractive bootstrap requires both `--no-interactive` and `--yes`.
-    [[#47], [#74]]
+    filesystem support produces the documented warning.  POSIX reapplies mode
+    `0700` after creating staging, so a restrictive umask cannot leave it
+    unusable.  External transports run beneath an owner-only staging parent.
+    Windows creates that parent with a protected, inheritable owner-only ACL and
+    rejects filesystems that cannot enforce persistent ACLs.  Archive input is
+    limited to 16 MiB, expanded file contents to 64 MiB, and entry counts to
+    10,000, including bounded gzip decoding.  Broken Windows directory links
+    retain their intrinsic link type, and interrupted publication widens
+    restrictive staging before cleanup.  Noninteractive bootstrap requires
+    both `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's
