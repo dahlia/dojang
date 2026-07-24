@@ -24,32 +24,35 @@ To be released.
     files are rejected without blocking.  Unsupported permission metadata
     produces a warning without discarding the acquired contents.  An absent or
     missing destination is published with an atomic no-replace rename.  An
-    existing empty destination is atomically exchanged where supported;
-    otherwise its identity is preserved and its entries are created without
-    replacement.  Publication refuses a destination replaced by a symbolic
-    link or concurrently changed during the final exchange.  The same
-    entrywise path preserves the current working directory.  Rollback removes
-    only unchanged entries created by Dojang, preserving files raced into or
-    replaced within the directory, and also runs when publication is
-    interrupted.
-    Filesystems without an atomic no-replace rename cannot publish a
-    non-current-directory destination and are rejected rather than using a
-    race-prone fallback.  A dry run does not start an external transport and
-    redacts its source argument and environment values.  Directory sources and
-    Unix ZIP archives reject FIFOs, sockets, devices, and other unsupported
-    entry types before reading or extraction.  Standard tar archives whose
-    first entry is `./` are accepted.  A missing destination inherits the
-    source root's permissions, including the target permissions when the
-    directory source is a symbolic link, while an existing empty destination
-    keeps its original root permissions after publication.  Permission
-    restoration is verified after it is applied, so partial filesystem support
-    produces the documented warning.  External transports run beneath an
-    owner-only staging parent.  Archive input is limited to 16 MiB, expanded
-    file contents to 64 MiB, and entry counts to 10,000, including bounded gzip
-    decoding.  Broken Windows directory links retain their intrinsic link
-    type, and interrupted publication widens restrictive staging before
-    cleanup.  Noninteractive bootstrap requires both `--no-interactive` and
-    `--yes`.  [[#47], [#74]]
+    existing empty destination is atomically exchanged where supported and is
+    rejected when a safe exchange is unavailable.  Publication refuses a
+    destination replaced by a symbolic link or concurrently changed during the
+    final exchange.  The current working directory keeps its identity by
+    moving each complete top-level staging entry with an atomic no-replace
+    rename.  Entry identities are captured before publication, and rollback
+    removes only unchanged entries created by Dojang, preserving files raced
+    into or replaced within the directory even when copying or publication is
+    interrupted.  Filesystems without an atomic no-replace rename cannot
+    publish a non-current-directory destination and are rejected rather than
+    using a race-prone fallback.  A dry run does not start an external
+    transport and redacts its source argument and environment values.
+    Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
+    other unsupported entry types before reading or extraction.  A destination
+    nested inside its local directory source is rejected before staging is
+    created.  Standard tar archives whose first entry is `./` are accepted.  A
+    missing destination inherits the source root's permissions, including the
+    target permissions when the directory source is a symbolic link, while an
+    existing empty destination keeps its original root permissions after
+    publication.  Permission restoration is verified after it is applied, so
+    partial filesystem support produces the documented warning.  External
+    transports run beneath an owner-only staging parent.  Windows creates that
+    parent with a protected, inheritable owner-only ACL and rejects filesystems
+    that cannot enforce persistent ACLs.  Archive input is limited to 16 MiB,
+    expanded file contents to 64 MiB, and entry counts to 10,000, including
+    bounded gzip decoding.  Broken Windows directory links retain their
+    intrinsic link type, and interrupted publication widens restrictive
+    staging before cleanup.  Noninteractive bootstrap requires both
+    `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

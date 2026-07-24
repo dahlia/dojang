@@ -282,6 +282,8 @@ instance
   writeFile dst = App . lift . lift . lift . writeFile dst
   replaceFile src = App . lift . lift . lift . replaceFile src
   renameDirectory src = App . lift . lift . lift . renameDirectory src
+  renameEntry fileType src =
+    App . lift . lift . lift . renameEntry fileType src
   exchangeDirectories src =
     App . lift . lift . lift . exchangeDirectories src
   writeTemporaryFile directory template contents =

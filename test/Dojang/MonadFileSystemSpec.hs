@@ -29,7 +29,7 @@ import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (length, readFile, writeFile)
+import Data.ByteString qualified (length, readFile, replicate, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
@@ -44,7 +44,10 @@ import System.FilePath (combine)
 
 
 #ifndef mingw32_HOST_OS
+import Control.Concurrent (threadDelay)
+import Control.Exception qualified as Exception
 import Data.Bits ((.&.))
+import Data.Maybe (isJust)
 import System.Posix.Files qualified as Posix
 import System.OsPath (decodeFS)
 import System.Timeout (timeout)
@@ -115,6 +118,10 @@ posixPortableModeSpec = pure ()
 
 posixDryRunPortableModeSpec :: Spec
 posixDryRunPortableModeSpec = pure ()
+
+
+posixCopyInterruptionSpec :: Spec
+posixCopyInterruptionSpec = pure ()
 #else
 posixRegularFileSpec :: Spec
 posixRegularFileSpec =
@@ -206,6 +213,44 @@ posixDryRunPortableModeSpec = do
       observed `shouldBe` portableModeFromBits 0o600
       mode <- Posix.fileMode <$> Posix.getFileStatus fooFP
       (mode .&. 0o777) `shouldBe` 0o644
+
+
+posixCopyInterruptionSpec :: Spec
+posixCopyInterruptionSpec =
+  specify
+    "copyRegularFileNoReplace preserves a replacement after interruption"
+    $ withTempDir
+    $ \tmpDir _ -> do
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      displacedName <- encodeFS "displaced"
+      let source = tmpDir </> sourceName
+          destination = tmpDir </> destinationName
+          displaced = tmpDir </> displacedName
+          replacement = "concurrent replacement"
+      writeFile source $ Data.ByteString.replicate (32 * 1024 * 1024) 0x61
+      result <- newEmptyMVar
+      worker <-
+        forkIO $ do
+          outcome <-
+            Exception.try $
+              copyRegularFileNoReplace source destination
+          putMVar result (outcome :: Either Exception.SomeException Bool)
+      appeared <-
+        timeout 5000000 $
+          let waitForDestination = do
+                present <- exists destination
+                if present
+                  then return ()
+                  else threadDelay 1000 >> waitForDestination
+          in waitForDestination
+      appeared `shouldBe` Just ()
+      OsDirectory.renameFile destination displaced
+      writeFile destination replacement
+      Exception.throwTo worker Exception.UserInterrupt
+      finished <- timeout 5000000 $ takeMVar result
+      finished `shouldSatisfy` isJust
+      readFile destination `shouldReturn` replacement
 #endif
 
 
@@ -418,6 +463,8 @@ spec = do
               return (either isAlreadyExistsError (const False) result, contents)
         refused === True
         observed === destinationContents
+
+    posixCopyInterruptionSpec
 
     specify "renameDirectory" $ withTempDir $ \tmpDir _ -> do
       createDirectory $ tmpDir </> foo

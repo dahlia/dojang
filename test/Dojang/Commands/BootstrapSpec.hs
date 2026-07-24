@@ -6,6 +6,7 @@
 module Dojang.Commands.BootstrapSpec (spec) where
 
 import Control.Exception (bracket)
+import Control.Exception qualified as Exception
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
@@ -13,7 +14,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import Hedgehog (forAll)
+import Hedgehog (evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.Exit (ExitCode (ExitSuccess))
@@ -310,6 +311,40 @@ spec = sequential $ do
           )
           `shouldThrow` (== cliError)
         readFile (destination </> childName) `shouldReturn` "untouched"
+
+    it "rejects arbitrary destinations nested inside a directory source" $
+      hedgehog $ do
+        suffix <-
+          forAll $
+            Gen.string
+              (Range.linear 1 40)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        (rejected, destinationExists, sourceEntries) <-
+          evalIO $
+            withBootstrapFixture $
+              \source sourceText _ _ home appEnv -> do
+                destinationName <- encodeFS $ "clone-" <> suffix
+                let destination = source </> destinationName
+                result <-
+                  Exception.try
+                    $ withHome home
+                    $ runAppWithoutLogging
+                      appEnv{sourceDirectory = destination}
+                    $ bootstrap
+                      sourceText
+                      Nothing
+                      Nothing
+                      []
+                      True
+                      True
+                      Nothing
+                      []
+                present <- exists destination
+                entries <- traverse decodeFS =<< listDirectory source
+                return (result, present, entries)
+        rejected === Left cliError
+        destinationExists === False
+        sourceEntries === ["dojang.toml"]
 
     it "cleans staging when repository validation fails" $
       withBootstrapFixture $ \source sourceText destination _ home appEnv -> do

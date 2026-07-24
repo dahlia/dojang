@@ -17,6 +17,7 @@ import Control.Monad (unless, when)
 import Control.Monad.Catch (onException)
 import Control.Monad.Except (MonadError (catchError))
 import Control.Monad.Reader (asks, local)
+import Data.List (isPrefixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -41,6 +42,7 @@ import Dojang.App
   )
 import Dojang.Bootstrap
   ( AcquisitionError (..)
+  , BuiltinSource (..)
   , StagedMetadata
   , detectBuiltinSource
   , emptyStagedMetadata
@@ -71,6 +73,7 @@ import Dojang.ExitCodes
   )
 import Dojang.MonadFileSystem (MonadFileSystem (..))
 import Dojang.Syntax.Transport qualified as TransportSyntax
+import Dojang.Types.PathIdentity (pathIdentityComponents)
 import Dojang.Types.Transport
   ( EnvironmentNameCase (..)
   , TransportLookupError (..)
@@ -207,23 +210,32 @@ bootstrapInto
   facts
   destination = do
     ensureAvailableDestination destination
+    preparedBuiltin <-
+      ( case requestedTransport of
+          Nothing -> Just <$> prepareBuiltin source destination
+          Just _ -> return Nothing
+      )
+        `catchError` reportFilesystemError
     stagingRoot <- newStagingPath destination
     repositoryName <- encodePath "repository"
     let staging = stagingRoot </> repositoryName
         cleanup = cleanupStaging stagingRoot
     catchCommandExit
       ( onException
-          (bootstrapAction stagingRoot staging)
+          (bootstrapAction preparedBuiltin stagingRoot staging)
           cleanup
       )
       (\exitCode -> cleanup >> abortCommand exitCode)
    where
-    bootstrapAction stagingRoot staging = do
+    bootstrapAction preparedBuiltin stagingRoot staging = do
       createPrivateDirectory stagingRoot
         `catchError` reportFilesystemError
       acquired <-
         ( case requestedTransport of
-            Nothing -> acquireBuiltin source staging
+            Nothing ->
+              case preparedBuiltin of
+                Just builtin -> acquireBuiltin builtin staging
+                Nothing -> die' cliError "Bootstrap source was not prepared."
             Just name ->
               acquireExternal
                 source
@@ -292,16 +304,43 @@ newStagingPath destination = do
 
 acquireBuiltin
   :: (MonadFileSystem i, AppEffects i)
-  => FilePath
+  => BuiltinSource
   -> OsPath
   -> App i (Maybe StagedMetadata)
-acquireBuiltin source staging = do
-  sourcePath <- encodePath source
-  detected <- detectBuiltinSource sourcePath
-  builtin <- either reportAcquisitionError return detected
+acquireBuiltin builtin staging = do
+  let sourcePath = case builtin of
+        DirectorySource path -> path
+        ArchiveSource _ path -> path
   printAcquisition sourcePath staging
   staged <- liftApp $ stageBuiltinSourceWithMetadata builtin staging
   either reportAcquisitionError (return . Just) staged
+
+
+prepareBuiltin
+  :: (MonadFileSystem i, AppEffects i)
+  => FilePath
+  -> OsPath
+  -> App i BuiltinSource
+prepareBuiltin source destination = do
+  sourcePath <- encodePath source
+  detected <- detectBuiltinSource sourcePath
+  builtin <- either reportAcquisitionError return detected
+  case builtin of
+    DirectorySource directory -> do
+      canonicalSource <- canonicalizePath directory
+      canonicalDestination <- canonicalizePath destination
+      let sourceComponents = pathIdentityComponents canonicalSource
+          destinationComponents =
+            pathIdentityComponents canonicalDestination
+      when
+        ( sourceComponents /= destinationComponents
+            && sourceComponents `isPrefixOf` destinationComponents
+        )
+        $ die'
+          cliError
+          "Bootstrap destination cannot be inside its directory source."
+    ArchiveSource _ _ -> return ()
+  return builtin
 
 
 acquireExternal

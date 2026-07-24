@@ -36,7 +36,7 @@ import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Control.Monad.Trans.Class (lift)
 import System.Directory.OsPath qualified
 import System.FilePath qualified as FilePath
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, takeDirectory)
 import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
 #endif
@@ -75,7 +75,7 @@ import Dojang.Bootstrap
 #endif
 import Dojang.MonadFileSystem
   ( FileIdentity
-  , FileType (Directory)
+  , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
   )
@@ -1047,7 +1047,7 @@ archiveModeSpecs = do
       published `shouldBe` Right ["writability-only"]
       readFile (destination </> limitedName) `shouldReturn` "contents"
 
-  it "preserves an existing destination when atomic exchange is unavailable" $
+  it "rejects an existing destination when atomic exchange is unavailable" $
     withTempDir $ \tmpDir _ -> do
       stagingName <- encodeFS "staging"
       destinationName <- encodeFS "failing-rename"
@@ -1065,14 +1065,14 @@ archiveModeSpecs = do
             emptyStagedMetadata
             staging
             destination
-      result `shouldBe` Right []
+      result `shouldSatisfy` isLeft
       isDirectory destination `shouldReturn` True
       getFileIdentity destination `shouldReturn` originalIdentity
       getPortableMode destination
         `shouldReturn` portableModeFromBits 0o600
       setPortableMode destination 0o700
-      readFile (destination </> manifestName) `shouldReturn` "manifest"
-      isDirectory staging `shouldReturn` False
+      listDirectory destination `shouldReturn` []
+      readFile (staging </> manifestName) `shouldReturn` "manifest"
 
 
 archiveSpecialFileSpecs :: Spec
@@ -1243,6 +1243,11 @@ instance MonadFileSystem FailingModeIO where
         throwError $ userError "injected rename failure"
       "interrupted-publish" -> liftIO $ Exception.throwIO UserInterrupt
       _ -> liftIO (renameDirectory source destination :: IO ())
+  exchangeDirectories source destination = do
+    destinationPath <- liftIO (decodePath destination :: IO FilePath)
+    if FilePath.takeFileName destinationPath == "failing-rename"
+      then return False
+      else liftIO (exchangeDirectories source destination :: IO Bool)
   writeTemporaryFile directory template contents =
     liftIO (writeTemporaryFile directory template contents :: IO OsPath)
   withFileLock _ action = action
@@ -1285,6 +1290,11 @@ instance MonadFileSystem FailingModeIO where
 data CurrentDirectoryRace
   = CreateBeforeCopy OsPath ByteString.ByteString
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
+  | ReplaceAfterCopyThenFail
+      OsPath
+      OsPath
+      ByteString.ByteString
+      OsPath
   | InterruptBeforeCopy OsPath
   | FailStagingRemoval OsPath
 
@@ -1363,8 +1373,17 @@ instance MonadFileSystem CurrentDirectoryIO where
         | destination == trigger ->
             liftIO $ Exception.throwIO UserInterrupt
       _ -> return ()
-    liftCurrentDirectoryIO $
+    copied <-
+      liftCurrentDirectoryIO $
       copyRegularFileNoReplace source destination
+    case racedEntry of
+      Just (ReplaceAfterCopyThenFail racedPath replacedPath replacement _)
+        | destination == racedPath ->
+            liftIO $ do
+              removeFile replacedPath
+              writeFile replacedPath replacement
+      _ -> return ()
+    return copied
   writeFile path contents = do
     (_, racedEntry) <- CurrentDirectoryIO ask
     case racedEntry of
@@ -1380,6 +1399,34 @@ instance MonadFileSystem CurrentDirectoryIO where
     liftIO (replaceFile source destination :: IO ())
   renameDirectory source destination =
     liftIO (renameDirectory source destination :: IO ())
+  renameEntry fileType source destination = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    let move =
+          liftCurrentDirectoryIO $
+            renameEntry fileType source destination
+    case racedEntry of
+      Just (CreateBeforeCopy racedPath racedContents)
+        | destination == takeDirectory racedPath -> do
+            liftIO $ do
+              createDirectory destination
+              writeFile racedPath racedContents
+            move
+      Just (ReplaceThenFail trigger replacedPath replacement)
+        | destination == takeDirectory trigger -> do
+            liftIO $ do
+              removeFile replacedPath
+              writeFile replacedPath replacement
+            throwError $ userError "injected publication failure"
+      Just (ReplaceAfterCopyThenFail racedPath replacedPath replacement _)
+        | destination == racedPath -> do
+            move
+            liftIO $ do
+              renameEntry fileType replacedPath source
+              writeFile replacedPath replacement
+      Just (InterruptBeforeCopy trigger)
+        | destination == takeDirectory trigger ->
+            liftIO $ Exception.throwIO UserInterrupt
+      _ -> move
   writeTemporaryFile directory template contents =
     liftIO (writeTemporaryFile directory template contents :: IO OsPath)
   withFileLock _ action = action
@@ -1401,6 +1448,9 @@ instance MonadFileSystem CurrentDirectoryIO where
       (_, racedEntry) <- CurrentDirectoryIO ask
       case racedEntry of
         Just (FailStagingRemoval staging)
+          | value == staging ->
+              throwError $ userError "injected staging removal failure"
+        Just (ReplaceAfterCopyThenFail _ _ _ staging)
           | value == staging ->
               throwError $ userError "injected staging removal failure"
         _ -> liftCurrentDirectoryIO (removeDirectory value :: IO ())
@@ -1608,6 +1658,39 @@ symlinkSpecs = do
             contents <- readFile owned
             return (result, contents)
       isLeft published === True
+      observedContents === replacementContents
+
+  it "does not claim a replacement raced in after entry creation" $
+    hedgehog $ do
+      replacementContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (published, replacementExists, observedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            ownedName <- encodeFS "owned"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                owned = destination </> ownedName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> ownedName) "bootstrap"
+            result <-
+              runCurrentDirectoryIOWithRace
+                destination
+                ( ReplaceAfterCopyThenFail
+                    owned
+                    owned
+                    replacementContents
+                    staging
+                )
+                (publishStagedDirectory staging destination)
+            present <- exists owned
+            contents <- if present then readFile owned else return ""
+            return (result, present, contents)
+      isLeft published === True
+      replacementExists === True
       observedContents === replacementContents
 
   it "rolls back CWD publication interrupted between entries" $

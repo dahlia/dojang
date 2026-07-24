@@ -59,6 +59,7 @@ import GHC.Generics (Generic)
 import System.FilePath.Posix qualified as Posix
 import System.OsPath
   ( OsPath
+  , splitDirectories
   , takeDirectory
   , (</>)
   )
@@ -326,39 +327,28 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
         else do
           destinationMode <- getPortableMode destination
           destinationIdentity <- getFileIdentity destination
-          exchanged <-
-            protectRestrictedStaging staging metadata $ do
-              modeFailures <-
-                applyStagedMetadata staging $ withoutRootMetadata metadata
-              rootModeRestored <- restorePortableMode staging destinationMode
-              unless rootModeRestored $
-                throwError $
-                  userError
-                    "bootstrap destination permissions could not be preserved"
-              didExchange <- case destinationIdentity of
-                Nothing -> return False
-                Just _ -> exchangeDirectories staging destination
-              if not didExchange
-                then do
-                  widenDirectoryForCleanup staging
-                  widenStagedMetadata staging metadata
-                  return Nothing
-                else do
-                  validateExchangedDestination
-                    destinationIdentity
-                    staging
-                    destination
-                  widenDirectoryForCleanup staging
-                  removeDirectory staging
-                  return $ Just modeFailures
-          case exchanged of
-            Just modeFailures -> return modeFailures
-            Nothing ->
-              copyIntoExistingDestination
-                destinationMode
-                metadata
-                staging
-                destination
+          protectRestrictedStaging staging metadata $ do
+            modeFailures <-
+              applyStagedMetadata staging $ withoutRootMetadata metadata
+            rootModeRestored <- restorePortableMode staging destinationMode
+            unless rootModeRestored $
+              throwError $
+                userError
+                  "bootstrap destination permissions could not be preserved"
+            didExchange <- case destinationIdentity of
+              Nothing -> return False
+              Just _ -> exchangeDirectories staging destination
+            unless didExchange $
+              throwError $
+                userError
+                  "filesystem cannot atomically exchange the bootstrap destination"
+            validateExchangedDestination
+              destinationIdentity
+              staging
+              destination
+            widenDirectoryForCleanup staging
+            removeDirectory staging
+            return modeFailures
 
 
 resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
@@ -390,36 +380,6 @@ validateExchangedDestination expectedIdentity staging destination = do
         userError "bootstrap destination exchange could not be reversed"
     throwError $
       userError "bootstrap destination changed during publication"
-
-
-copyIntoExistingDestination
-  :: (MonadFileSystem m, MonadMask m)
-  => PortableMode
-  -> StagedMetadata
-  -> OsPath
-  -> OsPath
-  -> m [FilePath]
-copyIntoExistingDestination destinationMode metadata staging destination =
-  mask $ \restore -> do
-    widenDirectoryForCleanup destination
-    let restoreDestinationMode = do
-          restored <- restorePortableMode destination destinationMode
-          unless restored $
-            throwError $
-              userError
-                "bootstrap destination permissions could not be preserved"
-        handleException (err :: SomeException) = do
-          restoreDestinationMode `catchError` const (return ())
-          throwM err
-        handleFilesystemError err = do
-          restoreDestinationMode `catchError` const (return ())
-          throwError err
-    modeFailures <-
-      (restore $ copyDirectoryContents metadata staging destination)
-        `catch` handleException
-        `catchError` handleFilesystemError
-    restoreDestinationMode
-    return modeFailures
 
 
 copyDirectoryTree
@@ -470,8 +430,7 @@ copyDirectoryContents retainedMetadata source destination = do
         withoutRootMetadata $
           overlayStagedMetadata retainedMetadata sourceMetadata
   withDirectoryEntriesNoReplace source destination entries $ \_ -> do
-    widenStagedMetadata source sourceMetadata
-    removeDirectoryRecursively source
+    removeDirectory source
     applyStagedMetadata destination publishedMetadata
 
 
@@ -511,52 +470,60 @@ withDirectoryEntriesNoReplace
   -> ([PublishedEntry] -> m a)
   -> m a
 withDirectoryEntriesNoReplace source destination entries action =
-  copyEntries [] entries
+  identifyEntries entries >>= moveTopLevelEntries []
  where
-  copyEntries created [] = action created
-  copyEntries created ((fileType, relative) : remaining) =
+  identifyEntries =
+    mapM $ \(fileType, relative) ->
+      getFileIdentity (source </> relative) >>= \case
+        Just identity -> return (fileType, relative, identity)
+        Nothing -> do
+          path <- decodePath relative
+          throwError $
+            userError $
+              "filesystem cannot identify staged bootstrap entry: " <> path
+
+  topLevel relative =
+    case splitDirectories relative of
+      component : _ -> component
+      [] -> relative
+
+  topLevelEntries identified =
+    [ (fileType, relative)
+    | (fileType, relative, _) <- identified
+    , relative == topLevel relative
+    ]
+
+  publishedEntries identified relative =
+    [ PublishedEntry fileType (destination </> entry) identity
+    | (fileType, entry, identity) <- identified
+    , topLevel entry == relative
+    ]
+
+  moveTopLevelEntries created identified =
+    moveEntries created identified $ topLevelEntries identified
+
+  moveEntries created _ [] = action created
+  moveEntries created identified ((fileType, relative) : remaining) =
     mask $ \restore -> do
-      published <- createPublishedEntry fileType relative
-      let cleanup = cleanupPublishedEntry published
+      let published = publishedEntries identified relative
+          cleanup = cleanupPublishedEntries published
           continue =
             restore $
-              copyEntries (published : created) remaining
+              moveEntries (created <> published) identified remaining
           handleException (err :: SomeException)
             | Just (_ :: IOError) <- fromException err = throwM err
             | otherwise = cleanup >> throwM err
+      renameEntry
+        fileType
+        (source </> relative)
+        (destination </> relative)
       (continue `catch` handleException)
         `catchError` \err -> cleanup >> throwError err
 
-  createPublishedEntry fileType relative = do
-    let sourceEntry = source </> relative
-        destinationEntry = destination </> relative
-        createEntry = case fileType of
-          Directory -> createDirectory destinationEntry
-          File -> do
-            copied <-
-              copyRegularFileNoReplace sourceEntry destinationEntry
-            unless copied $ do
-              path <- decodePath relative
-              throwError $
-                userError $
-                  "unsupported bootstrap source entry: " <> path
-          Symlink -> do
-            target <- readSymlinkTarget sourceEntry
-            linkType <- getSymbolicLinkType sourceEntry
-            createSymbolicLink
-              target
-              destinationEntry
-              linkType
-    createEntry
-    getFileIdentity destinationEntry >>= \case
-      Just identity ->
-        return $ PublishedEntry fileType destinationEntry identity
-      Nothing -> do
-        removePublishedEntry fileType destinationEntry
-        path <- decodePath relative
-        throwError $
-          userError $
-            "filesystem cannot identify published bootstrap entry: " <> path
+
+cleanupPublishedEntries
+  :: (MonadFileSystem m) => [PublishedEntry] -> m ()
+cleanupPublishedEntries = mapM_ cleanupPublishedEntry . reverse
 
 
 cleanupPublishedEntry :: (MonadFileSystem m) => PublishedEntry -> m ()

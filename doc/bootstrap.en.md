@@ -3,21 +3,28 @@ Bootstrapping a repository
 
 `dojang init --from SOURCE` brings an existing repository onto a new machine,
 enrolls that machine, and offers to run the first `dojang apply`.  Acquisition
-happens in an owner-only temporary directory beside the destination.  Dojang
-checks the staged *dojang.toml* before publishing the repository, so an invalid
-or incomplete source does not replace the destination.
+happens in an owner-only temporary directory beside the destination.  POSIX
+systems apply the private mode during creation, and Windows uses a protected,
+inheritable owner-only ACL.  A filesystem that cannot enforce this protection
+is rejected.  Dojang checks the staged *dojang.toml* before publishing the
+repository, so an invalid or incomplete source does not replace the
+destination.
 
 The destination must not exist or must be an empty directory.  It is the current
 directory unless `-r`/`--repository-dir` selects another path.  Publication
 refuses a destination that has been replaced by a symbolic link.  A missing
 destination is published with an atomic no-replace rename.  An existing empty
 destination is atomically exchanged with staging when the filesystem supports
-directory exchange.  Otherwise, Dojang preserves the existing directory and
-creates each entry without replacement.  The current directory also keeps its
-identity and uses this entrywise path.  If another process creates an entry
-first, bootstrap fails without overwriting it; cleanup removes only unchanged
-entries created by bootstrap.  Entries replaced by another process are
-preserved, and interruption triggers the same rollback.
+directory exchange.  If atomic exchange is unavailable, bootstrap rejects that
+existing destination instead of using a race-prone fallback.  The current
+directory keeps its identity by moving each complete top-level staging entry
+with an atomic no-replace rename.  If another process creates an entry first,
+bootstrap fails without overwriting it.  Bootstrap captures entry identities
+before publication, so cleanup removes only unchanged entries that it moved.
+Entries replaced by another process are preserved, and interruption triggers
+the same rollback.  Windows does not currently provide directory exchange
+through Dojang, so use an absent non-current-directory destination or run
+bootstrap from inside an existing empty destination.
 
 
 Local directories and archives
@@ -28,6 +35,9 @@ Local directories need no transport option:
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
+
+Dojang rejects a destination nested inside its local directory source before
+creating staging.  Choose a sibling or otherwise disjoint destination instead.
 
 Dojang copies symbolic links as links instead of following them.  Other entries
 in a directory source must be regular files or directories; FIFOs, sockets,

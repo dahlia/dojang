@@ -468,6 +468,8 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase . copyRegularFileNoReplace source
   writeFile path = liftCommandEffectBase . writeFile path
   replaceFile source = liftCommandEffectBase . replaceFile source
+  renameEntry fileType source =
+    liftCommandEffectBase . renameEntry fileType source
   exchangeDirectories source =
     liftCommandEffectBase . exchangeDirectories source
   writeTemporaryFile directory template =

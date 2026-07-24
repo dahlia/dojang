@@ -88,8 +88,18 @@ import Dojang.Types.RouteMetadata
 
 
 #ifdef mingw32_HOST_OS
-import System.IO (IOMode (ReadMode), hIsSeekable, hSetBinaryMode)
+import Foreign
+  ( Ptr
+  , alloca
+  , castPtr
+  , nullPtr
+  , peek
+  , poke
+  , sizeOf
+  )
+import System.IO (IOMode (ReadMode), hIsSeekable)
 import System.Win32.File qualified as Win32
+import System.Win32.String qualified as Win32String
 import System.Win32.Types qualified as Win32
 #else
 import Foreign.C.Error qualified as CError
@@ -125,6 +135,39 @@ import System.OsPath
   , takeFileName
   , (</>)
   )
+
+
+#ifdef mingw32_HOST_OS
+foreign import stdcall unsafe "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+  c_convertStringSecurityDescriptor
+    :: Win32.LPCTSTR
+    -> Win32.DWORD
+    -> Ptr Win32.LPVOID
+    -> Win32.LPDWORD
+    -> IO Win32.BOOL
+
+foreign import stdcall unsafe "LocalFree"
+  c_localFree :: Win32.LPVOID -> IO Win32.LPVOID
+
+foreign import stdcall unsafe "GetVolumePathNameW"
+  c_getVolumePathName
+    :: Win32.LPCTSTR
+    -> Win32.LPTSTR
+    -> Win32.DWORD
+    -> IO Win32.BOOL
+
+foreign import stdcall unsafe "GetVolumeInformationW"
+  c_getVolumeInformation
+    :: Win32.LPCTSTR
+    -> Win32.LPTSTR
+    -> Win32.DWORD
+    -> Win32.LPDWORD
+    -> Win32.LPDWORD
+    -> Win32.LPDWORD
+    -> Win32.LPTSTR
+    -> Win32.DWORD
+    -> IO Win32.BOOL
+#endif
 
 
 -- | A type that represents a file or directory.
@@ -348,6 +391,42 @@ class (MonadError IOError m) => MonadFileSystem m where
     removeDirectoryRecursively source
 
 
+  -- | Atomically renames one filesystem entry without replacing an existing
+  -- destination.
+  --
+  -- Filesystem-backed implementations must keep the entry's identity across
+  -- the rename and fail atomically when the destination exists.  The default
+  -- implementation preserves observable behavior for virtual filesystems.
+  renameEntry
+    :: (HasCallStack)
+    => FileType
+    -- ^ Type of the source entry.
+    -> OsPath
+    -- ^ Existing source entry.
+    -> OsPath
+    -- ^ Destination path, which must not exist.
+    -> m ()
+  renameEntry fileType source destination =
+    case fileType of
+      Directory -> renameDirectory source destination
+      File -> do
+        copied <- copyRegularFileNoReplace source destination
+        unless copied $ do
+          source' <- decodePath source
+          throwError $
+            mkIOError
+              InappropriateType
+              "renameEntry"
+              Nothing
+              (Just source')
+        removeFile source
+      Symlink -> do
+        target <- readSymlinkTarget source
+        linkType <- getSymbolicLinkType source
+        createSymbolicLink target destination linkType
+        removeFile source
+
+
   -- | Atomically swaps two existing directories when the filesystem supports
   -- that operation.
   --
@@ -444,8 +523,9 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Creates a directory that is accessible only to the current user.
   --
-  -- Filesystem-backed POSIX implementations must apply the restrictive mode
+  -- Filesystem-backed implementations must apply the restrictive mode or ACL
   -- atomically with creation so that no wider-permission window is observable.
+  -- They must reject filesystems that cannot enforce this restriction.
   createPrivateDirectory :: (HasCallStack) => OsPath -> m ()
   createPrivateDirectory path = do
     createDirectory path
@@ -805,11 +885,84 @@ setPortableWritableIO path writable' = do
 
 
 createPrivateDirectoryIO :: OsPath -> IO ()
-createPrivateDirectoryIO = OsDirectory.createDirectory
+createPrivateDirectoryIO path = do
+  path' <- decodeFS path
+  ensurePersistentAcls path'
+  withPrivateSecurityAttributes $ \attributes ->
+    Win32.createDirectory path' $ Just attributes
+
+
+ensurePersistentAcls :: FilePath -> IO ()
+ensurePersistentAcls path = do
+  absolutePath <- Directory.makeAbsolute path
+  Win32String.withTString absolutePath $ \nativePath ->
+    Win32String.withTStringBufferLen 32768 $ \(rootBuffer, rootLength) -> do
+      Win32.failIfFalse_ "GetVolumePathNameW" $
+        c_getVolumePathName
+          nativePath
+          rootBuffer
+          (fromIntegral rootLength)
+      rootPath <- Win32String.peekTString rootBuffer
+      Win32String.withTString rootPath $ \nativeRoot ->
+        alloca $ \flags -> do
+          Win32.failIfFalse_ "GetVolumeInformationW" $
+            c_getVolumeInformation
+              nativeRoot
+              nullPtr
+              0
+              nullPtr
+              nullPtr
+              flags
+              nullPtr
+              0
+          capabilities <- peek flags
+          unless (capabilities .&. filePersistentAcls /= 0) $
+            ioError $
+              userError
+                "filesystem cannot enforce a private directory ACL"
+ where
+  filePersistentAcls = 0x00000008
+
+
+withPrivateSecurityAttributes
+  :: (Win32.LPSECURITY_ATTRIBUTES -> IO a) -> IO a
+withPrivateSecurityAttributes action =
+  Win32String.withTString "D:P(A;OICI;FA;;;OW)" $ \descriptorText ->
+    alloca $ \descriptorAddress -> do
+      Win32.failIfFalse_
+        "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+        $ c_convertStringSecurityDescriptor
+          descriptorText
+          1
+          descriptorAddress
+          nullPtr
+      descriptor <- peek descriptorAddress
+      Exception.bracket
+        (return descriptor)
+        (\value -> c_localFree value >> return ())
+        $ \value ->
+          alloca $ \attributes -> do
+            poke
+              attributes
+              Win32.SECURITY_ATTRIBUTES
+                { Win32.nLength =
+                    fromIntegral $
+                      sizeOf (undefined :: Win32.SECURITY_ATTRIBUTES)
+                , Win32.lpSecurityDescriptor = castPtr value
+                , Win32.bInheritHandle = False
+                }
+            action attributes
+
+
+renameEntryNoReplaceIO :: FileType -> OsPath -> OsPath -> IO ()
+renameEntryNoReplaceIO _ source destination = do
+  source' <- decodeFS source
+  destination' <- decodeFS destination
+  Win32.moveFile source' destination'
 
 
 renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
-renameDirectoryNoReplaceIO = OsDirectory.renameDirectory
+renameDirectoryNoReplaceIO = renameEntryNoReplaceIO Directory
 
 
 exchangeDirectoriesIO :: OsPath -> OsPath -> IO Bool
@@ -916,8 +1069,8 @@ createPrivateDirectoryIO path = do
   PosixDirectory.createDirectory path' 0o700
 
 
-renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
-renameDirectoryNoReplaceIO source destination = do
+renameEntryNoReplaceIO :: FileType -> OsPath -> OsPath -> IO ()
+renameEntryNoReplaceIO _ source destination = do
   destination' <- decodeFS destination
 #if defined(linux_HOST_OS)
   source' <- decodeFS source
@@ -972,6 +1125,10 @@ throwNoReplaceUnsupported destination =
       (Just destination)
       `ioeSetErrorString` "filesystem lacks atomic no-replace rename"
 #endif
+
+
+renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
+renameDirectoryNoReplaceIO = renameEntryNoReplaceIO Directory
 
 
 exchangeDirectoriesIO :: OsPath -> OsPath -> IO Bool
@@ -1076,67 +1233,23 @@ copyRegularFileNoReplaceIO source destination = do
   result <-
     withRegularFileHandleIO source $ \sourceHandle ->
       Exception.mask $ \restore -> do
-        destinationHandle <- openBinaryFileNoReplaceIO destination
-        let discardDestination = do
-              hClose destinationHandle `catchError` const (return ())
-              removeNewDestination destination
-        restore (copyHandle sourceHandle destinationHandle)
-          `Exception.onException` discardDestination
-        hClose destinationHandle
-          `Exception.onException` discardDestination
+        destinationDirectory <- decodeFS $ takeDirectory destination
+        (temporaryPath, temporaryHandle) <-
+          openBinaryTempFile destinationDirectory ".dojang-copy-"
+        let discardTemporary = do
+              hClose temporaryHandle `catchError` const (return ())
+              Directory.removeFile temporaryPath
+                `catchError` const (return ())
+        restore (copyHandle sourceHandle temporaryHandle)
+          `Exception.onException` discardTemporary
+        hClose temporaryHandle
+          `Exception.onException` discardTemporary
+        temporary <- encodeFS temporaryPath
+        renameEntryNoReplaceIO File temporary destination
+          `Exception.onException` discardTemporary
   return $ case result of
     Nothing -> False
     Just () -> True
-
-
-openBinaryFileNoReplaceIO :: OsPath -> IO Handle
-#ifdef mingw32_HOST_OS
-openBinaryFileNoReplaceIO destination = do
-  destination' <- decodeFS destination
-  nativeHandle <-
-    Win32.createFile
-      destination'
-      Win32.gENERIC_WRITE
-      Win32.fILE_SHARE_NONE
-      Nothing
-      Win32.cREATE_NEW
-      Win32.fILE_ATTRIBUTE_NORMAL
-      Nothing
-  let discardNativeHandle = do
-        Win32.closeHandle nativeHandle
-          `catchError` const (return ())
-        removeNewDestination destination
-  handle <-
-    Win32.hANDLEToHandle nativeHandle
-      `Exception.onException` discardNativeHandle
-  hSetBinaryMode handle True
-    `Exception.onException` do
-      hClose handle `catchError` const (return ())
-      removeNewDestination destination
-  return handle
-#else
-openBinaryFileNoReplaceIO destination = do
-  destination' <- decodeFS destination
-  descriptor <-
-    Posix.openFd
-      destination'
-      Posix.WriteOnly
-      Posix.defaultFileFlags
-        { Posix.exclusive = True
-        , Posix.creat = Just 0o600
-        , Posix.nofollow = True
-        , Posix.cloexec = True
-        }
-  Posix.fdToHandle descriptor
-    `Exception.onException` do
-      Posix.closeFd descriptor `catchError` const (return ())
-      removeNewDestination destination
-#endif
-
-
-removeNewDestination :: OsPath -> IO ()
-removeNewDestination destination =
-  OsDirectory.removeFile destination `catchError` const (return ())
 
 
 copyHandle :: Handle -> Handle -> IO ()
@@ -1215,6 +1328,9 @@ instance MonadFileSystem IO where
 
 
   renameDirectory = renameDirectoryNoReplaceIO
+
+
+  renameEntry = renameEntryNoReplaceIO
 
 
   exchangeDirectories = exchangeDirectoriesIO
