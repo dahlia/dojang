@@ -14,10 +14,15 @@ To be released.
     configuration.  Machine-local external transports can run Git or another
     executable without a shell, with whole-argument source and destination
     placeholders and an explicit environment allowlist.  Acquisition is staged
-    beside the destination, rejects unsafe archive entries, requires an absent
-    or empty destination, and cleans unpublished work after failure.  A dry run
-    does not start an external transport.  Noninteractive bootstrap requires
-    both `--no-interactive` and `--yes`.  [[#47], [#74]]
+    beside the destination, rejects unsafe archive entries and paths that
+    collide after case folding or Unicode normalization, preserves recorded
+    POSIX permissions where the destination filesystem supports them, requires
+    an absent or empty destination, and cleans unpublished work after failure.
+    Unsupported permission metadata produces a warning without discarding the
+    acquired contents.  An absent destination is published with an atomic
+    filesystem rename.  A dry run does not start an external transport and
+    redacts its source argument and environment values.  Noninteractive
+    bootstrap requires both `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

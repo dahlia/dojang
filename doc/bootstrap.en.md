@@ -28,7 +28,11 @@ $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
 ~~~~
 
 Archive entries are validated before extraction.  Absolute paths, parent
-traversal, backslash paths, links, and conflicting entries are rejected.
+traversal, backslash paths, links, and entries that collide case-insensitively
+or after Unicode normalization are rejected.  On POSIX systems, stored
+permission bits, including executable bits, are restored when the destination
+filesystem supports them.  If it does not, bootstrap publishes the contents
+and warns that the permissions could not be restored.
 
 
 External transports
@@ -112,7 +116,7 @@ $ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 A dry run does not publish the repository, save enrollment, or apply files.
-For an external transport, Dojang prints the redacted executable request but
-does not start the program.  Because no files are fetched, that dry run cannot
-validate the remote manifest.  Run a real bootstrap to perform the staged
-manifest check.
+For an external transport, Dojang redacts the source argument and environment
+values when it prints the executable request, and does not start the program.
+Because no files are fetched, that dry run cannot validate the remote manifest.
+Run a real bootstrap to perform the staged manifest check.

@@ -9,6 +9,7 @@ module Dojang.Commands.Bootstrap
   , initialize
   , makeTransportProcessRequest
   , normalizeBootstrapDestination
+  , redactTransportSource
   ) where
 
 import Control.Exception (displayException)
@@ -40,9 +41,11 @@ import Dojang.App
   )
 import Dojang.Bootstrap
   ( AcquisitionError (..)
+  , StagedMetadata
   , detectBuiltinSource
-  , publishStagedDirectory
-  , stageBuiltinSource
+  , emptyStagedMetadata
+  , publishStagedDirectoryWithMetadata
+  , stageBuiltinSourceWithMetadata
   )
 import Dojang.CommandEffect
   ( MonadCommandEffect (..)
@@ -52,7 +55,7 @@ import Dojang.CommandEffect
   , emptyProcessRequest
   )
 import Dojang.Commands
-  ( Admonition (Note)
+  ( Admonition (Note, Warning)
   , StandardStream (StandardError)
   , die'
   , pathStyleFor
@@ -214,7 +217,7 @@ bootstrapInto
       (\exitCode -> cleanup >> abortCommand exitCode)
    where
     bootstrapAction staging = do
-      externalDryRun <-
+      acquired <-
         ( case requestedTransport of
             Nothing -> acquireBuiltin source staging
             Just name ->
@@ -225,11 +228,13 @@ bootstrapInto
                 staging
         )
           `catchError` reportFilesystemError
-      if externalDryRun
-        then return ExitSuccess
-        else do
+      case acquired of
+        Nothing -> return ExitSuccess
+        Just metadata -> do
           catchError
-            (validateStaging staging >> publishStaging staging destination)
+            ( validateStaging staging
+                >> publishStaging metadata staging destination
+            )
             reportFilesystemError
           enrolled <-
             catchCommandExit
@@ -281,14 +286,17 @@ newStagingPath destination = do
 
 
 acquireBuiltin
-  :: (MonadFileSystem i, AppEffects i) => Text -> OsPath -> App i Bool
+  :: (MonadFileSystem i, AppEffects i)
+  => Text
+  -> OsPath
+  -> App i (Maybe StagedMetadata)
 acquireBuiltin source staging = do
   sourcePath <- encodePath $ Text.unpack source
   detected <- detectBuiltinSource sourcePath
   builtin <- either reportAcquisitionError return detected
   printAcquisition sourcePath staging
-  staged <- liftApp $ stageBuiltinSource builtin staging
-  either reportAcquisitionError (const $ return False) staged
+  staged <- liftApp $ stageBuiltinSourceWithMetadata builtin staging
+  either reportAcquisitionError (return . Just) staged
 
 
 acquireExternal
@@ -297,7 +305,7 @@ acquireExternal
   -> Text
   -> Maybe OsPath
   -> OsPath
-  -> App i Bool
+  -> App i (Maybe StagedMetadata)
 acquireExternal source name requestedConfig staging = do
   platform <- hostPlatform
   configPath <- maybe (defaultTransportConfigPath platform) return requestedConfig
@@ -334,8 +342,10 @@ acquireExternal source name requestedConfig staging = do
   if dryRunEnabled
     then do
       printStderr $
-        "Would run external transport: " <> Text.pack (show request) <> "."
-      return True
+        "Would run external transport: "
+          <> Text.pack (show $ redactTransportSource source request)
+          <> "."
+      return Nothing
     else do
       printStderr $
         "Running external transport '" <> name <> "' into staging..."
@@ -347,7 +357,7 @@ acquireExternal source name requestedConfig staging = do
       directory <- isDirectory staging
       unless directory $
         die' cliError "External transport did not create its staging directory."
-      return False
+      return $ Just emptyStagedMetadata
 
 
 -- | Builds a shell-free process request with an explicit child environment.
@@ -384,6 +394,23 @@ makeTransportProcessRequest platform hostEnvironment transport source destinatio
       )
       (fmap (\(name, value) -> (Text.pack name, Text.pack value)) hostEnvironment)
       transport
+
+
+-- | Redacts an expanded transport source before rendering a process request.
+--
+-- Validated transports contain the source as exactly one whole argument, so
+-- replacing exact matches hides embedded credentials without altering the
+-- request that will actually be executed.
+redactTransportSource :: Text -> ProcessRequest -> ProcessRequest
+redactTransportSource source request =
+  request
+    { arguments =
+        fmap
+          (\argument -> if argument == expanded then "<redacted>" else argument)
+          request.arguments
+    }
+ where
+  expanded = Text.unpack source
 
 
 defaultTransportConfigPath
@@ -434,11 +461,19 @@ validateStaging staging = do
 
 publishStaging
   :: (MonadFileSystem i, AppEffects i)
-  => OsPath
+  => StagedMetadata
+  -> OsPath
   -> OsPath
   -> App i ()
-publishStaging staging destination = do
-  publishStagedDirectory staging destination
+publishStaging metadata staging destination = do
+  modeFailures <-
+    publishStagedDirectoryWithMetadata metadata staging destination
+  unless (null modeFailures) $
+    printStderr' Warning $
+      "Could not restore stored permissions for "
+        <> Text.pack (show $ length modeFailures)
+        <> " repository "
+        <> if length modeFailures == 1 then "entry." else "entries."
   pathStyle <- pathStyleFor StandardError
   printStderr $ "Repository published: " <> pathStyle destination <> "."
 

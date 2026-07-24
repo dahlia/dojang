@@ -15,6 +15,8 @@ import Data.Map.Strict qualified as Map
 
 #ifndef mingw32_HOST_OS
 import Control.Exception (bracket_)
+import System.Posix.Files qualified as Posix
+import System.OsPath (decodeFS)
 #endif
 
 import Options.Applicative.Path (hyphen)
@@ -41,6 +43,11 @@ import Dojang.App
   , startAndAwaitAppProcess
   , validateRepositoryCheckout
   )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.Bootstrap (publishStagedDirectory)
+#endif
 import Dojang.CommandEffect
   ( CommandEffect (..)
   , CommandEffectKind (ProcessExecution)
@@ -187,6 +194,8 @@ spec = sequential $ do
         ( Right $ Just "scripted-editor"
         , [EnvironmentLookup "EDITOR"]
         )
+
+  atomicPublicationSpec
 
   it "runs a command entirely through the scripted interpreter" $ do
     path <- encodeFS "."
@@ -1082,6 +1091,33 @@ spec = sequential $ do
       let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       withHome home (runAppWithoutLogging appEnv $ prepareMachineState manifest)
         `shouldThrow` (== machineStateError)
+
+#ifdef mingw32_HOST_OS
+atomicPublicationSpec :: Spec
+atomicPublicationSpec = pure ()
+#else
+atomicPublicationSpec :: Spec
+atomicPublicationSpec =
+  it "delegates atomic directory publication to the inner filesystem" $
+    withTempDir $ \tmp _ -> do
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      childName <- encodeFS "child"
+      let staging = tmp </> stagingName
+          destination = tmp </> destinationName
+          appEnv = AppEnv tmp True Nothing tmp tmp tmp False False
+      createDirectories staging
+      writeFile (staging </> childName) "contents"
+      stagingPath <- decodeFS staging
+      before <- Posix.fileID <$> Posix.getFileStatus stagingPath
+      runAppResultWithoutLogging
+        appEnv
+        (publishStagedDirectory staging destination)
+        `shouldReturn` Right ()
+      destinationPath <- decodeFS destination
+      after <- Posix.fileID <$> Posix.getFileStatus destinationPath
+      after `shouldBe` before
+#endif
 
 #ifdef mingw32_HOST_OS
 posixUnreadableRegistrySpec :: Spec

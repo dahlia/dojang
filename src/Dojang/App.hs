@@ -275,6 +275,7 @@ instance
   readFile = App . lift . lift . lift . readFile
   writeFile dst = App . lift . lift . lift . writeFile dst
   replaceFile src = App . lift . lift . lift . replaceFile src
+  renameDirectory src = App . lift . lift . lift . renameDirectory src
   writeTemporaryFile directory template contents =
     App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
   withFileLock lockPath action = App $ ReaderT $ \appEnv ->

@@ -4,16 +4,27 @@
 
 module Dojang.Commands.BootstrapSpec (spec) where
 
+import Control.Exception (bracket)
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
-import Data.List (isPrefixOf)
+import Data.ByteString qualified as ByteString
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Hedgehog (forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath (addTrailingPathSeparator)
+import System.IO
+  ( SeekMode (AbsoluteSeek)
+  , hClose
+  , hFlush
+  , hSeek
+  , stderr
+  )
+import System.IO.Temp (withSystemTempFile)
 import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, takeDirectory, (</>))
 import Test.Hspec
@@ -39,6 +50,7 @@ import Dojang.Commands.Bootstrap
   , initialize
   , makeTransportProcessRequest
   , normalizeBootstrapDestination
+  , redactTransportSource
   )
 import Dojang.Commands.Init (InitPreset (Amd64Linux))
 import Dojang.ExitCodes
@@ -89,6 +101,31 @@ spec = do
         request.arguments === ["--", Text.unpack source, destination]
         request.environment
           === Just [("PATH", "host"), ("TOKEN", "fixed")]
+
+    it "redacts arbitrary credential-bearing sources from diagnostics" $
+      hedgehog $ do
+        credential <- forAll $ Gen.string (Range.linear 1 100) Gen.alphaNum
+        let sourceText =
+              Text.pack $
+                "https://token:" <> credential <> "@example.com/repository.git"
+            destination = "/staging/repository"
+            Right config =
+              readTransportConfig
+                ( "[transports.copy]\n"
+                    <> "command = [\"copy\", \"--\", \"{source}\", "
+                    <> "\"{destination}\"]\n"
+                )
+            Right transport = lookupTransport "copy" config
+            request =
+              makeTransportProcessRequest
+                "linux"
+                []
+                transport
+                sourceText
+                destination
+            rendered = show $ redactTransportSource sourceText request
+        (Text.unpack sourceText `isInfixOf` rendered) === False
+        ("<redacted>" `isInfixOf` rendered) === True
 
     it "normalizes a current-directory path beside its parent" $
       withTempDir $ \tmp _ -> do
@@ -395,7 +432,7 @@ externalTransportSpec =
     if os == "mingw32"
       then pendingWith "The fixture uses a POSIX shell script."
       else withTempDir $ \tmp _ -> do
-        sourceName <- encodeFS "source;touch-pwned"
+        sourceName <- encodeFS "source-token-secret;touch-pwned"
         destinationName <- encodeFS "destination"
         stateName <- encodeFS "state"
         homeName <- encodeFS "home"
@@ -443,20 +480,25 @@ externalTransportSpec =
                 <> show markerPath
                 <> "]\n"
         sourceText <- Text.pack <$> decodeFS source
-        dryRunResult <-
-          withHome home $
-            dryRunIO $
-              runAppWithoutLogging appEnv{dryRun = True} $
-                bootstrap
-                  sourceText
-                  (Just "copy")
-                  (Just config)
-                  []
-                  True
-                  True
-                  Nothing
-                  []
+        (dryRunOutput, dryRunResult) <-
+          captureStderr $
+            withHome home $
+              dryRunIO $
+                runAppWithoutLogging appEnv{dryRun = True} $
+                  bootstrap
+                    sourceText
+                    (Just "copy")
+                    (Just config)
+                    []
+                    True
+                    True
+                    Nothing
+                    []
         dryRunResult `shouldBe` ExitSuccess
+        dryRunOutput
+          `shouldSatisfy` (not . ByteString.isInfixOf "token-secret")
+        dryRunOutput
+          `shouldSatisfy` ByteString.isInfixOf "<redacted>"
         exists marker `shouldReturn` False
         exists destination `shouldReturn` False
         exists stateRoot `shouldReturn` False
@@ -515,3 +557,19 @@ externalTransportSpec =
         exists failureStateRoot `shouldReturn` False
         entries <- traverse decodeFS =<< listDirectory tmp
         entries `shouldSatisfy` all (not . isPrefixOf ".dojang-bootstrap-")
+
+
+captureStderr :: IO a -> IO (ByteString, a)
+captureStderr action =
+  withSystemTempFile "dojang-bootstrap-spec-stderr" $ \_ captureHandle ->
+    bracket (hDuplicate stderr) restore $ \_ -> do
+      hDuplicateTo captureHandle stderr
+      result <- action
+      hFlush stderr
+      hSeek captureHandle AbsoluteSeek 0
+      captured <- ByteString.hGetContents captureHandle
+      return (captured, result)
+ where
+  restore original = do
+    hDuplicateTo original stderr
+    hClose original
