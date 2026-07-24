@@ -1050,6 +1050,33 @@ archiveModeSpecs = do
       published `shouldSatisfy` isLeft
       listDirectory destination `shouldReturn` []
 
+  it "restores arbitrary destination modes when staging removal fails" $
+    hedgehog $ do
+      destinationMode <-
+        forAll $ (0o500 .|.) <$> Gen.word (Range.linear 0 0o77)
+      (published, observedMode) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            setPortableMode destination destinationMode
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (FailStagingRemoval staging)
+                (publishStagedDirectory staging destination)
+            mode <- getPortableMode destination
+            setPortableMode destination 0o700
+            return (result, mode)
+      isLeft published === True
+      observedMode === portableModeFromBits destinationMode
+
   it "does not report a discarded source root mode" $
     withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source"
@@ -1429,6 +1456,10 @@ instance MonadFileSystem FailingModeIO where
 data CurrentDirectoryRace
   = CreateBeforeCopy OsPath ByteString.ByteString
   | CreateAfterExchange OsPath OsPath ByteString.ByteString
+  | ReplaceDestinationBeforeExchange
+      OsPath
+      OsPath
+      ByteString.ByteString
   | ReplaceSourceBeforeCopy FileType OsPath OsPath
   | FailQuarantine OsPath OsPath
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
@@ -1586,6 +1617,21 @@ instance MonadFileSystem CurrentDirectoryIO where
       _ -> move
   exchangeDirectories source destination = do
     (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just
+        ( ReplaceDestinationBeforeExchange
+            racedStaging
+            racedDestination
+            contents
+          )
+          | source == racedStaging && destination == racedDestination ->
+              liftIO $ do
+                destinationEntries <-
+                  System.Directory.OsPath.listDirectory destination
+                when (null destinationEntries) $ do
+                  removeDirectory destination
+                  writeFile destination contents
+      _ -> return ()
     concurrentPresent <- case racedEntry of
       Just (CreateAfterExchange racedDestination concurrentPath _)
         | destination == racedDestination ->
@@ -2083,6 +2129,56 @@ symlinkSpecs = do
       isLeft published === True
       destinationContents === concurrentContents
       stagedContents === "manifest"
+
+  it "restores an arbitrary file raced into a directory exchange" $
+    hedgehog $ do
+      concurrentContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      ( published
+        , destinationIsFile
+        , destinationContents
+        , stagingIsDirectory
+        , stagingContents
+        ) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                ( ReplaceDestinationBeforeExchange
+                    staging
+                    destination
+                    concurrentContents
+                )
+                (publishStagedDirectory staging destination)
+            destinationRegular <- isRegularFile destination
+            destinationValue <-
+              if destinationRegular then readFile destination else return ""
+            stagingDirectory <- isDirectory staging
+            stagingValue <-
+              if stagingDirectory
+                then readFile $ staging </> manifestName
+                else return ""
+            return
+              ( result
+              , destinationRegular
+              , destinationValue
+              , stagingDirectory
+              , stagingValue
+              )
+      isLeft published === True
+      destinationIsFile === True
+      destinationContents === concurrentContents
+      stagingIsDirectory === True
+      stagingContents === "manifest"
 
   it "rolls back CWD publication interrupted between entries" $
     withTempDir $ \tmpDir _ -> do

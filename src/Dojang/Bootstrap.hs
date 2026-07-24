@@ -355,7 +355,10 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
               destination
             widenDirectoryForCleanup staging
             removeDirectory staging `catchError` \err -> do
-              restoreExchangedDestination staging destination
+              restoreExchangedDestinationMode
+                destinationMode
+                staging
+                destination
               throwError err
             return modeFailures
 
@@ -375,20 +378,31 @@ resolvesToRegularFile path = do
 
 
 validateExchangedDestination
-  :: (MonadFileSystem m)
+  :: (MonadFileSystem m, MonadCatch m)
   => Maybe FileIdentity
   -> OsPath
   -> OsPath
   -> m ()
 validateExchangedDestination expectedIdentity staging destination = do
-  actualIdentity <- getFileIdentity staging
-  exchangedEntries <- listDirectory staging
-  unless
-    (actualIdentity == expectedIdentity && null exchangedEntries)
-    $ do
+  inspected <-
+    catchError
+      ( try $
+          (,)
+            <$> getFileIdentity staging
+            <*> listDirectory staging
+      )
+      (return . Left)
+  case inspected of
+    Left (err :: IOError) -> do
       restoreExchangedDestination staging destination
-      throwError $
-        userError "bootstrap destination changed during publication"
+      throwError err
+    Right (actualIdentity, exchangedEntries) ->
+      unless
+        (actualIdentity == expectedIdentity && null exchangedEntries)
+        $ do
+          restoreExchangedDestination staging destination
+          throwError $
+            userError "bootstrap destination changed during publication"
 
 
 restoreExchangedDestination
@@ -401,6 +415,27 @@ restoreExchangedDestination staging destination = do
   unless restored $
     throwError $
       userError "bootstrap destination exchange could not be reversed"
+
+
+restoreExchangedDestinationMode
+  :: (MonadFileSystem m, MonadCatch m)
+  => PortableMode
+  -> OsPath
+  -> OsPath
+  -> m ()
+restoreExchangedDestinationMode mode staging destination = do
+  modeResult <-
+    catchError
+      (try $ restorePortableMode staging mode)
+      (return . Left)
+  restoreExchangedDestination staging destination
+  case modeResult of
+    Left (err :: IOError) -> throwError err
+    Right False ->
+      throwError $
+        userError
+          "bootstrap destination permissions could not be restored"
+    Right True -> return ()
 
 
 copyDirectoryTree
