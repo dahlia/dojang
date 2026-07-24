@@ -48,10 +48,15 @@ import Control.Concurrent (threadDelay)
 import Control.Exception qualified as Exception
 import Data.Bits ((.&.))
 import Data.Maybe (isJust)
-import System.Exit (ExitCode (ExitSuccess))
+import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..))
 import System.Posix.Files qualified as Posix
-import System.Posix.Process qualified as PosixProcess
 import System.OsPath (decodeFS)
+import System.Process
+  ( CreateProcess (env)
+  , proc
+  , readCreateProcessWithExitCode
+  )
 import System.Timeout (timeout)
 #endif
 
@@ -198,18 +203,50 @@ posixPortableModeSpec = do
 
 posixPrivateDirectorySpec :: Spec
 posixPrivateDirectorySpec =
-  specify "createPrivateDirectory overrides a restrictive umask" $
-    withTempDir $ \tmpDir _ -> do
-      privateName <- encodeFS "private"
-      let private = tmpDir </> privateName
-      processId <-
-        PosixProcess.forkProcess $ do
-          _ <- Posix.setFileCreationMask 0o777
-          createPrivateDirectory private :: IO ()
-      status <- PosixProcess.getProcessStatus True False processId
-      status `shouldBe` Just (PosixProcess.Exited ExitSuccess)
-      getPortableMode private
-        `shouldReturn` portableModeFromBits 0o700
+  specify privateDirectoryTestName $ do
+    probe <- lookupEnv privateDirectoryProbeVariable
+    case probe of
+      Just privatePath -> do
+        private <- encodeFS privatePath
+        Exception.bracket
+          (Posix.setFileCreationMask 0o777)
+          Posix.setFileCreationMask
+          $ \_ -> do
+            createPrivateDirectory private :: IO ()
+            getPortableMode private
+              `shouldReturn` portableModeFromBits 0o700
+      Nothing ->
+        withTempDir $ \tmpDir _ -> do
+          privateName <- encodeFS "private"
+          let private = tmpDir </> privateName
+          privatePath <- decodeFS private
+          executable <- getExecutablePath
+          environment <- getEnvironment
+          let childEnvironment =
+                (privateDirectoryProbeVariable, privatePath)
+                  : filter
+                    ((/= privateDirectoryProbeVariable) . fst)
+                    environment
+              child =
+                (proc executable ["--match", privateDirectoryTestName])
+                  { env = Just childEnvironment
+                  }
+          (exitCode, standardOutput, standardError) <-
+            readCreateProcessWithExitCode child ""
+          case exitCode of
+            ExitSuccess -> return ()
+            ExitFailure _ ->
+              expectationFailure $ standardOutput <> standardError
+
+
+privateDirectoryTestName :: String
+privateDirectoryTestName =
+  "createPrivateDirectory overrides a restrictive umask"
+
+
+privateDirectoryProbeVariable :: String
+privateDirectoryProbeVariable =
+  "DOJANG_TEST_PRIVATE_DIRECTORY_UMASK_PROBE"
 
 
 posixDryRunPortableModeSpec :: Spec
@@ -473,6 +510,33 @@ spec = do
       contents <- Data.ByteString.readFile (tmpDirFP `combine` nonExistentFP)
       original <- Data.ByteString.readFile packageYamlFP
       contents `shouldBe` original
+
+    specify
+      "copyRegularFileWithIdentity rejects arbitrary replaced sources"
+      $ hedgehog
+      $ do
+        original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        (copied, destinationExists) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              let source = tmpDir </> foo
+                  outside = tmpDir </> bar
+                  destination = tmpDir </> baz
+              writeFile source original
+              writeFile outside replacement
+              Just identity <- getFileIdentity source
+              removeFile source
+              createSymbolicLink outside source File
+              result <-
+                copyRegularFileWithIdentity
+                  identity
+                  source
+                  destination
+              present <- exists destination
+              return (result, present)
+        copied === False
+        destinationExists === False
 
     specify "readRegularFileBounded enforces arbitrary byte limits" $
       hedgehog $ do

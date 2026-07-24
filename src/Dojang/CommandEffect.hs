@@ -464,6 +464,8 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase . readRegularFileBounded limit
   copyRegularFile source =
     liftCommandEffectBase . copyRegularFile source
+  copyRegularFileWithIdentity identity source =
+    liftCommandEffectBase . copyRegularFileWithIdentity identity source
   copyRegularFileNoReplace source =
     liftCommandEffectBase . copyRegularFileNoReplace source
   writeFile path = liftCommandEffectBase . writeFile path

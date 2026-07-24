@@ -15,10 +15,12 @@ import Data.ByteString.Char8 qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower, toUpper)
 import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import Data.Word (Word32)
-import Hedgehog (evalIO, forAll)
+import Hedgehog (assert, evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import System.FilePath.Posix qualified as Posix
 
 
 #ifndef mingw32_HOST_OS
@@ -133,6 +135,20 @@ spec = do
         let path = "nested/" <> prefix <> [forbidden] <> suffix
         normalizeArchiveEntryPath path
           === Left (UnsafeArchiveEntry path)
+
+    it "rejects arbitrary archive paths deeper than the safety limit" $
+      hedgehog $ do
+        depth <- forAll $ Gen.int $ Range.linear 257 2048
+        let path = Posix.joinPath $ replicate depth "a"
+        normalizeArchiveEntryPath path
+          === Left ArchiveResourceLimitExceeded
+
+    it "rejects arbitrary archive paths longer than the safety limit" $
+      hedgehog $ do
+        pathLength <- forAll $ Gen.int $ Range.linear 4097 8192
+        let path = replicate pathLength 'a'
+        normalizeArchiveEntryPath path
+          === Left ArchiveResourceLimitExceeded
 
     it "rejects arbitrary casing of every Windows device name" $
       hedgehog $ do
@@ -1405,6 +1421,8 @@ instance MonadFileSystem FailingModeIO where
 data CurrentDirectoryRace
   = CreateBeforeCopy OsPath ByteString.ByteString
   | CreateAfterExchange OsPath OsPath ByteString.ByteString
+  | ReplaceSourceBeforeCopy FileType OsPath OsPath
+  | FailQuarantine OsPath OsPath
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
   | ReplaceBeforeMode OsPath OsPath
   | ReplaceAfterCopyThenFail
@@ -1554,6 +1572,9 @@ instance MonadFileSystem CurrentDirectoryIO where
       Just (InterruptBeforeCopy trigger)
         | destination == takeDirectory trigger ->
             liftIO $ Exception.throwIO UserInterrupt
+      Just (FailQuarantine published _)
+        | source == published ->
+            throwError $ userError "injected quarantine failure"
       _ -> move
   exchangeDirectories source destination = do
     (_, racedEntry) <- CurrentDirectoryIO ask
@@ -1585,7 +1606,26 @@ instance MonadFileSystem CurrentDirectoryIO where
     liftIO (copyFilePermissions source destination :: IO ())
   createDirectory value = liftIO (createDirectory value :: IO ())
   createPrivateDirectory value =
-    liftIO (createPrivateDirectory value :: IO ())
+    do
+      liftIO (createPrivateDirectory value :: IO ())
+      (_, racedEntry) <- CurrentDirectoryIO ask
+      case racedEntry of
+        Just
+          ( ReplaceSourceBeforeCopy
+              sourceType
+              sourceEntry
+              replacementTarget
+            ) ->
+          liftIO $ do
+            case sourceType of
+              Directory -> removeDirectoryRecursively sourceEntry
+              File -> removeFile sourceEntry
+              Symlink -> removeFile sourceEntry
+            createSymbolicLink
+              replacementTarget
+              sourceEntry
+              sourceType
+        _ -> return ()
   removeFile value =
     liftCurrentDirectoryIO (removeFile value :: IO ())
   removeDirectory value =
@@ -1599,6 +1639,9 @@ instance MonadFileSystem CurrentDirectoryIO where
           | value == staging ->
               throwError $ userError "injected staging removal failure"
         Just (ReplaceDuringRollback _ _ _ staging)
+          | value == staging ->
+              throwError $ userError "injected staging removal failure"
+        Just (FailQuarantine _ staging)
           | value == staging ->
               throwError $ userError "injected staging removal failure"
         _ -> liftCurrentDirectoryIO (removeDirectory value :: IO ())
@@ -1636,6 +1679,83 @@ symlinkSpecs = return ()
 #else
 symlinkSpecs :: Spec
 symlinkSpecs = do
+  it "rejects a regular file replaced by a link after validation" $
+    hedgehog $ do
+      outsideContents <- forAll $ Gen.bytes $ Range.linear 0 4096
+      (stagedResult, stagingExists, stagedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            stagingName <- encodeFS "staging"
+            victimName <- encodeFS "victim"
+            outsideName <- encodeFS "outside"
+            let source = tmpDir </> sourceName
+                staging = tmpDir </> stagingName
+                victim = source </> victimName
+                outside = tmpDir </> outsideName
+                stagedVictim = staging </> victimName
+            createDirectory source
+            writeFile victim "original"
+            writeFile outside outsideContents
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (ReplaceSourceBeforeCopy File victim outside)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            stagedVictimPresent <- exists stagedVictim
+            contents <-
+              if stagedVictimPresent
+                then readFile stagedVictim
+                else return ""
+            return (result, present, contents)
+      case stagedResult of
+        Left err ->
+          assert $
+            "bootstrap source entry changed during acquisition"
+              `isInfixOf` Exception.displayException err
+        Right _ -> assert False
+      stagingExists === False
+      stagedContents === ""
+
+  it "rejects a directory ancestor replaced by a link after validation" $
+    hedgehog $ do
+      outsideContents <- forAll $ Gen.bytes $ Range.linear 0 4096
+      (stagedResult, stagingExists, stagedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            stagingName <- encodeFS "staging"
+            nestedName <- encodeFS "nested"
+            victimName <- encodeFS "victim"
+            outsideName <- encodeFS "outside"
+            let source = tmpDir </> sourceName
+                staging = tmpDir </> stagingName
+                nested = source </> nestedName
+                victim = nested </> victimName
+                outside = tmpDir </> outsideName
+                stagedVictim = staging </> nestedName </> victimName
+            createDirectory source
+            createDirectory nested
+            createDirectory outside
+            writeFile victim "original"
+            writeFile (outside </> victimName) outsideContents
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (ReplaceSourceBeforeCopy Directory nested outside)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            stagedVictimPresent <- exists stagedVictim
+            contents <-
+              if stagedVictimPresent
+                then readFile stagedVictim
+                else return ""
+            return (result, present, contents)
+      isLeft stagedResult === True
+      stagingExists === False
+      stagedContents === ""
+
   it "preserves arbitrary target modes for symlinked directory sources" $
     hedgehog $ do
       sourceMode <- forAll $ (0o700 .|.) <$> Gen.word (Range.linear 0 0o77)
@@ -1890,6 +2010,38 @@ symlinkSpecs = do
       isLeft published === True
       replacementExists === True
       observedContents === replacementContents
+
+  it "reports a quarantine failure that leaves a published entry" $
+    hedgehog $ do
+      contents <- forAll $ Gen.bytes $ Range.linear 0 4096
+      (publishedResult, publishedExists, publishedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            ownedName <- encodeFS "owned"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                owned = destination </> ownedName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> ownedName) contents
+            result <-
+              runCurrentDirectoryIOWithRace
+                destination
+                (FailQuarantine owned staging)
+                (publishStagedDirectory staging destination)
+            present <- exists owned
+            observed <- if present then readFile owned else return ""
+            return (result, present, observed)
+      case publishedResult of
+        Left err ->
+          assert $
+            "injected quarantine failure"
+              `isInfixOf` Exception.displayException err
+        Right _ -> assert False
+      publishedExists === True
+      publishedContents === contents
 
   it "preserves arbitrary entries raced into a directory exchange" $
     hedgehog $ do

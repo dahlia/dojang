@@ -49,7 +49,11 @@ creating staging.  Choose a sibling or otherwise disjoint destination instead.
 Dojang copies symbolic links as links instead of following them.  Other entries
 in a directory source must be regular files or directories; FIFOs, sockets,
 devices, and other special files are rejected before they are read.  Dojang
-also accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
+pins the identity of the source root and every entry during validation, checks
+regular files through the same open handle used to copy them, and rechecks the
+recorded identities after copying.  If a recorded source entry changes during
+acquisition, bootstrap stops without publishing the staged copy.  Dojang also
+accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
@@ -68,10 +72,11 @@ devices, or another unsupported type are also rejected rather than converted
 into regular files.  ZIP directory entries marked with the DOS directory
 attribute are accepted even when their names omit the conventional trailing
 slash.  Archive input is limited to 16 MiB, expanded file contents to 64 MiB,
-and the entry count to 10,000.  Compressed tar decoding is bounded as well, so
-malformed or highly compressed input cannot expand without limit.  On POSIX
-systems, stored permission bits, including executable bits, are restored when
-the destination filesystem supports them.
+the entry count to 10,000, each entry path to 4,096 characters, and path depth
+to 256 components.  Compressed tar decoding is bounded as well, so malformed,
+highly compressed, or pathologically deep input cannot consume resources
+without limit.  On POSIX systems, stored permission bits, including executable
+bits, are restored when the destination filesystem supports them.
 Bootstrap verifies the resulting permissions instead of assuming that a
 successful filesystem call restored every bit.  If exact restoration is
 unavailable, bootstrap publishes the contents and warns that the permissions

@@ -277,6 +277,8 @@ instance
   readRegularFileBounded limit =
     App . lift . lift . lift . readRegularFileBounded limit
   copyRegularFile src = App . lift . lift . lift . copyRegularFile src
+  copyRegularFileWithIdentity identity src =
+    App . lift . lift . lift . copyRegularFileWithIdentity identity src
   copyRegularFileNoReplace src =
     App . lift . lift . lift . copyRegularFileNoReplace src
   writeFile dst = App . lift . lift . lift . writeFile dst

@@ -57,6 +57,7 @@ import Data.Text.Encoding (decodeUtf8')
 import Data.Text.Normalize qualified as Unicode
 import GHC.Generics (Generic)
 import System.FilePath.Posix qualified as Posix
+import System.IO.Error (isDoesNotExistError)
 import System.OsPath
   ( OsPath
   , joinPath
@@ -181,6 +182,8 @@ detectBuiltinSource source = do
 normalizeArchiveEntryPath
   :: FilePath -> Either AcquisitionError FilePath
 normalizeArchiveEntryPath original
+  | length original > maximumArchivePathCharacters =
+      Left ArchiveResourceLimitExceeded
   | null path = Left unsafe
   | '\0' `elem` path = Left unsafe
   | '\\' `elem` path = Left unsafe
@@ -189,6 +192,8 @@ normalizeArchiveEntryPath original
   | windowsDrive path = Left unsafe
   | any (== "..") components = Left unsafe
   | null normalizedComponents = Left unsafe
+  | length normalizedComponents > maximumArchivePathDepth =
+      Left ArchiveResourceLimitExceeded
   | any windowsUnsafeComponent normalizedComponents = Left unsafe
   | otherwise = Right $ Posix.joinPath normalizedComponents
  where
@@ -405,32 +410,61 @@ copyDirectoryTree
   -> m (Either AcquisitionError StagedMetadata)
 copyDirectoryTree source destination = do
   entries <- listDirectoryRecursively source []
-  validation <- validateDirectoryEntries source entries
+  validation <- identifyDirectoryEntries source entries
   case validation of
     Left err -> return $ Left err
-    Right () -> do
+    Right (sourceIdentity, entryIdentities) -> do
       metadata <- captureStagedMetadata source entries
       createPrivateDirectory destination
-      cleanupStagingOnError destination $
-        copyDirectoryEntries source destination entries
+      cleanupStagingOnError destination $ do
+        copyDirectoryEntries
+          source
+          destination
+          entryIdentities
+          entries
+        verifyDirectorySource
+          source
+          sourceIdentity
+          entryIdentities
+          entries
       return $ Right metadata
 
 
-validateDirectoryEntries
+identifyDirectoryEntries
   :: (MonadFileSystem m)
   => OsPath
   -> [(FileType, OsPath)]
-  -> m (Either AcquisitionError ())
-validateDirectoryEntries _ [] = return $ Right ()
-validateDirectoryEntries source ((File, relative) : remaining) = do
-  regular <- isRegularFile $ source </> relative
-  if regular
-    then validateDirectoryEntries source remaining
-    else do
-      path <- decodePath relative
+  -> m
+       ( Either
+           AcquisitionError
+           (FileIdentity, Map.Map OsPath FileIdentity)
+       )
+identifyDirectoryEntries source entries = do
+  sourceIdentity <- getFileIdentity source
+  case sourceIdentity of
+    Nothing -> do
+      path <- decodePath source
       return $ Left $ UnsupportedSourceEntry path
-validateDirectoryEntries source (_ : remaining) =
-  validateDirectoryEntries source remaining
+    Just identity -> do
+      identified <- go Map.empty entries
+      return $ fmap (\entryIdentities -> (identity, entryIdentities)) identified
+ where
+  go identities [] = return $ Right identities
+  go identities ((fileType, relative) : remaining) = do
+    let path = source </> relative
+    identityBefore <- getFileIdentity path
+    supported <- case fileType of
+      File -> isRegularFile path
+      Directory -> (&&) <$> isDirectory path <*> (not <$> isSymlink path)
+      Symlink -> isSymlink path
+    identityAfter <- getFileIdentity path
+    case identityBefore of
+      Just identity
+        | supported && identityAfter == Just identity ->
+            go (Map.insert relative identity identities) remaining
+      _ -> do
+        decoded <- decodePath relative
+        return $ Left $ UnsupportedSourceEntry decoded
 
 
 copyDirectoryContents
@@ -459,28 +493,94 @@ copyDirectoryEntries
   :: (MonadFileSystem m)
   => OsPath
   -> OsPath
+  -> Map.Map OsPath FileIdentity
   -> [(FileType, OsPath)]
   -> m ()
-copyDirectoryEntries source destination entries =
+copyDirectoryEntries source destination identities entries =
   forM_ entries $ \(fileType, relative) -> do
     let sourceEntry = source </> relative
         destinationEntry = destination </> relative
+    expectedIdentity <- expectedEntryIdentity identities relative
     case fileType of
-      Directory -> createDirectory destinationEntry
+      Directory -> do
+        verifyEntryIdentity source relative expectedIdentity
+        createDirectory destinationEntry
       File -> do
-        copied <- copyRegularFile sourceEntry destinationEntry
+        copied <-
+          copyRegularFileWithIdentity
+            expectedIdentity
+            sourceEntry
+            destinationEntry
         unless copied $ do
-          path <- decodePath relative
-          throwError $
-            userError $
-              "unsupported bootstrap source entry: " <> path
+          throwSourceEntryChanged relative
       Symlink -> do
+        verifyEntryIdentity source relative expectedIdentity
         target <- readSymlinkTarget sourceEntry
         linkType <- getSymbolicLinkType sourceEntry
+        verifyEntryIdentity source relative expectedIdentity
         createSymbolicLink
           target
           destinationEntry
           linkType
+
+
+verifyDirectorySource
+  :: (MonadFileSystem m)
+  => OsPath
+  -> FileIdentity
+  -> Map.Map OsPath FileIdentity
+  -> [(FileType, OsPath)]
+  -> m ()
+verifyDirectorySource source sourceIdentity identities entries = do
+  verifyPathIdentity source source sourceIdentity
+  forM_ entries $ \(_, relative) -> do
+    expectedIdentity <- expectedEntryIdentity identities relative
+    verifyEntryIdentity source relative expectedIdentity
+
+
+verifyEntryIdentity
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> FileIdentity
+  -> m ()
+verifyEntryIdentity source relative =
+  verifyPathIdentity relative $ source </> relative
+
+
+verifyPathIdentity
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> FileIdentity
+  -> m ()
+verifyPathIdentity displayPath path expectedIdentity = do
+  actualIdentity <- getFileIdentity path
+  unless (actualIdentity == Just expectedIdentity) $
+    throwSourceEntryChanged displayPath
+
+
+throwSourceEntryChanged :: (MonadFileSystem m) => OsPath -> m a
+throwSourceEntryChanged path = do
+  decoded <- decodePath path
+  throwError $
+    userError $
+      "bootstrap source entry changed during acquisition: " <> decoded
+
+
+expectedEntryIdentity
+  :: (MonadFileSystem m)
+  => Map.Map OsPath FileIdentity
+  -> OsPath
+  -> m FileIdentity
+expectedEntryIdentity identities relative =
+  case Map.lookup relative identities of
+    Just identity -> return identity
+    Nothing -> do
+      decoded <- decodePath relative
+      throwError $
+        userError $
+          "filesystem cannot identify bootstrap source entry: " <> decoded
 
 
 withDirectoryEntriesNoReplace
@@ -599,9 +699,7 @@ cleanupPublishedEntries
     ) = do
     quarantined <- quarantineEntry root
     when quarantined $ do
-      currentIdentity <-
-        getFileIdentity rootQuarantine
-          `catchError` const (return Nothing)
+      currentIdentity <- getFileIdentity rootQuarantine
       if currentIdentity /= Just rootIdentity
         then renameEntry rootType rootQuarantine rootPath
         else case rootType of
@@ -662,15 +760,11 @@ preparePublishedDirectories
         let path =
               relocatedPublishedPath rootRelative rootQuarantine relative
         quarantined <-
-          catchError
-            (renameEntry Directory path quarantine >> return True)
-            (const $ return False)
+          renameEntryIfPresent Directory path quarantine
         if not quarantined
           then continue safe modes
           else do
-            currentIdentity <-
-              getFileIdentity quarantine
-                `catchError` const (return Nothing)
+            currentIdentity <- getFileIdentity quarantine
             if currentIdentity /= Just expectedIdentity
               then renameEntry Directory quarantine path >> continue safe modes
               else do
@@ -706,9 +800,22 @@ relocatedPublishedPath rootRelative rootQuarantine relative =
 
 quarantineEntry :: (MonadFileSystem m) => PublishedEntry -> m Bool
 quarantineEntry (PublishedEntry fileType _ path quarantine _) =
+  renameEntryIfPresent fileType path quarantine
+
+
+renameEntryIfPresent
+  :: (MonadFileSystem m)
+  => FileType
+  -> OsPath
+  -> OsPath
+  -> m Bool
+renameEntryIfPresent fileType source destination =
   catchError
-    (renameEntry fileType path quarantine >> return True)
-    (const $ return False)
+    (renameEntry fileType source destination >> return True)
+    $ \err ->
+      if isDoesNotExistError err
+        then return False
+        else throwError err
 
 
 cleanupPublishedEntry
@@ -726,12 +833,9 @@ cleanupPublishedEntry
     let path =
           relocatedPublishedPath rootRelative rootQuarantine relative
     quarantined <-
-      catchError
-        (renameEntry fileType path quarantine >> return True)
-        (const $ return False)
+      renameEntryIfPresent fileType path quarantine
     when quarantined $ do
-      currentIdentity <-
-        getFileIdentity quarantine `catchError` const (return Nothing)
+      currentIdentity <- getFileIdentity quarantine
       if currentIdentity == Just expectedIdentity
         then
           removePublishedEntry
@@ -805,6 +909,14 @@ maximumExpandedArchiveBytes = 64 * 1024 * 1024
 
 maximumArchiveEntries :: Int
 maximumArchiveEntries = 10000
+
+
+maximumArchivePathCharacters :: Int
+maximumArchivePathCharacters = 4096
+
+
+maximumArchivePathDepth :: Int
+maximumArchivePathDepth = 256
 
 
 maximumDecodedTarBytes :: Int
