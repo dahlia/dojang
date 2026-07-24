@@ -25,7 +25,20 @@ import System.Info (os)
 
 
 #ifndef mingw32_HOST_OS
-import Control.Exception (AsyncException (UserInterrupt), throw)
+import Control.Concurrent
+  ( MVar
+  , forkFinally
+  , forkIO
+  , newEmptyMVar
+  , putMVar
+  , takeMVar
+  , threadDelay
+  , tryTakeMVar
+  )
+import Control.Exception
+  ( AsyncException (ThreadKilled, UserInterrupt)
+  , throw
+  )
 import Control.Exception qualified as Exception
 import Control.Monad (unless, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
@@ -1460,6 +1473,17 @@ data CurrentDirectoryRace
       OsPath
       OsPath
       ByteString.ByteString
+  | InterruptAfterExchange
+      OsPath
+      OsPath
+      ByteString.ByteString
+  | InterruptDuringExchangeRollback
+      OsPath
+      OsPath
+      ByteString.ByteString
+      (MVar ())
+      (MVar ())
+      (MVar ())
   | ReplaceSourceBeforeCopy FileType OsPath OsPath
   | FailQuarantine OsPath OsPath
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
@@ -1645,6 +1669,21 @@ instance MonadFileSystem CurrentDirectoryIO where
             && exchanged
             && not concurrentPresent ->
             liftIO $ writeFile concurrentPath contents
+      Just (InterruptAfterExchange racedDestination concurrentPath contents)
+        | destination == racedDestination && exchanged ->
+            liftIO $ writeFile concurrentPath contents
+      Just
+        ( InterruptDuringExchangeRollback
+            racedDestination
+            concurrentPath
+            contents
+            exchangeDone
+            _
+            _
+          )
+          | destination == racedDestination && exchanged -> liftIO $ do
+              writeFile concurrentPath contents
+              putMVar exchangeDone ()
       _ -> return ()
     return exchanged
   writeTemporaryFile directory template contents =
@@ -1702,8 +1741,13 @@ instance MonadFileSystem CurrentDirectoryIO where
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
   getFileIdentity value = do
-    identity <- liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
     (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just (InterruptAfterExchange _ concurrentPath _)
+        | value == takeDirectory concurrentPath ->
+            liftIO $ Exception.throwIO UserInterrupt
+      _ -> return ()
+    identity <- liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
     case racedEntry of
       Just (ReplaceDuringRollback racedPath displacedPath replacement _)
         | value == racedPath -> liftIO $ do
@@ -1719,6 +1763,22 @@ instance MonadFileSystem CurrentDirectoryIO where
         | path == racedPath -> liftIO $ do
             removeFile racedPath
             createSymbolicLink victimPath racedPath File
+      Just
+        ( InterruptDuringExchangeRollback
+            _
+            concurrentPath
+            _
+            exchangeDone
+            rollbackStarted
+            releaseRollback
+          )
+          | path == takeDirectory concurrentPath -> liftIO $ do
+              exchanged <- tryTakeMVar exchangeDone
+              case exchanged of
+                Just () -> do
+                  putMVar rollbackStarted ()
+                  takeMVar releaseRollback
+                Nothing -> return ()
       _ -> return ()
     liftIO (setPortableMode path mode :: IO ())
   setPortableWritable path writable =
@@ -2178,6 +2238,92 @@ symlinkSpecs = do
       destinationIsFile === True
       destinationContents === concurrentContents
       stagingIsDirectory === True
+      stagingContents === "manifest"
+
+  it "rolls back an interrupted directory exchange" $
+    hedgehog $ do
+      concurrentContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (interrupted, destinationContents, stagingContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            concurrentName <- encodeFS "concurrent"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                concurrent = staging </> concurrentName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            result <-
+              Exception.try $
+                runCurrentDirectoryIOWithRace
+                  tmpDir
+                  ( InterruptAfterExchange
+                      destination
+                      concurrent
+                      concurrentContents
+                  )
+                  (publishStagedDirectory staging destination)
+            destinationValue <- readFile $ destination </> concurrentName
+            stagingValue <- readFile $ staging </> manifestName
+            return
+              ( result :: Either AsyncException (Either IOError ())
+              , destinationValue
+              , stagingValue
+              )
+      assert $ isLeft interrupted
+      destinationContents === concurrentContents
+      stagingContents === "manifest"
+
+  it "finishes exchange rollback through a second interruption" $
+    hedgehog $ do
+      concurrentContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (finished, destinationContents, stagingContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            concurrentName <- encodeFS "concurrent"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                concurrent = staging </> concurrentName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            exchangeDone <- newEmptyMVar
+            rollbackStarted <- newEmptyMVar
+            releaseRollback <- newEmptyMVar
+            result <- newEmptyMVar
+            worker <-
+              forkFinally
+                ( runCurrentDirectoryIOWithRace
+                    tmpDir
+                    ( InterruptDuringExchangeRollback
+                        destination
+                        concurrent
+                        concurrentContents
+                        exchangeDone
+                        rollbackStarted
+                        releaseRollback
+                    )
+                    (publishStagedDirectory staging destination)
+                )
+                (putMVar result)
+            takeMVar rollbackStarted
+            _ <- forkIO $ Exception.throwTo worker ThreadKilled
+            threadDelay 10000
+            putMVar releaseRollback ()
+            outcome <- timeout 5000000 $ takeMVar result
+            destinationValue <- readFile $ destination </> concurrentName
+            stagingValue <- readFile $ staging </> manifestName
+            return (outcome, destinationValue, stagingValue)
+      assert $ maybe False isLeft finished
+      destinationContents === concurrentContents
       stagingContents === "manifest"
 
   it "rolls back CWD publication interrupted between entries" $

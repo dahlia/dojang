@@ -37,7 +37,15 @@ import Control.Exception
   , throwIO
   )
 import Control.Monad (forM, forM_, unless, void, when)
-import Control.Monad.Catch (MonadCatch, MonadMask, catch, mask, throwM, try)
+import Control.Monad.Catch
+  ( MonadCatch
+  , MonadMask
+  , catch
+  , mask
+  , throwM
+  , try
+  , uninterruptibleMask_
+  )
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (shiftR, (.&.), (.|.))
@@ -349,18 +357,47 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
               throwError $
                 userError
                   "filesystem cannot atomically exchange the bootstrap destination"
-            validateExchangedDestination
-              destinationIdentity
+            withExchangedDestinationRollback
+              destinationMode
               staging
               destination
-            widenDirectoryForCleanup staging
-            removeDirectory staging `catchError` \err -> do
-              restoreExchangedDestinationMode
-                destinationMode
-                staging
-                destination
-              throwError err
+              $ do
+                validateExchangedDestination
+                  destinationIdentity
+                  staging
+                widenDirectoryForCleanup staging
+                removeDirectory staging
             return modeFailures
+
+
+withExchangedDestinationRollback
+  :: (MonadFileSystem m, MonadMask m)
+  => PortableMode
+  -> OsPath
+  -> OsPath
+  -> m a
+  -> m a
+withExchangedDestinationRollback mode staging destination action = do
+  outcome <-
+    catchError
+      (Right <$> try action)
+      (return . Left)
+  case outcome of
+    Left filesystemError -> uninterruptibleMask_ $ do
+      restoreExchangedDestinationMode
+        mode
+        staging
+        destination
+      throwError filesystemError
+    Right (Left (exception :: SomeException)) -> uninterruptibleMask_ $ do
+      restoreExchangedDestinationMode
+        mode
+        staging
+        destination
+      case fromException exception of
+        Just filesystemError -> throwError filesystemError
+        Nothing -> throwM exception
+    Right (Right value) -> return value
 
 
 resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
@@ -378,31 +415,17 @@ resolvesToRegularFile path = do
 
 
 validateExchangedDestination
-  :: (MonadFileSystem m, MonadCatch m)
+  :: (MonadFileSystem m)
   => Maybe FileIdentity
   -> OsPath
-  -> OsPath
   -> m ()
-validateExchangedDestination expectedIdentity staging destination = do
-  inspected <-
-    catchError
-      ( try $
-          (,)
-            <$> getFileIdentity staging
-            <*> listDirectory staging
-      )
-      (return . Left)
-  case inspected of
-    Left (err :: IOError) -> do
-      restoreExchangedDestination staging destination
-      throwError err
-    Right (actualIdentity, exchangedEntries) ->
-      unless
-        (actualIdentity == expectedIdentity && null exchangedEntries)
-        $ do
-          restoreExchangedDestination staging destination
-          throwError $
-            userError "bootstrap destination changed during publication"
+validateExchangedDestination expectedIdentity staging = do
+  actualIdentity <- getFileIdentity staging
+  exchangedEntries <- listDirectory staging
+  unless
+    (actualIdentity == expectedIdentity && null exchangedEntries)
+    $ throwError
+    $ userError "bootstrap destination changed during publication"
 
 
 restoreExchangedDestination
