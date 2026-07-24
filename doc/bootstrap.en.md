@@ -8,7 +8,10 @@ staged *dojang.toml* before publishing the repository, so an invalid or
 incomplete source does not replace the destination.
 
 The destination must not exist or must be an empty directory.  It is the current
-directory unless `-r`/`--repository-dir` selects another path.
+directory unless `-r`/`--repository-dir` selects another path.  Publication
+refuses a destination that has been replaced by a symbolic link.  Other
+existing empty destinations are replaced atomically; the current directory
+keeps its identity.
 
 
 Local directories and archives
@@ -26,6 +29,10 @@ accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
 ~~~~
+
+An archive source must resolve to a regular file.  Symbolic links to regular
+archives are accepted, but FIFOs and other special files are rejected without
+reading them.
 
 Archive entries are validated before extraction.  Absolute paths, parent
 traversal, backslash paths, links, Windows-reserved or invalid filename

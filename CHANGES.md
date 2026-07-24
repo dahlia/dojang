@@ -19,11 +19,15 @@ To be released.
     after case folding or Unicode normalization.  It preserves recorded POSIX
     permissions where the destination filesystem supports them, requires an
     absent or empty destination, and cleans unpublished work after failure.
-    Unsupported permission metadata produces a warning without discarding the
-    acquired contents.  An absent destination is published with an atomic
-    filesystem rename.  A dry run does not start an external transport and
-    redacts its source argument and environment values.  Noninteractive
-    bootstrap requires both `--no-interactive` and `--yes`.  [[#47], [#74]]
+    Archive sources must resolve to regular files, so FIFOs and other special
+    files are rejected without blocking.  Unsupported permission metadata
+    produces a warning without discarding the acquired contents.  An absent or
+    existing empty destination is published with an atomic filesystem rename,
+    except that the current working directory keeps its identity.  Publication
+    refuses a destination replaced by a symbolic link.  A dry run does not
+    start an external transport and redacts its source argument and environment
+    values.  Noninteractive bootstrap requires both `--no-interactive` and
+    `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

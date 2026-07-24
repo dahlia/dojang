@@ -27,19 +27,25 @@ import Control.Monad.Except
   , runExceptT
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Data.Bits (shiftL, (.|.))
 import Data.Word (Word32)
 import System.Directory.OsPath qualified
+import System.FilePath qualified as FilePath
 import System.OsPath (OsPath)
+import System.Posix.Files qualified as Posix
+import System.Timeout (timeout)
 #endif
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec
   ( Spec
+  , anyIOException
   , describe
   , it
   , shouldBe
   , shouldReturn
   , shouldSatisfy
+  , shouldThrow
   )
 import Test.Hspec.Hedgehog (hedgehog, (===))
 import Prelude hiding (readFile, writeFile)
@@ -50,6 +56,7 @@ import Dojang.Bootstrap
   , BuiltinSource (..)
   , archiveFormatFromFilePath
   , detectBuiltinSource
+  , emptyStagedMetadata
   , normalizeArchiveEntryPath
   , publishStagedDirectory
   , stageBuiltinSource
@@ -249,6 +256,7 @@ spec = do
           cases
 
     archiveModeSpecs
+    archiveSpecialFileSpecs
 
     it "rejects traversal before writing any archive entry" $
       withTempDir $ \tmpDir _ -> do
@@ -505,6 +513,10 @@ isConflictingArchive _ = False
 #ifdef mingw32_HOST_OS
 archiveModeSpecs :: Spec
 archiveModeSpecs = return ()
+
+
+archiveSpecialFileSpecs :: Spec
+archiveSpecialFileSpecs = return ()
 #else
 archiveModeSpecs :: Spec
 archiveModeSpecs = do
@@ -629,6 +641,69 @@ archiveModeSpecs = do
         `shouldReturn` "#!/bin/sh\n"
       isDirectory staging `shouldReturn` False
 
+  it "restores an existing empty destination when its rename fails" $
+    withTempDir $ \tmpDir _ -> do
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "failing-rename"
+      manifestName <- encodeFS "dojang.toml"
+      let staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+      createDirectory staging
+      createDirectory destination
+      setPortableMode destination 0o750
+      writeFile (staging </> manifestName) "manifest"
+      result <-
+        runFailingModeIO $
+          publishStagedDirectoryWithMetadata
+            emptyStagedMetadata
+            staging
+            destination
+      result `shouldSatisfy` either (const True) (const False)
+      isDirectory destination `shouldReturn` True
+      listDirectory destination `shouldReturn` []
+      getPortableMode destination
+        `shouldReturn` portableModeFromBits 0o750
+      isDirectory staging `shouldReturn` True
+
+
+archiveSpecialFileSpecs :: Spec
+archiveSpecialFileSpecs = do
+  it "rejects arbitrary FIFO paths with supported archive extensions" $
+    hedgehog $ do
+      prefix <-
+        forAll $
+          Gen.string
+            (Range.linear 1 40)
+            (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+      extension <-
+        forAll $ Gen.element [".zip", ".tar", ".tar.gz", ".tgz"]
+      (detected, archiveFilePath) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            archiveName <- encodeFS $ prefix <> extension
+            let archivePath = tmpDir </> archiveName
+            path <- decodePath archivePath
+            Posix.createNamedPipe path 0o600
+            result <- detectBuiltinSource archivePath
+            return (result, path)
+      detected === Left (SourceDoesNotExist archiveFilePath)
+
+  it "does not block when given a FIFO archive source directly" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "repository.tar"
+      stagingName <- encodeFS "staging"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+      archiveFilePath <- decodePath archivePath
+      Posix.createNamedPipe archiveFilePath 0o600
+      result <-
+        timeout 1000000 $
+          stageBuiltinSource
+            (ArchiveSource TarArchive archivePath)
+            staging
+      result
+        `shouldBe` Just (Left (SourceDoesNotExist archiveFilePath))
+
 
 newtype FailingModeIO a
   = FailingModeIO (ExceptT IOError IO a)
@@ -661,6 +736,75 @@ instance MonadFileSystem FailingModeIO where
   writeFile path contents = liftIO (writeFile path contents :: IO ())
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
+  renameDirectory source destination = do
+    destinationPath <- liftIO (decodePath destination :: IO FilePath)
+    if FilePath.takeFileName destinationPath == "failing-rename"
+      then throwError $ userError "injected rename failure"
+      else liftIO (renameDirectory source destination :: IO ())
+  writeTemporaryFile directory template contents =
+    liftIO (writeTemporaryFile directory template contents :: IO OsPath)
+  withFileLock _ action = action
+  canonicalizePath value = liftIO (canonicalizePath value :: IO OsPath)
+  readSymlinkTarget value = liftIO (readSymlinkTarget value :: IO OsPath)
+  copyFile source destination =
+    liftIO (copyFile source destination :: IO ())
+  copyFileWithMetadata source destination =
+    liftIO (copyFileWithMetadata source destination :: IO ())
+  copyFilePermissions source destination =
+    liftIO (copyFilePermissions source destination :: IO ())
+  createDirectory value = liftIO (createDirectory value :: IO ())
+  removeFile value = liftIO (removeFile value :: IO ())
+  removeDirectory value = liftIO (removeDirectory value :: IO ())
+  listDirectory value = liftIO (listDirectory value :: IO [OsPath])
+  getFileSize value = liftIO (getFileSize value :: IO Integer)
+  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  setPortableMode path mode = do
+    path' <- liftIO (decodePath path :: IO FilePath)
+    if FilePath.takeFileName path' == "script"
+      then throwError $ userError "injected mode-restoration failure"
+      else liftIO (setPortableMode path mode :: IO ())
+  setPortableWritable path writable =
+    liftIO (setPortableWritable path writable :: IO ())
+  createSymbolicLink target link fileType =
+    liftIO (createSymbolicLink target link fileType :: IO ())
+
+
+newtype CurrentDirectoryIO a
+  = CurrentDirectoryIO (ReaderT OsPath (ExceptT IOError IO) a)
+  deriving
+    ( Functor
+    , Applicative
+    , Monad
+    , MonadIO
+    , MonadThrow
+    , MonadCatch
+    , MonadError IOError
+    )
+
+
+runCurrentDirectoryIO
+  :: OsPath -> CurrentDirectoryIO a -> IO (Either IOError a)
+runCurrentDirectoryIO currentDirectory (CurrentDirectoryIO action) =
+  runExceptT $ runReaderT action currentDirectory
+
+
+instance MonadFileSystem CurrentDirectoryIO where
+  encodePath "." = CurrentDirectoryIO ask
+  encodePath value = liftIO (encodePath value :: IO OsPath)
+  decodePath value = liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory = CurrentDirectoryIO ask
+  getHomeDirectory = liftIO (getHomeDirectory :: IO OsPath)
+  exists value = liftIO (exists value :: IO Bool)
+  isFile value = liftIO (isFile value :: IO Bool)
+  isRegularFile value = liftIO (isRegularFile value :: IO Bool)
+  isDirectory value = liftIO (isDirectory value :: IO Bool)
+  isSymlink value = liftIO (isSymlink value :: IO Bool)
+  readFile value = liftIO (readFile value :: IO ByteString.ByteString)
+  readRegularFile value =
+    liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
+  writeFile path contents = liftIO (writeFile path contents :: IO ())
+  replaceFile source destination =
+    liftIO (replaceFile source destination :: IO ())
   renameDirectory source destination =
     liftIO (renameDirectory source destination :: IO ())
   writeTemporaryFile directory template contents =
@@ -680,8 +824,8 @@ instance MonadFileSystem FailingModeIO where
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
   getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
-  setPortableMode _ _ =
-    throwError $ userError "injected mode-restoration failure"
+  setPortableMode path mode =
+    liftIO (setPortableMode path mode :: IO ())
   setPortableWritable path writable =
     liftIO (setPortableWritable path writable :: IO ())
   createSymbolicLink target link fileType =
@@ -715,12 +859,70 @@ symlinkSpecs = do
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "repository.zip"
       linkName <- encodeFS "current.zip"
+      stagingName <- encodeFS "staging"
+      manifestName <- encodeFS "dojang.toml"
       let archivePath = tmpDir </> archiveName
           linkPath = tmpDir </> linkName
+          staging = tmpDir </> stagingName
       writeFile archivePath $
         LazyByteString.toStrict $
           zipBytes "dojang.toml" "contents"
       System.Directory.OsPath.createFileLink archiveName linkPath
       detectBuiltinSource linkPath
         `shouldReturn` Right (ArchiveSource ZipArchive linkPath)
+      stageBuiltinSource (ArchiveSource ZipArchive linkPath) staging
+        `shouldReturn` Right ()
+      readFile (staging </> manifestName) `shouldReturn` "contents"
+
+  it "does not publish through a replaced destination symbolic link" $
+    withTempDir $ \tmpDir _ -> do
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      redirectedName <- encodeFS "redirected"
+      manifestName <- encodeFS "dojang.toml"
+      let staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          redirected = tmpDir </> redirectedName
+      createDirectory staging
+      createDirectory redirected
+      writeFile (staging </> manifestName) "manifest"
+      System.Directory.OsPath.createDirectoryLink
+        redirectedName
+        destination
+      publishStagedDirectory staging destination
+        `shouldThrow` anyIOException
+      exists (redirected </> manifestName) `shouldReturn` False
+      isDirectory staging `shouldReturn` True
+
+  it "preserves CWD identity through a symlinked parent path" $
+    withTempDir $ \tmpDir _ -> do
+      realParentName <- encodeFS "real-parent"
+      aliasParentName <- encodeFS "alias-parent"
+      destinationName <- encodeFS "destination"
+      stagingName <- encodeFS "staging"
+      manifestName <- encodeFS "dojang.toml"
+      let realParent = tmpDir </> realParentName
+          aliasParent = tmpDir </> aliasParentName
+          realDestination = realParent </> destinationName
+          aliasDestination = aliasParent </> destinationName
+          staging = tmpDir </> stagingName
+      createDirectory realParent
+      createDirectory realDestination
+      createDirectory staging
+      writeFile (staging </> manifestName) "manifest"
+      System.Directory.OsPath.createDirectoryLink
+        realParentName
+        aliasParent
+      realDestinationPath <- decodePath realDestination
+      originalId <-
+        Posix.fileID <$> Posix.getFileStatus realDestinationPath
+      published <-
+        runCurrentDirectoryIO realDestination $
+          publishStagedDirectory staging aliasDestination
+      published `shouldBe` Right ()
+      readFile (realDestination </> manifestName)
+        `shouldReturn` "manifest"
+      publishedId <-
+        Posix.fileID <$> Posix.getFileStatus realDestinationPath
+      publishedId `shouldBe` originalId
 #endif

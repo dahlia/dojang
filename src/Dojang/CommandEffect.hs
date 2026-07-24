@@ -459,6 +459,7 @@ instance MonadFileSystem CommandEffectTest where
   isDirectory = liftCommandEffectBase . isDirectory
   isSymlink = liftCommandEffectBase . isSymlink
   readFile = liftCommandEffectBase . readFile
+  readRegularFile = liftCommandEffectBase . readRegularFile
   writeFile path = liftCommandEffectBase . writeFile path
   replaceFile source = liftCommandEffectBase . replaceFile source
   writeTemporaryFile directory template =

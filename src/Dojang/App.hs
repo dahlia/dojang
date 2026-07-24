@@ -273,6 +273,7 @@ instance
   isDirectory = App . lift . lift . lift . isDirectory
   isSymlink = App . lift . lift . lift . isSymlink
   readFile = App . lift . lift . lift . readFile
+  readRegularFile = App . lift . lift . lift . readRegularFile
   writeFile dst = App . lift . lift . lift . writeFile dst
   replaceFile src = App . lift . lift . lift . replaceFile src
   renameDirectory src = App . lift . lift . lift . renameDirectory src

@@ -143,7 +143,7 @@ detectBuiltinSource source = do
   if directory
     then return $ Right $ DirectorySource source
     else do
-      regularFile <- isFile source
+      regularFile <- resolvesToRegularFile source
       sourceName <- decodePath source
       if not regularFile
         then return $ Left $ SourceDoesNotExist sourceName
@@ -218,36 +218,39 @@ stageBuiltinSourceWithMetadata (DirectorySource source) staging = do
   metadata <- copyDirectoryTree source staging
   return $ Right metadata
 stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
-  bytes <- readFile source
-  decoded <-
-    try $
-      liftIO $
-        evaluate $
-          force $
-            decodeArchive format bytes
-  case decoded of
-    Left (err :: SomeException) ->
-      return $ Left $ InvalidArchive $ Text.pack $ displayException err
-    Right (Left err) -> return $ Left err
-    Right (Right entries) -> do
-      createDirectory staging
-      cleanupStagingOnError staging $ do
-        forM_ entries $ \case
-          StagedDirectory relative _ -> do
-            encoded <- encodePath relative
-            createDirectories $ staging </> encoded
-          StagedFile relative contents _ -> do
-            encoded <- encodePath relative
-            let destination = staging </> encoded
-            createDirectories $ takeDirectory destination
-            writeFile destination contents
-      return $ Right $ metadataFromEntries entries
+  sourceName <- decodePath source
+  readRegularFile source >>= \case
+    Nothing -> return $ Left $ SourceDoesNotExist sourceName
+    Just bytes -> do
+      decoded <-
+        try $
+          liftIO $
+            evaluate $
+              force $
+                decodeArchive format bytes
+      case decoded of
+        Left (err :: SomeException) ->
+          return $ Left $ InvalidArchive $ Text.pack $ displayException err
+        Right (Left err) -> return $ Left err
+        Right (Right entries) -> do
+          createDirectory staging
+          cleanupStagingOnError staging $ do
+            forM_ entries $ \case
+              StagedDirectory relative _ -> do
+                encoded <- encodePath relative
+                createDirectories $ staging </> encoded
+              StagedFile relative contents _ -> do
+                encoded <- encodePath relative
+                let destination = staging </> encoded
+                createDirectories $ takeDirectory destination
+                writeFile destination contents
+          return $ Right $ metadataFromEntries entries
 
 
--- | Publishes a fully validated staging tree. A missing destination is created
--- with an atomic directory rename. An existing empty destination keeps its
--- directory identity, which is required when it is the process's current
--- working directory.
+-- | Publishes a fully validated staging tree. A missing or existing empty
+-- destination is published with an atomic directory rename. When the
+-- destination is the process's current working directory, its directory
+-- identity is preserved instead.
 publishStagedDirectory
   :: (MonadFileSystem m) => OsPath -> OsPath -> m ()
 publishStagedDirectory staging destination =
@@ -260,12 +263,12 @@ publishStagedDirectory staging destination =
 
 -- | Publishes a fully validated staging tree and applies retained permissions.
 --
--- A missing destination is still published with one atomic rename.  An
--- existing empty destination keeps its identity while receiving the same file
--- and directory modes as the staging tree, with retained archive modes taking
--- precedence.  The returned paths identify entries whose stored permissions
--- the destination filesystem could not represent; their contents are still
--- published.
+-- A missing or existing empty destination is published with an atomic rename,
+-- except that the current working directory keeps its identity.  File and
+-- directory modes come from the staging tree, with retained archive modes
+-- taking precedence.  The returned paths identify entries whose stored
+-- permissions the destination filesystem could not represent; their contents
+-- are still published.
 publishStagedDirectoryWithMetadata
   :: (MonadFileSystem m)
   => StagedMetadata
@@ -273,6 +276,10 @@ publishStagedDirectoryWithMetadata
   -> OsPath
   -> m [FilePath]
 publishStagedDirectoryWithMetadata metadata staging destination = do
+  destinationSymlink <- isSymlink destination
+  when destinationSymlink $
+    throwError $
+      userError "bootstrap destination is a symbolic link"
   destinationExists <- exists destination
   if not destinationExists
     then do
@@ -285,7 +292,50 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
       unless (null destinationEntries) $
         throwError $
           userError "bootstrap destination is not empty"
-      copyDirectoryContents metadata staging destination
+      currentDirectory <- canonicalizePath =<< getCurrentDirectory
+      absoluteDestination <- canonicalizePath =<< makeAbsolute destination
+      if absoluteDestination == currentDirectory
+        then do
+          current <- encodePath "."
+          copyDirectoryContents metadata staging current
+        else do
+          destinationMode <- getPortableMode destination
+          modeFailures <- applyStagedMetadata staging metadata
+          removeDirectory destination
+          renameDirectory staging destination
+            `catchError` \err -> do
+              widenStagedMetadata staging metadata
+                `catchError` const (return ())
+              restoreEmptyDestination destination destinationMode
+                `catchError` const (return ())
+              throwError err
+          return modeFailures
+
+
+resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
+resolvesToRegularFile path = do
+  regularFile <- isRegularFile path
+  if regularFile
+    then return True
+    else do
+      symbolicLink <- isSymlink path
+      if not symbolicLink
+        then return False
+        else do
+          resolved <- canonicalizePath path
+          isRegularFile resolved
+
+
+restoreEmptyDestination
+  :: (MonadFileSystem m) => OsPath -> PortableMode -> m ()
+restoreEmptyDestination destination (PortableMode posixBits writable) = do
+  symbolicLink <- isSymlink destination
+  present <- exists destination
+  unless (symbolicLink || present) $ do
+    createDirectory destination
+    case posixBits of
+      Just bits -> setPortableMode destination bits
+      Nothing -> setPortableWritable destination writable
 
 
 copyDirectoryTree

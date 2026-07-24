@@ -79,6 +79,7 @@
 | record                       | 레코드, 기록하다           | 명사와 동사를 구분합니다.                                                                    |
 | reflection, reflect          | 반영, 반영하다             | 명령 이름 `dojang reflect`는 그대로 씁니다.                                                  |
 | reflection policy            | 반영 정책                  | 코덱 구현이 `identity`, `reject`, `re-add` 중 하나로 정합니다.                               |
+| regular file                 | 정규 파일                  | FIFO, 소켓, 장치 같은 특수 파일이 아닌 일반 파일을 뜻합니다.                                 |
 | rendered bytes               | 렌더링된 바이트            | 코덱의 정방향 변환 결과이며 중간 스냅샷과 대상 경로에 배치됩니다.                            |
 | registry                     | 레지스트리                 |                                                                                              |
 | repository                   | 저장소                     |                                                                                              |

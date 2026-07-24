@@ -49,7 +49,13 @@ import Control.Monad.State.Strict
   , runStateT
   )
 import Data.ByteString (ByteString)
-import Data.ByteString qualified (hPut, length, readFile, writeFile)
+import Data.ByteString qualified
+  ( hGetContents
+  , hPut
+  , length
+  , readFile
+  , writeFile
+  )
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
 import System.Directory qualified as Directory
 import System.Directory.OsPath
@@ -70,7 +76,9 @@ import Dojang.Types.RouteMetadata
 
 
 #ifndef mingw32_HOST_OS
+import Control.Exception qualified as Exception
 import System.Posix.Files qualified as Posix
+import System.Posix.IO qualified as Posix
 #endif
 import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
 import System.IO
@@ -154,6 +162,28 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Reads contents from a file.
   readFile :: (HasCallStack) => OsPath -> m ByteString
+
+
+  -- | Reads a regular file, returning 'Nothing' for every other file type.
+  --
+  -- Symbolic links to regular files are accepted. Filesystem-backed
+  -- implementations should validate the opened file rather than a pathname so
+  -- that a concurrent replacement cannot redirect the read to a special file.
+  readRegularFile :: (HasCallStack) => OsPath -> m (Maybe ByteString)
+  readRegularFile path = do
+    regularFile <- isRegularFile path
+    if regularFile
+      then Just <$> readFile path
+      else do
+        symbolicLink <- isSymlink path
+        if not symbolicLink
+          then return Nothing
+          else do
+            resolved <- canonicalizePath path
+            resolvedRegularFile <- isRegularFile resolved
+            if resolvedRegularFile
+              then Just <$> readFile path
+              else return Nothing
 
 
   -- | Writes contents into a file.
@@ -491,6 +521,15 @@ isRegularFileIO path =
   (&&) <$> doesFileExist path <*> (not <$> isSymlink path)
 
 
+readRegularFileIO :: OsPath -> IO (Maybe ByteString)
+readRegularFileIO path = do
+  resolved <- OsDirectory.canonicalizePath path
+  regularFile <- isRegularFileIO resolved
+  if regularFile
+    then Just <$> (decodeFS path >>= Data.ByteString.readFile)
+    else return Nothing
+
+
 getPortableModeIO :: OsPath -> IO PortableMode
 getPortableModeIO path = do
   permissions <- OsDirectory.getPermissions path
@@ -530,6 +569,32 @@ isRegularFileIO path = do
   (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus path')
     `catchError` \err ->
       if isDoesNotExistError err then return False else throwError err
+
+
+readRegularFileIO :: OsPath -> IO (Maybe ByteString)
+readRegularFileIO path = do
+  path' <- decodeFS path
+  Exception.mask $ \restore -> do
+    descriptor <-
+      Posix.openFd
+        path'
+        Posix.ReadOnly
+        Posix.defaultFileFlags
+          { Posix.nonBlock = True
+          , Posix.cloexec = True
+          }
+    status <-
+      restore (Posix.getFdStatus descriptor)
+        `Exception.onException` Posix.closeFd descriptor
+    if not $ Posix.isRegularFile status
+      then Posix.closeFd descriptor >> return Nothing
+      else do
+        handle <-
+          Posix.fdToHandle descriptor
+            `Exception.onException` Posix.closeFd descriptor
+        Just
+          <$> restore (Data.ByteString.hGetContents handle)
+            `Exception.finally` hClose handle
 
 
 getPortableModeIO :: OsPath -> IO PortableMode
@@ -601,6 +666,9 @@ instance MonadFileSystem IO where
 
 
   readFile src = decodePath src >>= Data.ByteString.readFile
+
+
+  readRegularFile = readRegularFileIO
 
 
   writeFile dst contents = do
