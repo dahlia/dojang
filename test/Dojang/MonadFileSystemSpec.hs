@@ -370,6 +370,41 @@ spec = do
       original <- Data.ByteString.readFile packageYamlFP
       contents `shouldBe` original
 
+    specify "copyRegularFileNoReplace copies arbitrary contents" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        (copied, observed) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              writeFile (tmpDir </> foo) contents
+              result <-
+                copyRegularFileNoReplace
+                  (tmpDir </> foo)
+                  (tmpDir </> bar)
+              destinationContents <- readFile $ tmpDir </> bar
+              return (result, destinationContents)
+        copied === True
+        observed === contents
+
+    specify "copyRegularFileNoReplace preserves arbitrary existing contents" $
+      hedgehog $ do
+        sourceContents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        destinationContents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        (refused, observed) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              writeFile (tmpDir </> foo) sourceContents
+              writeFile (tmpDir </> bar) destinationContents
+              result <-
+                tryError $
+                  copyRegularFileNoReplace
+                    (tmpDir </> foo)
+                    (tmpDir </> bar)
+              contents <- readFile $ tmpDir </> bar
+              return (either isAlreadyExistsError (const False) result, contents)
+        refused === True
+        observed === destinationContents
+
     specify "renameDirectory" $ withTempDir $ \tmpDir _ -> do
       createDirectory $ tmpDir </> foo
       writeFile (tmpDir </> foo </> bar) "contents"

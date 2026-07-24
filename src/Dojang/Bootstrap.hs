@@ -412,17 +412,17 @@ copyDirectoryContents retainedMetadata source destination = do
   let publishedMetadata =
         withoutRootMetadata $
           overlayStagedMetadata retainedMetadata sourceMetadata
-  topLevelEntries <- listDirectory source
-  cleanupDestinationOnError
-    destination
-    topLevelEntries
-    publishedMetadata
-    $ do
-      copyDirectoryEntries source destination entries
-      modeFailures <- applyStagedMetadata destination publishedMetadata
+  createdEntries <-
+    copyDirectoryEntriesNoReplace source destination entries
+  ( do
       widenStagedMetadata source sourceMetadata
       removeDirectoryRecursively source
+      modeFailures <- applyStagedMetadata destination publishedMetadata
       return modeFailures
+    )
+    `catchError` \err -> do
+      cleanupPublishedEntries createdEntries
+      throwError err
 
 
 copyDirectoryEntries
@@ -453,31 +453,52 @@ copyDirectoryEntries source destination entries =
           (if directoryLink then Directory else File)
 
 
-cleanupDestinationOnError
+copyDirectoryEntriesNoReplace
   :: (MonadFileSystem m)
   => OsPath
-  -> [OsPath]
-  -> StagedMetadata
-  -> m a
-  -> m a
-cleanupDestinationOnError destination entries metadata action =
-  action `catchError` \err -> do
-    widenStagedMetadata destination metadata
-      `catchError` const (return ())
-    forM_ entries $ \entry ->
-      removeAnyEntry (destination </> entry)
-        `catchError` const (return ())
-    throwError err
+  -> OsPath
+  -> [(FileType, OsPath)]
+  -> m [(FileType, OsPath)]
+copyDirectoryEntriesNoReplace source destination = copyEntries []
+ where
+  copyEntries created [] = return created
+  copyEntries created ((fileType, relative) : remaining) = do
+    let sourceEntry = source </> relative
+        destinationEntry = destination </> relative
+        createEntry = case fileType of
+          Directory -> createDirectory destinationEntry
+          File -> do
+            copied <-
+              copyRegularFileNoReplace sourceEntry destinationEntry
+            unless copied $ do
+              path <- decodePath relative
+              throwError $
+                userError $
+                  "unsupported bootstrap source entry: " <> path
+          Symlink -> do
+            target <- readSymlinkTarget sourceEntry
+            directoryLink <- isDirectory sourceEntry
+            createSymbolicLink
+              target
+              destinationEntry
+              (if directoryLink then Directory else File)
+    createEntry `catchError` \err -> do
+      cleanupPublishedEntries created
+      throwError err
+    copyEntries ((fileType, destinationEntry) : created) remaining
 
 
-removeAnyEntry :: (MonadFileSystem m) => OsPath -> m ()
-removeAnyEntry path = do
-  symbolicLink <- isSymlink path
-  directory <- isDirectory path
-  present <- exists path
-  if directory && not symbolicLink
-    then removeDirectoryRecursively path
-    else when (symbolicLink || present) $ removeFile path
+cleanupPublishedEntries
+  :: (MonadFileSystem m) => [(FileType, OsPath)] -> m ()
+cleanupPublishedEntries entries =
+  forM_ entries $ \(fileType, path) ->
+    case fileType of
+      Directory ->
+        removeDirectory path `catchError` const (return ())
+      File ->
+        removeFile path `catchError` const (return ())
+      Symlink ->
+        removeFile path `catchError` const (return ())
 
 
 cleanupStagingOnError

@@ -77,6 +77,9 @@ library:
     zip-archive: ">=0.4.3 && <0.5"
     zlib: ">=0.6.3 && <0.8"
   when:
+  - condition: os(windows)
+    dependencies:
+      Win32: ">=2.13 && <2.15"
   - condition: "!os(windows)"
     dependencies:
       unix: ">=2.8 && <2.9"

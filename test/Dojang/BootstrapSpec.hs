@@ -14,6 +14,7 @@ import Data.Bits (shiftL, (.&.), (.|.))
 import Data.ByteString.Char8 qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower, toUpper)
+import Data.Either (isLeft)
 import Data.Word (Word32)
 import Hedgehog (evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
@@ -22,15 +23,17 @@ import Hedgehog.Range qualified as Range
 
 #ifndef mingw32_HOST_OS
 import Control.Exception (AsyncException (UserInterrupt), throw)
-import Control.Monad (when)
+import Control.Exception qualified as Exception
+import Control.Monad (unless, when)
 import Control.Monad.Catch (MonadCatch, MonadThrow)
 import Control.Monad.Except
-  ( ExceptT
+  ( ExceptT (..)
   , MonadError (throwError)
   , runExceptT
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
+import Control.Monad.Trans.Class (lift)
 import System.Directory.OsPath qualified
 import System.FilePath qualified as FilePath
 import System.OsPath (OsPath)
@@ -1131,7 +1134,8 @@ instance MonadFileSystem FailingModeIO where
 
 
 newtype CurrentDirectoryIO a
-  = CurrentDirectoryIO (ReaderT OsPath (ExceptT IOError IO) a)
+  = CurrentDirectoryIO
+      (ReaderT (OsPath, Maybe (OsPath, ByteString.ByteString)) (ExceptT IOError IO) a)
   deriving
     ( Functor
     , Applicative
@@ -1146,14 +1150,36 @@ newtype CurrentDirectoryIO a
 runCurrentDirectoryIO
   :: OsPath -> CurrentDirectoryIO a -> IO (Either IOError a)
 runCurrentDirectoryIO currentDirectory (CurrentDirectoryIO action) =
-  runExceptT $ runReaderT action currentDirectory
+  runExceptT $ runReaderT action (currentDirectory, Nothing)
+
+
+runCurrentDirectoryIOWithRace
+  :: OsPath
+  -> OsPath
+  -> ByteString.ByteString
+  -> CurrentDirectoryIO a
+  -> IO (Either IOError a)
+runCurrentDirectoryIOWithRace
+  currentDirectory
+  racedPath
+  racedContents
+  (CurrentDirectoryIO action) =
+    runExceptT $
+      runReaderT
+        action
+        (currentDirectory, Just (racedPath, racedContents))
+
+
+liftCurrentDirectoryIO :: IO a -> CurrentDirectoryIO a
+liftCurrentDirectoryIO action =
+  CurrentDirectoryIO $ lift $ ExceptT $ Exception.try action
 
 
 instance MonadFileSystem CurrentDirectoryIO where
-  encodePath "." = CurrentDirectoryIO ask
+  encodePath "." = CurrentDirectoryIO $ fst <$> ask
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
-  getCurrentDirectory = CurrentDirectoryIO ask
+  getCurrentDirectory = CurrentDirectoryIO $ fst <$> ask
   getHomeDirectory = liftIO (getHomeDirectory :: IO OsPath)
   exists value = liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
@@ -1163,7 +1189,29 @@ instance MonadFileSystem CurrentDirectoryIO where
   readFile value = liftIO (readFile value :: IO ByteString.ByteString)
   readRegularFile value =
     liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
-  writeFile path contents = liftIO (writeFile path contents :: IO ())
+  copyRegularFileNoReplace source destination = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just (racedPath, racedContents)
+        | destination == racedPath ->
+            liftIO $ do
+              present <- exists destination
+              unless present $
+                writeFile destination racedContents
+      _ -> return ()
+    liftCurrentDirectoryIO $
+      copyRegularFileNoReplace source destination
+  writeFile path contents = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just (racedPath, racedContents)
+        | path == racedPath ->
+            liftIO $ do
+              present <- exists path
+              unless present $
+                writeFile path racedContents
+      _ -> return ()
+    liftIO (writeFile path contents :: IO ())
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
   renameDirectory source destination =
@@ -1180,8 +1228,10 @@ instance MonadFileSystem CurrentDirectoryIO where
   copyFilePermissions source destination =
     liftIO (copyFilePermissions source destination :: IO ())
   createDirectory value = liftIO (createDirectory value :: IO ())
-  removeFile value = liftIO (removeFile value :: IO ())
-  removeDirectory value = liftIO (removeDirectory value :: IO ())
+  removeFile value =
+    liftCurrentDirectoryIO (removeFile value :: IO ())
+  removeDirectory value =
+    liftCurrentDirectoryIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
   getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
@@ -1319,4 +1369,39 @@ symlinkSpecs = do
       publishedId <-
         Posix.fileID <$> Posix.getFileStatus realDestinationPath
       publishedId `shouldBe` originalId
+
+  it "preserves arbitrary files raced into the current directory" $
+    hedgehog $ do
+      concurrentContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (published, observedContents, ownedFileExists) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            ownedName <- encodeFS "owned"
+            nestedName <- encodeFS "nested"
+            victimName <- encodeFS "victim"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                owned = destination </> ownedName
+                stagedNested = staging </> nestedName
+                victim = destination </> nestedName </> victimName
+            createDirectory staging
+            createDirectory stagedNested
+            createDirectory destination
+            writeFile (staging </> ownedName) "owned"
+            writeFile (stagedNested </> victimName) "staged"
+            result <-
+              runCurrentDirectoryIOWithRace
+                destination
+                victim
+                concurrentContents
+                (publishStagedDirectory staging destination)
+            contents <- readFile victim
+            ownedExists <- exists owned
+            return (result, contents, ownedExists)
+      isLeft published === True
+      observedContents === concurrentContents
+      ownedFileExists === False
 #endif

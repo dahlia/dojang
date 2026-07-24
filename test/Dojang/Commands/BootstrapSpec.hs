@@ -33,6 +33,7 @@ import Test.Hspec
   , describe
   , it
   , pendingWith
+  , sequential
   , shouldBe
   , shouldReturn
   , shouldSatisfy
@@ -75,7 +76,7 @@ import Dojang.Types.Transport (lookupTransport)
 
 
 spec :: Spec
-spec = do
+spec = sequential $ do
   describe "makeTransportProcessRequest" $ do
     it "preserves arbitrary source and destination arguments without a shell" $
       hedgehog $ do

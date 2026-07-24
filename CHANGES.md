@@ -25,18 +25,22 @@ To be released.
     existing empty destination is published with an atomic filesystem rename,
     except that the current working directory keeps its identity.  Publication
     refuses a destination replaced by a symbolic link or concurrently created
-    during the final rename.  Filesystems without an atomic no-replace rename
-    are rejected rather than using a race-prone fallback.  A dry run does not
-    start an external transport and redacts its source argument and environment
-    values.  Directory sources and Unix ZIP archives reject FIFOs, sockets,
-    devices, and other unsupported entry types before reading or extraction.
-    Standard tar archives whose first entry is `./` are accepted.  A missing
-    destination inherits the source root's permissions, including the target
-    permissions when the directory source is a symbolic link, while an existing
-    empty destination keeps its original root permissions after publication.
-    Permission restoration is verified after it is applied, so partial
-    filesystem support produces the documented warning.  Noninteractive
-    bootstrap requires both `--no-interactive` and `--yes`.  [[#47], [#74]]
+    during the final rename.  Publication into the current working directory
+    also creates every entry without replacement, and rollback removes only
+    entries created by Dojang, preserving files raced into the directory.
+    Filesystems without an atomic no-replace rename cannot publish a
+    non-current-directory destination and are rejected rather than using a
+    race-prone fallback.  A dry run does not start an external transport and
+    redacts its source argument and environment values.  Directory sources and
+    Unix ZIP archives reject FIFOs, sockets, devices, and other unsupported
+    entry types before reading or extraction.  Standard tar archives whose
+    first entry is `./` are accepted.  A missing destination inherits the
+    source root's permissions, including the target permissions when the
+    directory source is a symbolic link, while an existing empty destination
+    keeps its original root permissions after publication.  Permission
+    restoration is verified after it is applied, so partial filesystem support
+    produces the documented warning.  Noninteractive bootstrap requires both
+    `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

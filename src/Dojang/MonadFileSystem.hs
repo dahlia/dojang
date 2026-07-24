@@ -85,7 +85,9 @@ import Dojang.Types.RouteMetadata
 
 
 #ifdef mingw32_HOST_OS
-import System.IO (IOMode (ReadMode), hIsSeekable)
+import System.IO (IOMode (ReadMode), hIsSeekable, hSetBinaryMode)
+import System.Win32.File qualified as Win32
+import System.Win32.Types qualified as Win32
 #else
 import Foreign.C.Error qualified as CError
 import Foreign.C.Types (CInt (CInt))
@@ -226,6 +228,38 @@ class (MonadError IOError m) => MonadFileSystem m where
     case result of
       Nothing -> return False
       Just contents -> writeFile destination contents >> return True
+
+
+  -- | Copies a regular file without replacing an existing destination.
+  --
+  -- This has the same source-validation contract as 'copyRegularFile', but
+  -- creation of the destination must be atomic for filesystem-backed
+  -- implementations.  Returns 'False' without creating the destination when
+  -- the opened source is not a regular file.
+  copyRegularFileNoReplace
+    :: (HasCallStack)
+    => OsPath
+    -- ^ Source path.
+    -> OsPath
+    -- ^ Destination path, which must not exist.
+    -> m Bool
+  copyRegularFileNoReplace source destination = do
+    result <- readRegularFile source
+    case result of
+      Nothing -> return False
+      Just contents -> do
+        symbolicLink <- isSymlink destination
+        present <- exists destination
+        when (symbolicLink || present) $ do
+          destination' <- decodePath destination
+          throwError $
+            mkIOError
+              alreadyExistsErrorType
+              "copyRegularFileNoReplace"
+              Nothing
+              (Just destination')
+        writeFile destination contents
+        return True
 
 
   -- | Writes contents into a file.
@@ -789,6 +823,74 @@ copyRegularFileIO source destination = do
     Just () -> True
 
 
+copyRegularFileNoReplaceIO :: OsPath -> OsPath -> IO Bool
+copyRegularFileNoReplaceIO source destination = do
+  result <-
+    withRegularFileHandleIO source $ \sourceHandle ->
+      Exception.mask $ \restore -> do
+        destinationHandle <- openBinaryFileNoReplaceIO destination
+        let discardDestination = do
+              hClose destinationHandle `catchError` const (return ())
+              removeNewDestination destination
+        restore (copyHandle sourceHandle destinationHandle)
+          `Exception.onException` discardDestination
+        hClose destinationHandle
+          `Exception.onException` discardDestination
+  return $ case result of
+    Nothing -> False
+    Just () -> True
+
+
+openBinaryFileNoReplaceIO :: OsPath -> IO Handle
+#ifdef mingw32_HOST_OS
+openBinaryFileNoReplaceIO destination = do
+  destination' <- decodeFS destination
+  nativeHandle <-
+    Win32.createFile
+      destination'
+      Win32.gENERIC_WRITE
+      Win32.fILE_SHARE_NONE
+      Nothing
+      Win32.cREATE_NEW
+      Win32.fILE_ATTRIBUTE_NORMAL
+      Nothing
+  let discardNativeHandle = do
+        Win32.closeHandle nativeHandle
+          `catchError` const (return ())
+        removeNewDestination destination
+  handle <-
+    Win32.hANDLEToHandle nativeHandle
+      `Exception.onException` discardNativeHandle
+  hSetBinaryMode handle True
+    `Exception.onException` do
+      hClose handle `catchError` const (return ())
+      removeNewDestination destination
+  return handle
+#else
+openBinaryFileNoReplaceIO destination = do
+  destination' <- decodeFS destination
+  descriptor <-
+    Posix.openFd
+      destination'
+      Posix.WriteOnly
+      Posix.defaultFileFlags
+        { Posix.exclusive = True
+        , Posix.creat = Just 0o600
+        , Posix.nofollow = True
+        , Posix.cloexec = True
+        }
+  Posix.fdToHandle descriptor
+    `Exception.onException` do
+      Posix.closeFd descriptor `catchError` const (return ())
+      removeNewDestination destination
+#endif
+
+
+removeNewDestination :: OsPath -> IO ()
+removeNewDestination destination =
+  OsDirectory.removeFile destination `catchError` const (return ())
+
+
 copyHandle :: Handle -> Handle -> IO ()
 copyHandle source destination = do
   chunk <- Data.ByteString.hGetSome source 32768
@@ -848,6 +950,9 @@ instance MonadFileSystem IO where
 
 
   copyRegularFile = copyRegularFileIO
+
+
+  copyRegularFileNoReplace = copyRegularFileNoReplaceIO
 
 
   writeFile dst contents = do

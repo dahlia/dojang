@@ -13,8 +13,12 @@ refuses a destination that has been replaced by a symbolic link.  Other
 existing empty destinations are replaced atomically; if another process creates
 the destination during publication, Dojang fails instead of replacing it.  The
 current directory keeps its identity.  Publication requires the destination
-filesystem to support an atomic no-replace rename.  Dojang fails closed when
-that operation is unavailable instead of falling back to a race-prone rename.
+filesystem to support an atomic no-replace rename when replacing the
+destination as a whole.  Dojang fails closed when that operation is unavailable
+instead of falling back to a race-prone rename.  When publishing into the
+current directory, each entry is created without replacement.  If another
+process creates an entry first, bootstrap fails without overwriting it; cleanup
+removes only entries created by bootstrap.
 
 
 Local directories and archives
