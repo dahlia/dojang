@@ -7,11 +7,13 @@
 module Dojang.MonadFileSystemSpec (spec) where
 
 import Control.Concurrent
-  ( forkIO
+  ( forkFinally
+  , forkIO
   , newEmptyMVar
   , putMVar
   , readMVar
   , takeMVar
+  , tryReadMVar
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (sort, sortOn)
@@ -51,6 +53,7 @@ import Data.Maybe (isJust)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Posix.Files qualified as Posix
+import System.IO (IOMode (WriteMode), hSetFileSize, withBinaryFile)
 import System.OsPath (decodeFS)
 import System.Process
   ( CreateProcess (env)
@@ -275,7 +278,7 @@ posixDryRunPortableModeSpec = do
 
 
 posixCopyInterruptionSpec :: Spec
-posixCopyInterruptionSpec =
+posixCopyInterruptionSpec = do
   specify
     "copyRegularFileNoReplace preserves a replacement after interruption"
     $ withTempDir
@@ -310,6 +313,55 @@ posixCopyInterruptionSpec =
       finished <- timeout 5000000 $ takeMVar result
       finished `shouldSatisfy` isJust
       readFile destination `shouldReturn` replacement
+
+  specify
+    "copyRegularFileWithIdentity rejects an in-place source mutation"
+    $ withTempDir
+    $ \tmpDir tmpDir' -> do
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      let source = tmpDir </> sourceName
+          destination = tmpDir </> destinationName
+          sourcePath = tmpDir' `combine` "source"
+          sourceSize = 128 * 1024 * 1024
+      withBinaryFile sourcePath WriteMode $ \handle ->
+        hSetFileSize handle sourceSize
+      Just identity <- getFileIdentity source
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      Posix.setFileSize sourcePath $ fromIntegral $ sourceSize `div` 2
+      _ <-
+        forkFinally
+          ( let mutate size = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      Posix.setFileSize sourcePath $ fromIntegral size
+                      threadDelay 100
+                      mutate $
+                        if size == sourceSize
+                          then sourceSize `div` 2
+                          else sourceSize
+            in mutate sourceSize
+          )
+          (const $ putMVar mutationFinished ())
+      threadDelay 1000
+      result <- newEmptyMVar
+      _ <-
+        forkIO $ do
+          copied <-
+            copyRegularFileWithIdentity
+              identity
+              source
+              destination
+          putMVar result copied
+      copied <- timeout 5000000 $ takeMVar result
+      putMVar stopMutating ()
+      timeout 5000000 (takeMVar mutationFinished)
+        `shouldReturn` Just ()
+      copied `shouldBe` Just False
+      exists destination `shouldReturn` False
 #endif
 
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
@@ -1161,6 +1213,35 @@ spec = do
         ioeGetFileName failToCopy' `shouldBe` Just nonExistentFP
         ioeGetLocation failToCopy' `shouldBe` "copyFile"
         show failToCopy' `shouldContain` "destination is a directory"
+
+    describe "copyRegularFileWithIdentity" $
+      it "retains arbitrary dry-run copies by reference" $
+        hedgehog $ do
+          sourceContents <-
+            forAll $ Gen.bytes $ constantFrom 0 0 4096
+          let changedContents = sourceContents <> "changed"
+          (copied, observed) <-
+            liftIO $
+              withTempDir $ \tmpDir tmpDir' -> do
+                let source = tmpDir </> foo
+                    destination = tmpDir </> bar
+                    sourcePath = tmpDir' `combine` "foo"
+                Data.ByteString.writeFile sourcePath sourceContents
+                dryRunIO $ do
+                  Just identity <- getFileIdentity source
+                  result <-
+                    copyRegularFileWithIdentity
+                      identity
+                      source
+                      destination
+                  liftIO $
+                    Data.ByteString.writeFile
+                      sourcePath
+                      changedContents
+                  contents <- readFile destination
+                  return (result, contents)
+          copied === True
+          observed === changedContents
 
     describe "createDirectory" $ do
       it "creates an empty directory" $ do

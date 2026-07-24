@@ -322,8 +322,10 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- Filesystem-backed implementations must compare the identity obtained from
   -- the same handle used for copying.  This prevents a pathname replacement
   -- between directory-source validation and acquisition from redirecting the
-  -- copy.  Returns 'False' without creating the destination when the identity
-  -- differs or the opened source is not a regular file.
+  -- copy.  They must also recheck change metadata from that handle after
+  -- copying and discard the destination if the source changed in place.
+  -- Returns 'False' without retaining the destination when the identity
+  -- differs, the source changes, or the opened source is not a regular file.
   copyRegularFileWithIdentity
     :: (HasCallStack)
     => FileIdentity
@@ -825,7 +827,7 @@ isRegularFileIO path =
 
 withRegularFileHandleIO
   :: OsPath
-  -> (FileIdentity -> Handle -> IO a)
+  -> (FileIdentity -> IO Bool -> Handle -> IO a)
   -> IO (Maybe a)
 withRegularFileHandleIO path action = do
   path' <- decodeFS path
@@ -842,14 +844,21 @@ withRegularFileHandleIO path action = do
                     FileIdentity
                       (fromIntegral information.bhfiVolumeSerialNumber)
                       (fromIntegral information.bhfiFileIndex)
-              Just <$> action identity handle
+                  unchanged = do
+                    current <-
+                      Win32.getFileInformationByHandle nativeHandle
+                    return $
+                      current.bhfiSize == information.bhfiSize
+                        && current.bhfiLastWriteTime
+                          == information.bhfiLastWriteTime
+              Just <$> action identity unchanged handle
           else return Nothing
     )
 
 
 readRegularFileIO :: OsPath -> IO (Maybe ByteString)
 readRegularFileIO path =
-  withRegularFileHandleIO path $ \_ -> Data.ByteString.hGetContents
+  withRegularFileHandleIO path $ \_ _ -> Data.ByteString.hGetContents
 
 
 getFileIdentityIO :: OsPath -> IO (Maybe FileIdentity)
@@ -1022,7 +1031,7 @@ isRegularFileIO path = do
 
 withRegularFileHandleIO
   :: OsPath
-  -> (FileIdentity -> Handle -> IO a)
+  -> (FileIdentity -> IO Bool -> Handle -> IO a)
   -> IO (Maybe a)
 withRegularFileHandleIO path action = do
   path' <- decodeFS path
@@ -1044,13 +1053,28 @@ withRegularFileHandleIO path action = do
         handle <-
           Posix.fdToHandle descriptor
             `Exception.onException` Posix.closeFd descriptor
-        (Just <$> restore (action (fileIdentityFromStatus status) handle))
+        let unchanged = do
+              current <- Posix.getFdStatus descriptor
+              return $
+                Posix.fileSize current == Posix.fileSize status
+                  && Posix.modificationTimeHiRes current
+                    == Posix.modificationTimeHiRes status
+                  && Posix.statusChangeTimeHiRes current
+                    == Posix.statusChangeTimeHiRes status
+        ( Just
+            <$> restore
+              ( action
+                  (fileIdentityFromStatus status)
+                  unchanged
+                  handle
+              )
+          )
           `Exception.finally` hClose handle
 
 
 readRegularFileIO :: OsPath -> IO (Maybe ByteString)
 readRegularFileIO path =
-  withRegularFileHandleIO path $ \_ -> Data.ByteString.hGetContents
+  withRegularFileHandleIO path $ \_ _ -> Data.ByteString.hGetContents
 
 
 fileIdentityFromStatus :: Posix.FileStatus -> FileIdentity
@@ -1227,7 +1251,7 @@ exchangeDirectoriesIO _ _ = return False
 
 readRegularFileBoundedIO :: Int -> OsPath -> IO BoundedFileRead
 readRegularFileBoundedIO limit path = do
-  result <- withRegularFileHandleIO path $ \_ -> readHandleBounded limit
+  result <- withRegularFileHandleIO path $ \_ _ -> readHandleBounded limit
   return $ case result of
     Nothing -> NotRegularFile
     Just Nothing -> FileSizeLimitExceeded
@@ -1254,7 +1278,7 @@ readHandleBounded limit handle = go limit []
 copyRegularFileIO :: OsPath -> OsPath -> IO Bool
 copyRegularFileIO source destination = do
   result <-
-    withRegularFileHandleIO source $ \_ sourceHandle -> do
+    withRegularFileHandleIO source $ \_ _ sourceHandle -> do
       destination' <- decodeFS destination
       Exception.bracket
         (openBinaryFile destination' WriteMode)
@@ -1269,23 +1293,39 @@ copyRegularFileWithIdentityIO
   :: FileIdentity -> OsPath -> OsPath -> IO Bool
 copyRegularFileWithIdentityIO expectedIdentity source destination = do
   result <-
-    withRegularFileHandleIO source $ \actualIdentity sourceHandle ->
-      if actualIdentity /= expectedIdentity
-        then return False
-        else do
-          destination' <- decodeFS destination
-          Exception.bracket
-            (openBinaryFile destination' WriteMode)
-            hClose
-            (copyHandle sourceHandle)
-          return True
+    withRegularFileHandleIO
+      source
+      $ \actualIdentity sourceUnchanged sourceHandle ->
+        if actualIdentity /= expectedIdentity
+          then return False
+          else Exception.mask $ \restore -> do
+            destinationDirectory <- decodeFS $ takeDirectory destination
+            (temporaryPath, temporaryHandle) <-
+              openBinaryTempFile destinationDirectory ".dojang-copy-"
+            let discardTemporary = do
+                  hClose temporaryHandle `catchError` const (return ())
+                  Directory.removeFile temporaryPath
+                    `catchError` const (return ())
+            unchanged <-
+              restore
+                (copyHandle sourceHandle temporaryHandle >> sourceUnchanged)
+                `Exception.onException` discardTemporary
+            hClose temporaryHandle
+              `Exception.onException` discardTemporary
+            if not unchanged
+              then discardTemporary >> return False
+              else do
+                temporary <- encodeFS temporaryPath
+                replaceFileIO temporary destination
+                  `Exception.onException` discardTemporary
+                return True
   return $ maybe False id result
 
 
 copyRegularFileNoReplaceIO :: OsPath -> OsPath -> IO Bool
 copyRegularFileNoReplaceIO source destination = do
   result <-
-    withRegularFileHandleIO source $ \_ sourceHandle ->
+    withRegularFileHandleIO source $ \_ _ sourceHandle ->
       Exception.mask $ \restore -> do
         destinationDirectory <- decodeFS $ takeDirectory destination
         (temporaryPath, temporaryHandle) <-
@@ -1899,6 +1939,14 @@ instance MonadFileSystem DryRunIO where
   readFile src = do
     seqNo <- gets currentSequenceNumber
     readFileFromDryRunIO seqNo src
+
+
+  copyRegularFileWithIdentity expectedIdentity source destination = do
+    actualIdentity <- getFileIdentity source
+    regularFile <- isRegularFile source
+    if actualIdentity == Just expectedIdentity && regularFile
+      then copyFile source destination >> return True
+      else return False
 
 
   writeFile dst contents = do
