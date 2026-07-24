@@ -28,11 +28,12 @@ $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
 ~~~~
 
 Archive entries are validated before extraction.  Absolute paths, parent
-traversal, backslash paths, links, and entries that collide case-insensitively
-or after Unicode normalization are rejected.  On POSIX systems, stored
-permission bits, including executable bits, are restored when the destination
-filesystem supports them.  If it does not, bootstrap publishes the contents
-and warns that the permissions could not be restored.
+traversal, backslash paths, links, Windows-reserved or invalid filename
+components, and entries that collide case-insensitively or after Unicode
+normalization are rejected.  On POSIX systems, stored permission bits,
+including executable bits, are restored when the destination filesystem
+supports them.  If it does not, bootstrap publishes the contents and warns
+that the permissions could not be restored.
 
 
 External transports

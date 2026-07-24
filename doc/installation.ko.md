@@ -27,9 +27,30 @@ irm https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 | i
 
 다른 디렉터리를 선택하려면 `DOJANG_INSTALL_DIR`을 설정하세요.  최신 버전 대신
 특정 릴리스를 설치하려면 스크립트를 실행하기 전에
-`DOJANG_INSTALL_VERSION`을 `0.3.0` 같은 값으로 설정합니다.  보안 정책상 원격
-스크립트를 셸로 바로 보낼 수 없다면, 먼저 설치 스크립트를 다운로드하여 내용을
-확인하세요.
+`DOJANG_INSTALL_VERSION`을 `0.3.0` 같은 값으로 설정합니다.
+
+선택한 아카이브를 설치하거나 압축을 풀지 않고 다운로드하여 검증하려면
+`DOJANG_INSTALL_DOWNLOAD_DIR`을 명시적인 디렉터리로 설정하세요.  이
+디렉터리에는 아카이브와 릴리스의 *SHA256SUMS* 파일이 함께 저장됩니다.  다음
+수동 절차는 네트워크 응답을 셸로 바로 보내지 않습니다.
+
+~~~~ console
+$ curl -fsSLO https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
+$ less install.sh
+$ DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" sh ./install.sh
+~~~~
+
+Windows에서는 `install.ps1`을 다운로드하여 확인하고 같은 환경 변수를 설정한 뒤
+로컬 스크립트를 실행합니다.
+
+~~~~ powershell
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
+  -OutFile install.ps1
+Get-Content .\install.ps1
+$env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
+.\install.ps1
+~~~~
 
 
 Homebrew (macOS 및 Linux)

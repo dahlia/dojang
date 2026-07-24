@@ -43,9 +43,17 @@ $temporaryDirectory = Join-Path `
 $archive = Join-Path $temporaryDirectory $asset
 $checksums = Join-Path $temporaryDirectory "SHA256SUMS"
 $extracted = Join-Path $temporaryDirectory "extracted"
+$downloadDirectory = $env:DOJANG_INSTALL_DOWNLOAD_DIR
 
 New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
 try {
+  if ([string]::IsNullOrWhiteSpace($downloadDirectory)) {
+    Write-Output "Downloading and verifying Dojang $version before installation."
+  }
+  else {
+    Write-Output `
+      "Downloading and verifying Dojang $version into $downloadDirectory."
+  }
   Invoke-WebRequest `
     -Uri "$baseUrl/$version/$asset" `
     -OutFile $archive `
@@ -74,6 +82,23 @@ try {
   ).Hash.ToLowerInvariant()
   if ($actualChecksum -cne $matches[0]) {
     Stop-Install "checksum verification failed for $asset."
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($downloadDirectory)) {
+    New-Item `
+      -ItemType Directory `
+      -Force `
+      -Path $downloadDirectory |
+      Out-Null
+    Copy-Item `
+      -LiteralPath $archive `
+      -Destination (Join-Path $downloadDirectory $asset)
+    Copy-Item `
+      -LiteralPath $checksums `
+      -Destination (Join-Path $downloadDirectory "SHA256SUMS")
+    Write-Output `
+      "Verified Dojang $version downloaded to $(Join-Path $downloadDirectory $asset)."
+    return
   }
 
   Expand-Archive -LiteralPath $archive -DestinationPath $extracted

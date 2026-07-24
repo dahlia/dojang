@@ -64,6 +64,18 @@ class ContainerBuildTests(unittest.TestCase):
         )
         self.assertIn("test -s", self.workflow)
 
+    def test_release_workflow_smoke_tests_every_final_binary_archive(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self.workflow.count("scripts/smoke-test-dist.sh"),
+            2,
+        )
+        self.assertEqual(
+            self.workflow.count(r"scripts\smoke-test-dist.ps1"),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,7 +38,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Char8 qualified as ByteString.Char8
 import Data.ByteString.Lazy qualified as LazyByteString
-import Data.Char (isAlpha, isDigit, toLower)
+import Data.Char (isAlpha, isDigit, ord, toLower)
 import Data.List (dropWhileEnd, inits, isSuffixOf, sortOn)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -179,12 +179,19 @@ normalizeArchiveEntryPath original
     null component
       || last component == '.'
       || last component == ' '
+      || any windowsForbiddenCharacter component
       || reservedWindowsName component
+  windowsForbiddenCharacter character =
+    ord character <= 31 || character `elem` ("<>:\"/\\|?*" :: String)
   reservedWindowsName component =
     let base = fmap toLower $ takeWhile (/= '.') component
-    in base `elem` ["con", "prn", "aux", "nul", "clock$"]
-         || base `elem` (("com" <>) . show <$> [1 :: Int .. 9])
-         || base `elem` (("lpt" <>) . show <$> [1 :: Int .. 9])
+        numberedDevices =
+          [prefix <> [suffix] | prefix <- ["com", "lpt"], suffix <- deviceDigits]
+    in base
+         `elem` ( ["con", "prn", "aux", "nul", "clock$", "conin$", "conout$"]
+                    <> numberedDevices
+                )
+  deviceDigits = ['1' .. '9'] <> ['\185', '\178', '\179']
 
 
 -- | Copies or extracts a built-in source into a new staging directory.

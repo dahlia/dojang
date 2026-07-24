@@ -13,7 +13,6 @@ require_command() {
 
 require_command curl
 require_command install
-require_command tar
 
 version="${DOJANG_INSTALL_VERSION:-}"
 if [ -z "$version" ]; then
@@ -56,11 +55,17 @@ esac
 base_url="${DOJANG_INSTALL_BASE_URL:-https://github.com/dahlia/dojang/releases/download}"
 base_url="${base_url%/}"
 asset="dojang-$version-$operating_system-$architecture.tar.xz"
+download_directory="${DOJANG_INSTALL_DOWNLOAD_DIR:-}"
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/dojang-install.XXXXXX")"
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 archive="$temporary_directory/$asset"
 checksums="$temporary_directory/SHA256SUMS"
 
+if [ -n "$download_directory" ]; then
+  echo "Downloading and verifying Dojang $version into $download_directory."
+else
+  echo "Downloading and verifying Dojang $version before installation."
+fi
 curl -fsSL "$base_url/$version/$asset" -o "$archive"
 curl -fsSL "$base_url/$version/SHA256SUMS" -o "$checksums"
 
@@ -108,6 +113,15 @@ actual_checksum="$(printf '%s' "$actual_checksum" | tr 'A-F' 'a-f')"
 [ "$actual_checksum" = "$expected_checksum" ] ||
   error "checksum verification failed for $asset."
 
+if [ -n "$download_directory" ]; then
+  install -d "$download_directory"
+  install -m 0644 "$archive" "$download_directory/$asset"
+  install -m 0644 "$checksums" "$download_directory/SHA256SUMS"
+  echo "Verified Dojang $version downloaded to $download_directory/$asset."
+  exit 0
+fi
+
+require_command tar
 extracted="$temporary_directory/extracted"
 mkdir "$extracted"
 tar -xJf "$archive" -C "$extracted"

@@ -175,6 +175,32 @@ class InstallerTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(shutil.which("sh"), "POSIX shell is unavailable")
+    def test_posix_installer_can_only_download_a_verified_archive(self) -> None:
+        asset = f"dojang-{VERSION}-linux-x86_64.tar.xz"
+        install_directory = self.root / "must not install"
+        download_directory = self.root / "POSIX downloads with spaces"
+        environment = self._environment(install_directory)
+        environment["DOJANG_INSTALL_OS"] = "linux"
+        environment["DOJANG_INSTALL_ARCH"] = "x86_64"
+        environment["DOJANG_INSTALL_DOWNLOAD_DIR"] = str(download_directory)
+        subprocess.run(
+            ["sh", str(REPOSITORY_ROOT / "scripts/install.sh")],
+            check=True,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            (download_directory / asset).read_bytes(),
+            (self.release_directory / asset).read_bytes(),
+        )
+        self.assertEqual(
+            (download_directory / "SHA256SUMS").read_bytes(),
+            (self.release_directory / "SHA256SUMS").read_bytes(),
+        )
+        self.assertFalse((install_directory / "dojang").exists())
+
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell is unavailable")
     def test_posix_installer_requires_home_for_the_default_directory(self) -> None:
         environment = self._environment(self.root / "unused")
         environment.pop("DOJANG_INSTALL_DIR")
@@ -238,6 +264,39 @@ class InstallerTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((install_directory / "dojang.exe").exists())
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is unavailable")
+    def test_powershell_installer_can_only_download_a_verified_archive(
+        self,
+    ) -> None:
+        asset = f"dojang-{VERSION}-windows-x86_64.zip"
+        install_directory = self.root / "must not install on Windows"
+        download_directory = self.root / "Windows downloads with spaces"
+        environment = self._environment(install_directory)
+        environment["DOJANG_INSTALL_ARCH"] = "x86_64"
+        environment["DOJANG_INSTALL_DOWNLOAD_DIR"] = str(download_directory)
+        subprocess.run(
+            [
+                "pwsh",
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                str(REPOSITORY_ROOT / "scripts/install.ps1"),
+            ],
+            check=True,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            (download_directory / asset).read_bytes(),
+            (self.release_directory / asset).read_bytes(),
+        )
+        self.assertEqual(
+            (download_directory / "SHA256SUMS").read_bytes(),
+            (self.release_directory / "SHA256SUMS").read_bytes(),
+        )
         self.assertFalse((install_directory / "dojang.exe").exists())
 
 

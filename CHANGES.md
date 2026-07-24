@@ -14,10 +14,11 @@ To be released.
     configuration.  Machine-local external transports can run Git or another
     executable without a shell, with whole-argument source and destination
     placeholders and an explicit environment allowlist.  Acquisition is staged
-    beside the destination, rejects unsafe archive entries and paths that
-    collide after case folding or Unicode normalization, preserves recorded
-    POSIX permissions where the destination filesystem supports them, requires
-    an absent or empty destination, and cleans unpublished work after failure.
+    beside the destination, rejects unsafe archive entries, including names
+    that are reserved or invalid on Windows, and rejects paths that collide
+    after case folding or Unicode normalization.  It preserves recorded POSIX
+    permissions where the destination filesystem supports them, requires an
+    absent or empty destination, and cleans unpublished work after failure.
     Unsupported permission metadata produces a warning without discarding the
     acquired contents.  An absent destination is published with an atomic
     filesystem rename.  A dry run does not start an external transport and
@@ -27,10 +28,13 @@ To be released.
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's
     *SHA256SUMS* file and reject an archive before installation when its
-    checksum does not match.  Linux container images are built and tested with
-    checksum-pinned official GHCup, GHC, and Stack artifacts for both
-    architectures.  The release binary is statically linked, and the workflow
-    runs the final image before packaging its executable.  [[#47], [#74]]
+    checksum does not match.  They can also leave the verified archive and
+    checksums in an explicit directory without installing.  Linux container
+    images are built and tested with checksum-pinned official GHCup, GHC, and
+    Stack artifacts for both architectures.  After packaging each executable,
+    the workflow extracts the final archive and checks its executable mode,
+    version output, repository initialization, and status workflow.
+    [[#47], [#74]]
 
  -  Manifests can declare reusable sensitive-codec commands in
     `[codec-backends]`.  Each backend has a shell-free executable path, stable

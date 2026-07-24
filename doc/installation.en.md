@@ -28,8 +28,31 @@ irm https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 | i
 
 Set `DOJANG_INSTALL_DIR` to choose another directory.  To install a specific
 release instead of the latest one, set `DOJANG_INSTALL_VERSION`, for example
-to `0.3.0`, before running the script.  Download and inspect the installer
-first if your security policy does not allow piping a remote script to a shell.
+to `0.3.0`, before running the script.
+
+Set `DOJANG_INSTALL_DOWNLOAD_DIR` to an explicit directory to download and
+verify the selected archive without extracting or installing it.  The
+directory receives both the archive and the release's *SHA256SUMS* file.  For
+example, the following manual workflow avoids piping a network response
+directly into a shell:
+
+~~~~ console
+$ curl -fsSLO https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
+$ less install.sh
+$ DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" sh ./install.sh
+~~~~
+
+On Windows, download and inspect `install.ps1`, set the same environment
+variable, and then run the local script:
+
+~~~~ powershell
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
+  -OutFile install.ps1
+Get-Content .\install.ps1
+$env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
+.\install.ps1
+~~~~
 
 
 Homebrew (macOS & Linux)

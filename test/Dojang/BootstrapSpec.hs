@@ -12,6 +12,7 @@ import Codec.Archive.Zip qualified as Zip
 import Codec.Compression.GZip qualified as GZip
 import Data.ByteString.Char8 qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
+import Data.Char (toLower, toUpper)
 import Hedgehog (evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -102,6 +103,58 @@ spec = do
         `shouldBe` Left (UnsafeArchiveEntry "trailing.")
       normalizeArchiveEntryPath "trailing "
         `shouldBe` Left (UnsafeArchiveEntry "trailing ")
+
+    it "rejects arbitrary Windows-forbidden characters" $
+      hedgehog $ do
+        prefix <-
+          forAll $ Gen.string (Range.linear 0 20) Gen.alphaNum
+        suffix <-
+          forAll $ Gen.string (Range.linear 0 20) Gen.alphaNum
+        forbidden <-
+          forAll $
+            Gen.choice
+              [ Gen.element ("<>:\"\\|?*" :: String)
+              , toEnum <$> Gen.int (Range.linear 0 31)
+              ]
+        let path = "nested/" <> prefix <> [forbidden] <> suffix
+        normalizeArchiveEntryPath path
+          === Left (UnsafeArchiveEntry path)
+
+    it "rejects arbitrary casing of every Windows device name" $
+      hedgehog $ do
+        device <-
+          forAll $
+            Gen.element
+              [ "con"
+              , "prn"
+              , "aux"
+              , "nul"
+              , "clock$"
+              , "conin$"
+              , "conout$"
+              , "com1"
+              , "com9"
+              , "com\185"
+              , "com\178"
+              , "com\179"
+              , "lpt1"
+              , "lpt9"
+              , "lpt\185"
+              , "lpt\178"
+              , "lpt\179"
+              ]
+        cased <-
+          forAll $
+            traverse
+              (\character -> Gen.element [toLower character, toUpper character])
+              device
+        extension <-
+          forAll $
+            Gen.maybe $
+              Gen.string (Range.linear 1 20) Gen.alphaNum
+        let path = cased <> maybe "" ('.' :) extension
+        normalizeArchiveEntryPath path
+          === Left (UnsafeArchiveEntry path)
 
   describe "archiveFormatFromFilePath" $ do
     it "recognizes every built-in archive format" $ do

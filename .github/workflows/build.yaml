@@ -109,13 +109,21 @@ jobs:
         set -e
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins/"
-        mv dojang-*.tar.xz "$RUNNER_TEMP/"
+        archives=(dojang-*.tar.xz)
+        [[ "${#archives[@]}" -eq 1 ]]
+        scripts/smoke-test-dist.sh "${archives[0]}"
+        mv "${archives[0]}" "$RUNNER_TEMP/"
     - if: startsWith(runner.os, 'Windows')
       shell: pwsh
       run: |
         Copy-Item .\LICENSE $env:RUNNER_TEMP\dojang-bins\
         & scripts\make-dist.ps1 $env:RUNNER_TEMP\dojang-bins\
-        Move-Item dojang-*.zip $env:RUNNER_TEMP\
+        $archives = @(Get-ChildItem dojang-*.zip)
+        if ($archives.Count -ne 1) {
+          throw "expected exactly one Dojang archive"
+        }
+        & scripts\smoke-test-dist.ps1 $archives[0].FullName
+        Move-Item $archives[0].FullName $env:RUNNER_TEMP\
     - uses: actions/upload-artifact@v4
       with:
         name: dist-${{ matrix.os }}
@@ -190,7 +198,10 @@ jobs:
         test -s "$RUNNER_TEMP/dojang-bins/dojang"
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins"
-        mv dojang-*.tar.xz "$RUNNER_TEMP/"
+        archives=(dojang-*.tar.xz)
+        [[ "${#archives[@]}" -eq 1 ]]
+        scripts/smoke-test-dist.sh "${archives[0]}"
+        mv "${archives[0]}" "$RUNNER_TEMP/"
       env:
         DIGEST: ${{ steps.build-image.outputs.digest }}
         ARCH: ${{ matrix.arch }}
