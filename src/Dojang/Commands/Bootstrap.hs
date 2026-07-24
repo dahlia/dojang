@@ -538,6 +538,8 @@ reportAcquisitionError err =
       "Unsafe archive entry path: " <> Text.pack path <> "."
     UnsupportedArchiveEntry path ->
       "Unsupported archive entry: " <> Text.pack path <> "."
+    UnsupportedSourceEntry path ->
+      "Unsupported directory source entry: " <> Text.pack path <> "."
     ConflictingArchiveEntry path ->
       "Conflicting archive entry: " <> Text.pack path <> "."
 

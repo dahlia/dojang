@@ -100,6 +100,8 @@ data AcquisitionError
     UnsafeArchiveEntry FilePath
   | -- | An entry uses links, encryption, or another unsupported type.
     UnsupportedArchiveEntry FilePath
+  | -- | A directory source contains a non-regular, non-link entry.
+    UnsupportedSourceEntry FilePath
   | -- | Two entries conflict by path or file type.
     ConflictingArchiveEntry FilePath
   deriving (Eq, Show, Generic, NFData)
@@ -219,8 +221,7 @@ stageBuiltinSourceWithMetadata
   -> OsPath
   -> m (Either AcquisitionError StagedMetadata)
 stageBuiltinSourceWithMetadata (DirectorySource source) staging = do
-  metadata <- copyDirectoryTree source staging
-  return $ Right metadata
+  copyDirectoryTree source staging
 stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
   sourceName <- decodePath source
   readRegularFile source >>= \case
@@ -240,6 +241,7 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
           createDirectory staging
           cleanupStagingOnError staging $ do
             forM_ entries $ \case
+              StagedDirectory "" _ -> return ()
               StagedDirectory relative _ -> do
                 encoded <- encodePath relative
                 createDirectories $ staging </> encoded
@@ -304,7 +306,8 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
           copyDirectoryContents metadata staging current
         else do
           destinationMode <- getPortableMode destination
-          modeFailures <- applyStagedMetadata staging metadata
+          modeFailures <-
+            applyStagedMetadata staging $ withoutRootMetadata metadata
           rootModeRestored <- restorePortableMode staging destinationMode
           unless rootModeRestored $ do
             widenDirectoryForCleanup staging
@@ -353,14 +356,38 @@ restoreEmptyDestination destination (PortableMode posixBits writable) = do
 
 
 copyDirectoryTree
-  :: (MonadFileSystem m) => OsPath -> OsPath -> m StagedMetadata
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> m (Either AcquisitionError StagedMetadata)
 copyDirectoryTree source destination = do
   entries <- listDirectoryRecursively source []
-  metadata <- captureStagedMetadata source entries
-  createDirectory destination
-  cleanupStagingOnError destination $
-    copyDirectoryEntries source destination entries
-  return metadata
+  validation <- validateDirectoryEntries source entries
+  case validation of
+    Left err -> return $ Left err
+    Right () -> do
+      metadata <- captureStagedMetadata source entries
+      createDirectory destination
+      cleanupStagingOnError destination $
+        copyDirectoryEntries source destination entries
+      return $ Right metadata
+
+
+validateDirectoryEntries
+  :: (MonadFileSystem m)
+  => OsPath
+  -> [(FileType, OsPath)]
+  -> m (Either AcquisitionError ())
+validateDirectoryEntries _ [] = return $ Right ()
+validateDirectoryEntries source ((File, relative) : remaining) = do
+  regular <- isRegularFile $ source </> relative
+  if regular
+    then validateDirectoryEntries source remaining
+    else do
+      path <- decodePath relative
+      return $ Left $ UnsupportedSourceEntry path
+validateDirectoryEntries source (_ : remaining) =
+  validateDirectoryEntries source remaining
 
 
 copyDirectoryContents
@@ -373,7 +400,8 @@ copyDirectoryContents retainedMetadata source destination = do
   entries <- listDirectoryRecursively source []
   sourceMetadata <- captureStagedMetadata source entries
   let publishedMetadata =
-        overlayStagedMetadata retainedMetadata sourceMetadata
+        withoutRootMetadata $
+          overlayStagedMetadata retainedMetadata sourceMetadata
   topLevelEntries <- listDirectory source
   cleanupDestinationOnError
     destination
@@ -399,7 +427,13 @@ copyDirectoryEntries source destination entries =
         destinationEntry = destination </> relative
     case fileType of
       Directory -> createDirectory destinationEntry
-      File -> copyFile sourceEntry destinationEntry
+      File -> do
+        copied <- copyRegularFile sourceEntry destinationEntry
+        unless copied $ do
+          path <- decodePath relative
+          throwError $
+            userError $
+              "unsupported bootstrap source entry: " <> path
       Symlink -> do
         target <- readSymlinkTarget sourceEntry
         directoryLink <- isDirectory sourceEntry
@@ -550,8 +584,12 @@ captureStagedMetadata
   -> [(FileType, OsPath)]
   -> m StagedMetadata
 captureStagedMetadata source entries =
-  StagedMetadata . concat
-    <$> traverse capture entries
+  do
+    rootMode <- getPortableMode source
+    descendants <- concat <$> traverse capture entries
+    return $
+      StagedMetadata $
+        StagedMode "" Directory rootMode : descendants
  where
   capture (Symlink, _) = return []
   capture (fileType, relative) = do
@@ -576,6 +614,15 @@ overlayStagedMetadata (StagedMetadata retained) (StagedMetadata captured) =
       [ (portableMetadataPathKey path, ())
       | StagedMode path _ _ <- retained
       ]
+
+
+withoutRootMetadata :: StagedMetadata -> StagedMetadata
+withoutRootMetadata (StagedMetadata modes) =
+  StagedMetadata
+    [ mode
+    | mode@(StagedMode path _ _) <- modes
+    , not $ null path
+    ]
 
 
 portableMetadataPathKey :: FilePath -> Text
@@ -672,27 +719,56 @@ decodeZip bytes = do
         Left $ UnsupportedArchiveEntry $ Zip.eRelativePath entry
     | otherwise = do
         relative <- normalizeArchiveEntryPath $ Zip.eRelativePath entry
-        if "/" `isSuffixOf` Zip.eRelativePath entry
-          then Right $ StagedDirectory relative $ zipEntryMode entry
-          else
+        case zipEntryKind entry of
+          ZipDirectory ->
+            Right $ StagedDirectory relative $ zipEntryMode entry
+          ZipRegularFile ->
             Right $
               StagedFile
                 relative
                 (LazyByteString.toStrict $ Zip.fromEntry entry)
                 (zipEntryMode entry)
+          ZipUnsupported ->
+            Left $ UnsupportedArchiveEntry $ Zip.eRelativePath entry
+
+
+data ZipEntryKind
+  = ZipRegularFile
+  | ZipDirectory
+  | ZipUnsupported
+
+
+zipEntryKind :: Zip.Entry -> ZipEntryKind
+zipEntryKind entry
+  | zipCreatorSystem entry `notElem` [3, 19] = inferredKind
+  | unixFileType == 0 = inferredKind
+  | unixFileType == 0o100000 && not directoryPath = ZipRegularFile
+  | unixFileType == 0o040000 = ZipDirectory
+  | otherwise = ZipUnsupported
+ where
+  directoryPath = "/" `isSuffixOf` Zip.eRelativePath entry
+  inferredKind
+    | directoryPath = ZipDirectory
+    | otherwise = ZipRegularFile
+  unixFileType =
+    (Zip.eExternalFileAttributes entry `shiftR` 16) .&. 0o170000
 
 
 zipEntryMode :: Zip.Entry -> Maybe Word
 zipEntryMode entry
-  | creatorSystem `elem` [3, 19]
+  | zipCreatorSystem entry `elem` [3, 19]
       && permissionBits /= 0 =
       Just $
         fromIntegral permissionBits
   | otherwise = Nothing
  where
-  creatorSystem = Zip.eVersionMadeBy entry `shiftR` 8
   permissionBits =
     (Zip.eExternalFileAttributes entry `shiftR` 16) .&. 0o777
+
+
+zipCreatorSystem :: Zip.Entry -> Word
+zipCreatorSystem entry =
+  fromIntegral $ Zip.eVersionMadeBy entry `shiftR` 8
 
 
 decodeTar
@@ -712,7 +788,12 @@ decodeTar = go Nothing . Tar.decodeLongNames . Tar.read
       Tar.Directory
         | isTarRootDirectory
             (fromMaybe (TarEntry.entryTarPath entry) pendingPath) ->
-            go Nothing remaining
+            ( StagedDirectory
+                ""
+                (Just $ archivePermissions entry)
+                :
+            )
+              <$> go Nothing remaining
       _ -> do
         decoded <-
           decodeEntry

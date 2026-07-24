@@ -10,9 +10,11 @@ import Codec.Archive.Tar qualified as Tar
 import Codec.Archive.Tar.Entry qualified as Tar
 import Codec.Archive.Zip qualified as Zip
 import Codec.Compression.GZip qualified as GZip
+import Data.Bits (shiftL, (.&.), (.|.))
 import Data.ByteString.Char8 qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower, toUpper)
+import Data.Word (Word32)
 import Hedgehog (evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -28,8 +30,6 @@ import Control.Monad.Except
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
-import Data.Bits (shiftL, (.&.), (.|.))
-import Data.Word (Word32)
 import System.Directory.OsPath qualified
 import System.FilePath qualified as FilePath
 import System.OsPath (OsPath)
@@ -399,6 +399,82 @@ spec = do
         result `shouldSatisfy` isConflictingArchive
         isDirectory staging `shouldReturn` False
 
+    it "rejects arbitrary unsupported Unix ZIP entry types" $
+      hedgehog $ do
+        entryType <-
+          forAll $
+            Gen.element
+              [ 0o010000
+              , 0o020000
+              , 0o060000
+              , 0o140000
+              ]
+        permissions <- forAll $ Gen.word32 $ Range.linear 0 0o777
+        suffix <-
+          forAll $
+            Gen.string
+              (Range.linear 1 40)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        let path = "special-" <> suffix
+            attributes = (entryType .|. permissions) `shiftL` 16
+            entry =
+              (Zip.toEntry path 0 "contents")
+                { Zip.eVersionMadeBy = (3 `shiftL` 8) .|. 20
+                , Zip.eExternalFileAttributes = attributes
+                }
+        rejected <-
+          evalIO $
+            withTempDir $ \tmpDir _ -> do
+              archiveName <- encodeFS "special.zip"
+              stagingName <- encodeFS "staging"
+              let archivePath = tmpDir </> archiveName
+                  staging = tmpDir </> stagingName
+              writeFile archivePath $
+                LazyByteString.toStrict $
+                  Zip.fromArchive $
+                    Zip.addEntryToArchive entry Zip.emptyArchive
+              result <-
+                stageBuiltinSource
+                  (ArchiveSource ZipArchive archivePath)
+                  staging
+              stagingExists <- isDirectory staging
+              return (result, stagingExists)
+        rejected
+          === (Left (UnsupportedArchiveEntry path), False)
+
+    it "accepts a Unix ZIP directory declared without a trailing slash" $
+      withTempDir $ \tmpDir _ -> do
+        archiveName <- encodeFS "directory.zip"
+        stagingName <- encodeFS "staging"
+        nestedName <- encodeFS "nested"
+        manifestName <- encodeFS "dojang.toml"
+        let archivePath = tmpDir </> archiveName
+            staging = tmpDir </> stagingName
+            directoryEntry =
+              (Zip.toEntry "nested" 0 "")
+                { Zip.eVersionMadeBy = (3 `shiftL` 8) .|. 20
+                , Zip.eExternalFileAttributes =
+                    (0o040755 :: Word32) `shiftL` 16
+                }
+            fileEntry =
+              (Zip.toEntry "nested/dojang.toml" 0 "manifest")
+                { Zip.eVersionMadeBy = (3 `shiftL` 8) .|. 20
+                , Zip.eExternalFileAttributes =
+                    (0o100644 :: Word32) `shiftL` 16
+                }
+            archive =
+              Zip.addEntryToArchive fileEntry $
+                Zip.addEntryToArchive directoryEntry Zip.emptyArchive
+        writeFile archivePath $
+          LazyByteString.toStrict $
+            Zip.fromArchive archive
+        stageBuiltinSource
+          (ArchiveSource ZipArchive archivePath)
+          staging
+          `shouldReturn` Right ()
+        readFile (staging </> nestedName </> manifestName)
+          `shouldReturn` "manifest"
+
     it "rejects links and conflicting archive entries before extraction" $
       withTempDir $ \tmpDir _ -> do
         linkArchiveName <- encodeFS "link.tar"
@@ -607,6 +683,59 @@ archiveModeSpecs = do
             getPortableMode $ destination </> scriptName
       observed === portableModeFromBits mode
 
+  it "preserves arbitrary source and destination root modes" $
+    hedgehog $ do
+      sourceKind <- forAll Gen.bool
+      existingDestination <- forAll Gen.bool
+      sourceMode <- forAll $ (0o700 .|.) <$> Gen.word (Range.linear 0 0o77)
+      destinationMode <-
+        forAll $ (0o700 .|.) <$> Gen.word (Range.linear 0 0o77)
+      observed <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            archiveName <- encodeFS "repository.tar"
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            let source = tmpDir </> sourceName
+                archivePath = tmpDir </> archiveName
+                staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            builtin <-
+              if sourceKind
+                then do
+                  createDirectory source
+                  writeFile (source </> manifestName) "manifest"
+                  setPortableMode source sourceMode
+                  return $ DirectorySource source
+                else do
+                  let rootEntry =
+                        (Tar.directoryEntry $ tarPath "./")
+                          { Tar.entryPermissions = fromIntegral sourceMode
+                          }
+                  writeFile archivePath $
+                    LazyByteString.toStrict $
+                      Tar.write
+                        [ rootEntry
+                        , tarFileEntry "./dojang.toml" "manifest"
+                        ]
+                  return $ ArchiveSource TarArchive archivePath
+            Right metadata <-
+              stageBuiltinSourceWithMetadata builtin staging
+            when existingDestination $ do
+              createDirectory destination
+              setPortableMode destination destinationMode
+            _ <-
+              publishStagedDirectoryWithMetadata
+                metadata
+                staging
+                destination
+            getPortableMode destination
+      observed
+        === portableModeFromBits
+          (if existingDestination then destinationMode else sourceMode)
+
   it "uses default permissions when a Unix zip omits external attributes" $
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "repository.zip"
@@ -667,6 +796,33 @@ archiveModeSpecs = do
       getPortableMode (destination </> privateName </> fileName)
         `shouldReturn` portableModeFromBits 0o400
       setPortableMode (destination </> privateName) 0o700
+
+  it "does not report a discarded source root mode" $
+    withTempDir $ \tmpDir _ -> do
+      sourceName <- encodeFS "source"
+      stagingName <- encodeFS "partially-restored-root"
+      destinationName <- encodeFS "destination"
+      manifestName <- encodeFS "dojang.toml"
+      let source = tmpDir </> sourceName
+          staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+      createDirectory source
+      writeFile (source </> manifestName) "manifest"
+      setPortableMode source 0o700
+      Right (Right metadata) <-
+        runFailingModeIO $
+          stageBuiltinSourceWithMetadata
+            (DirectorySource source)
+            staging
+      createDirectory destination
+      setPortableMode destination 0o600
+      published <-
+        runFailingModeIO $
+          publishStagedDirectoryWithMetadata
+            metadata
+            staging
+            destination
+      published `shouldBe` Right []
 
   it "preserves arbitrary restrictive destination root permissions" $
     hedgehog $ do
@@ -807,6 +963,43 @@ archiveModeSpecs = do
 
 archiveSpecialFileSpecs :: Spec
 archiveSpecialFileSpecs = do
+  it "copies directory files without buffering them in the acquisition layer" $
+    withTempDir $ \tmpDir _ -> do
+      sourceName <- encodeFS "source"
+      stagingName <- encodeFS "staging"
+      streamedName <- encodeFS "streamed"
+      let source = tmpDir </> sourceName
+          staging = tmpDir </> stagingName
+      createDirectory source
+      writeFile (source </> streamedName) "contents"
+      result <-
+        runFailingModeIO $
+          stageBuiltinSource
+            (DirectorySource source)
+            staging
+      result `shouldBe` Right (Right ())
+      readFile (staging </> streamedName) `shouldReturn` "contents"
+
+  it "does not block on a FIFO inside a directory source" $
+    withTempDir $ \tmpDir _ -> do
+      sourceName <- encodeFS "source"
+      stagingName <- encodeFS "staging"
+      pipeName <- encodeFS "pipe"
+      let source = tmpDir </> sourceName
+          staging = tmpDir </> stagingName
+          pipe = source </> pipeName
+      createDirectory source
+      pipePath <- decodePath pipe
+      Posix.createNamedPipe pipePath 0o600
+      result <-
+        timeout 1000000 $
+          stageBuiltinSource
+            (DirectorySource source)
+            staging
+      result
+        `shouldBe` Just (Left (UnsupportedSourceEntry "pipe"))
+      isDirectory staging `shouldReturn` False
+
   it "rejects arbitrary FIFO paths with supported archive extensions" $
     hedgehog $ do
       prefix <-
@@ -872,6 +1065,13 @@ instance MonadFileSystem FailingModeIO where
   isDirectory value = liftIO (isDirectory value :: IO Bool)
   isSymlink value = liftIO (isSymlink value :: IO Bool)
   readFile value = liftIO (readFile value :: IO ByteString.ByteString)
+  readRegularFile value = do
+    path <- liftIO (decodePath value :: IO FilePath)
+    if FilePath.takeFileName path == "streamed"
+      then throwError $ userError "buffered read forbidden"
+      else liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
+  copyRegularFile source destination =
+    liftIO (copyRegularFile source destination :: IO Bool)
   writeFile path contents = liftIO (writeFile path contents :: IO ())
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
@@ -900,6 +1100,7 @@ instance MonadFileSystem FailingModeIO where
     path <- liftIO (decodePath value :: IO FilePath)
     case FilePath.takeFileName path of
       "partially-restored" -> return $ portableModeFromBits 0o600
+      "partially-restored-root" -> return $ portableModeFromBits 0o600
       "writability-only" ->
         return PortableMode{posixBits = Nothing, writable = True}
       _ -> liftIO (getPortableMode value :: IO PortableMode)

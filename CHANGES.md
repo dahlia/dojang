@@ -26,12 +26,14 @@ To be released.
     except that the current working directory keeps its identity.  Publication
     refuses a destination replaced by a symbolic link.  A dry run does not
     start an external transport and redacts its source argument and environment
-    values.  Standard tar archives whose first entry is `./` are accepted, and
-    an existing empty destination keeps its original root permissions after
-    publication.  Permission restoration is verified after it is applied, so
-    partial filesystem support produces the documented warning.
-    Noninteractive bootstrap requires both `--no-interactive` and `--yes`.
-    [[#47], [#74]]
+    values.  Directory sources and Unix ZIP archives reject FIFOs, sockets,
+    devices, and other unsupported entry types before reading or extraction.
+    Standard tar archives whose first entry is `./` are accepted.  A missing
+    destination inherits the source root's permissions, while an existing
+    empty destination keeps its original root permissions after publication.
+    Permission restoration is verified after it is applied, so partial
+    filesystem support produces the documented warning.  Noninteractive
+    bootstrap requires both `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

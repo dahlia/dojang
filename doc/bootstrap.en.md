@@ -23,8 +23,10 @@ Local directories need no transport option:
 $ dojang -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
-Dojang copies symbolic links as links instead of following them.  It also
-accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
+Dojang copies symbolic links as links instead of following them.  Other entries
+in a directory source must be regular files or directories; FIFOs, sockets,
+devices, and other special files are rejected before they are read.  Dojang
+also accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
@@ -38,13 +40,16 @@ Archive entries are validated before extraction.  Absolute paths, parent
 traversal, backslash paths, links, Windows-reserved or invalid filename
 components, and entries that collide case-insensitively or after Unicode
 normalization are rejected.  This collision check includes parent directories
-that an archive leaves implicit.  On POSIX systems, stored permission bits,
-including executable bits, are restored when the destination filesystem
-supports them.  Bootstrap verifies the resulting permissions instead of
-assuming that a successful filesystem call restored every bit.  If exact
-restoration is unavailable, bootstrap publishes the contents and warns that
-the permissions could not be restored.  When replacing an existing empty
-destination, its root directory keeps its original permissions.
+that an archive leaves implicit.  Unix ZIP entries that declare FIFOs, sockets,
+devices, or another unsupported type are also rejected rather than converted
+into regular files.  On POSIX systems, stored permission bits, including
+executable bits, are restored when the destination filesystem supports them.
+Bootstrap verifies the resulting permissions instead of assuming that a
+successful filesystem call restored every bit.  If exact restoration is
+unavailable, bootstrap publishes the contents and warns that the permissions
+could not be restored.  A newly created destination inherits the directory
+source or tar root permissions.  When replacing an existing empty destination,
+its root directory keeps its original permissions.
 
 
 External transports

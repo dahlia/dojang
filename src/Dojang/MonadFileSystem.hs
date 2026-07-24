@@ -52,8 +52,10 @@ import Control.Monad.State.Strict
 import Data.ByteString (ByteString)
 import Data.ByteString qualified
   ( hGetContents
+  , hGetSome
   , hPut
   , length
+  , null
   , readFile
   , writeFile
   )
@@ -77,15 +79,18 @@ import Dojang.Types.RouteMetadata
 
 
 #ifdef mingw32_HOST_OS
-import System.IO (IOMode (ReadMode), hIsSeekable, openBinaryFile)
+import System.IO (IOMode (ReadMode), hIsSeekable)
 #else
 import System.Posix.Files qualified as Posix
 import System.Posix.IO qualified as Posix
 #endif
 import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
 import System.IO
-  ( hClose
+  ( Handle
+  , IOMode (WriteMode)
+  , hClose
   , hFlush
+  , openBinaryFile
   , openBinaryTempFile
   )
 import System.OsPath
@@ -186,6 +191,27 @@ class (MonadError IOError m) => MonadFileSystem m where
             if resolvedRegularFile
               then Just <$> readFile path
               else return Nothing
+
+
+  -- | Copies a regular file without following a concurrent replacement to a
+  -- special file.
+  --
+  -- Symbolic links to regular files are accepted. Filesystem-backed
+  -- implementations should validate the opened source and stream from that
+  -- same handle. Returns 'False' without creating the destination when the
+  -- opened source is not a regular file.
+  copyRegularFile
+    :: (HasCallStack)
+    => OsPath
+    -- ^ Source path.
+    -> OsPath
+    -- ^ Destination path.
+    -> m Bool
+  copyRegularFile source destination = do
+    result <- readRegularFile source
+    case result of
+      Nothing -> return False
+      Just contents -> writeFile destination contents >> return True
 
 
   -- | Writes contents into a file.
@@ -523,8 +549,11 @@ isRegularFileIO path =
   (&&) <$> doesFileExist path <*> (not <$> isSymlink path)
 
 
-readRegularFileIO :: OsPath -> IO (Maybe ByteString)
-readRegularFileIO path = do
+withRegularFileHandleIO
+  :: OsPath
+  -> (Handle -> IO a)
+  -> IO (Maybe a)
+withRegularFileHandleIO path action = do
   path' <- decodeFS path
   Exception.bracket
     (openBinaryFile path' ReadMode)
@@ -532,9 +561,14 @@ readRegularFileIO path = do
     ( \handle -> do
         regularFile <- hIsSeekable handle
         if regularFile
-          then Just <$> Data.ByteString.hGetContents handle
+          then Just <$> action handle
           else return Nothing
     )
+
+
+readRegularFileIO :: OsPath -> IO (Maybe ByteString)
+readRegularFileIO path =
+  withRegularFileHandleIO path Data.ByteString.hGetContents
 
 
 getPortableModeIO :: OsPath -> IO PortableMode
@@ -578,8 +612,11 @@ isRegularFileIO path = do
       if isDoesNotExistError err then return False else throwError err
 
 
-readRegularFileIO :: OsPath -> IO (Maybe ByteString)
-readRegularFileIO path = do
+withRegularFileHandleIO
+  :: OsPath
+  -> (Handle -> IO a)
+  -> IO (Maybe a)
+withRegularFileHandleIO path action = do
   path' <- decodeFS path
   Exception.mask $ \restore -> do
     descriptor <-
@@ -599,9 +636,13 @@ readRegularFileIO path = do
         handle <-
           Posix.fdToHandle descriptor
             `Exception.onException` Posix.closeFd descriptor
-        Just
-          <$> restore (Data.ByteString.hGetContents handle)
-            `Exception.finally` hClose handle
+        (Just <$> restore (action handle))
+          `Exception.finally` hClose handle
+
+
+readRegularFileIO :: OsPath -> IO (Maybe ByteString)
+readRegularFileIO path =
+  withRegularFileHandleIO path Data.ByteString.hGetContents
 
 
 getPortableModeIO :: OsPath -> IO PortableMode
@@ -626,6 +667,28 @@ setPortableWritableIO path writable' = do
       then mode .|. 0o200
       else mode .&. complement 0o200
 #endif
+
+
+copyRegularFileIO :: OsPath -> OsPath -> IO Bool
+copyRegularFileIO source destination = do
+  result <-
+    withRegularFileHandleIO source $ \sourceHandle -> do
+      destination' <- decodeFS destination
+      Exception.bracket
+        (openBinaryFile destination' WriteMode)
+        hClose
+        (copyHandle sourceHandle)
+  return $ case result of
+    Nothing -> False
+    Just () -> True
+
+
+copyHandle :: Handle -> Handle -> IO ()
+copyHandle source destination = do
+  chunk <- Data.ByteString.hGetSome source 32768
+  unless (Data.ByteString.null chunk) $ do
+    Data.ByteString.hPut destination chunk
+    copyHandle source destination
 
 
 validateFileLockPath :: OsPath -> IO ()
@@ -676,6 +739,9 @@ instance MonadFileSystem IO where
 
 
   readRegularFile = readRegularFileIO
+
+
+  copyRegularFile = copyRegularFileIO
 
 
   writeFile dst contents = do
