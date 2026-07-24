@@ -10,8 +10,11 @@ incomplete source does not replace the destination.
 The destination must not exist or must be an empty directory.  It is the current
 directory unless `-r`/`--repository-dir` selects another path.  Publication
 refuses a destination that has been replaced by a symbolic link.  Other
-existing empty destinations are replaced atomically; the current directory
-keeps its identity.
+existing empty destinations are replaced atomically; if another process creates
+the destination during publication, Dojang fails instead of replacing it.  The
+current directory keeps its identity.  Publication requires the destination
+filesystem to support an atomic no-replace rename.  Dojang fails closed when
+that operation is unavailable instead of falling back to a race-prone rename.
 
 
 Local directories and archives
@@ -48,8 +51,10 @@ Bootstrap verifies the resulting permissions instead of assuming that a
 successful filesystem call restored every bit.  If exact restoration is
 unavailable, bootstrap publishes the contents and warns that the permissions
 could not be restored.  A newly created destination inherits the directory
-source or tar root permissions.  When replacing an existing empty destination,
-its root directory keeps its original permissions.
+source or tar root permissions.  When the directory source itself is a symbolic
+link, these permissions come from the target directory rather than the link.
+When replacing an existing empty destination, its root directory keeps its
+original permissions.
 
 
 External transports

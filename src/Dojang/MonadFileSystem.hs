@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE InstanceSigs #-}
@@ -24,7 +25,12 @@ import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
-import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
+import GHC.IO.Exception
+  ( IOErrorType
+      ( InappropriateType
+      , InvalidArgument
+      )
+  )
 import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( alreadyExistsErrorType
@@ -81,6 +87,14 @@ import Dojang.Types.RouteMetadata
 #ifdef mingw32_HOST_OS
 import System.IO (IOMode (ReadMode), hIsSeekable)
 #else
+import Foreign.C.Error qualified as CError
+import Foreign.C.Types (CInt (CInt))
+import GHC.IO.Exception qualified as GHCIO
+#if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
+import Foreign.C.String (CString)
+import Foreign.C.Types (CUInt (CUInt))
+import System.Posix.Internals qualified as PosixInternal
+#endif
 import System.Posix.Files qualified as Posix
 import System.Posix.IO qualified as Posix
 #endif
@@ -511,6 +525,37 @@ listDirectoryRecursively' path ptnStep = do
     subentries <- listDirectoryRecursively' (path </> dir) step
     return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
   return $ files' ++ symlinks' ++ concat dirs'
+
+#if defined(linux_HOST_OS)
+atFdcwd :: CInt
+atFdcwd = -100
+
+
+renameNoreplace :: CUInt
+renameNoreplace = 1
+
+
+foreign import ccall unsafe "renameat2"
+  c_renameat2
+    :: CInt
+    -> CString
+    -> CInt
+    -> CString
+    -> CUInt
+    -> IO CInt
+#elif defined(darwin_HOST_OS)
+renameExcl :: CUInt
+renameExcl = 4
+
+
+foreign import ccall unsafe "renamex_np"
+  c_renamex_np
+    :: CString
+    -> CString
+    -> CUInt
+    -> IO CInt
+#endif
+
 #ifdef mingw32_HOST_OS
 replaceFileIO :: OsPath -> OsPath -> IO ()
 replaceFileIO source destination = do
@@ -591,6 +636,10 @@ setPortableWritableIO path writable' = do
   permissions <- OsDirectory.getPermissions path
   OsDirectory.setPermissions path $
     Directory.setOwnerWritable writable' permissions
+
+
+renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
+renameDirectoryNoReplaceIO = OsDirectory.renameDirectory
 #else
 replaceFileIO :: OsPath -> OsPath -> IO ()
 replaceFileIO = OsDirectory.renameFile
@@ -666,6 +715,63 @@ setPortableWritableIO path writable' = do
     if writable'
       then mode .|. 0o200
       else mode .&. complement 0o200
+
+
+renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
+renameDirectoryNoReplaceIO source destination = do
+  destination' <- decodeFS destination
+#if defined(linux_HOST_OS)
+  source' <- decodeFS source
+  PosixInternal.withFilePath source' $ \sourcePath ->
+    PosixInternal.withFilePath destination' $ \destinationPath ->
+      checkNoReplaceResult
+        [CError.eINVAL, CError.eNOSYS, CError.eNOTSUP, CError.eOPNOTSUPP]
+        destination'
+        $ c_renameat2
+            atFdcwd
+            sourcePath
+            atFdcwd
+            destinationPath
+            renameNoreplace
+#elif defined(darwin_HOST_OS)
+  source' <- decodeFS source
+  PosixInternal.withFilePath source' $ \sourcePath ->
+    PosixInternal.withFilePath destination' $ \destinationPath ->
+      checkNoReplaceResult
+        [CError.eNOTSUP, CError.eOPNOTSUPP]
+        destination'
+        $ c_renamex_np sourcePath destinationPath renameExcl
+#else
+  _ <- decodeFS source
+  throwNoReplaceUnsupported destination'
+#endif
+
+
+checkNoReplaceResult :: [CError.Errno] -> FilePath -> IO CInt -> IO ()
+checkNoReplaceResult unsupportedErrors destination action = do
+  result <- action
+  when (result == -1) $ do
+    err <- CError.getErrno
+    if err `elem` unsupportedErrors
+      then throwNoReplaceUnsupported destination
+      else
+        Exception.throwIO $
+          CError.errnoToIOError
+            "renameDirectory"
+            err
+            Nothing
+            (Just destination)
+
+
+throwNoReplaceUnsupported :: FilePath -> IO a
+throwNoReplaceUnsupported destination =
+  Exception.throwIO $
+    mkIOError
+      GHCIO.UnsupportedOperation
+      "renameDirectory"
+      Nothing
+      (Just destination)
+      `ioeSetErrorString` "filesystem lacks atomic no-replace rename"
 #endif
 
 
@@ -752,14 +858,7 @@ instance MonadFileSystem IO where
   replaceFile = replaceFileIO
 
 
-  renameDirectory source destination = do
-    destinationExists <- doesPathExist destination
-    when destinationExists $ do
-      destination' <- decodePath destination
-      throwError $
-        mkIOError alreadyExistsErrorType "renameDirectory" Nothing (Just destination')
-          `ioeSetErrorString` "destination already exists"
-    OsDirectory.renameDirectory source destination
+  renameDirectory = renameDirectoryNoReplaceIO
 
 
   copyFileWithMetadata = OsDirectory.copyFileWithMetadata

@@ -28,7 +28,14 @@ import Codec.Archive.Zip qualified as Zip
 import Codec.Compression.GZip qualified as GZip
 import Control.Applicative ((<|>))
 import Control.DeepSeq (NFData, force)
-import Control.Exception (SomeException, displayException, evaluate)
+import Control.Exception
+  ( SomeAsyncException
+  , SomeException
+  , displayException
+  , evaluate
+  , fromException
+  , throwIO
+  )
 import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Catch (MonadCatch, try)
 import Control.Monad.Except (MonadError (catchError, throwError))
@@ -234,8 +241,11 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
               force $
                 decodeArchive format bytes
       case decoded of
-        Left (err :: SomeException) ->
-          return $ Left $ InvalidArchive $ Text.pack $ displayException err
+        Left (err :: SomeException)
+          | Just (_ :: SomeAsyncException) <- fromException err ->
+              liftIO $ throwIO err
+          | otherwise ->
+              return $ Left $ InvalidArchive $ Text.pack $ displayException err
         Right (Left err) -> return $ Left err
         Right (Right entries) -> do
           createDirectory staging
@@ -585,7 +595,8 @@ captureStagedMetadata
   -> m StagedMetadata
 captureStagedMetadata source entries =
   do
-    rootMode <- getPortableMode source
+    resolvedSource <- canonicalizePath source
+    rootMode <- getPortableMode resolvedSource
     descendants <- concat <$> traverse capture entries
     return $
       StagedMetadata $

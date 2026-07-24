@@ -21,6 +21,7 @@ import Hedgehog.Range qualified as Range
 
 
 #ifndef mingw32_HOST_OS
+import Control.Exception (AsyncException (UserInterrupt), throw)
 import Control.Monad (when)
 import Control.Monad.Catch (MonadCatch, MonadThrow)
 import Control.Monad.Except
@@ -963,6 +964,19 @@ archiveModeSpecs = do
 
 archiveSpecialFileSpecs :: Spec
 archiveSpecialFileSpecs = do
+  it "lets asynchronous archive-decoding exceptions escape" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "interrupted.zip"
+      stagingName <- encodeFS "staging"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+      runFailingModeIO
+        ( stageBuiltinSource
+            (ArchiveSource ZipArchive archivePath)
+            staging
+        )
+        `shouldThrow` (== UserInterrupt)
+
   it "copies directory files without buffering them in the acquisition layer" $
     withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source"
@@ -1067,9 +1081,10 @@ instance MonadFileSystem FailingModeIO where
   readFile value = liftIO (readFile value :: IO ByteString.ByteString)
   readRegularFile value = do
     path <- liftIO (decodePath value :: IO FilePath)
-    if FilePath.takeFileName path == "streamed"
-      then throwError $ userError "buffered read forbidden"
-      else liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
+    case FilePath.takeFileName path of
+      "interrupted.zip" -> return $ Just $ throw UserInterrupt
+      "streamed" -> throwError $ userError "buffered read forbidden"
+      _ -> liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
   copyRegularFile source destination =
     liftIO (copyRegularFile source destination :: IO Bool)
   writeFile path contents = liftIO (writeFile path contents :: IO ())
@@ -1184,6 +1199,39 @@ symlinkSpecs = return ()
 #else
 symlinkSpecs :: Spec
 symlinkSpecs = do
+  it "preserves arbitrary target modes for symlinked directory sources" $
+    hedgehog $ do
+      sourceMode <- forAll $ (0o700 .|.) <$> Gen.word (Range.linear 0 0o77)
+      observed <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            sourceLinkName <- encodeFS "source-link"
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            let source = tmpDir </> sourceName
+                sourceLink = tmpDir </> sourceLinkName
+                staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            createDirectory source
+            writeFile (source </> manifestName) "manifest"
+            setPortableMode source sourceMode
+            System.Directory.OsPath.createDirectoryLink
+              sourceName
+              sourceLink
+            Right metadata <-
+              stageBuiltinSourceWithMetadata
+                (DirectorySource sourceLink)
+                staging
+            _ <-
+              publishStagedDirectoryWithMetadata
+                metadata
+                staging
+                destination
+            getPortableMode destination
+      observed === portableModeFromBits sourceMode
+
   it "recreates symbolic links instead of following them" $
     withTempDir $ \tmpDir _ -> do
       sourceName <- encodeFS "source"

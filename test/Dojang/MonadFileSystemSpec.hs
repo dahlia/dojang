@@ -6,6 +6,13 @@
 
 module Dojang.MonadFileSystemSpec (spec) where
 
+import Control.Concurrent
+  ( forkIO
+  , newEmptyMVar
+  , putMVar
+  , readMVar
+  , takeMVar
+  )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.List (sort, sortOn)
 import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
@@ -378,6 +385,32 @@ spec = do
           `shouldThrow` isAlreadyExistsError
         isDirectory (tmpDir </> foo) `shouldReturn` True
         isDirectory (tmpDir </> baz) `shouldReturn` True
+
+    specify "renameDirectory allows only one concurrent publisher" $
+      withTempDir $ \tmpDir _ -> do
+        start <- newEmptyMVar
+        sourceNames <-
+          mapM (encodeFS . ("source-" <>) . show) [1 .. 128 :: Int]
+        mapM_ (createDirectory . (tmpDir </>)) sourceNames
+        results <-
+          mapM
+            ( \sourceName -> do
+                result <- newEmptyMVar
+                _ <-
+                  forkIO $ do
+                    readMVar start
+                    outcome <-
+                      tryError $
+                        renameDirectory
+                          (tmpDir </> sourceName)
+                          (tmpDir </> baz)
+                    putMVar result outcome
+                return result
+            )
+            sourceNames
+        putMVar start ()
+        outcomes <- mapM takeMVar results
+        length [() | Right () <- outcomes] `shouldBe` 1
 
     specify "createDirectory" $ withTempDir $ \tmpDirP _ -> do
       () <- createDirectory (tmpDirP </> nonExistentP)
