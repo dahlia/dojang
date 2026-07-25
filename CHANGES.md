@@ -18,34 +18,22 @@ To be released.
     entries, including names that are reserved or invalid on Windows, and
     rejects paths that collide after case folding or Unicode normalization.  It
     preserves recorded POSIX permissions where the destination filesystem
-    supports them, requires an absent or empty destination, and cleans
-    unpublished work after failure.
+    supports them, requires an absent destination, and cleans unpublished work
+    after failure.
     Archive sources must resolve to regular files, so FIFOs and other special
     files are rejected without blocking.  Unsupported permission metadata
-    produces a warning without discarding the acquired contents.  An absent or
-    missing destination is published with an atomic no-replace rename.  An
-    existing empty destination is atomically exchanged where supported and is
-    rejected when a safe exchange is unavailable.  Publication refuses a
-    destination replaced by a symbolic link or concurrently changed during the
-    final exchange.  If an entry is concurrently added to the old destination
-    during exchange, publication reverses the exchange and preserves it.  The
-    current working directory keeps its identity by moving each complete
-    top-level staging entry with an atomic no-replace rename.  Stored
-    permissions are restored while entries are still private.
-    Entry identities are captured before publication, and rollback first moves
-    entries into private quarantine before validating their identities and
-    deleting them.  This preserves files raced into or replaced within the
-    directory even when copying or publication is interrupted.  If a
-    concurrent replacement cannot be restored safely, the private recovery
-    data is retained instead of deleted.  Filesystems without an atomic
-    no-replace rename cannot publish a non-current-directory destination and
-    are rejected rather than using a race-prone fallback.  On Linux and macOS,
-    dry runs model directory exchange in memory, including publication into an
-    existing empty destination.  External transport source and destination
-    arguments and inherited environment values retain their native byte
-    representation on POSIX.  A dry run does not start an external transport
-    and redacts its source argument and environment values, including sources
-    whose native representation is not UTF-8.
+    produces a warning without discarding the acquired contents.  Stored
+    permissions are restored while the repository is still private in staging,
+    then an absent destination is published with one atomic no-replace
+    directory rename.  Existing paths, including empty directories and the
+    current working directory, are rejected.  If another process creates the
+    destination first, publication fails without modifying that entry.
+    Filesystems without an atomic no-replace rename are rejected rather than
+    using an entry-by-entry fallback.  External transport source and
+    destination arguments and inherited environment values retain their native
+    byte representation on POSIX.  A dry run does not start an external
+    transport and redacts its source argument and environment values, including
+    sources whose native representation is not UTF-8.
     Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
     other unsupported entry types before reading or extraction.  Directory
     source identities are pinned during validation, regular files are checked
@@ -53,15 +41,13 @@ To be released.
     and recorded entries are revalidated after copying.  Concurrent additions,
     removals, replacements, and type changes therefore stop publication.
     Archives changed while their bounded read is in progress are rejected with
-    a retryable source-change error.  Rollback reports quarantine failures
-    instead of silently leaving published entries behind.  ZIP directories
-    marked with the DOS directory attribute are accepted even when their names
-    omit a trailing slash.  A destination nested inside its local directory
-    source is rejected before staging is created.  Standard tar archives whose
-    first entry is `./` are accepted.  A missing destination inherits the
-    source root's permissions, including the target permissions when the
-    directory source is a symbolic link, while an existing empty destination
-    keeps its original root permissions after publication.
+    a retryable source-change error.  ZIP directories marked with the DOS
+    directory attribute are accepted even when their names omit a trailing
+    slash.  A destination nested inside its local directory source is rejected
+    before staging is created.  Standard tar archives whose first entry is `./`
+    are accepted.  A missing destination inherits the source root's
+    permissions, including the target permissions when the directory source is
+    a symbolic link.
     Permission restoration is verified after it is applied, so partial
     filesystem support produces the documented warning.  POSIX reapplies mode
     `0700` after creating staging, so a restrictive umask cannot leave it

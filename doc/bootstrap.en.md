@@ -8,30 +8,17 @@ systems request the private mode during creation and then reapply it, so even a
 restrictive process umask cannot make the staging directory unusable.  Windows
 uses a protected, inheritable owner-only ACL.  A filesystem that cannot enforce
 this protection is rejected.  Dojang checks the staged *dojang.toml* before
-publishing the repository, so an invalid or incomplete source does not replace
-the destination.
+publishing the repository, so an invalid or incomplete source does not publish
+anything at the destination.
 
-The destination must not exist or must be an empty directory.  It is the current
-directory unless `-r`/`--repository-dir` selects another path.  Publication
-refuses a destination that has been replaced by a symbolic link.  A missing
-destination is published with an atomic no-replace rename.  An existing empty
-destination is atomically exchanged with staging when the filesystem supports
-directory exchange.  If atomic exchange is unavailable, bootstrap rejects that
-existing destination instead of using a race-prone fallback.  If another
-process adds an entry to the old destination during that exchange, bootstrap
-reverses the exchange instead of deleting the entry.  The current directory
-keeps its identity by moving each complete top-level staging entry with an
-atomic no-replace rename.  If another process creates an entry first, bootstrap
-fails without overwriting it.  Stored permissions are restored while the entries
-are still private in staging.  Bootstrap captures entry identities before
-publication, and rollback atomically moves entries back into private quarantine
-before validating those identities and deleting anything.  Entries replaced by
-another process are restored instead, and interruption triggers the same
-rollback.  If a concurrent replacement cannot be restored safely, Dojang keeps
-the private staging tree and reports its location instead of deleting the
-recovery data.  Windows does not currently provide directory exchange through
-Dojang, so use an absent non-current-directory destination or run bootstrap from
-inside an existing empty destination.
+The destination must not exist.  Because the default repository directory is
+the current directory, use `-r`/`--repository-dir` to select a new path when
+bootstrapping.  An existing path is rejected even when it is an empty
+directory.  Dojang restores stored permissions while the repository is still
+private in staging, then publishes it with one atomic no-replace directory
+rename.  If another process creates the destination first, publication fails
+without modifying that entry.  Filesystems without an atomic no-replace rename
+are rejected instead of using an entry-by-entry fallback.
 
 
 Local directories and archives
@@ -86,8 +73,6 @@ unavailable, bootstrap publishes the contents and warns that the permissions
 could not be restored.  A newly created destination inherits the directory
 source or tar root permissions.  When the directory source itself is a symbolic
 link, these permissions come from the target directory rather than the link.
-When replacing an existing empty destination, its root directory keeps its
-original permissions.
 
 
 External transports
@@ -176,10 +161,8 @@ $ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 A dry run does not publish the repository, save enrollment, or apply files.
-On Linux and macOS, the in-memory preview models directory exchange, so an
-existing empty destination can be previewed without changing it.  The real
-bootstrap still verifies that the destination filesystem supports the atomic
-operation.
+It applies the same requirement that the destination does not exist, then
+models acquisition and publication without changing the filesystem.
 For an external transport, Dojang redacts the source argument and environment
 values when it prints the executable request, including source arguments whose
 native representation is not UTF-8, and does not start the program.  Because

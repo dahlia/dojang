@@ -279,15 +279,9 @@ instance
   copyRegularFile src = App . lift . lift . lift . copyRegularFile src
   copyRegularFileWithSnapshot snapshot src =
     App . lift . lift . lift . copyRegularFileWithSnapshot snapshot src
-  copyRegularFileNoReplace src =
-    App . lift . lift . lift . copyRegularFileNoReplace src
   writeFile dst = App . lift . lift . lift . writeFile dst
   replaceFile src = App . lift . lift . lift . replaceFile src
   renameDirectory src = App . lift . lift . lift . renameDirectory src
-  renameEntry fileType src =
-    App . lift . lift . lift . renameEntry fileType src
-  exchangeDirectories src =
-    App . lift . lift . lift . exchangeDirectories src
   writeTemporaryFile directory template contents =
     App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
   withFileLock lockPath action = App $ ReaderT $ \appEnv ->
@@ -309,14 +303,10 @@ instance
   listDirectory = App . lift . lift . lift . listDirectory
   getFileSize = App . lift . lift . lift . getFileSize
   getFileIdentity = App . lift . lift . lift . getFileIdentity
-  captureDirectorySnapshot =
-    App . lift . lift . lift . captureDirectorySnapshot
   getFileSnapshot = App . lift . lift . lift . getFileSnapshot
   getPortableMode = App . lift . lift . lift . getPortableMode
   setPortableMode path = App . lift . lift . lift . setPortableMode path
   setPortableWritable path = App . lift . lift . lift . setPortableWritable path
-  restoreDirectoryModeFromSnapshot path =
-    App . lift . lift . lift . restoreDirectoryModeFromSnapshot path
   createSymbolicLink target link =
     App . lift . lift . lift . createSymbolicLink target link
 

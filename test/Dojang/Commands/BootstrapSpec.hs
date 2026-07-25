@@ -213,31 +213,32 @@ spec = sequential $ do
 
     nativeSourcePathSpec
 
-    it "honors atomic exchange support for an existing empty destination" $
+    it "rejects an existing empty destination before acquisition" $
       withBootstrapFixture $ \_ sourceText destination stateRoot home appEnv -> do
-        manifestName <- encodeFS "dojang.toml"
         createDirectory destination
-        let action =
-              withHome home $
-                runAppWithoutLogging appEnv $
-                  bootstrap
-                    sourceText
-                    Nothing
-                    Nothing
-                    []
-                    True
-                    True
-                    Nothing
-                    []
-        if os == "mingw32"
-          then do
-            action `shouldThrow` (== cliError)
-            listDirectory destination `shouldReturn` []
-            exists stateRoot `shouldReturn` False
-          else do
-            action `shouldReturn` ExitSuccess
-            readFile (destination </> manifestName)
-              `shouldReturn` validManifest
+        (standardError, result) <-
+          captureStderr $
+            Exception.try $
+              withHome
+                home
+                ( runAppWithoutLogging appEnv $
+                    bootstrap
+                      sourceText
+                      Nothing
+                      Nothing
+                      []
+                      True
+                      True
+                      Nothing
+                      []
+                )
+        result `shouldBe` Left cliError
+        standardError
+          `shouldSatisfy` ByteString.isPrefixOf "Error:"
+        standardError
+          `shouldSatisfy` ByteString.isInfixOf "--repository-dir"
+        listDirectory destination `shouldReturn` []
+        exists stateRoot `shouldReturn` False
 
     it "normalizes a destination with a trailing separator" $
       withBootstrapFixture $ \_ sourceText destination _ home appEnv -> do
@@ -281,25 +282,24 @@ spec = sequential $ do
         exists destination `shouldReturn` False
         exists stateRoot `shouldReturn` False
 
-    it "honors dry-run exchange support for an existing empty destination" $
+    it "rejects an existing empty destination during dry-run" $
       withBootstrapFixture $ \_ sourceText destination stateRoot home appEnv -> do
         createDirectory destination
-        let action =
-              withHome home $
-                dryRunIO $
-                  runAppWithoutLogging appEnv{dryRun = True} $
-                    bootstrap
-                      sourceText
-                      Nothing
-                      Nothing
-                      []
-                      True
-                      True
-                      Nothing
-                      []
-        if os == "mingw32"
-          then action `shouldThrow` (== cliError)
-          else action `shouldReturn` ExitSuccess
+        withHome
+          home
+          ( dryRunIO $
+              runAppWithoutLogging appEnv{dryRun = True} $
+                bootstrap
+                  sourceText
+                  Nothing
+                  Nothing
+                  []
+                  True
+                  True
+                  Nothing
+                  []
+          )
+          `shouldThrow` (== cliError)
         listDirectory destination `shouldReturn` []
         exists stateRoot `shouldReturn` False
 

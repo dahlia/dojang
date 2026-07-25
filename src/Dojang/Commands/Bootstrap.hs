@@ -57,7 +57,7 @@ import Dojang.CommandEffect
   , emptyProcessRequest
   )
 import Dojang.Commands
-  ( Admonition (Note, Warning)
+  ( Admonition (Error, Hint, Note, Warning)
   , StandardStream (StandardError)
   , die'
   , pathStyleFor
@@ -280,16 +280,16 @@ ensureAvailableDestination destination = do
   symbolicLink <- isSymlink destination
   when symbolicLink $ unavailable "is a symbolic link"
   present <- exists destination
-  when present $ do
-    directory <- isDirectory destination
-    unless directory $ unavailable "is not a directory"
-    entries <- listDirectory destination
-    unless (null entries) $ unavailable "is not empty"
+  when present $ unavailable "already exists"
  where
   unavailable reason = do
     pathStyle <- pathStyleFor StandardError
-    die' cliError $
+    printStderr' Error $
       "Bootstrap destination " <> pathStyle destination <> " " <> reason <> "."
+    printStderr' Hint $
+      "Choose a repository directory that does not exist yet with "
+        <> "`-r`/`--repository-dir`."
+    abortCommand cliError
 
 
 newStagingPath
@@ -523,40 +523,10 @@ cleanupStaging staging = do
   directory <- isDirectory staging
   present <- exists staging
   if directory && not symbolicLink
-    then do
-      retainedRollback <-
-        hasRetainedRollbackEntries staging
-          `catchError` const (return True)
-      if retainedRollback
-        then do
-          pathStyle <- pathStyleFor StandardError
-          printStderr' Warning $
-            "Rollback could not safely restore every concurrent entry.  "
-              <> "Private recovery data was kept at "
-              <> pathStyle staging
-              <> "."
-        else removeDirectoryRecursively staging `catchError` const (return ())
+    then removeDirectoryRecursively staging `catchError` const (return ())
     else
       when (symbolicLink || present) $
         removeFile staging `catchError` const (return ())
-
-
-hasRetainedRollbackEntries
-  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i Bool
-hasRetainedRollbackEntries staging = do
-  entries <- listDirectory staging
-  or <$> traverse retained entries
- where
-  retained entry = do
-    name <- decodePath entry
-    if ".dojang-bootstrap-rollback-" `isPrefixOf` name
-      then do
-        let path = staging </> entry
-        directory <- isDirectory path
-        if directory
-          then not . null <$> listDirectory path
-          else return True
-      else return False
 
 
 reportFilesystemError :: (AppEffects i) => IOError -> App i a

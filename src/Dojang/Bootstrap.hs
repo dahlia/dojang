@@ -44,7 +44,6 @@ import Control.Monad.Catch
   , mask
   , throwM
   , try
-  , uninterruptibleMask_
   )
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.IO.Class (MonadIO (liftIO))
@@ -65,11 +64,8 @@ import Data.Text.Encoding (decodeUtf8')
 import Data.Text.Normalize qualified as Unicode
 import GHC.Generics (Generic)
 import System.FilePath.Posix qualified as Posix
-import System.IO.Error (isDoesNotExistError)
 import System.OsPath
   ( OsPath
-  , joinPath
-  , splitDirectories
   , takeDirectory
   , (</>)
   )
@@ -78,13 +74,10 @@ import Prelude hiding (readFile, writeFile)
 
 import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
-  , DirectorySnapshot
   , FileIdentity
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
-  , directorySnapshotIdentity
-  , directorySnapshotMode
   )
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
@@ -143,10 +136,6 @@ data StagedEntry
 
 data StagedMode = StagedMode FilePath FileType PortableMode
   deriving (Eq, Show, Generic)
-
-
-data PublishedEntry
-  = PublishedEntry FileType OsPath OsPath OsPath FileIdentity
 
 
 data DirectoryEntrySnapshot
@@ -301,10 +290,8 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
           return $ Right $ metadataFromEntries entries
 
 
--- | Publishes a fully validated staging tree. A missing or existing empty
--- destination is published with an atomic directory rename. When the
--- destination is the process's current working directory, its directory
--- identity is preserved instead.
+-- | Publishes a fully validated staging tree to a missing destination with an
+-- atomic no-replace directory rename.
 publishStagedDirectory
   :: (MonadFileSystem m, MonadMask m) => OsPath -> OsPath -> m ()
 publishStagedDirectory staging destination =
@@ -317,12 +304,10 @@ publishStagedDirectory staging destination =
 
 -- | Publishes a fully validated staging tree and applies retained permissions.
 --
--- A missing or existing empty destination is published with an atomic rename,
--- except that the current working directory keeps its identity.  File and
--- directory modes come from the staging tree, with retained archive modes
--- taking precedence.  The returned paths identify entries whose stored
--- permissions the destination filesystem could not represent; their contents
--- are still published.
+-- The destination must not exist. File and directory modes come from the
+-- staging tree, with retained archive modes taking precedence. The returned
+-- paths identify entries whose stored permissions the destination filesystem
+-- could not represent; their contents are still published.
 publishStagedDirectoryWithMetadata
   :: (MonadFileSystem m, MonadMask m)
   => StagedMetadata
@@ -335,91 +320,13 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
     throwError $
       userError "bootstrap destination is a symbolic link"
   destinationExists <- exists destination
-  if not destinationExists
-    then do
-      protectRestrictedStaging staging metadata $ do
-        modeFailures <- applyStagedMetadata staging metadata
-        renameDirectory staging destination
-        return modeFailures
-    else do
-      initialSnapshot <- captureDirectorySnapshot destination
-      destinationEntries <- listDirectory destination
-      unless (null destinationEntries) $
-        throwError $
-          userError "bootstrap destination is not empty"
-      destinationSnapshot <- captureDirectorySnapshot destination
-      let initialIdentity = directorySnapshotIdentity initialSnapshot
-          destinationIdentity =
-            directorySnapshotIdentity destinationSnapshot
-          destinationMode = directorySnapshotMode destinationSnapshot
-      unless (destinationIdentity == initialIdentity) $
-        throwError $
-          userError "bootstrap destination changed during publication"
-      current <- encodePath "."
-      currentIdentity <- getFileIdentity current
-      if currentIdentity == Just destinationIdentity
-        then do
-          protectRestrictedStaging staging metadata $
-            copyDirectoryContents metadata staging current
-        else do
-          protectRestrictedStaging staging metadata $ do
-            modeFailures <-
-              applyStagedMetadata staging $ withoutRootMetadata metadata
-            rootModeRestored <- restorePortableMode staging destinationMode
-            unless rootModeRestored $
-              throwError $
-                userError
-                  "bootstrap destination permissions could not be preserved"
-            didExchange <- exchangeDirectories staging destination
-            unless didExchange $
-              throwError $
-                userError
-                  "filesystem cannot atomically exchange the bootstrap destination"
-            withExchangedDestinationRollback
-              destinationSnapshot
-              staging
-              destination
-              $ do
-                validateExchangedDestination
-                  destinationIdentity
-                  staging
-                widenDirectoryForCleanup staging
-                removeDirectory staging
-            return modeFailures
-
-
-withExchangedDestinationRollback
-  :: (MonadFileSystem m, MonadMask m)
-  => DirectorySnapshot
-  -> OsPath
-  -> OsPath
-  -> m a
-  -> m a
-withExchangedDestinationRollback
-  snapshot
-  staging
-  destination
-  action = do
-    outcome <-
-      catchError
-        (Right <$> try action)
-        (return . Left)
-    case outcome of
-      Left filesystemError -> uninterruptibleMask_ $ do
-        restoreExchangedDestinationMode
-          snapshot
-          staging
-          destination
-        throwError filesystemError
-      Right (Left (exception :: SomeException)) -> uninterruptibleMask_ $ do
-        restoreExchangedDestinationMode
-          snapshot
-          staging
-          destination
-        case fromException exception of
-          Just filesystemError -> throwError filesystemError
-          Nothing -> throwM exception
-      Right (Right value) -> return value
+  when destinationExists $
+    throwError $
+      userError "bootstrap destination already exists"
+  protectRestrictedStaging staging metadata $ do
+    modeFailures <- applyStagedMetadata staging metadata
+    renameDirectory staging destination
+    return modeFailures
 
 
 resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
@@ -434,54 +341,6 @@ resolvesToRegularFile path = do
         else do
           resolved <- canonicalizePath path
           isRegularFile resolved
-
-
-validateExchangedDestination
-  :: (MonadFileSystem m)
-  => FileIdentity
-  -> OsPath
-  -> m ()
-validateExchangedDestination expectedIdentity staging = do
-  actualIdentity <- getFileIdentity staging
-  exchangedEntries <- listDirectory staging
-  unless
-    (actualIdentity == Just expectedIdentity && null exchangedEntries)
-    $ throwError
-    $ userError "bootstrap destination changed during publication"
-
-
-restoreExchangedDestination
-  :: (MonadFileSystem m)
-  => OsPath
-  -> OsPath
-  -> m ()
-restoreExchangedDestination staging destination = do
-  restored <- exchangeDirectories staging destination
-  unless restored $
-    throwError $
-      userError "bootstrap destination exchange could not be reversed"
-
-
-restoreExchangedDestinationMode
-  :: (MonadFileSystem m)
-  => DirectorySnapshot
-  -> OsPath
-  -> OsPath
-  -> m ()
-restoreExchangedDestinationMode
-  snapshot
-  staging
-  destination = do
-    restoreExchangedDestination staging destination
-    restoration <-
-      restoreDirectoryModeFromSnapshot destination snapshot
-    case restoration of
-      Nothing -> return ()
-      Just restored ->
-        unless restored $
-          throwError $
-            userError
-              "bootstrap destination permissions could not be restored"
 
 
 copyDirectoryTree
@@ -557,28 +416,6 @@ identifyDirectoryEntries source entries = do
   unsupported relative = do
     decoded <- decodePath relative
     return $ Left $ UnsupportedSourceEntry decoded
-
-
-copyDirectoryContents
-  :: (MonadFileSystem m, MonadMask m)
-  => StagedMetadata
-  -> OsPath
-  -> OsPath
-  -> m [FilePath]
-copyDirectoryContents retainedMetadata source destination = do
-  entries <- listDirectoryRecursively source []
-  sourceMetadata <- captureStagedMetadata source entries
-  let publishedMetadata =
-        withoutRootMetadata $
-          overlayStagedMetadata retainedMetadata sourceMetadata
-  withDirectoryEntriesNoReplace
-    source
-    destination
-    entries
-    (applyStagedMetadata source publishedMetadata)
-    $ \modeFailures _ -> do
-      removeDirectory source
-      return modeFailures
 
 
 copyDirectoryEntries
@@ -744,297 +581,6 @@ throwSourceEntryTypeChanged path = do
   throwError $
     userError $
       "bootstrap source entry type changed during acquisition: " <> decoded
-
-
-withDirectoryEntriesNoReplace
-  :: (MonadFileSystem m, MonadMask m)
-  => OsPath
-  -> OsPath
-  -> [(FileType, OsPath)]
-  -> m preparation
-  -> (preparation -> [PublishedEntry] -> m a)
-  -> m a
-withDirectoryEntriesNoReplace source destination entries prepare action = do
-  rollbackDirectory <- createRollbackDirectory
-  identified <-
-    identifyEntries rollbackDirectory $ zip [0 ..] entries
-  prepared <-
-    prepare `catchError` \err -> do
-      removeDirectory rollbackDirectory `catchError` const (return ())
-      throwError err
-  moveTopLevelEntries rollbackDirectory prepared [] identified
- where
-  createRollbackDirectory = do
-    temporary <-
-      writeTemporaryFile
-        (takeDirectory source)
-        ".dojang-bootstrap-rollback-"
-        ""
-    removeFile temporary
-    createPrivateDirectory temporary
-    return temporary
-
-  identifyEntries rollbackDirectory =
-    mapM $ \(index, (fileType, relative)) -> do
-      quarantineName <- encodePath $ show (index :: Int)
-      getFileIdentity (source </> relative) >>= \case
-        Just identity ->
-          return
-            ( fileType
-            , relative
-            , rollbackDirectory </> quarantineName
-            , identity
-            )
-        Nothing -> do
-          path <- decodePath relative
-          throwError $
-            userError $
-              "filesystem cannot identify staged bootstrap entry: " <> path
-
-  topLevel relative =
-    case splitDirectories relative of
-      component : _ -> component
-      [] -> relative
-
-  topLevelEntries identified =
-    [ (fileType, relative)
-    | (fileType, relative, _, _) <- identified
-    , relative == topLevel relative
-    ]
-
-  publishedEntries identified relative =
-    [ PublishedEntry
-        fileType
-        entry
-        (destination </> entry)
-        quarantine
-        identity
-    | (fileType, entry, quarantine, identity) <- identified
-    , topLevel entry == relative
-    ]
-
-  moveTopLevelEntries rollbackDirectory prepared created identified =
-    moveEntries
-      rollbackDirectory
-      prepared
-      created
-      identified
-      (topLevelEntries identified)
-
-  moveEntries rollbackDirectory prepared created _ [] = do
-    result <- action prepared created
-    removeDirectory rollbackDirectory
-    return result
-  moveEntries
-    rollbackDirectory
-    prepared
-    created
-    identified
-    ((fileType, relative) : remaining) =
-      mask $ \restore -> do
-        let published = publishedEntries identified relative
-            cleanup = cleanupPublishedEntries published
-            continue =
-              restore $
-                moveEntries
-                  rollbackDirectory
-                  prepared
-                  (created <> published)
-                  identified
-                  remaining
-            handleException (err :: SomeException)
-              | Just (_ :: IOError) <- fromException err = throwM err
-              | otherwise = cleanup >> throwM err
-        renameEntry
-          fileType
-          (source </> relative)
-          (destination </> relative)
-        (continue `catch` handleException)
-          `catchError` \err -> cleanup >> throwError err
-
-
-cleanupPublishedEntries
-  :: (MonadFileSystem m) => [PublishedEntry] -> m ()
-cleanupPublishedEntries [] = return ()
-cleanupPublishedEntries
-  ( root@(PublishedEntry rootType rootRelative rootPath rootQuarantine rootIdentity)
-      : descendants
-    ) = do
-    quarantined <- quarantineEntry root
-    when quarantined $ do
-      currentIdentity <- getFileIdentity rootQuarantine
-      if currentIdentity /= Just rootIdentity
-        then renameEntry rootType rootQuarantine rootPath
-        else case rootType of
-          Directory -> do
-            rootMode <- getPortableMode rootQuarantine
-            widenDirectoryForCleanup rootQuarantine
-            (safeDirectories, directoryModes) <-
-              preparePublishedDirectories
-                rootRelative
-                rootQuarantine
-                (Set.singleton rootRelative)
-                [(rootRelative, rootMode)]
-                descendants
-            forM_ (reverse descendants) $ \entry ->
-              when
-                (publishedEntryParent entry `Set.member` safeDirectories)
-                $ cleanupPublishedEntry
-                  rootRelative
-                  rootQuarantine
-                  directoryModes
-                  entry
-            removePublishedEntry
-              Directory
-              rootPath
-              rootQuarantine
-              (Just rootMode)
-          File ->
-            removePublishedEntry File rootPath rootQuarantine Nothing
-          Symlink ->
-            removePublishedEntry Symlink rootPath rootQuarantine Nothing
-
-
-preparePublishedDirectories
-  :: (MonadFileSystem m)
-  => OsPath
-  -> OsPath
-  -> Set.Set OsPath
-  -> [(OsPath, PortableMode)]
-  -> [PublishedEntry]
-  -> m (Set.Set OsPath, [(OsPath, PortableMode)])
-preparePublishedDirectories _ _ safe modes [] =
-  return (safe, modes)
-preparePublishedDirectories
-  rootRelative
-  rootQuarantine
-  safe
-  modes
-  (entry@(PublishedEntry fileType relative _ quarantine expectedIdentity) : rest)
-    | fileType /= Directory
-        || publishedEntryParent entry `Set.notMember` safe =
-        preparePublishedDirectories
-          rootRelative
-          rootQuarantine
-          safe
-          modes
-          rest
-    | otherwise = do
-        let path =
-              relocatedPublishedPath rootRelative rootQuarantine relative
-        quarantined <-
-          renameEntryIfPresent Directory path quarantine
-        if not quarantined
-          then continue safe modes
-          else do
-            currentIdentity <- getFileIdentity quarantine
-            if currentIdentity /= Just expectedIdentity
-              then renameEntry Directory quarantine path >> continue safe modes
-              else do
-                mode <- getPortableMode quarantine
-                widenDirectoryForCleanup quarantine
-                renameEntry Directory quarantine path
-                continue
-                  (Set.insert relative safe)
-                  ((relative, mode) : modes)
-   where
-    continue safe' modes' =
-      preparePublishedDirectories
-        rootRelative
-        rootQuarantine
-        safe'
-        modes'
-        rest
-
-
-publishedEntryParent :: PublishedEntry -> OsPath
-publishedEntryParent (PublishedEntry _ relative _ _ _) =
-  takeDirectory relative
-
-
-relocatedPublishedPath :: OsPath -> OsPath -> OsPath -> OsPath
-relocatedPublishedPath rootRelative rootQuarantine relative =
-  case drop
-    (length $ splitDirectories rootRelative)
-    (splitDirectories relative) of
-    [] -> rootQuarantine
-    components -> rootQuarantine </> joinPath components
-
-
-quarantineEntry :: (MonadFileSystem m) => PublishedEntry -> m Bool
-quarantineEntry (PublishedEntry fileType _ path quarantine _) =
-  renameEntryIfPresent fileType path quarantine
-
-
-renameEntryIfPresent
-  :: (MonadFileSystem m)
-  => FileType
-  -> OsPath
-  -> OsPath
-  -> m Bool
-renameEntryIfPresent fileType source destination =
-  catchError
-    (renameEntry fileType source destination >> return True)
-    $ \err ->
-      if isDoesNotExistError err
-        then return False
-        else throwError err
-
-
-cleanupPublishedEntry
-  :: (MonadFileSystem m)
-  => OsPath
-  -> OsPath
-  -> [(OsPath, PortableMode)]
-  -> PublishedEntry
-  -> m ()
-cleanupPublishedEntry
-  rootRelative
-  rootQuarantine
-  directoryModes
-  (PublishedEntry fileType relative _ quarantine expectedIdentity) = do
-    let path =
-          relocatedPublishedPath rootRelative rootQuarantine relative
-    quarantined <-
-      renameEntryIfPresent fileType path quarantine
-    when quarantined $ do
-      currentIdentity <- getFileIdentity quarantine
-      if currentIdentity == Just expectedIdentity
-        then
-          removePublishedEntry
-            fileType
-            path
-            quarantine
-            (lookup relative directoryModes)
-        else renameEntry fileType quarantine path
-
-
-removePublishedEntry
-  :: (MonadFileSystem m)
-  => FileType
-  -> OsPath
-  -> OsPath
-  -> Maybe PortableMode
-  -> m ()
-removePublishedEntry fileType published quarantine originalMode =
-  case fileType of
-    Directory -> do
-      mode <- maybe (getPortableMode quarantine) return originalMode
-      widenDirectoryForCleanup quarantine
-      entries <- listDirectory quarantine
-      if null entries
-        then removeDirectory quarantine
-        else do
-          restored <- restorePortableMode quarantine mode
-          unless restored $
-            throwError $
-              userError
-                "bootstrap rollback could not restore directory permissions"
-          renameEntry Directory quarantine published
-    File -> do
-      setPortableWritable quarantine True
-      removeFile quarantine
-    Symlink -> removeFile quarantine
 
 
 cleanupStagingOnError
@@ -1206,39 +752,6 @@ captureStagedMetadata source entries =
     mode <- getPortableMode $ source </> relative
     path <- decodePath relative
     return [StagedMode path fileType mode]
-
-
-overlayStagedMetadata
-  :: StagedMetadata -> StagedMetadata -> StagedMetadata
-overlayStagedMetadata (StagedMetadata retained) (StagedMetadata captured) =
-  StagedMetadata $
-    retained
-      <> filter
-        ( \(StagedMode path _ _) ->
-            Map.notMember (portableMetadataPathKey path) retainedPaths
-        )
-        captured
- where
-  retainedPaths =
-    Map.fromList
-      [ (portableMetadataPathKey path, ())
-      | StagedMode path _ _ <- retained
-      ]
-
-
-withoutRootMetadata :: StagedMetadata -> StagedMetadata
-withoutRootMetadata (StagedMetadata modes) =
-  StagedMetadata
-    [ mode
-    | mode@(StagedMode path _ _) <- modes
-    , not $ null path
-    ]
-
-
-portableMetadataPathKey :: FilePath -> Text
-portableMetadataPathKey =
-  archivePathKey
-    . fmap (\character -> if character == '\\' then '/' else character)
 
 
 applyStagedMetadata

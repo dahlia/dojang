@@ -32,7 +32,7 @@ import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (length, map, readFile, replicate, writeFile)
+import Data.ByteString qualified (length, map, readFile, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
@@ -50,7 +50,6 @@ import System.FilePath (combine)
 import Control.Concurrent (threadDelay)
 import Control.Exception qualified as Exception
 import Data.Bits ((.&.))
-import Data.Maybe (isJust)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Posix.Files qualified as Posix
@@ -281,41 +280,6 @@ posixDryRunPortableModeSpec = do
 posixCopyInterruptionSpec :: Spec
 posixCopyInterruptionSpec = do
   specify
-    "copyRegularFileNoReplace preserves a replacement after interruption"
-    $ withTempDir
-    $ \tmpDir _ -> do
-      sourceName <- encodeFS "source"
-      destinationName <- encodeFS "destination"
-      displacedName <- encodeFS "displaced"
-      let source = tmpDir </> sourceName
-          destination = tmpDir </> destinationName
-          displaced = tmpDir </> displacedName
-          replacement = "concurrent replacement"
-      writeFile source $ Data.ByteString.replicate (32 * 1024 * 1024) 0x61
-      result <- newEmptyMVar
-      worker <-
-        forkIO $ do
-          outcome <-
-            Exception.try $
-              copyRegularFileNoReplace source destination
-          putMVar result (outcome :: Either Exception.SomeException Bool)
-      appeared <-
-        timeout 5000000 $
-          let waitForDestination = do
-                present <- exists destination
-                if present
-                  then return ()
-                  else threadDelay 1000 >> waitForDestination
-          in waitForDestination
-      appeared `shouldBe` Just ()
-      OsDirectory.renameFile destination displaced
-      writeFile destination replacement
-      Exception.throwTo worker Exception.UserInterrupt
-      finished <- timeout 5000000 $ takeMVar result
-      finished `shouldSatisfy` isJust
-      readFile destination `shouldReturn` replacement
-
-  specify
     "copyRegularFileWithSnapshot rejects an in-place source mutation"
     $ withTempDir
     $ \tmpDir tmpDir' -> do
@@ -402,41 +366,6 @@ posixCopyInterruptionSpec = do
       timeout 5000000 (takeMVar mutationFinished)
         `shouldReturn` Just ()
       observed `shouldBe` Just FileChangedDuringRead
-#endif
-
-#if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
-dryRunExchangeSpec :: Spec
-dryRunExchangeSpec =
-  describe "exchangeDirectories" $
-    it "swaps virtual trees without touching the real filesystem" $
-      withTempDir $ \tmpDir _ -> do
-        sourceName <- encodeFS "source"
-        destinationName <- encodeFS "destination"
-        sourceFileName <- encodeFS "source-file"
-        destinationFileName <- encodeFS "destination-file"
-        let source = tmpDir </> sourceName
-            destination = tmpDir </> destinationName
-        observed <-
-          dryRunIO $ do
-            createDirectory source
-            createDirectory destination
-            writeFile (source </> sourceFileName) "source"
-            writeFile (destination </> destinationFileName) "destination"
-            sourceIdentity <- getFileIdentity source
-            destinationIdentity <- getFileIdentity destination
-            exchanged <- exchangeDirectories source destination
-            (,,,,)
-              <$> pure exchanged
-              <*> readFile (source </> destinationFileName)
-              <*> readFile (destination </> sourceFileName)
-              <*> ((== destinationIdentity) <$> getFileIdentity source)
-              <*> ((== sourceIdentity) <$> getFileIdentity destination)
-        observed `shouldBe` (True, "destination", "source", True, True)
-        doesPathExist source `shouldReturn` False
-        doesPathExist destination `shouldReturn` False
-#else
-dryRunExchangeSpec :: Spec
-dryRunExchangeSpec = pure ()
 #endif
 
 
@@ -667,41 +596,6 @@ spec = do
           then observed === FileSizeLimitExceeded
           else observed === BoundedFileContents contents
 
-    specify "copyRegularFileNoReplace copies arbitrary contents" $
-      hedgehog $ do
-        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
-        (copied, observed) <-
-          liftIO $
-            withTempDir $ \tmpDir _ -> do
-              writeFile (tmpDir </> foo) contents
-              result <-
-                copyRegularFileNoReplace
-                  (tmpDir </> foo)
-                  (tmpDir </> bar)
-              destinationContents <- readFile $ tmpDir </> bar
-              return (result, destinationContents)
-        copied === True
-        observed === contents
-
-    specify "copyRegularFileNoReplace preserves arbitrary existing contents" $
-      hedgehog $ do
-        sourceContents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
-        destinationContents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
-        (refused, observed) <-
-          liftIO $
-            withTempDir $ \tmpDir _ -> do
-              writeFile (tmpDir </> foo) sourceContents
-              writeFile (tmpDir </> bar) destinationContents
-              result <-
-                tryError $
-                  copyRegularFileNoReplace
-                    (tmpDir </> foo)
-                    (tmpDir </> bar)
-              contents <- readFile $ tmpDir </> bar
-              return (either isAlreadyExistsError (const False) result, contents)
-        refused === True
-        observed === destinationContents
-
     posixCopyInterruptionSpec
 
     specify "renameDirectory" $ withTempDir $ \tmpDir _ -> do
@@ -839,8 +733,6 @@ spec = do
     specify "getHomeDirectory" $ do
       homeDirectory <- OsDirectory.getHomeDirectory
       dryRunIO getHomeDirectory `shouldReturn` homeDirectory
-
-    dryRunExchangeSpec
 
     describe "isFile" $ do
       it "checks an actual file that exists on the real file system" $ do
@@ -1674,132 +1566,6 @@ spec = do
         ioeGetFileName e' `shouldBe` Just nonExistentFP
         ioeGetLocation e' `shouldBe` "getFileSize"
         show e' `shouldContain` "not a regular file, but a directory"
-
-  describe "directory snapshots (IO)" $ do
-    specify "rejects regular files" $
-      withTempDir $ \tmpDir tmpDir' -> do
-        Prelude.writeFile (tmpDir' `combine` "file") ""
-        fileName <- encodeFS "file"
-        result <- tryError $ captureDirectorySnapshot $ tmpDir </> fileName
-        case result of
-          Left err -> ioeGetErrorType err `shouldBe` InappropriateType
-          Right _ -> expectationFailure "Captured a regular file."
-
-    symSpecify "rejects symbolic links to directories" $
-      withTempDir $ \tmpDir _ -> do
-        targetName <- encodeFS "target"
-        linkName <- encodeFS "link"
-        let target = tmpDir </> targetName
-            link = tmpDir </> linkName
-        createDirectory target
-        createSymbolicLink target link Directory :: IO ()
-        result <- tryError $ captureDirectorySnapshot link
-        case result of
-          Left err ->
-            ioeGetErrorType err
-              `shouldSatisfy` (`elem` [InappropriateType, InvalidArgument])
-          Right _ -> expectationFailure "Captured a symbolic link."
-
-    it "restores arbitrary writability through the captured handle" $
-      hedgehog $ do
-        writable <- forAll Gen.bool
-        (restored, observed) <-
-          liftIO $
-            withTempDir $ \tmpDir _ -> do
-              directoryName <- encodeFS "directory"
-              let directory = tmpDir </> directoryName
-              createDirectory directory
-              setPortableWritable directory writable
-              snapshot <- captureDirectorySnapshot directory
-              setPortableWritable directory $ not writable
-              result <-
-                restoreDirectoryModeFromSnapshot directory snapshot
-              mode <- getPortableMode directory
-              return (result, mode.writable)
-        restored === Just True
-        observed === writable
-
-    it "does not restore a replacement directory" $
-      hedgehog $ do
-        writable <- forAll Gen.bool
-        (restored, observed) <-
-          liftIO $
-            withTempDir $ \tmpDir _ -> do
-              directoryName <- encodeFS "directory"
-              replacementName <- encodeFS "replacement"
-              let directory = tmpDir </> directoryName
-                  replacement = tmpDir </> replacementName
-              createDirectory directory
-              createDirectory replacement
-              snapshot <- captureDirectorySnapshot directory
-              removeDirectory directory
-              renameDirectory replacement directory
-              setPortableWritable directory writable
-              result <-
-                restoreDirectoryModeFromSnapshot directory snapshot
-              mode <- getPortableMode directory
-              return (result, mode.writable)
-        restored === Nothing
-        observed === writable
-
-    (if symlinkAvailable then it else xit)
-      "does not restore through a replacement symbolic link"
-      $ hedgehog
-      $ do
-        targetWritable <- forAll Gen.bool
-        (restored, observed) <-
-          liftIO $
-            withTempDir $ \tmpDir _ -> do
-              directoryName <- encodeFS "directory"
-              targetName <- encodeFS "target"
-              let directory = tmpDir </> directoryName
-                  target = tmpDir </> targetName
-              createDirectory directory
-              createDirectory target
-              setPortableWritable directory $ not targetWritable
-              snapshot <- captureDirectorySnapshot directory
-              removeDirectory directory
-              setPortableWritable target targetWritable
-              createSymbolicLink target directory Directory
-              result <-
-                restoreDirectoryModeFromSnapshot directory snapshot
-              mode <- getPortableMode target
-              return (result, mode.writable)
-        restored === Nothing
-        observed === targetWritable
-
-  describe "directory snapshots (DryRunIO)" $ do
-    it "restores arbitrary overlaid writability" $
-      hedgehog $ do
-        writable <- forAll Gen.bool
-        (restored, observed) <-
-          liftIO $
-            withTempDir $ \tmpDir _ -> do
-              directoryName <- encodeFS "directory"
-              let directory = tmpDir </> directoryName
-              createDirectory directory
-              dryRunIO $ do
-                setPortableWritable directory writable
-                snapshot <- captureDirectorySnapshot directory
-                setPortableWritable directory $ not writable
-                result <-
-                  restoreDirectoryModeFromSnapshot directory snapshot
-                mode <- getPortableMode directory
-                return (result, mode.writable)
-        restored === Just True
-        observed === writable
-
-    it "does not restore an overlaid replacement directory" $
-      withTempDir $ \tmpDir _ -> do
-        directoryName <- encodeFS "directory"
-        let directory = tmpDir </> directoryName
-        createDirectory directory
-        restored <- dryRunIO $ do
-          snapshot <- captureDirectorySnapshot directory
-          removeDirectory directory
-          createDirectory directory
-          restoreDirectoryModeFromSnapshot directory snapshot
-        restored `shouldBe` Nothing
 
   describe "createSymbolicLink (IO)" $ do
     symSpecify "creates a file link" $ withTempDir $ \tmpDir tmpDir' -> do

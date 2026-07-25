@@ -466,14 +466,10 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase . copyRegularFile source
   copyRegularFileWithSnapshot snapshot source =
     liftCommandEffectBase . copyRegularFileWithSnapshot snapshot source
-  copyRegularFileNoReplace source =
-    liftCommandEffectBase . copyRegularFileNoReplace source
   writeFile path = liftCommandEffectBase . writeFile path
   replaceFile source = liftCommandEffectBase . replaceFile source
-  renameEntry fileType source =
-    liftCommandEffectBase . renameEntry fileType source
-  exchangeDirectories source =
-    liftCommandEffectBase . exchangeDirectories source
+  renameDirectory source =
+    liftCommandEffectBase . renameDirectory source
   writeTemporaryFile directory template =
     liftCommandEffectBase . writeTemporaryFile directory template
   withFileLock _ action = action
@@ -492,14 +488,10 @@ instance MonadFileSystem CommandEffectTest where
   listDirectory = liftCommandEffectBase . listDirectory
   getFileSize = liftCommandEffectBase . getFileSize
   getFileIdentity = liftCommandEffectBase . getFileIdentity
-  captureDirectorySnapshot =
-    liftCommandEffectBase . captureDirectorySnapshot
   getFileSnapshot = liftCommandEffectBase . getFileSnapshot
   getPortableMode = liftCommandEffectBase . getPortableMode
   setPortableMode path = liftCommandEffectBase . setPortableMode path
   setPortableWritable path = liftCommandEffectBase . setPortableWritable path
-  restoreDirectoryModeFromSnapshot path =
-    liftCommandEffectBase . restoreDirectoryModeFromSnapshot path
   createSymbolicLink target link =
     liftCommandEffectBase . createSymbolicLink target link
 
