@@ -70,7 +70,10 @@ To be released.
     Directory traversal pins each opened directory and opens children without
     following links, so a transient directory-link replacement cannot redirect
     enumeration outside the source.  Noninteractive bootstrap requires both
-    `--no-interactive` and `--yes`.  [[#47], [#74]]
+    `--no-interactive` and `--yes`.  The selected bootstrap manifest must use a
+    drive-less relative path inside the acquired repository without parent or
+    symbolic-link components, so validation and enrollment cannot resolve it
+    to different files before and after publication.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

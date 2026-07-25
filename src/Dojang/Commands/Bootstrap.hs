@@ -17,7 +17,7 @@ import Control.Monad (unless, void, when)
 import Control.Monad.Catch (mask, onException)
 import Control.Monad.Except (MonadError (catchError))
 import Control.Monad.Reader (asks, local)
-import Data.List (isPrefixOf)
+import Data.List (inits, isPrefixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
@@ -25,8 +25,11 @@ import System.Exit (ExitCode (..))
 import System.OsPath
   ( OsPath
   , dropTrailingPathSeparator
+  , hasDrive
   , isAbsolute
+  , joinPath
   , normalise
+  , splitDirectories
   , takeDirectory
   , (</>)
   )
@@ -499,11 +502,41 @@ defaultTransportConfigPath platform
 validateStaging
   :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 validateStaging staging = do
+  validateStagedManifestPath staging
   _ <-
     local
       (\environment -> environment{sourceDirectory = staging})
       ensureManifest
   printStderr "Staged repository manifest validated."
+
+
+validateStagedManifestPath
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
+validateStagedManifestPath staging = do
+  configuredManifest <- asks (.manifestFile)
+  parentComponent <- encodePath ".."
+  let normalizedManifest = normalise configuredManifest
+      components = splitDirectories normalizedManifest
+  when
+    ( case components of
+        [] -> True
+        _ : _ ->
+          isAbsolute normalizedManifest
+            || hasDrive normalizedManifest
+            || parentComponent `elem` components
+    )
+    $ die'
+      cliError
+      "Bootstrap manifest must be inside the acquired repository."
+  symbolicLink <-
+    or
+      <$> traverse
+        (isSymlink . (staging </>) . joinPath)
+        (drop 1 $ inits components)
+  when symbolicLink $
+    die'
+      cliError
+      "Bootstrap manifest path cannot contain symbolic links."
 
 
 publishStaging

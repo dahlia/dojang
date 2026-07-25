@@ -18,6 +18,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Hedgehog (evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import System.Directory.OsPath qualified
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath (addTrailingPathSeparator)
 import System.IO
@@ -210,6 +211,261 @@ spec = sequential $ do
           Right value -> return value
           Left err -> fail $ "Unexpected state error: " <> show err
         fmap (.firstApplied) states `shouldBe` [True]
+
+    it "rejects a manifest symlink that changes target after publication" $
+      if os == "mingw32"
+        then pendingWith "Creating symbolic links requires Windows privileges."
+        else withTempDir $ \tmp _ -> do
+          repositoriesName <- encodeFS "repositories"
+          sourceName <- encodeFS "source"
+          destinationName <- encodeFS "destination"
+          stateName <- encodeFS "state"
+          homeName <- encodeFS "home"
+          manifestName <- encodeFS "dojang.toml"
+          envName <- encodeFS "dojang-env.toml"
+          escapedManifestName <- encodeFS "escaped-manifest.toml"
+          relativeTarget <- encodeFS "../../escaped-manifest.toml"
+          let repositories = tmp </> repositoriesName
+              source = repositories </> sourceName
+              destination = repositories </> destinationName
+              stagedTarget = repositories </> escapedManifestName
+              publishedTarget = tmp </> escapedManifestName
+              stateRoot = tmp </> stateName
+              home = tmp </> homeName
+              appEnv =
+                AppEnv
+                  destination
+                  True
+                  Nothing
+                  stateRoot
+                  manifestName
+                  envName
+                  False
+                  False
+          createDirectory repositories
+          createDirectory source
+          createDirectory home
+          writeFile stagedTarget validManifest
+          System.Directory.OsPath.createFileLink
+            relativeTarget
+            (source </> manifestName)
+          sourceText <- decodeFS source
+          withHome
+            home
+            ( runAppWithoutLogging appEnv $
+                bootstrap
+                  sourceText
+                  Nothing
+                  Nothing
+                  []
+                  True
+                  True
+                  Nothing
+                  []
+            )
+            `shouldThrow` (== cliError)
+          exists destination `shouldReturn` False
+          exists publishedTarget `shouldReturn` False
+          readFile stagedTarget `shouldReturn` validManifest
+
+    it "rejects an embedded parent traversal in the manifest path" $
+      withTempDir $ \tmp _ -> do
+        repositoriesName <- encodeFS "repositories"
+        sourceName <- encodeFS "source"
+        childName <- encodeFS "sub"
+        destinationName <- encodeFS "destination"
+        stateName <- encodeFS "state"
+        homeName <- encodeFS "home"
+        envName <- encodeFS "dojang-env.toml"
+        escapedManifestName <- encodeFS "escaped-manifest.toml"
+        escapingManifest <- encodeFS "sub/../../../escaped-manifest.toml"
+        let repositories = tmp </> repositoriesName
+            source = repositories </> sourceName
+            destination = repositories </> destinationName
+            stagedTarget = repositories </> escapedManifestName
+            publishedTarget = tmp </> escapedManifestName
+            stateRoot = tmp </> stateName
+            home = tmp </> homeName
+            appEnv =
+              AppEnv
+                destination
+                True
+                Nothing
+                stateRoot
+                escapingManifest
+                envName
+                False
+                False
+        createDirectory repositories
+        createDirectory source
+        createDirectory (source </> childName)
+        createDirectory home
+        writeFile stagedTarget validManifest
+        sourceText <- decodeFS source
+        withHome
+          home
+          ( runAppWithoutLogging appEnv $
+              bootstrap
+                sourceText
+                Nothing
+                Nothing
+                []
+                True
+                True
+                Nothing
+                []
+          )
+          `shouldThrow` (== cliError)
+        exists destination `shouldReturn` False
+        exists publishedTarget `shouldReturn` False
+        readFile stagedTarget `shouldReturn` validManifest
+
+    it "rejects an absolute bootstrap manifest path" $
+      withBootstrapFixture $ \source sourceText destination _ home appEnv -> do
+        manifestName <- encodeFS "dojang.toml"
+        withHome
+          home
+          ( runAppWithoutLogging
+              appEnv{manifestFile = source </> manifestName}
+              $ bootstrap
+                sourceText
+                Nothing
+                Nothing
+                []
+                True
+                True
+                Nothing
+                []
+          )
+          `shouldThrow` (== cliError)
+        exists destination `shouldReturn` False
+
+    it "rejects a drive-relative bootstrap manifest path" $
+      if os /= "mingw32"
+        then pendingWith "Drive-relative paths exist only on Windows."
+        else withBootstrapFixture $ \_ sourceText destination _ home appEnv -> do
+          driveRelative <- encodeFS "C:dojang.toml"
+          withHome
+            home
+            ( runAppWithoutLogging
+                appEnv{manifestFile = driveRelative}
+                $ bootstrap
+                  sourceText
+                  Nothing
+                  Nothing
+                  []
+                  True
+                  True
+                  Nothing
+                  []
+            )
+            `shouldThrow` (== cliError)
+          exists destination `shouldReturn` False
+
+    it "rejects a symbolic-link ancestor in the manifest path" $
+      if os == "mingw32"
+        then pendingWith "Creating symbolic links requires Windows privileges."
+        else withTempDir $ \tmp _ -> do
+          repositoriesName <- encodeFS "repositories"
+          sourceName <- encodeFS "source"
+          destinationName <- encodeFS "destination"
+          stateName <- encodeFS "state"
+          homeName <- encodeFS "home"
+          manifestName <- encodeFS "dojang.toml"
+          envName <- encodeFS "dojang-env.toml"
+          configName <- encodeFS "config"
+          linkedConfigName <- encodeFS "linked-config"
+          relativeTarget <- encodeFS "../../linked-config"
+          configuredManifest <- encodeFS "config/dojang.toml"
+          let repositories = tmp </> repositoriesName
+              source = repositories </> sourceName
+              destination = repositories </> destinationName
+              stagedConfig = repositories </> linkedConfigName
+              publishedConfig = tmp </> linkedConfigName
+              stateRoot = tmp </> stateName
+              home = tmp </> homeName
+              appEnv =
+                AppEnv
+                  destination
+                  True
+                  Nothing
+                  stateRoot
+                  configuredManifest
+                  envName
+                  False
+                  False
+          createDirectory repositories
+          createDirectory source
+          createDirectory stagedConfig
+          createDirectory home
+          writeFile (stagedConfig </> manifestName) validManifest
+          System.Directory.OsPath.createDirectoryLink
+            relativeTarget
+            (source </> configName)
+          sourceText <- decodeFS source
+          withHome
+            home
+            ( runAppWithoutLogging appEnv $
+                bootstrap
+                  sourceText
+                  Nothing
+                  Nothing
+                  []
+                  True
+                  True
+                  Nothing
+                  []
+            )
+            `shouldThrow` (== cliError)
+          exists destination `shouldReturn` False
+          exists publishedConfig `shouldReturn` False
+          readFile (stagedConfig </> manifestName)
+            `shouldReturn` validManifest
+
+    it "rejects arbitrary manifest parent components before publication" $
+      hedgehog $ do
+        depth <- forAll $ Gen.int $ Range.linear 1 8
+        filename <-
+          forAll $
+            Gen.string
+              (Range.linear 1 40)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        outcomes <-
+          evalIO $
+            withBootstrapFixture $
+              \_ sourceText destination _ home appEnv -> do
+                manifests <-
+                  traverse
+                    encodeFS
+                    [ concat (replicate depth "../")
+                        <> filename
+                        <> ".toml"
+                    , "sub/"
+                        <> concat (replicate depth "../")
+                        <> filename
+                        <> ".toml"
+                    ]
+                traverse
+                  ( \manifest -> do
+                      result <-
+                        Exception.try
+                          $ withHome home
+                          $ runAppWithoutLogging
+                            appEnv{manifestFile = manifest}
+                          $ bootstrap
+                            sourceText
+                            Nothing
+                            Nothing
+                            []
+                            True
+                            True
+                            Nothing
+                            []
+                      present <- exists destination
+                      return (result, present)
+                  )
+                  manifests
+        outcomes === replicate 2 (Left cliError, False)
 
     nativeSourcePathSpec
 

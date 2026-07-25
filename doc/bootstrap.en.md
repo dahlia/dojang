@@ -149,6 +149,11 @@ options as ordinary repository initialization.  Dojang then asks whether to
 apply the repository.  Declining leaves a valid, enrolled checkout without
 changing target files.
 
+The selected manifest path must be relative without a drive prefix, remain
+inside the acquired repository, and contain no parent or symbolic-link
+components.  This ensures staged validation and post-publication enrollment
+observe the same manifest.
+
 Noninteractive bootstrap requires explicit approval:
 
 ~~~~ console
