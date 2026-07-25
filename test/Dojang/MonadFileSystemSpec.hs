@@ -1636,6 +1636,132 @@ spec = do
         ioeGetLocation e' `shouldBe` "getFileSize"
         show e' `shouldContain` "not a regular file, but a directory"
 
+  describe "directory snapshots (IO)" $ do
+    specify "rejects regular files" $
+      withTempDir $ \tmpDir tmpDir' -> do
+        Prelude.writeFile (tmpDir' `combine` "file") ""
+        fileName <- encodeFS "file"
+        result <- tryError $ captureDirectorySnapshot $ tmpDir </> fileName
+        case result of
+          Left err -> ioeGetErrorType err `shouldBe` InappropriateType
+          Right _ -> expectationFailure "Captured a regular file."
+
+    symSpecify "rejects symbolic links to directories" $
+      withTempDir $ \tmpDir _ -> do
+        targetName <- encodeFS "target"
+        linkName <- encodeFS "link"
+        let target = tmpDir </> targetName
+            link = tmpDir </> linkName
+        createDirectory target
+        createSymbolicLink target link Directory :: IO ()
+        result <- tryError $ captureDirectorySnapshot link
+        case result of
+          Left err ->
+            ioeGetErrorType err
+              `shouldSatisfy` (`elem` [InappropriateType, InvalidArgument])
+          Right _ -> expectationFailure "Captured a symbolic link."
+
+    it "restores arbitrary writability through the captured handle" $
+      hedgehog $ do
+        writable <- forAll Gen.bool
+        (restored, observed) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              directoryName <- encodeFS "directory"
+              let directory = tmpDir </> directoryName
+              createDirectory directory
+              setPortableWritable directory writable
+              snapshot <- captureDirectorySnapshot directory
+              setPortableWritable directory $ not writable
+              result <-
+                restoreDirectoryModeFromSnapshot directory snapshot
+              mode <- getPortableMode directory
+              return (result, mode.writable)
+        restored === Just True
+        observed === writable
+
+    it "does not restore a replacement directory" $
+      hedgehog $ do
+        writable <- forAll Gen.bool
+        (restored, observed) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              directoryName <- encodeFS "directory"
+              replacementName <- encodeFS "replacement"
+              let directory = tmpDir </> directoryName
+                  replacement = tmpDir </> replacementName
+              createDirectory directory
+              createDirectory replacement
+              snapshot <- captureDirectorySnapshot directory
+              removeDirectory directory
+              renameDirectory replacement directory
+              setPortableWritable directory writable
+              result <-
+                restoreDirectoryModeFromSnapshot directory snapshot
+              mode <- getPortableMode directory
+              return (result, mode.writable)
+        restored === Nothing
+        observed === writable
+
+    (if symlinkAvailable then it else xit)
+      "does not restore through a replacement symbolic link"
+      $ hedgehog
+      $ do
+        targetWritable <- forAll Gen.bool
+        (restored, observed) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              directoryName <- encodeFS "directory"
+              targetName <- encodeFS "target"
+              let directory = tmpDir </> directoryName
+                  target = tmpDir </> targetName
+              createDirectory directory
+              createDirectory target
+              setPortableWritable directory $ not targetWritable
+              snapshot <- captureDirectorySnapshot directory
+              removeDirectory directory
+              setPortableWritable target targetWritable
+              createSymbolicLink target directory Directory
+              result <-
+                restoreDirectoryModeFromSnapshot directory snapshot
+              mode <- getPortableMode target
+              return (result, mode.writable)
+        restored === Nothing
+        observed === targetWritable
+
+  describe "directory snapshots (DryRunIO)" $ do
+    it "restores arbitrary overlaid writability" $
+      hedgehog $ do
+        writable <- forAll Gen.bool
+        (restored, observed) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              directoryName <- encodeFS "directory"
+              let directory = tmpDir </> directoryName
+              createDirectory directory
+              dryRunIO $ do
+                setPortableWritable directory writable
+                snapshot <- captureDirectorySnapshot directory
+                setPortableWritable directory $ not writable
+                result <-
+                  restoreDirectoryModeFromSnapshot directory snapshot
+                mode <- getPortableMode directory
+                return (result, mode.writable)
+        restored === Just True
+        observed === writable
+
+    it "does not restore an overlaid replacement directory" $
+      withTempDir $ \tmpDir _ -> do
+        directoryName <- encodeFS "directory"
+        let directory = tmpDir </> directoryName
+        createDirectory directory
+        restored <- dryRunIO $ do
+          snapshot <- captureDirectorySnapshot directory
+          removeDirectory directory
+          createDirectory directory
+          restoreDirectoryModeFromSnapshot directory snapshot
+        restored `shouldBe` Nothing
+
   describe "createSymbolicLink (IO)" $ do
     symSpecify "creates a file link" $ withTempDir $ \tmpDir tmpDir' -> do
       Prelude.writeFile (tmpDir' `combine` "foo") "linked contents"

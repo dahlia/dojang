@@ -8,11 +8,14 @@
 
 module Dojang.MonadFileSystem
   ( BoundedFileRead (..)
+  , DirectorySnapshot
   , DryRunIO
   , FileIdentity
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
+  , directorySnapshotIdentity
+  , directorySnapshotMode
   , dryRunIO
   , dryRunIO'
   , tryDryRunIO
@@ -38,6 +41,7 @@ import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
+  , ioeGetErrorType
   , ioeGetLocation
   , ioeSetErrorString
   , ioeSetLocation
@@ -86,6 +90,7 @@ import System.FileLock qualified as FileLock
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
+  , satisfiesPortableMode
   )
 
 
@@ -99,6 +104,7 @@ import Foreign
   , peek
   , peekByteOff
   , poke
+  , pokeByteOff
   , sizeOf
   )
 import Foreign.C.Types (CInt)
@@ -120,6 +126,7 @@ import System.Posix.Internals qualified as PosixInternal
 import System.Posix.Directory qualified as PosixDirectory
 import System.Posix.Files qualified as Posix
 import System.Posix.IO qualified as Posix
+import System.Posix.Types qualified as PosixTypes
 #endif
 import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
 import System.IO
@@ -182,6 +189,14 @@ foreign import stdcall unsafe "GetFileInformationByHandleEx"
     -> Ptr ()
     -> Win32.DWORD
     -> IO Win32.BOOL
+
+foreign import stdcall unsafe "SetFileInformationByHandle"
+  c_setFileInformationByHandle
+    :: Win32.HANDLE
+    -> CInt
+    -> Ptr ()
+    -> Win32.DWORD
+    -> IO Win32.BOOL
 #endif
 
 
@@ -203,6 +218,25 @@ data FileType
 -- on platform-specific device, volume, inode, or file-index details.
 data FileIdentity = FileIdentity Integer Integer
   deriving (Eq, Ord, Show)
+
+
+-- | The stable identity and portable mode of one opened directory.
+--
+-- Filesystem-backed interpreters capture both values from the same handle
+-- without following a symbolic link at the final path component.
+data DirectorySnapshot
+  = DirectorySnapshot FileIdentity PortableMode
+  deriving (Eq, Show)
+
+
+-- | Returns the stable identity captured in a directory snapshot.
+directorySnapshotIdentity :: DirectorySnapshot -> FileIdentity
+directorySnapshotIdentity (DirectorySnapshot identity _) = identity
+
+
+-- | Returns the portable mode captured in a directory snapshot.
+directorySnapshotMode :: DirectorySnapshot -> PortableMode
+directorySnapshotMode (DirectorySnapshot _ mode) = mode
 
 
 -- | The identity and change metadata of a regular file at one instant.
@@ -681,6 +715,41 @@ class (MonadError IOError m) => MonadFileSystem m where
   getFileIdentity _ = return Nothing
 
 
+  -- | Captures a directory's identity and portable mode as one snapshot.
+  --
+  -- Filesystem-backed implementations must obtain both values from the same
+  -- opened directory handle without following a symbolic link at the final
+  -- path component.  The default implementation provides equivalent
+  -- validation for deterministic interpreters.
+  captureDirectorySnapshot
+    :: (HasCallStack) => OsPath -> m DirectorySnapshot
+  captureDirectorySnapshot path = do
+    symbolicLinkBefore <- isSymlink path
+    identityBefore <- getFileIdentity path
+    directoryBefore <- isDirectory path
+    mode <- getPortableMode path
+    identityAfter <- getFileIdentity path
+    symbolicLinkAfter <- isSymlink path
+    directoryAfter <- isDirectory path
+    case (identityBefore, identityAfter) of
+      (Just identity, Just confirmedIdentity)
+        | identity == confirmedIdentity
+            && directoryBefore
+            && directoryAfter
+            && not symbolicLinkBefore
+            && not symbolicLinkAfter ->
+            return $ DirectorySnapshot identity mode
+      _ -> do
+        path' <- decodePath path
+        throwError $
+          mkIOError
+            InappropriateType
+            "captureDirectorySnapshot"
+            Nothing
+            (Just path')
+            `ioeSetErrorString` "not a stable non-symbolic-link directory"
+
+
   -- | Captures a regular file's identity and change metadata without following
   -- symbolic links.
   --
@@ -711,6 +780,31 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- before mutating it and to restore the previous state afterwards.
   -- Throws an 'IOError' when the entry does not exist.
   setPortableWritable :: (HasCallStack) => OsPath -> Bool -> m ()
+
+
+  -- | Restores the mode from a directory snapshot only to the same entry.
+  --
+  -- Filesystem-backed implementations must bind identity validation and mode
+  -- application to one no-follow directory handle.  Returns 'Nothing' without
+  -- mutation when the path no longer names the snapshotted directory.
+  -- Otherwise, returns whether every observable part of the mode was restored.
+  restoreDirectoryModeFromSnapshot
+    :: (HasCallStack)
+    => OsPath
+    -> DirectorySnapshot
+    -> m (Maybe Bool)
+  restoreDirectoryModeFromSnapshot
+    path
+    (DirectorySnapshot expectedIdentity mode) = do
+      actualIdentity <- getFileIdentity path
+      if actualIdentity /= Just expectedIdentity
+        then return Nothing
+        else do
+          case mode.posixBits of
+            Just bits -> setPortableMode path bits
+            Nothing -> setPortableWritable path mode.writable
+          restored <- getPortableMode path
+          return $ Just $ restored `satisfiesPortableMode` mode
 
 
   -- | Creates a symbolic link.  The target may be absolute or relative;
@@ -905,16 +999,136 @@ getFileIdentityIO path = do
         Win32.closeHandle
         ( \handle -> do
             information <- Win32.getFileInformationByHandle handle
-            return $
-              FileIdentity
-                (fromIntegral information.bhfiVolumeSerialNumber)
-                (fromIntegral information.bhfiFileIndex)
+            return $ fileIdentityFromInformation information
         )
     )
     `catchError` \err ->
       if isDoesNotExistError err then return Nothing else throwError err
  where
  fileFlagOpenReparsePoint = 0x00200000
+
+
+fileIdentityFromInformation
+  :: Win32.BY_HANDLE_FILE_INFORMATION -> FileIdentity
+fileIdentityFromInformation information =
+  FileIdentity
+    (fromIntegral information.bhfiVolumeSerialNumber)
+    (fromIntegral information.bhfiFileIndex)
+
+
+captureDirectorySnapshotIO :: OsPath -> IO DirectorySnapshot
+captureDirectorySnapshotIO path = do
+  path' <- decodeFS path
+  Exception.bracket
+    (openDirectoryHandleIO path' Win32.gENERIC_NONE)
+    Win32.closeHandle
+    (fmap directorySnapshotFromInformation . validateDirectoryHandleIO path')
+
+
+restoreDirectoryModeFromSnapshotIO
+  :: OsPath -> DirectorySnapshot -> IO (Maybe Bool)
+restoreDirectoryModeFromSnapshotIO
+  path
+  (DirectorySnapshot expectedIdentity expectedMode) = do
+    path' <- decodeFS path
+    Exception.mask $ \restore -> do
+      opened <-
+        tryError $
+          openDirectoryHandleIO path' fileReadWriteAttributes
+      case opened of
+        Left err
+          | isDirectoryReplacementError err -> return Nothing
+          | otherwise -> throwError err
+        Right handle ->
+          restore
+            ( do
+                validated <- tryError $ validateDirectoryHandleIO path' handle
+                case validated of
+                  Left err
+                    | isDirectoryReplacementError err -> return Nothing
+                    | otherwise -> throwError err
+                  Right information ->
+                    if
+                      fileIdentityFromInformation information
+                        /= expectedIdentity
+                      then return Nothing
+                      else do
+                        attributes <- getBasicFileAttributes handle
+                        let restoredAttributes =
+                              if expectedMode.writable
+                                then
+                                  attributes
+                                    .&. complement
+                                      Win32.fILE_ATTRIBUTE_READONLY
+                                else
+                                  attributes
+                                    .|. Win32.fILE_ATTRIBUTE_READONLY
+                        setBasicFileAttributes handle restoredAttributes
+                        observedAttributes <- getBasicFileAttributes handle
+                        let observedMode =
+                              portableModeFromAttributes observedAttributes
+                        return $
+                          Just $
+                            observedMode `satisfiesPortableMode` expectedMode
+            )
+            `Exception.finally` Win32.closeHandle handle
+ where
+  fileReadWriteAttributes = 0x00000180
+
+
+openDirectoryHandleIO
+  :: FilePath -> Win32.DWORD -> IO Win32.HANDLE
+openDirectoryHandleIO path access =
+  Win32.createFile
+    path
+    access
+    ( Win32.fILE_SHARE_READ
+        .|. Win32.fILE_SHARE_WRITE
+        .|. Win32.fILE_SHARE_DELETE
+    )
+    Nothing
+    Win32.oPEN_EXISTING
+    (Win32.fILE_FLAG_BACKUP_SEMANTICS .|. fileFlagOpenReparsePoint)
+    Nothing
+ where
+  fileFlagOpenReparsePoint = 0x00200000
+
+
+validateDirectoryHandleIO
+  :: FilePath
+  -> Win32.HANDLE
+  -> IO Win32.BY_HANDLE_FILE_INFORMATION
+validateDirectoryHandleIO path handle = do
+  information <- Win32.getFileInformationByHandle handle
+  let attributes = information.bhfiFileAttributes
+      supportedType =
+        attributes .&. Win32.fILE_ATTRIBUTE_DIRECTORY /= 0
+          && attributes .&. Win32.fILE_ATTRIBUTE_REPARSE_POINT == 0
+  unless supportedType $
+    throwError $
+      mkIOError
+        InappropriateType
+        "captureDirectorySnapshot"
+        Nothing
+        (Just path)
+        `ioeSetErrorString` "not a non-symbolic-link directory"
+  return information
+
+
+directorySnapshotFromInformation
+  :: Win32.BY_HANDLE_FILE_INFORMATION -> DirectorySnapshot
+directorySnapshotFromInformation information =
+  DirectorySnapshot
+    (fileIdentityFromInformation information)
+    (portableModeFromAttributes information.bhfiFileAttributes)
+
+
+portableModeFromAttributes :: Win32.DWORD -> PortableMode
+portableModeFromAttributes attributes =
+  PortableMode
+    { posixBits = Nothing
+    , writable = attributes .&. Win32.fILE_ATTRIBUTE_READONLY == 0
+    }
 
 
 getFileSnapshotIO :: OsPath -> IO (Maybe FileSnapshot)
@@ -956,10 +1170,7 @@ fileSnapshotFromInformation
   :: Win32.BY_HANDLE_FILE_INFORMATION -> Int64 -> FileSnapshot
 fileSnapshotFromInformation information changeTime =
   FileSnapshot
-    ( FileIdentity
-        (fromIntegral information.bhfiVolumeSerialNumber)
-        (fromIntegral information.bhfiFileIndex)
-    )
+    (fileIdentityFromInformation information)
     (fromIntegral information.bhfiSize)
     (fileTimeValue information.bhfiLastWriteTime)
     (Just $ toRational changeTime)
@@ -989,6 +1200,44 @@ getFileChangeTime handle =
   fileBasicInfoClass = 0
   fileBasicInfoSize = 40
   changeTimeOffset = 24
+
+
+getBasicFileAttributes :: Win32.HANDLE -> IO Win32.DWORD
+getBasicFileAttributes handle =
+  allocaBytes fileBasicInfoSize $ \buffer -> do
+    Win32.failIfFalse_ "GetFileInformationByHandleEx" $
+      c_getFileInformationByHandleEx
+        handle
+        fileBasicInfoClass
+        buffer
+        (fromIntegral fileBasicInfoSize)
+    peekByteOff buffer attributesOffset
+ where
+  fileBasicInfoClass = 0
+  fileBasicInfoSize = 40
+  attributesOffset = 32
+
+
+setBasicFileAttributes :: Win32.HANDLE -> Win32.DWORD -> IO ()
+setBasicFileAttributes handle attributes =
+  allocaBytes fileBasicInfoSize $ \buffer -> do
+    Win32.failIfFalse_ "GetFileInformationByHandleEx" $
+      c_getFileInformationByHandleEx
+        handle
+        fileBasicInfoClass
+        buffer
+        (fromIntegral fileBasicInfoSize)
+    pokeByteOff buffer attributesOffset attributes
+    Win32.failIfFalse_ "SetFileInformationByHandle" $
+      c_setFileInformationByHandle
+        handle
+        fileBasicInfoClass
+        buffer
+        (fromIntegral fileBasicInfoSize)
+ where
+  fileBasicInfoClass = 0
+  fileBasicInfoSize = 40
+  attributesOffset = 32
 
 
 getSymbolicLinkTypeIO :: OsPath -> IO FileType
@@ -1189,6 +1438,99 @@ getFileIdentityIO path = do
       if isDoesNotExistError err then return Nothing else throwError err
 
 
+withDirectoryFdIO
+  :: OsPath -> (PosixTypes.Fd -> Posix.FileStatus -> IO a) -> IO a
+withDirectoryFdIO path action = do
+  path' <- decodeFS path
+  Exception.bracket
+    (openDirectoryFdIO path')
+    Posix.closeFd
+    $ \descriptor -> do
+      status <- validateDirectoryFdIO path' descriptor
+      action descriptor status
+
+
+openDirectoryFdIO :: FilePath -> IO PosixTypes.Fd
+openDirectoryFdIO path =
+  Posix.openFd
+    path
+    Posix.ReadOnly
+    Posix.defaultFileFlags
+      { Posix.nofollow = True
+      , Posix.cloexec = True
+      , Posix.directory = True
+      }
+
+
+validateDirectoryFdIO
+  :: FilePath -> PosixTypes.Fd -> IO Posix.FileStatus
+validateDirectoryFdIO path descriptor = do
+  status <- Posix.getFdStatus descriptor
+  unless (Posix.isDirectory status) $
+    throwError $
+      mkIOError
+        InappropriateType
+        "captureDirectorySnapshot"
+        Nothing
+        (Just path)
+        `ioeSetErrorString` "not a directory"
+  return status
+
+
+directorySnapshotFromStatus :: Posix.FileStatus -> DirectorySnapshot
+directorySnapshotFromStatus status =
+  DirectorySnapshot
+    (fileIdentityFromStatus status)
+    ( portableModeFromBits $
+        fromIntegral $
+          Posix.fileMode status .&. 0o777
+    )
+
+
+captureDirectorySnapshotIO :: OsPath -> IO DirectorySnapshot
+captureDirectorySnapshotIO path =
+  withDirectoryFdIO path $ \_ -> return . directorySnapshotFromStatus
+
+
+restoreDirectoryModeFromSnapshotIO
+  :: OsPath -> DirectorySnapshot -> IO (Maybe Bool)
+restoreDirectoryModeFromSnapshotIO
+  path
+  (DirectorySnapshot expectedIdentity expectedMode) = do
+    path' <- decodeFS path
+    Exception.mask $ \restore -> do
+      opened <- tryError $ openDirectoryFdIO path'
+      case opened of
+        Left err
+          | isDirectoryReplacementError err -> return Nothing
+          | otherwise -> throwError err
+        Right descriptor ->
+          restore
+            ( do
+                status <- validateDirectoryFdIO path' descriptor
+                if fileIdentityFromStatus status /= expectedIdentity
+                  then return Nothing
+                  else do
+                    let currentMode = Posix.fileMode status
+                        restoredMode = case expectedMode.posixBits of
+                          Just bits -> fromIntegral bits
+                          Nothing
+                            | expectedMode.writable ->
+                                currentMode .|. Posix.ownerWriteMode
+                            | otherwise ->
+                                currentMode .&. complement Posix.ownerWriteMode
+                    Posix.setFdMode descriptor restoredMode
+                    observed <-
+                      directorySnapshotFromStatus
+                        <$> Posix.getFdStatus descriptor
+                    let DirectorySnapshot _ observedMode = observed
+                    return $
+                      Just $
+                        observedMode `satisfiesPortableMode` expectedMode
+            )
+            `Exception.finally` Posix.closeFd descriptor
+
+
 getFileSnapshotIO :: OsPath -> IO (Maybe FileSnapshot)
 getFileSnapshotIO path = do
   path' <- decodeFS path
@@ -1364,6 +1706,12 @@ exchangeDirectoriesIO source destination = do
 #else
 exchangeDirectoriesIO _ _ = return False
 #endif
+
+
+isDirectoryReplacementError :: IOError -> Bool
+isDirectoryReplacementError err =
+  isDoesNotExistError err
+    || ioeGetErrorType err `elem` [InappropriateType, InvalidArgument]
 
 
 readRegularFileBoundedIO :: Int -> OsPath -> IO BoundedFileRead
@@ -1633,6 +1981,9 @@ instance MonadFileSystem IO where
   getFileIdentity = getFileIdentityIO
 
 
+  captureDirectorySnapshot = captureDirectorySnapshotIO
+
+
   getFileSnapshot = getFileSnapshotIO
 
 
@@ -1646,6 +1997,10 @@ instance MonadFileSystem IO where
 
 
   setPortableWritable = setPortableWritableIO
+
+
+  restoreDirectoryModeFromSnapshot =
+    restoreDirectoryModeFromSnapshotIO
 
 
   createSymbolicLink target link Directory =

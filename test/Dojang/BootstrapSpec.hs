@@ -1479,6 +1479,8 @@ instance MonadFileSystem FailingModeIO where
 data CurrentDirectoryRace
   = CreateBeforeCopy OsPath ByteString.ByteString
   | CreateAfterExchange OsPath OsPath ByteString.ByteString
+  | ReplaceDestinationWithCurrentDirectory OsPath OsPath
+  | ReplaceDestinationBetweenModeAndIdentity OsPath Word (MVar ())
   | ReplaceDestinationBeforeExchange
       OsPath
       OsPath
@@ -1513,6 +1515,7 @@ data CurrentDirectoryRace
       OsPath
   | InterruptBeforeCopy OsPath
   | FailStagingRemoval OsPath
+  | ReplaceBeforeRollbackMode OsPath OsPath OsPath
 
 
 newtype CurrentDirectoryIO a
@@ -1724,7 +1727,22 @@ instance MonadFileSystem CurrentDirectoryIO where
   writeTemporaryFile directory template contents =
     liftIO (writeTemporaryFile directory template contents :: IO OsPath)
   withFileLock _ action = action
-  canonicalizePath value = liftIO (canonicalizePath value :: IO OsPath)
+  canonicalizePath value = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just
+        ( ReplaceDestinationWithCurrentDirectory
+            racedDestination
+            currentDirectory
+          )
+          | value == racedDestination -> liftIO $ do
+              removeDirectory racedDestination
+              createSymbolicLink
+                currentDirectory
+                racedDestination
+                Directory
+      _ -> return ()
+    liftIO (canonicalizePath value :: IO OsPath)
   readSymlinkTarget value = liftIO (readSymlinkTarget value :: IO OsPath)
   copyFile source destination =
     liftIO (copyFile source destination :: IO ())
@@ -1774,6 +1792,9 @@ instance MonadFileSystem CurrentDirectoryIO where
         Just (FailQuarantine _ staging)
           | value == staging ->
               throwError $ userError "injected staging removal failure"
+        Just (ReplaceBeforeRollbackMode staging _ _)
+          | value == staging ->
+              throwError $ userError "injected staging removal failure"
         _ -> liftCurrentDirectoryIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
@@ -1792,9 +1813,54 @@ instance MonadFileSystem CurrentDirectoryIO where
             writeFile racedPath replacement
       _ -> return ()
     return identity
+  captureDirectorySnapshot value = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just
+        ( ReplaceDestinationWithCurrentDirectory
+            racedDestination
+            currentDirectory
+          )
+          | value == racedDestination -> liftIO $ do
+              removeDirectory racedDestination
+              createSymbolicLink
+                currentDirectory
+                racedDestination
+                Directory
+      Just
+        ( ReplaceDestinationBetweenModeAndIdentity
+            racedDestination
+            replacementMode
+            replaced
+          )
+          | value == racedDestination -> liftIO $ do
+              firstReplacement <- tryPutMVar replaced ()
+              when firstReplacement $ do
+                removeDirectory racedDestination
+                createDirectory racedDestination
+                setPortableMode racedDestination replacementMode
+      _ -> return ()
+    liftCurrentDirectoryIO $ captureDirectorySnapshot value
   getFileSnapshot value =
     liftIO (getFileSnapshot value :: IO (Maybe FileSnapshot))
-  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  getPortableMode value = do
+    mode <- liftIO (getPortableMode value :: IO PortableMode)
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just
+        ( ReplaceDestinationBetweenModeAndIdentity
+            racedDestination
+            replacementMode
+            replaced
+          )
+          | value == racedDestination -> liftIO $ do
+              firstReplacement <- tryPutMVar replaced ()
+              when firstReplacement $ do
+                removeDirectory racedDestination
+                createDirectory racedDestination
+                setPortableMode racedDestination replacementMode
+      _ -> return ()
+    return mode
   setPortableMode path mode = do
     (_, racedEntry) <- CurrentDirectoryIO ask
     case racedEntry of
@@ -1818,10 +1884,50 @@ instance MonadFileSystem CurrentDirectoryIO where
                   putMVar rollbackStarted ()
                   takeMVar releaseRollback
                 Nothing -> return ()
+      Just
+        ( ReplaceBeforeRollbackMode
+            _
+            racedDestination
+            victimPath
+          )
+          | path == racedDestination -> liftIO $ do
+              removeDirectory racedDestination
+              createSymbolicLink victimPath racedDestination Directory
       _ -> return ()
     liftIO (setPortableMode path mode :: IO ())
   setPortableWritable path writable =
     liftIO (setPortableWritable path writable :: IO ())
+  restoreDirectoryModeFromSnapshot path snapshot = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just
+        ( ReplaceBeforeRollbackMode
+            _
+            racedDestination
+            victimPath
+          )
+          | path == racedDestination -> liftIO $ do
+              removeDirectory racedDestination
+              createSymbolicLink victimPath racedDestination Directory
+      Just
+        ( InterruptDuringExchangeRollback
+            racedDestination
+            _
+            _
+            exchangeDone
+            rollbackStarted
+            releaseRollback
+          )
+          | path == racedDestination -> liftIO $ do
+              exchanged <- tryTakeMVar exchangeDone
+              case exchanged of
+                Just () -> do
+                  putMVar rollbackStarted ()
+                  takeMVar releaseRollback
+                Nothing -> return ()
+      _ -> return ()
+    liftCurrentDirectoryIO $
+      restoreDirectoryModeFromSnapshot path snapshot
   createSymbolicLink target link fileType =
     liftIO (createSymbolicLink target link fileType :: IO ())
 #endif
@@ -2234,6 +2340,74 @@ symlinkSpecs = do
       publishedExists === True
       publishedContents === contents
 
+  it "rejects a destination redirected to the current directory" $
+    hedgehog $ do
+      manifestContents <-
+        forAll $ Gen.bytes $ Range.linear 0 4096
+      (published, currentEntries, destinationIsSymlink, stagedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            currentName <- encodeFS "current"
+            manifestName <- encodeFS "dojang.toml"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                current = tmpDir </> currentName
+                manifest = staging </> manifestName
+            createDirectory staging
+            createDirectory destination
+            createDirectory current
+            writeFile manifest manifestContents
+            result <-
+              runCurrentDirectoryIOWithRace
+                current
+                ( ReplaceDestinationWithCurrentDirectory
+                    destination
+                    current
+                )
+                (publishStagedDirectory staging destination)
+            entries <- listDirectory current
+            symbolicLink <- isSymlink destination
+            stagingPresent <- isDirectory staging
+            contents <-
+              if stagingPresent then readFile manifest else return ""
+            return (result, entries, symbolicLink, contents)
+      isLeft published === True
+      currentEntries === []
+      destinationIsSymlink === True
+      stagedContents === manifestContents
+
+  it "binds an arbitrary destination mode to its directory identity" $
+    hedgehog $ do
+      replacementMode <-
+        forAll $ (0o700 .|.) <$> Gen.word (Range.linear 0 0o7)
+      observedMode <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            manifestName <- encodeFS "dojang.toml"
+            replaced <- newEmptyMVar
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            setPortableMode destination 0o755
+            published <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                ( ReplaceDestinationBetweenModeAndIdentity
+                    destination
+                    replacementMode
+                    replaced
+                )
+                (publishStagedDirectory staging destination)
+            published `shouldBe` Right ()
+            getPortableMode destination
+      observedMode === portableModeFromBits replacementMode
+
   it "preserves arbitrary entries raced into a directory exchange" $
     hedgehog $ do
       concurrentContents <-
@@ -2360,6 +2534,49 @@ symlinkSpecs = do
             staged <- readFile $ staging </> manifestName
             return (result, symbolicLink, mode, staged)
       isLeft published === True
+      destinationIsSymlink === True
+      observedMode === portableModeFromBits targetMode
+      stagingContents === "manifest"
+
+  it "does not chmod a symlink target raced into exchange rollback" $
+    hedgehog $ do
+      targetMode <-
+        forAll $ (0o600 .|.) <$> Gen.word (Range.linear 0 0o77)
+      (published, destinationIsSymlink, observedMode, stagingContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            targetName <- encodeFS "target"
+            manifestName <- encodeFS "dojang.toml"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                target = tmpDir </> targetName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            writeFile target "unrelated"
+            setPortableMode destination 0o500
+            setPortableMode target targetMode
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                ( ReplaceBeforeRollbackMode
+                    staging
+                    destination
+                    target
+                )
+                (publishStagedDirectory staging destination)
+            symbolicLink <- isSymlink destination
+            mode <- getPortableMode target
+            staged <- readFile $ staging </> manifestName
+            return (result, symbolicLink, mode, staged)
+      case published of
+        Left err ->
+          assert $
+            "injected staging removal failure"
+              `isInfixOf` Exception.displayException err
+        Right _ -> assert False
       destinationIsSymlink === True
       observedMode === portableModeFromBits targetMode
       stagingContents === "manifest"

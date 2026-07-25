@@ -492,10 +492,14 @@ instance MonadFileSystem CommandEffectTest where
   listDirectory = liftCommandEffectBase . listDirectory
   getFileSize = liftCommandEffectBase . getFileSize
   getFileIdentity = liftCommandEffectBase . getFileIdentity
+  captureDirectorySnapshot =
+    liftCommandEffectBase . captureDirectorySnapshot
   getFileSnapshot = liftCommandEffectBase . getFileSnapshot
   getPortableMode = liftCommandEffectBase . getPortableMode
   setPortableMode path = liftCommandEffectBase . setPortableMode path
   setPortableWritable path = liftCommandEffectBase . setPortableWritable path
+  restoreDirectoryModeFromSnapshot path =
+    liftCommandEffectBase . restoreDirectoryModeFromSnapshot path
   createSymbolicLink target link =
     liftCommandEffectBase . createSymbolicLink target link
 

@@ -78,10 +78,13 @@ import Prelude hiding (readFile, writeFile)
 
 import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
+  , DirectorySnapshot
   , FileIdentity
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
+  , directorySnapshotIdentity
+  , directorySnapshotMode
   )
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
@@ -335,19 +338,25 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
         renameDirectory staging destination
         return modeFailures
     else do
+      initialSnapshot <- captureDirectorySnapshot destination
       destinationEntries <- listDirectory destination
       unless (null destinationEntries) $
         throwError $
           userError "bootstrap destination is not empty"
-      currentDirectory <- canonicalizePath =<< getCurrentDirectory
-      absoluteDestination <- canonicalizePath =<< makeAbsolute destination
-      if absoluteDestination == currentDirectory
+      destinationSnapshot <- captureDirectorySnapshot destination
+      let initialIdentity = directorySnapshotIdentity initialSnapshot
+          destinationIdentity =
+            directorySnapshotIdentity destinationSnapshot
+          destinationMode = directorySnapshotMode destinationSnapshot
+      unless (destinationIdentity == initialIdentity) $
+        throwError $
+          userError "bootstrap destination changed during publication"
+      current <- encodePath "."
+      currentIdentity <- getFileIdentity current
+      if currentIdentity == Just destinationIdentity
         then do
-          current <- encodePath "."
           copyDirectoryContents metadata staging current
         else do
-          destinationMode <- getPortableMode destination
-          destinationIdentity <- getFileIdentity destination
           protectRestrictedStaging staging metadata $ do
             modeFailures <-
               applyStagedMetadata staging $ withoutRootMetadata metadata
@@ -356,16 +365,13 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
               throwError $
                 userError
                   "bootstrap destination permissions could not be preserved"
-            didExchange <- case destinationIdentity of
-              Nothing -> return False
-              Just _ -> exchangeDirectories staging destination
+            didExchange <- exchangeDirectories staging destination
             unless didExchange $
               throwError $
                 userError
                   "filesystem cannot atomically exchange the bootstrap destination"
             withExchangedDestinationRollback
-              destinationIdentity
-              destinationMode
+              destinationSnapshot
               staging
               destination
               $ do
@@ -379,15 +385,13 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
 
 withExchangedDestinationRollback
   :: (MonadFileSystem m, MonadMask m)
-  => Maybe FileIdentity
-  -> PortableMode
+  => DirectorySnapshot
   -> OsPath
   -> OsPath
   -> m a
   -> m a
 withExchangedDestinationRollback
-  identity
-  mode
+  snapshot
   staging
   destination
   action = do
@@ -398,15 +402,13 @@ withExchangedDestinationRollback
     case outcome of
       Left filesystemError -> uninterruptibleMask_ $ do
         restoreExchangedDestinationMode
-          identity
-          mode
+          snapshot
           staging
           destination
         throwError filesystemError
       Right (Left (exception :: SomeException)) -> uninterruptibleMask_ $ do
         restoreExchangedDestinationMode
-          identity
-          mode
+          snapshot
           staging
           destination
         case fromException exception of
@@ -431,14 +433,14 @@ resolvesToRegularFile path = do
 
 validateExchangedDestination
   :: (MonadFileSystem m)
-  => Maybe FileIdentity
+  => FileIdentity
   -> OsPath
   -> m ()
 validateExchangedDestination expectedIdentity staging = do
   actualIdentity <- getFileIdentity staging
   exchangedEntries <- listDirectory staging
   unless
-    (actualIdentity == expectedIdentity && null exchangedEntries)
+    (actualIdentity == Just expectedIdentity && null exchangedEntries)
     $ throwError
     $ userError "bootstrap destination changed during publication"
 
@@ -457,24 +459,24 @@ restoreExchangedDestination staging destination = do
 
 restoreExchangedDestinationMode
   :: (MonadFileSystem m)
-  => Maybe FileIdentity
-  -> PortableMode
+  => DirectorySnapshot
   -> OsPath
   -> OsPath
   -> m ()
 restoreExchangedDestinationMode
-  expectedIdentity
-  mode
+  snapshot
   staging
   destination = do
     restoreExchangedDestination staging destination
-    actualIdentity <- getFileIdentity destination
-    when (actualIdentity == expectedIdentity) $ do
-      restored <- restorePortableMode destination mode
-      unless restored $
-        throwError $
-          userError
-            "bootstrap destination permissions could not be restored"
+    restoration <-
+      restoreDirectoryModeFromSnapshot destination snapshot
+    case restoration of
+      Nothing -> return ()
+      Just restored ->
+        unless restored $
+          throwError $
+            userError
+              "bootstrap destination permissions could not be restored"
 
 
 copyDirectoryTree
