@@ -130,6 +130,8 @@ data AcquisitionError
     ConflictingArchiveEntry FilePath
   | -- | The archive exceeds the bounded acquisition resource limits.
     ArchiveResourceLimitExceeded
+  | -- | The archive changed while its bytes were being read.
+    ArchiveChangedDuringAcquisition
   deriving (Eq, Show, Generic, NFData)
 
 
@@ -267,6 +269,8 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
     NotRegularFile -> return $ Left $ SourceDoesNotExist sourceName
     FileSizeLimitExceeded ->
       return $ Left ArchiveResourceLimitExceeded
+    FileChangedDuringRead ->
+      return $ Left ArchiveChangedDuringAcquisition
     BoundedFileContents bytes -> do
       decoded <-
         try $
@@ -355,7 +359,8 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
       currentIdentity <- getFileIdentity current
       if currentIdentity == Just destinationIdentity
         then do
-          copyDirectoryContents metadata staging current
+          protectRestrictedStaging staging metadata $
+            copyDirectoryContents metadata staging current
         else do
           protectRestrictedStaging staging metadata $ do
             modeFailures <-
@@ -626,9 +631,28 @@ verifyDirectorySource
   -> m ()
 verifyDirectorySource source sourceIdentity identities entries = do
   verifyPathIdentity source source sourceIdentity
+  currentEntries <- listDirectoryRecursively source []
+  let expectedMembership = directoryMembership entries
+      currentMembership = directoryMembership currentEntries
+      allPaths =
+        Map.keysSet expectedMembership
+          `Set.union` Map.keysSet currentMembership
+  case [ relative
+       | relative <- Set.toAscList allPaths
+       , Map.lookup relative expectedMembership
+           /= Map.lookup relative currentMembership
+       ] of
+    changed : _ -> throwSourceEntryChanged changed
+    [] -> return ()
   forM_ entries $ \(_, relative) -> do
     expectedSnapshot <- expectedEntrySnapshot identities relative
     verifyEntrySnapshot source relative expectedSnapshot
+  verifyPathIdentity source source sourceIdentity
+
+
+directoryMembership :: [(FileType, OsPath)] -> Map.Map OsPath FileType
+directoryMembership =
+  Map.fromList . fmap (\(fileType, relative) -> (relative, fileType))
 
 
 verifyEntrySnapshot

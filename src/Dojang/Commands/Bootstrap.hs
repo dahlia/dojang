@@ -78,9 +78,9 @@ import Dojang.Types.Transport
   ( EnvironmentNameCase (..)
   , TransportLookupError (..)
   , TransportSpec
-  , expandTransportCommand
+  , expandTransportCommandNative
   , lookupTransport
-  , resolveTransportEnvironment
+  , resolveTransportEnvironmentNative
   )
 
 
@@ -375,20 +375,19 @@ acquireExternal source name requestedConfig staging = do
       Right value -> return value
   hostEnvironment <- processEnvironment
   stagingPath <- decodePath staging
-  let sourceText = Text.pack source
-      request =
+  let request =
         makeTransportProcessRequest
           platform
           hostEnvironment
           transport
-          sourceText
+          source
           stagingPath
   dryRunEnabled <- asks (.dryRun)
   if dryRunEnabled
     then do
       printStderr $
         "Would run external transport: "
-          <> Text.pack (show $ redactTransportSource sourceText request)
+          <> Text.pack (show $ redactTransportSource source request)
           <> "."
       return Nothing
     else do
@@ -413,31 +412,27 @@ makeTransportProcessRequest
   -- ^ Complete host environment.
   -> TransportSpec
   -- ^ Validated external transport.
-  -> Text
+  -> FilePath
   -- ^ Opaque source.
   -> FilePath
   -- ^ Staging destination.
   -> ProcessRequest
 makeTransportProcessRequest platform hostEnvironment transport source destination =
   emptyProcessRequest
-    { executable = Text.unpack executable
-    , arguments = Text.unpack <$> arguments
-    , environment =
-        Just $
-          fmap
-            (\(name, value) -> (Text.unpack name, Text.unpack value))
-            resolvedEnvironment
+    { executable = executable
+    , arguments = arguments
+    , environment = Just resolvedEnvironment
     }
  where
   (executable, arguments) =
-    expandTransportCommand transport source $ Text.pack destination
+    expandTransportCommandNative transport source destination
   resolvedEnvironment =
-    resolveTransportEnvironment
+    resolveTransportEnvironmentNative
       ( if platform == "mingw32"
           then CaseInsensitiveEnvironment
           else CaseSensitiveEnvironment
       )
-      (fmap (\(name, value) -> (Text.pack name, Text.pack value)) hostEnvironment)
+      hostEnvironment
       transport
 
 
@@ -446,16 +441,14 @@ makeTransportProcessRequest platform hostEnvironment transport source destinatio
 -- Validated transports contain the source as exactly one whole argument, so
 -- replacing exact matches hides embedded credentials without altering the
 -- request that will actually be executed.
-redactTransportSource :: Text -> ProcessRequest -> ProcessRequest
+redactTransportSource :: FilePath -> ProcessRequest -> ProcessRequest
 redactTransportSource source request =
   request
     { arguments =
         fmap
-          (\argument -> if argument == expanded then "<redacted>" else argument)
+          (\argument -> if argument == source then "<redacted>" else argument)
           request.arguments
     }
- where
-  expanded = Text.unpack source
 
 
 defaultTransportConfigPath
@@ -618,6 +611,8 @@ reportAcquisitionError err =
       "Conflicting archive entry: " <> Text.pack path <> "."
     ArchiveResourceLimitExceeded ->
       "Bootstrap archive exceeds the safe size or entry-count limit."
+    ArchiveChangedDuringAcquisition ->
+      "Bootstrap archive changed during acquisition.  Retry with a stable source."
 
 
 ensureTransportSucceeded

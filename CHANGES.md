@@ -41,14 +41,19 @@ To be released.
     no-replace rename cannot publish a non-current-directory destination and
     are rejected rather than using a race-prone fallback.  On Linux and macOS,
     dry runs model directory exchange in memory, including publication into an
-    existing empty destination.  A dry run does not start an external transport
-    and redacts its source argument and environment values.
+    existing empty destination.  External transport source and destination
+    arguments and inherited environment values retain their native byte
+    representation on POSIX.  A dry run does not start an external transport
+    and redacts its source argument and environment values, including sources
+    whose native representation is not UTF-8.
     Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
     other unsupported entry types before reading or extraction.  Directory
     source identities are pinned during validation, regular files are checked
-    through the same handles used to copy them, and the source tree is
-    revalidated against those identities after copying, so concurrent
-    replacement stops publication.  Rollback reports quarantine failures
+    through the same handles used to copy them, and the source tree membership
+    and recorded entries are revalidated after copying.  Concurrent additions,
+    removals, replacements, and type changes therefore stop publication.
+    Archives changed while their bounded read is in progress are rejected with
+    a retryable source-change error.  Rollback reports quarantine failures
     instead of silently leaving published entries behind.  ZIP directories
     marked with the DOS directory attribute are accepted even when their names
     omit a trailing slash.  A destination nested inside its local directory

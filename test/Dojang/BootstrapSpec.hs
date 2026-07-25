@@ -91,7 +91,8 @@ import Dojang.Bootstrap
   )
 #endif
 import Dojang.MonadFileSystem
-  ( FileIdentity
+  ( BoundedFileRead (..)
+  , FileIdentity
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
@@ -1258,6 +1259,21 @@ archiveModeSpecs = do
 
 archiveSpecialFileSpecs :: Spec
 archiveSpecialFileSpecs = do
+  it "rejects an archive changed while its contents are read" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "changing-archive.tar"
+      stagingName <- encodeFS "staging"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+      writeFile archivePath "archive"
+      result <-
+        runFailingModeIO $
+          stageBuiltinSource
+            (ArchiveSource TarArchive archivePath)
+            staging
+      result `shouldBe` Right (Left ArchiveChangedDuringAcquisition)
+      exists staging `shouldReturn` False
+
   it "lets asynchronous archive-decoding exceptions escape" $
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "interrupted.zip"
@@ -1412,6 +1428,12 @@ instance MonadFileSystem FailingModeIO where
       "interrupted.zip" -> return $ Just $ throw UserInterrupt
       "streamed" -> throwError $ userError "buffered read forbidden"
       _ -> liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
+  readRegularFileBounded limit value = do
+    path <- liftIO (decodePath value :: IO FilePath)
+    case FilePath.takeFileName path of
+      "changing-archive.tar" -> return FileChangedDuringRead
+      "interrupted.zip" -> return $ BoundedFileContents $ throw UserInterrupt
+      _ -> liftIO (readRegularFileBounded limit value :: IO BoundedFileRead)
   copyRegularFile source destination =
     liftIO (copyRegularFile source destination :: IO Bool)
   copyRegularFileWithSnapshot snapshot source destination =
@@ -1499,6 +1521,7 @@ data CurrentDirectoryRace
       (MVar ())
       (MVar ())
   | ModifySourceBeforeCopy OsPath ByteString.ByteString
+  | AddSourceEntryBeforeCopy OsPath ByteString.ByteString
   | ReplaceSourceBeforeCopy FileType OsPath OsPath
   | FailQuarantine OsPath OsPath
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
@@ -1516,6 +1539,7 @@ data CurrentDirectoryRace
   | InterruptBeforeCopy OsPath
   | FailStagingRemoval OsPath
   | ReplaceBeforeRollbackMode OsPath OsPath OsPath
+  | InterruptAfterStagingMode OsPath
 
 
 newtype CurrentDirectoryIO a
@@ -1758,6 +1782,8 @@ instance MonadFileSystem CurrentDirectoryIO where
       case racedEntry of
         Just (ModifySourceBeforeCopy sourceEntry replacement) ->
           liftIO $ writeFile sourceEntry replacement
+        Just (AddSourceEntryBeforeCopy sourceEntry contents) ->
+          liftIO $ writeFile sourceEntry contents
         Just
           ( ReplaceSourceBeforeCopy
               sourceType
@@ -1895,6 +1921,11 @@ instance MonadFileSystem CurrentDirectoryIO where
               createSymbolicLink victimPath racedDestination Directory
       _ -> return ()
     liftIO (setPortableMode path mode :: IO ())
+    case racedEntry of
+      Just (InterruptAfterStagingMode racedPath)
+        | path == racedPath ->
+            liftIO $ Exception.throwIO UserInterrupt
+      _ -> return ()
   setPortableWritable path writable =
     liftIO (setPortableWritable path writable :: IO ())
   restoreDirectoryModeFromSnapshot path snapshot = do
@@ -1938,6 +1969,36 @@ symlinkSpecs = return ()
 #else
 symlinkSpecs :: Spec
 symlinkSpecs = do
+  it "rejects arbitrary entries added after directory enumeration" $
+    hedgehog $ do
+      addedContents <- forAll $ Gen.bytes $ Range.linear 0 4096
+      (stagedResult, stagingExists) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            stagingName <- encodeFS "staging"
+            originalName <- encodeFS "original"
+            addedName <- encodeFS "added"
+            let source = tmpDir </> sourceName
+                staging = tmpDir </> stagingName
+                added = source </> addedName
+            createDirectory source
+            writeFile (source </> originalName) "original"
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (AddSourceEntryBeforeCopy added addedContents)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            return (result, present)
+      case stagedResult of
+        Left err ->
+          assert $
+            "bootstrap source entry changed during acquisition"
+              `isInfixOf` Exception.displayException err
+        Right _ -> assert False
+      stagingExists === False
+
   it "rejects arbitrary in-place changes after source validation" $
     hedgehog $ do
       original <- forAll $ Gen.bytes $ Range.linear 0 4096
@@ -2173,6 +2234,49 @@ symlinkSpecs = do
       publishedId <-
         Posix.fileID <$> Posix.getFileStatus realDestinationPath
       publishedId `shouldBe` originalId
+
+  it "widens CWD staging after interrupted mode application" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "repository.tar"
+      stagingName <- encodeFS "staging"
+      destinationName <- encodeFS "destination"
+      nestedName <- encodeFS "nested"
+      manifestName <- encodeFS "dojang.toml"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+          stagedNested = staging </> nestedName
+          nestedEntry =
+            (Tar.directoryEntry $ tarPath "nested")
+              { Tar.entryPermissions = 0o000
+              }
+      writeFile archivePath $
+        LazyByteString.toStrict $
+          Tar.write
+            [ nestedEntry
+            , tarFileEntry "nested/dojang.toml" "manifest"
+            ]
+      Right metadata <-
+        stageBuiltinSourceWithMetadata
+          (ArchiveSource TarArchive archivePath)
+          staging
+      createDirectory destination
+      interrupted <-
+        Exception.try $
+          runCurrentDirectoryIOWithRace
+            destination
+            (InterruptAfterStagingMode stagedNested)
+            ( publishStagedDirectoryWithMetadata
+                metadata
+                staging
+                destination
+            )
+      interrupted `shouldBe` Left UserInterrupt
+      mode <- getPortableMode stagedNested
+      fmap (.&. 0o700) mode.posixBits `shouldBe` Just 0o700
+      exists (destination </> nestedName </> manifestName)
+        `shouldReturn` False
+      removeDirectoryRecursively staging
 
   it "preserves arbitrary files raced into the current directory" $
     hedgehog $ do

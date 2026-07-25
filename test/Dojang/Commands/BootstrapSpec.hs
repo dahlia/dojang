@@ -10,6 +10,7 @@ import Control.Exception qualified as Exception
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.Char (chr)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
@@ -98,7 +99,7 @@ spec = sequential $ do
                 "linux"
                 [("PATH", "host"), ("SECRET", "excluded")]
                 transport
-                source
+                (Text.unpack source)
                 destination
         request.executable === "copy"
         request.arguments === ["--", Text.unpack source, destination]
@@ -108,9 +109,8 @@ spec = sequential $ do
     it "redacts arbitrary credential-bearing sources from diagnostics" $
       hedgehog $ do
         credential <- forAll $ Gen.string (Range.linear 1 100) Gen.alphaNum
-        let sourceText =
-              Text.pack $
-                "https://token:" <> credential <> "@example.com/repository.git"
+        let source =
+              "https://token:" <> credential <> "@example.com/repository.git"
             destination = "/staging/repository"
             Right config =
               readTransportConfig
@@ -124,11 +124,13 @@ spec = sequential $ do
                 "linux"
                 []
                 transport
-                sourceText
+                source
                 destination
-            rendered = show $ redactTransportSource sourceText request
-        (Text.unpack sourceText `isInfixOf` rendered) === False
+            rendered = show $ redactTransportSource source request
+        (source `isInfixOf` rendered) === False
         ("<redacted>" `isInfixOf` rendered) === True
+
+    nativeTransportInputSpec
 
     it "normalizes a current-directory path beside its parent" $
       withTempDir $ \tmp _ -> do
@@ -633,9 +635,41 @@ externalTransportSpec =
         entries `shouldSatisfy` all (not . isPrefixOf ".dojang-bootstrap-")
 
 #ifdef mingw32_HOST_OS
+nativeTransportInputSpec :: Spec
+nativeTransportInputSpec = return ()
+
+
 nativeSourcePathSpec :: Spec
 nativeSourcePathSpec = return ()
 #else
+nativeTransportInputSpec :: Spec
+nativeTransportInputSpec =
+  it "preserves arbitrary native bytes in transport inputs" $
+    hedgehog $ do
+      byte <- forAll $ Gen.word8 Range.constantBounded
+      let escaped = [chr $ 0xdc00 + fromIntegral byte]
+          source = "source-" <> escaped
+          destination = "destination-" <> escaped
+          inherited = "inherited-" <> escaped
+          Right config =
+            readTransportConfig
+              ( "[transports.copy]\n"
+                  <> "command = [\"copy\", \"{source}\", "
+                  <> "\"{destination}\"]\n"
+                  <> "inherit-environment = [\"PATH\"]\n"
+              )
+          Right transport = lookupTransport "copy" config
+          request =
+            makeTransportProcessRequest
+              "linux"
+              [("PATH", inherited)]
+              transport
+              source
+              destination
+      request.arguments === [source, destination]
+      request.environment === Just [("PATH", inherited)]
+
+
 nativeSourcePathSpec :: Spec
 nativeSourcePathSpec =
   it "preserves non-UTF-8 bytes in a local source path" $

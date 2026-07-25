@@ -363,6 +363,45 @@ posixCopyInterruptionSpec = do
         `shouldReturn` Just ()
       copied `shouldBe` Just False
       exists destination `shouldReturn` False
+
+  specify "readRegularFileBounded rejects an in-place source mutation" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      sourceName <- encodeFS "source"
+      let source = tmpDir </> sourceName
+          sourcePath = tmpDir' `combine` "source"
+          sourceSize :: Int
+          sourceSize = 128 * 1024 * 1024
+      withBinaryFile sourcePath WriteMode $ \handle ->
+        hSetFileSize handle $ fromIntegral sourceSize
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      _ <-
+        forkFinally
+          ( let mutate size = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      Posix.setFileSize sourcePath $ fromIntegral size
+                      threadDelay 100
+                      mutate $
+                        if size == sourceSize
+                          then sourceSize `div` 2
+                          else sourceSize
+            in mutate $ sourceSize `div` 2
+          )
+          (const $ putMVar mutationFinished ())
+      threadDelay 1000
+      result <- newEmptyMVar
+      _ <-
+        forkIO $ do
+          observed <- readRegularFileBounded (sourceSize + 1) source
+          putMVar result observed
+      observed <- timeout 5000000 $ takeMVar result
+      putMVar stopMutating ()
+      timeout 5000000 (takeMVar mutationFinished)
+        `shouldReturn` Just ()
+      observed `shouldBe` Just FileChangedDuringRead
 #endif
 
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS)

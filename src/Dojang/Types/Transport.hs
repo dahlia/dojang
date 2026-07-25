@@ -12,16 +12,16 @@ module Dojang.Types.Transport
   , TransportName
   , TransportNameError (..)
   , TransportSpec (..)
-  , expandTransportCommand
+  , expandTransportCommandNative
   , lookupTransport
   , makeTransportConfig
   , makeTransportSpec
   , parseTransportName
-  , resolveTransportEnvironment
+  , resolveTransportEnvironmentNative
   , transportNameText
   ) where
 
-import Data.Char (isAscii, isAsciiLower, isAsciiUpper, isDigit)
+import Data.Char (isAscii, isAsciiLower, isAsciiUpper, isDigit, toLower)
 import Data.List (find)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
@@ -216,18 +216,18 @@ lookupTransport name (TransportConfig transports) = do
     Just transport -> Right transport
 
 
--- | Builds a deterministic child environment from permitted host and fixed
--- entries. Fixed entries override inherited entries according to the selected
+-- | Builds a deterministic child environment without transcoding opaque host
+-- values. Fixed entries override inherited entries according to the selected
 -- platform's environment-name comparison rules.
-resolveTransportEnvironment
+resolveTransportEnvironmentNative
   :: EnvironmentNameCase
   -- ^ Platform-specific environment-name comparison.
-  -> [(Text, Text)]
-  -- ^ Complete host environment.
+  -> [(String, String)]
+  -- ^ Complete host environment in its native representation.
   -> TransportSpec
   -- ^ Validated transport specification.
-  -> [(Text, Text)]
-resolveTransportEnvironment nameCase host transport =
+  -> [(String, String)]
+resolveTransportEnvironmentNative nameCase host transport =
   Map.elems $
     foldl'
       insertFixed
@@ -237,22 +237,36 @@ resolveTransportEnvironment nameCase host transport =
   canonical =
     case nameCase of
       CaseSensitiveEnvironment -> id
-      CaseInsensitiveEnvironment -> Text.toCaseFold
-  inherit result requested =
-    case find ((== canonical requested) . canonical . fst) host of
-      Nothing -> result
-      Just (_, value) -> Map.insert (canonical requested) (requested, value) result
-  insertFixed result (name, value) =
-    Map.insert (canonical name) (name, value) result
+      CaseInsensitiveEnvironment -> fmap toLower
+  inherit result requestedText =
+    let requested = Text.unpack requestedText
+    in case find ((== canonical requested) . canonical . fst) host of
+         Nothing -> result
+         Just (_, value) ->
+           Map.insert (canonical requested) (requested, value) result
+  insertFixed result (nameText, valueText) =
+    let name = Text.unpack nameText
+    in Map.insert
+         (canonical name)
+         (name, Text.unpack valueText)
+         result
 
 
--- | Expands the two whole-argument placeholders in a validated command.
-expandTransportCommand :: TransportSpec -> Text -> Text -> (Text, [Text])
-expandTransportCommand transport source destination =
+-- | Expands placeholders without transcoding opaque source and destination
+-- arguments.  Configured command literals are decoded from their validated
+-- Unicode representation, while native arguments remain unchanged.
+expandTransportCommandNative
+  :: TransportSpec
+  -> String
+  -- ^ Opaque native source argument.
+  -> String
+  -- ^ Opaque native destination argument.
+  -> (FilePath, [String])
+expandTransportCommandNative transport source destination =
   case transport.command of
     executable :| arguments ->
-      (executable, replace <$> arguments)
+      (Text.unpack executable, replace <$> arguments)
  where
   replace "{source}" = source
   replace "{destination}" = destination
-  replace argument = argument
+  replace argument = Text.unpack argument

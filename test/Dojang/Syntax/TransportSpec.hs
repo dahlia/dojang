@@ -29,9 +29,9 @@ import Dojang.Types.Transport
   , TransportLookupError (..)
   , TransportNameError (..)
   , TransportSpec (..)
-  , expandTransportCommand
+  , expandTransportCommandNative
   , lookupTransport
-  , resolveTransportEnvironment
+  , resolveTransportEnvironmentNative
   )
 
 
@@ -62,8 +62,8 @@ spec = do
 
     it "preserves arbitrary sources and destinations as whole arguments" $
       hedgehog $ do
-        source <- forAll $ Gen.text (Range.linear 0 200) Gen.unicodeAll
-        destination <- forAll $ Gen.text (Range.linear 0 200) Gen.unicodeAll
+        source <- forAll $ Gen.string (Range.linear 0 200) Gen.unicodeAll
+        destination <- forAll $ Gen.string (Range.linear 0 200) Gen.unicodeAll
         let document =
               "[transports.copy]\n"
                 <> "command = [\"copy-tool\", \"--source\", "
@@ -74,7 +74,7 @@ spec = do
         transport <- case lookupTransport "copy" config of
           Left err -> fail $ show err
           Right value -> return value
-        expandTransportCommand transport source destination
+        expandTransportCommandNative transport source destination
           === ( "copy-tool"
               , ["--source", source, "--destination", destination]
               )
@@ -167,7 +167,7 @@ spec = do
       lookupTransport "missing" config
         `shouldBe` Left (UnknownTransportName "missing")
 
-  describe "resolveTransportEnvironment" $ do
+  describe "resolveTransportEnvironmentNative" $ do
     it "preserves case-distinct inherited names on POSIX" $ do
       let Right config =
             readTransportConfig
@@ -177,7 +177,7 @@ spec = do
                   <> "\"MISSING\"]\n"
               )
           Right transport = lookupTransport "x" config
-      resolveTransportEnvironment
+      resolveTransportEnvironmentNative
         CaseSensitiveEnvironment
         [ ("http_proxy", "lower")
         , ("HTTP_PROXY", "upper")
@@ -196,7 +196,7 @@ spec = do
                   <> "PATH = \"fixed\"\n"
               )
           Right transport = lookupTransport "x" config
-      resolveTransportEnvironment
+      resolveTransportEnvironmentNative
         CaseInsensitiveEnvironment
         [("Path", "host")]
         transport

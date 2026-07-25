@@ -255,6 +255,8 @@ data BoundedFileRead
     NotRegularFile
   | -- | The regular file was larger than the requested limit.
     FileSizeLimitExceeded
+  | -- | The regular file changed while its contents were being read.
+    FileChangedDuringRead
   | -- | Complete contents of a regular file within the requested limit.
     BoundedFileContents ByteString
   deriving (Eq, Show)
@@ -340,7 +342,9 @@ class (MonadError IOError m) => MonadFileSystem m where
   --
   -- The source-validation guarantees are the same as 'readRegularFile'.
   -- Filesystem-backed implementations should enforce the bound while reading
-  -- from the validated handle, rather than inspecting the pathname first.
+  -- from the validated handle, rather than inspecting the pathname first, and
+  -- return 'FileChangedDuringRead' when its change metadata no longer matches
+  -- after a complete read.
   readRegularFileBounded
     :: (HasCallStack) => Int -> OsPath -> m BoundedFileRead
   readRegularFileBounded limit path = do
@@ -1716,11 +1720,18 @@ isDirectoryReplacementError err =
 
 readRegularFileBoundedIO :: Int -> OsPath -> IO BoundedFileRead
 readRegularFileBoundedIO limit path = do
-  result <- withRegularFileHandleIO path $ \_ _ -> readHandleBounded limit
-  return $ case result of
-    Nothing -> NotRegularFile
-    Just Nothing -> FileSizeLimitExceeded
-    Just (Just contents) -> BoundedFileContents contents
+  result <-
+    withRegularFileHandleIO path $ \_ unchanged handle -> do
+      bounded <- readHandleBounded limit handle
+      case bounded of
+        Nothing -> return FileSizeLimitExceeded
+        Just contents -> do
+          stable <- unchanged
+          return $
+            if stable
+              then BoundedFileContents contents
+              else FileChangedDuringRead
+  return $ maybe NotRegularFile id result
 
 
 readHandleBounded :: Int -> Handle -> IO (Maybe ByteString)

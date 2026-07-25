@@ -50,10 +50,11 @@ Dojang copies symbolic links as links instead of following them.  Other entries
 in a directory source must be regular files or directories; FIFOs, sockets,
 devices, and other special files are rejected before they are read.  Dojang
 pins the identity of the source root and every entry during validation, checks
-regular files through the same open handle used to copy them, and rechecks the
-recorded identities after copying.  If a recorded source entry changes during
-acquisition, bootstrap stops without publishing the staged copy.  Dojang also
-accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
+regular files through the same open handle used to copy them, and enumerates
+the source tree again after copying.  If an entry was added or removed, changed
+type, or no longer matches its recorded identity and change metadata,
+bootstrap stops without publishing the staged copy.  Dojang also accepts
+`.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
@@ -61,7 +62,9 @@ $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
 
 An archive source must resolve to a regular file.  Symbolic links to regular
 archives are accepted, but FIFOs and other special files are rejected without
-reading them.
+reading them.  Dojang checks the opened archive's change metadata after its
+bounded read.  If the archive changed during that read, bootstrap stops and
+asks you to retry with a stable source.
 
 Archive entries are validated before extraction.  Absolute paths, parent
 traversal, backslash paths, links, Windows-reserved or invalid filename
@@ -96,7 +99,9 @@ without a shell.  The source and staging destination each occupy one complete
 argument, so spaces and shell metacharacters remain data.  The destination
 given to the transport is a child of an owner-only directory, so files created
 with the transport's default permissions are not exposed while acquisition is
-in progress.
+in progress.  On POSIX, Dojang passes the native byte representation of the
+source, staging destination, and inherited environment values to the child
+process without transcoding it through Unicode.
 
 The default configuration file is:
 
@@ -176,6 +181,7 @@ existing empty destination can be previewed without changing it.  The real
 bootstrap still verifies that the destination filesystem supports the atomic
 operation.
 For an external transport, Dojang redacts the source argument and environment
-values when it prints the executable request, and does not start the program.
-Because no files are fetched, that dry run cannot validate the remote manifest.
-Run a real bootstrap to perform the staged manifest check.
+values when it prints the executable request, including source arguments whose
+native representation is not UTF-8, and does not start the program.  Because
+no files are fetched, that dry run cannot validate the remote manifest.  Run a
+real bootstrap to perform the staged manifest check.
