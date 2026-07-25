@@ -16,6 +16,7 @@ import Control.Concurrent
   , tryReadMVar
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
+import Data.Bits (xor)
 import Data.List (sort, sortOn)
 import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import System.IO.Error
@@ -31,7 +32,7 @@ import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (length, readFile, replicate, writeFile)
+import Data.ByteString qualified (length, map, readFile, replicate, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
@@ -315,7 +316,7 @@ posixCopyInterruptionSpec = do
       readFile destination `shouldReturn` replacement
 
   specify
-    "copyRegularFileWithIdentity rejects an in-place source mutation"
+    "copyRegularFileWithSnapshot rejects an in-place source mutation"
     $ withTempDir
     $ \tmpDir tmpDir' -> do
       sourceName <- encodeFS "source"
@@ -326,7 +327,7 @@ posixCopyInterruptionSpec = do
           sourceSize = 128 * 1024 * 1024
       withBinaryFile sourcePath WriteMode $ \handle ->
         hSetFileSize handle sourceSize
-      Just identity <- getFileIdentity source
+      Just snapshot <- getFileSnapshot source
       stopMutating <- newEmptyMVar
       mutationFinished <- newEmptyMVar
       Posix.setFileSize sourcePath $ fromIntegral $ sourceSize `div` 2
@@ -351,8 +352,8 @@ posixCopyInterruptionSpec = do
       _ <-
         forkIO $ do
           copied <-
-            copyRegularFileWithIdentity
-              identity
+            copyRegularFileWithSnapshot
+              snapshot
               source
               destination
           putMVar result copied
@@ -564,7 +565,7 @@ spec = do
       contents `shouldBe` original
 
     specify
-      "copyRegularFileWithIdentity rejects arbitrary replaced sources"
+      "copyRegularFileWithSnapshot rejects arbitrary replaced sources"
       $ hedgehog
       $ do
         original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
@@ -577,12 +578,36 @@ spec = do
                   destination = tmpDir </> baz
               writeFile source original
               writeFile outside replacement
-              Just identity <- getFileIdentity source
+              Just snapshot <- getFileSnapshot source
               removeFile source
               createSymbolicLink outside source File
               result <-
-                copyRegularFileWithIdentity
-                  identity
+                copyRegularFileWithSnapshot
+                  snapshot
+                  source
+                  destination
+              present <- exists destination
+              return (result, present)
+        copied === False
+        destinationExists === False
+
+    specify
+      "copyRegularFileWithSnapshot rejects changes before opening the source"
+      $ hedgehog
+      $ do
+        original <- forAll $ Gen.bytes $ constantFrom 1 1 4096
+        let replacement = Data.ByteString.map (`xor` 0xff) original
+        (copied, destinationExists) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              let source = tmpDir </> foo
+                  destination = tmpDir </> baz
+              writeFile source original
+              Just snapshot <- getFileSnapshot source
+              writeFile source replacement
+              result <-
+                copyRegularFileWithSnapshot
+                  snapshot
                   source
                   destination
               present <- exists destination
@@ -1214,7 +1239,7 @@ spec = do
         ioeGetLocation failToCopy' `shouldBe` "copyFile"
         show failToCopy' `shouldContain` "destination is a directory"
 
-    describe "copyRegularFileWithIdentity" $
+    describe "copyRegularFileWithSnapshot" $
       it "retains arbitrary dry-run copies by reference" $
         hedgehog $ do
           sourceContents <-
@@ -1228,10 +1253,10 @@ spec = do
                     sourcePath = tmpDir' `combine` "foo"
                 Data.ByteString.writeFile sourcePath sourceContents
                 dryRunIO $ do
-                  Just identity <- getFileIdentity source
+                  Just snapshot <- getFileSnapshot source
                   result <-
-                    copyRegularFileWithIdentity
-                      identity
+                    copyRegularFileWithSnapshot
+                      snapshot
                       source
                       destination
                   liftIO $

@@ -464,8 +464,8 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase . readRegularFileBounded limit
   copyRegularFile source =
     liftCommandEffectBase . copyRegularFile source
-  copyRegularFileWithIdentity identity source =
-    liftCommandEffectBase . copyRegularFileWithIdentity identity source
+  copyRegularFileWithSnapshot snapshot source =
+    liftCommandEffectBase . copyRegularFileWithSnapshot snapshot source
   copyRegularFileNoReplace source =
     liftCommandEffectBase . copyRegularFileNoReplace source
   writeFile path = liftCommandEffectBase . writeFile path
@@ -492,6 +492,7 @@ instance MonadFileSystem CommandEffectTest where
   listDirectory = liftCommandEffectBase . listDirectory
   getFileSize = liftCommandEffectBase . getFileSize
   getFileIdentity = liftCommandEffectBase . getFileIdentity
+  getFileSnapshot = liftCommandEffectBase . getFileSnapshot
   getPortableMode = liftCommandEffectBase . getPortableMode
   setPortableMode path = liftCommandEffectBase . setPortableMode path
   setPortableWritable path = liftCommandEffectBase . setPortableWritable path

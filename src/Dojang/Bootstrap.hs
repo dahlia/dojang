@@ -79,6 +79,7 @@ import Prelude hiding (readFile, writeFile)
 import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , FileIdentity
+  , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
   )
@@ -141,6 +142,11 @@ data StagedMode = StagedMode FilePath FileType PortableMode
 
 data PublishedEntry
   = PublishedEntry FileType OsPath OsPath OsPath FileIdentity
+
+
+data DirectoryEntrySnapshot
+  = DirectoryEntryIdentity FileIdentity
+  | DirectoryFileSnapshot FileSnapshot
 
 
 -- | Permission metadata retained until a staged source is published.
@@ -495,7 +501,7 @@ identifyDirectoryEntries
   -> m
        ( Either
            AcquisitionError
-           (FileIdentity, Map.Map OsPath FileIdentity)
+           (FileIdentity, Map.Map OsPath DirectoryEntrySnapshot)
        )
 identifyDirectoryEntries source entries = do
   sourceIdentity <- getFileIdentity source
@@ -510,19 +516,30 @@ identifyDirectoryEntries source entries = do
   go identities [] = return $ Right identities
   go identities ((fileType, relative) : remaining) = do
     let path = source </> relative
+    identified <- case fileType of
+      File -> fmap DirectoryFileSnapshot <$> getFileSnapshot path
+      Directory ->
+        identifyEntry path $
+          (&&) <$> isDirectory path <*> (not <$> isSymlink path)
+      Symlink -> identifyEntry path $ isSymlink path
+    case identified of
+      Just snapshot ->
+        go (Map.insert relative snapshot identities) remaining
+      Nothing -> unsupported relative
+
+  identifyEntry path supported = do
     identityBefore <- getFileIdentity path
-    supported <- case fileType of
-      File -> isRegularFile path
-      Directory -> (&&) <$> isDirectory path <*> (not <$> isSymlink path)
-      Symlink -> isSymlink path
+    supported' <- supported
     identityAfter <- getFileIdentity path
-    case identityBefore of
+    return $ case identityBefore of
       Just identity
-        | supported && identityAfter == Just identity ->
-            go (Map.insert relative identity identities) remaining
-      _ -> do
-        decoded <- decodePath relative
-        return $ Left $ UnsupportedSourceEntry decoded
+        | supported' && identityAfter == Just identity ->
+            Just $ DirectoryEntryIdentity identity
+      _ -> Nothing
+
+  unsupported relative = do
+    decoded <- decodePath relative
+    return $ Left $ UnsupportedSourceEntry decoded
 
 
 copyDirectoryContents
@@ -551,27 +568,33 @@ copyDirectoryEntries
   :: (MonadFileSystem m)
   => OsPath
   -> OsPath
-  -> Map.Map OsPath FileIdentity
+  -> Map.Map OsPath DirectoryEntrySnapshot
   -> [(FileType, OsPath)]
   -> m ()
 copyDirectoryEntries source destination identities entries =
   forM_ entries $ \(fileType, relative) -> do
     let sourceEntry = source </> relative
         destinationEntry = destination </> relative
-    expectedIdentity <- expectedEntryIdentity identities relative
+    expectedSnapshot <- expectedEntrySnapshot identities relative
     case fileType of
       Directory -> do
+        expectedIdentity <-
+          expectedDirectoryEntryIdentity relative expectedSnapshot
         verifyEntryIdentity source relative expectedIdentity
         createDirectory destinationEntry
       File -> do
+        expectedFileSnapshot <-
+          expectedDirectoryFileSnapshot relative expectedSnapshot
         copied <-
-          copyRegularFileWithIdentity
-            expectedIdentity
+          copyRegularFileWithSnapshot
+            expectedFileSnapshot
             sourceEntry
             destinationEntry
         unless copied $ do
           throwSourceEntryChanged relative
       Symlink -> do
+        expectedIdentity <-
+          expectedDirectoryEntryIdentity relative expectedSnapshot
         verifyEntryIdentity source relative expectedIdentity
         target <- readSymlinkTarget sourceEntry
         linkType <- getSymbolicLinkType sourceEntry
@@ -586,14 +609,30 @@ verifyDirectorySource
   :: (MonadFileSystem m)
   => OsPath
   -> FileIdentity
-  -> Map.Map OsPath FileIdentity
+  -> Map.Map OsPath DirectoryEntrySnapshot
   -> [(FileType, OsPath)]
   -> m ()
 verifyDirectorySource source sourceIdentity identities entries = do
   verifyPathIdentity source source sourceIdentity
   forM_ entries $ \(_, relative) -> do
-    expectedIdentity <- expectedEntryIdentity identities relative
-    verifyEntryIdentity source relative expectedIdentity
+    expectedSnapshot <- expectedEntrySnapshot identities relative
+    verifyEntrySnapshot source relative expectedSnapshot
+
+
+verifyEntrySnapshot
+  :: (MonadFileSystem m)
+  => OsPath
+  -> OsPath
+  -> DirectoryEntrySnapshot
+  -> m ()
+verifyEntrySnapshot source relative expectedSnapshot =
+  case expectedSnapshot of
+    DirectoryEntryIdentity expectedIdentity ->
+      verifyEntryIdentity source relative expectedIdentity
+    DirectoryFileSnapshot expectedFileSnapshot -> do
+      actualSnapshot <- getFileSnapshot $ source </> relative
+      unless (actualSnapshot == Just expectedFileSnapshot) $
+        throwSourceEntryChanged relative
 
 
 verifyEntryIdentity
@@ -626,19 +665,49 @@ throwSourceEntryChanged path = do
       "bootstrap source entry changed during acquisition: " <> decoded
 
 
-expectedEntryIdentity
+expectedEntrySnapshot
   :: (MonadFileSystem m)
-  => Map.Map OsPath FileIdentity
+  => Map.Map OsPath DirectoryEntrySnapshot
   -> OsPath
-  -> m FileIdentity
-expectedEntryIdentity identities relative =
+  -> m DirectoryEntrySnapshot
+expectedEntrySnapshot identities relative =
   case Map.lookup relative identities of
-    Just identity -> return identity
+    Just snapshot -> return snapshot
     Nothing -> do
       decoded <- decodePath relative
       throwError $
         userError $
           "filesystem cannot identify bootstrap source entry: " <> decoded
+
+
+expectedDirectoryEntryIdentity
+  :: (MonadFileSystem m)
+  => OsPath
+  -> DirectoryEntrySnapshot
+  -> m FileIdentity
+expectedDirectoryEntryIdentity _ (DirectoryEntryIdentity identity) =
+  return identity
+expectedDirectoryEntryIdentity relative _ =
+  throwSourceEntryTypeChanged relative
+
+
+expectedDirectoryFileSnapshot
+  :: (MonadFileSystem m)
+  => OsPath
+  -> DirectoryEntrySnapshot
+  -> m FileSnapshot
+expectedDirectoryFileSnapshot _ (DirectoryFileSnapshot snapshot) =
+  return snapshot
+expectedDirectoryFileSnapshot relative _ =
+  throwSourceEntryTypeChanged relative
+
+
+throwSourceEntryTypeChanged :: (MonadFileSystem m) => OsPath -> m a
+throwSourceEntryTypeChanged path = do
+  decoded <- decodePath path
+  throwError $
+    userError $
+      "bootstrap source entry type changed during acquisition: " <> decoded
 
 
 withDirectoryEntriesNoReplace

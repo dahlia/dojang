@@ -277,8 +277,8 @@ instance
   readRegularFileBounded limit =
     App . lift . lift . lift . readRegularFileBounded limit
   copyRegularFile src = App . lift . lift . lift . copyRegularFile src
-  copyRegularFileWithIdentity identity src =
-    App . lift . lift . lift . copyRegularFileWithIdentity identity src
+  copyRegularFileWithSnapshot snapshot src =
+    App . lift . lift . lift . copyRegularFileWithSnapshot snapshot src
   copyRegularFileNoReplace src =
     App . lift . lift . lift . copyRegularFileNoReplace src
   writeFile dst = App . lift . lift . lift . writeFile dst
@@ -309,6 +309,7 @@ instance
   listDirectory = App . lift . lift . lift . listDirectory
   getFileSize = App . lift . lift . lift . getFileSize
   getFileIdentity = App . lift . lift . lift . getFileIdentity
+  getFileSnapshot = App . lift . lift . lift . getFileSnapshot
   getPortableMode = App . lift . lift . lift . getPortableMode
   setPortableMode path = App . lift . lift . lift . setPortableMode path
   setPortableWritable path = App . lift . lift . lift . setPortableWritable path

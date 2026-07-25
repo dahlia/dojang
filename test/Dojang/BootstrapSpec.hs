@@ -91,6 +91,7 @@ import Dojang.Bootstrap
 #endif
 import Dojang.MonadFileSystem
   ( FileIdentity
+  , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
@@ -1412,6 +1413,12 @@ instance MonadFileSystem FailingModeIO where
       _ -> liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
   copyRegularFile source destination =
     liftIO (copyRegularFile source destination :: IO Bool)
+  copyRegularFileWithSnapshot snapshot source destination =
+    liftIO $
+      copyRegularFileWithSnapshot
+        snapshot
+        source
+        destination
   writeFile path contents = liftIO (writeFile path contents :: IO ())
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
@@ -1447,6 +1454,8 @@ instance MonadFileSystem FailingModeIO where
   getFileSize value = liftIO (getFileSize value :: IO Integer)
   getFileIdentity value =
     liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
+  getFileSnapshot value =
+    liftIO (getFileSnapshot value :: IO (Maybe FileSnapshot))
   getPortableMode value = do
     path <- liftIO (decodePath value :: IO FilePath)
     case FilePath.takeFileName path of
@@ -1484,6 +1493,7 @@ data CurrentDirectoryRace
       (MVar ())
       (MVar ())
       (MVar ())
+  | ModifySourceBeforeCopy OsPath ByteString.ByteString
   | ReplaceSourceBeforeCopy FileType OsPath OsPath
   | FailQuarantine OsPath OsPath
   | ReplaceThenFail OsPath OsPath ByteString.ByteString
@@ -1557,6 +1567,12 @@ instance MonadFileSystem CurrentDirectoryIO where
   readFile value = liftIO (readFile value :: IO ByteString.ByteString)
   readRegularFile value =
     liftIO (readRegularFile value :: IO (Maybe ByteString.ByteString))
+  copyRegularFileWithSnapshot snapshot source destination =
+    liftCurrentDirectoryIO $
+      copyRegularFileWithSnapshot
+        snapshot
+        source
+        destination
   copyRegularFileNoReplace source destination = do
     (_, racedEntry) <- CurrentDirectoryIO ask
     case racedEntry of
@@ -1703,6 +1719,8 @@ instance MonadFileSystem CurrentDirectoryIO where
       liftIO (createPrivateDirectory value :: IO ())
       (_, racedEntry) <- CurrentDirectoryIO ask
       case racedEntry of
+        Just (ModifySourceBeforeCopy sourceEntry replacement) ->
+          liftIO $ writeFile sourceEntry replacement
         Just
           ( ReplaceSourceBeforeCopy
               sourceType
@@ -1755,6 +1773,8 @@ instance MonadFileSystem CurrentDirectoryIO where
             writeFile racedPath replacement
       _ -> return ()
     return identity
+  getFileSnapshot value =
+    liftIO (getFileSnapshot value :: IO (Maybe FileSnapshot))
   getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
   setPortableMode path mode = do
     (_, racedEntry) <- CurrentDirectoryIO ask
@@ -1793,6 +1813,44 @@ symlinkSpecs = return ()
 #else
 symlinkSpecs :: Spec
 symlinkSpecs = do
+  it "rejects arbitrary in-place changes after source validation" $
+    hedgehog $ do
+      original <- forAll $ Gen.bytes $ Range.linear 0 4096
+      suffix <- forAll $ Gen.bytes $ Range.linear 1 64
+      let replacement = original <> suffix
+      (stagedResult, stagingExists, stagedContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            stagingName <- encodeFS "staging"
+            victimName <- encodeFS "victim"
+            let source = tmpDir </> sourceName
+                staging = tmpDir </> stagingName
+                victim = source </> victimName
+                stagedVictim = staging </> victimName
+            createDirectory source
+            writeFile victim original
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (ModifySourceBeforeCopy victim replacement)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            stagedVictimPresent <- exists stagedVictim
+            contents <-
+              if stagedVictimPresent
+                then readFile stagedVictim
+                else return ""
+            return (result, present, contents)
+      case stagedResult of
+        Left err ->
+          assert $
+            "bootstrap source entry changed during acquisition"
+              `isInfixOf` Exception.displayException err
+        Right _ -> assert False
+      stagingExists === False
+      stagedContents === ""
+
   it "rejects a regular file replaced by a link after validation" $
     hedgehog $ do
       outsideContents <- forAll $ Gen.bytes $ Range.linear 0 4096

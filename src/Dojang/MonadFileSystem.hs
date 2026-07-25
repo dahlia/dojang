@@ -10,6 +10,7 @@ module Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , DryRunIO
   , FileIdentity
+  , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
@@ -92,15 +93,20 @@ import Dojang.Types.RouteMetadata
 import Foreign
   ( Ptr
   , alloca
+  , allocaBytes
   , castPtr
   , nullPtr
   , peek
+  , peekByteOff
   , poke
   , sizeOf
   )
+import Foreign.C.Types (CInt)
+import Data.Int (Int64)
 import System.IO (IOMode (ReadMode), hIsSeekable)
 import System.Win32.File qualified as Win32
 import System.Win32.String qualified as Win32String
+import System.Win32.Time qualified as Win32Time
 import System.Win32.Types qualified as Win32
 #else
 import Foreign.C.Error qualified as CError
@@ -168,6 +174,14 @@ foreign import stdcall unsafe "GetVolumeInformationW"
     -> Win32.LPTSTR
     -> Win32.DWORD
     -> IO Win32.BOOL
+
+foreign import stdcall unsafe "GetFileInformationByHandleEx"
+  c_getFileInformationByHandleEx
+    :: Win32.HANDLE
+    -> CInt
+    -> Ptr ()
+    -> Win32.DWORD
+    -> IO Win32.BOOL
 #endif
 
 
@@ -189,6 +203,16 @@ data FileType
 -- on platform-specific device, volume, inode, or file-index details.
 data FileIdentity = FileIdentity Integer Integer
   deriving (Eq, Ord, Show)
+
+
+-- | The identity and change metadata of a regular file at one instant.
+--
+-- The representation is intentionally opaque.  A snapshot can be passed back
+-- to 'copyRegularFileWithSnapshot' to reject both pathname replacements and
+-- in-place changes made since the snapshot was captured.
+data FileSnapshot
+  = FileSnapshot FileIdentity Integer Rational (Maybe Rational)
+  deriving (Eq, Show)
 
 
 -- | The result of reading a regular file with an explicit byte limit.
@@ -316,28 +340,28 @@ class (MonadError IOError m) => MonadFileSystem m where
       Just contents -> writeFile destination contents >> return True
 
 
-  -- | Copies a regular file only when the opened source has the expected
-  -- identity.
+  -- | Copies a regular file only when the opened source matches a snapshot.
   --
-  -- Filesystem-backed implementations must compare the identity obtained from
-  -- the same handle used for copying.  This prevents a pathname replacement
-  -- between directory-source validation and acquisition from redirecting the
-  -- copy.  They must also recheck change metadata from that handle after
-  -- copying and discard the destination if the source changed in place.
+  -- Filesystem-backed implementations must compare identity and change
+  -- metadata obtained from the same handle used for copying.  This prevents
+  -- pathname replacements and in-place changes between directory-source
+  -- validation and acquisition from redirecting or corrupting the copy.  They
+  -- must also recheck change metadata from that handle after copying and
+  -- discard the destination if the source changed in place.
   -- Returns 'False' without retaining the destination when the identity
   -- differs, the source changes, or the opened source is not a regular file.
-  copyRegularFileWithIdentity
+  copyRegularFileWithSnapshot
     :: (HasCallStack)
-    => FileIdentity
-    -- ^ Identity captured while validating the source tree.
+    => FileSnapshot
+    -- ^ Snapshot captured while validating the source tree.
     -> OsPath
     -- ^ Source path.
     -> OsPath
     -- ^ Destination path.
     -> m Bool
-  copyRegularFileWithIdentity expectedIdentity source destination = do
-    actualIdentity <- getFileIdentity source
-    if actualIdentity == Just expectedIdentity
+  copyRegularFileWithSnapshot expectedSnapshot source destination = do
+    actualSnapshot <- getFileSnapshot source
+    if actualSnapshot == Just expectedSnapshot
       then copyRegularFile source destination
       else return False
 
@@ -657,6 +681,15 @@ class (MonadError IOError m) => MonadFileSystem m where
   getFileIdentity _ = return Nothing
 
 
+  -- | Captures a regular file's identity and change metadata without following
+  -- symbolic links.
+  --
+  -- Returns 'Nothing' when the entry is not a regular file, does not exist, or
+  -- the interpreter cannot represent a stable snapshot.
+  getFileSnapshot :: (HasCallStack) => OsPath -> m (Maybe FileSnapshot)
+  getFileSnapshot _ = return Nothing
+
+
   -- | Observes the portable permission state of a filesystem entry without
   -- following symbolic links.  Throws an 'IOError' when the entry does not
   -- exist.  Fields the platform cannot observe are 'Nothing'.
@@ -827,7 +860,7 @@ isRegularFileIO path =
 
 withRegularFileHandleIO
   :: OsPath
-  -> (FileIdentity -> IO Bool -> Handle -> IO a)
+  -> (FileSnapshot -> IO Bool -> Handle -> IO a)
   -> IO (Maybe a)
 withRegularFileHandleIO path action = do
   path' <- decodeFS path
@@ -839,19 +872,10 @@ withRegularFileHandleIO path action = do
         if regularFile
           then
             Win32.withHandleToHANDLE handle $ \nativeHandle -> do
-              information <- Win32.getFileInformationByHandle nativeHandle
-              let identity =
-                    FileIdentity
-                      (fromIntegral information.bhfiVolumeSerialNumber)
-                      (fromIntegral information.bhfiFileIndex)
-                  unchanged = do
-                    current <-
-                      Win32.getFileInformationByHandle nativeHandle
-                    return $
-                      current.bhfiSize == information.bhfiSize
-                        && current.bhfiLastWriteTime
-                          == information.bhfiLastWriteTime
-              Just <$> action identity unchanged handle
+              snapshot <- getFileSnapshotFromHandle nativeHandle
+              let unchanged =
+                    (== snapshot) <$> getFileSnapshotFromHandle nativeHandle
+              Just <$> action snapshot unchanged handle
           else return Nothing
     )
 
@@ -890,7 +914,81 @@ getFileIdentityIO path = do
     `catchError` \err ->
       if isDoesNotExistError err then return Nothing else throwError err
  where
+ fileFlagOpenReparsePoint = 0x00200000
+
+
+getFileSnapshotIO :: OsPath -> IO (Maybe FileSnapshot)
+getFileSnapshotIO path = do
+  path' <- decodeFS path
+  Exception.bracket
+    ( Win32.createFile
+        path'
+        Win32.gENERIC_NONE
+        ( Win32.fILE_SHARE_READ
+            .|. Win32.fILE_SHARE_WRITE
+            .|. Win32.fILE_SHARE_DELETE
+        )
+        Nothing
+        Win32.oPEN_EXISTING
+        (Win32.fILE_FLAG_BACKUP_SEMANTICS .|. fileFlagOpenReparsePoint)
+        Nothing
+    )
+    Win32.closeHandle
+    ( \handle -> do
+        information <- Win32.getFileInformationByHandle handle
+        let unsupportedAttributes =
+              Win32.fILE_ATTRIBUTE_DIRECTORY
+                .|. Win32.fILE_ATTRIBUTE_REPARSE_POINT
+        return $
+          if information.bhfiFileAttributes .&. unsupportedAttributes == 0
+            then
+              Just . fileSnapshotFromInformation information
+                <$> getFileChangeTime handle
+            else Nothing
+    )
+    `catchError` \err ->
+      if isDoesNotExistError err then return Nothing else throwError err
+ where
   fileFlagOpenReparsePoint = 0x00200000
+
+
+fileSnapshotFromInformation
+  :: Win32.BY_HANDLE_FILE_INFORMATION -> Int64 -> FileSnapshot
+fileSnapshotFromInformation information changeTime =
+  FileSnapshot
+    ( FileIdentity
+        (fromIntegral information.bhfiVolumeSerialNumber)
+        (fromIntegral information.bhfiFileIndex)
+    )
+    (fromIntegral information.bhfiSize)
+    (fileTimeValue information.bhfiLastWriteTime)
+    (Just $ toRational changeTime)
+ where
+  fileTimeValue (Win32Time.FILETIME value) = toRational value
+
+
+getFileSnapshotFromHandle :: Win32.HANDLE -> IO FileSnapshot
+getFileSnapshotFromHandle handle = do
+  information <- Win32.getFileInformationByHandle handle
+  fileSnapshotFromInformation information <$> getFileChangeTime handle
+
+
+getFileChangeTime :: Win32.HANDLE -> IO Int64
+getFileChangeTime handle =
+  allocaBytes fileBasicInfoSize $ \buffer -> do
+    Win32.failIfFalse_ "GetFileInformationByHandleEx" $
+      c_getFileInformationByHandleEx
+        handle
+        fileBasicInfoClass
+        buffer
+        (fromIntegral fileBasicInfoSize)
+    peekByteOff buffer changeTimeOffset
+ where
+  -- FILE_INFO_BY_HANDLE_CLASS uses 0 for FileBasicInfo.  FILE_BASIC_INFO is
+  -- five naturally aligned fields: four 64-bit times followed by a DWORD.
+  fileBasicInfoClass = 0
+  fileBasicInfoSize = 40
+  changeTimeOffset = 24
 
 
 getSymbolicLinkTypeIO :: OsPath -> IO FileType
@@ -1031,7 +1129,7 @@ isRegularFileIO path = do
 
 withRegularFileHandleIO
   :: OsPath
-  -> (FileIdentity -> IO Bool -> Handle -> IO a)
+  -> (FileSnapshot -> IO Bool -> Handle -> IO a)
   -> IO (Maybe a)
 withRegularFileHandleIO path action = do
   path' <- decodeFS path
@@ -1055,16 +1153,12 @@ withRegularFileHandleIO path action = do
             `Exception.onException` Posix.closeFd descriptor
         let unchanged = do
               current <- Posix.getFdStatus descriptor
-              return $
-                Posix.fileSize current == Posix.fileSize status
-                  && Posix.modificationTimeHiRes current
-                    == Posix.modificationTimeHiRes status
-                  && Posix.statusChangeTimeHiRes current
-                    == Posix.statusChangeTimeHiRes status
+              return $ fileSnapshotFromStatus current == snapshot
+            snapshot = fileSnapshotFromStatus status
         ( Just
             <$> restore
               ( action
-                  (fileIdentityFromStatus status)
+                  snapshot
                   unchanged
                   handle
               )
@@ -1093,6 +1187,29 @@ getFileIdentityIO path = do
     )
     `catchError` \err ->
       if isDoesNotExistError err then return Nothing else throwError err
+
+
+getFileSnapshotIO :: OsPath -> IO (Maybe FileSnapshot)
+getFileSnapshotIO path = do
+  path' <- decodeFS path
+  ( do
+      status <- Posix.getSymbolicLinkStatus path'
+      return $
+        if Posix.isRegularFile status
+          then Just $ fileSnapshotFromStatus status
+          else Nothing
+    )
+    `catchError` \err ->
+      if isDoesNotExistError err then return Nothing else throwError err
+
+
+fileSnapshotFromStatus :: Posix.FileStatus -> FileSnapshot
+fileSnapshotFromStatus status =
+  FileSnapshot
+    (fileIdentityFromStatus status)
+    (fromIntegral $ Posix.fileSize status)
+    (toRational $ Posix.modificationTimeHiRes status)
+    (Just $ toRational $ Posix.statusChangeTimeHiRes status)
 
 
 getSymbolicLinkTypeIO :: OsPath -> IO FileType
@@ -1289,14 +1406,14 @@ copyRegularFileIO source destination = do
     Just () -> True
 
 
-copyRegularFileWithIdentityIO
-  :: FileIdentity -> OsPath -> OsPath -> IO Bool
-copyRegularFileWithIdentityIO expectedIdentity source destination = do
+copyRegularFileWithSnapshotIO
+  :: FileSnapshot -> OsPath -> OsPath -> IO Bool
+copyRegularFileWithSnapshotIO expectedSnapshot source destination = do
   result <-
     withRegularFileHandleIO
       source
-      $ \actualIdentity sourceUnchanged sourceHandle ->
-        if actualIdentity /= expectedIdentity
+      $ \actualSnapshot sourceUnchanged sourceHandle ->
+        if actualSnapshot /= expectedSnapshot
           then return False
           else Exception.mask $ \restore -> do
             destinationDirectory <- decodeFS $ takeDirectory destination
@@ -1410,7 +1527,7 @@ instance MonadFileSystem IO where
   copyRegularFile = copyRegularFileIO
 
 
-  copyRegularFileWithIdentity = copyRegularFileWithIdentityIO
+  copyRegularFileWithSnapshot = copyRegularFileWithSnapshotIO
 
 
   copyRegularFileNoReplace = copyRegularFileNoReplaceIO
@@ -1514,6 +1631,9 @@ instance MonadFileSystem IO where
 
 
   getFileIdentity = getFileIdentityIO
+
+
+  getFileSnapshot = getFileSnapshotIO
 
 
   copyFile = OsDirectory.copyFile
@@ -1941,10 +2061,9 @@ instance MonadFileSystem DryRunIO where
     readFileFromDryRunIO seqNo src
 
 
-  copyRegularFileWithIdentity expectedIdentity source destination = do
-    actualIdentity <- getFileIdentity source
-    regularFile <- isRegularFile source
-    if actualIdentity == Just expectedIdentity && regularFile
+  copyRegularFileWithSnapshot expectedSnapshot source destination = do
+    actualSnapshot <- getFileSnapshot source
+    if actualSnapshot == Just expectedSnapshot
       then copyFile source destination >> return True
       else return False
 
@@ -2430,6 +2549,27 @@ instance MonadFileSystem DryRunIO where
       Nothing -> case oIdentities !? normalise path of
         Just identity -> return $ Just identity
         Nothing -> liftIO $ getFileIdentityIO path
+
+
+  getFileSnapshot path = do
+    oFiles <- gets overlaidFiles
+    case oFiles !? normalise path of
+      Just ((_, Gone) :| _) -> return Nothing
+      Just ((_, SymlinkTo _ _) :| _) -> return Nothing
+      Just ((_, Directory') :| _) -> return Nothing
+      Just ((sequenceNumber, _) :| _) -> do
+        identity <- getFileIdentity path
+        return $
+          fmap
+            ( \value ->
+                FileSnapshot
+                  value
+                  0
+                  (fromIntegral sequenceNumber)
+                  Nothing
+            )
+            identity
+      Nothing -> liftIO $ getFileSnapshotIO path
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns the result.
