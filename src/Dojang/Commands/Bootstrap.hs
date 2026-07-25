@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoFieldSelectors #-}
@@ -13,15 +14,16 @@ module Dojang.Commands.Bootstrap
   ) where
 
 import Control.Exception (displayException)
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, when)
 import Control.Monad.Catch (mask, onException)
-import Control.Monad.Except (MonadError (catchError))
+import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.Reader (asks, local)
 import Data.List (inits, isPrefixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import System.Exit (ExitCode (..))
+import System.IO.Error (isDoesNotExistError)
 import System.OsPath
   ( OsPath
   , dropTrailingPathSeparator
@@ -40,7 +42,6 @@ import Dojang.App
   , AppEffects
   , AppEnv (..)
   , catchCommandExit
-  , ensureManifest
   , liftApp
   )
 import Dojang.Bootstrap
@@ -63,6 +64,7 @@ import Dojang.Commands
   ( Admonition (Error, Hint, Note, Warning)
   , StandardStream (StandardError)
   , die'
+  , dieWithErrors
   , pathStyleFor
   , printStderr
   , printStderr'
@@ -73,10 +75,26 @@ import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
   ( cliError
   , externalProgramNonZeroExit
+  , manifestReadError
+  , manifestUninitialized
   )
-import Dojang.MonadFileSystem (FileIdentity, MonadFileSystem (..))
+import Dojang.MonadFileSystem
+  ( BoundedFileRead (..)
+  , DirectoryPathIdentity
+  , FileIdentity
+  , MonadFileSystem (..)
+  , captureDirectoryPathIdentity
+  , matchesDirectoryPathIdentity
+  )
+import Dojang.Syntax.Manifest.Parser
+  ( formatErrors
+  , readManifestBytes
+  )
 import Dojang.Syntax.Transport qualified as TransportSyntax
-import Dojang.Types.PathIdentity (pathIdentityComponents)
+import Dojang.Types.PathIdentity
+  ( equalDestinationPath
+  , pathIdentityComponents
+  )
 import Dojang.Types.Transport
   ( EnvironmentNameCase (..)
   , TransportLookupError (..)
@@ -213,12 +231,14 @@ bootstrapInto
   facts
   destination = do
     ensureAvailableDestination destination
+    parentIdentity <- captureDestinationParent destination
     preparedBuiltin <-
       ( case requestedTransport of
           Nothing -> Just <$> prepareBuiltin source destination
           Just _ -> return Nothing
       )
         `catchError` reportFilesystemError
+    ensureDestinationParent parentIdentity
     stagingRoot <- newStagingPath destination
     repositoryName <- encodePath "repository"
     let staging = stagingRoot </> repositoryName
@@ -233,14 +253,24 @@ bootstrapInto
           reportFilesystemError $
             userError "filesystem cannot identify bootstrap staging"
       let cleanup = cleanupStaging stagingRoot identity
-      catchCommandExit
-        ( onException
-            (restore $ bootstrapAction preparedBuiltin cleanup staging)
-            cleanup
-        )
-        (\exitCode -> cleanup >> abortCommand exitCode)
+      published <-
+        catchCommandExit
+          ( onException
+              ( restore $
+                  acquireAndPublish
+                    preparedBuiltin
+                    staging
+                    parentIdentity
+              )
+              cleanup
+          )
+          (\exitCode -> cleanup >> abortCommand exitCode)
+      cleanup
+      if published
+        then restore finishBootstrap
+        else return ExitSuccess
    where
-    bootstrapAction preparedBuiltin cleanup staging = do
+    acquireAndPublish preparedBuiltin staging parentIdentity = do
       acquired <-
         ( case requestedTransport of
             Nothing ->
@@ -255,35 +285,38 @@ bootstrapInto
                 staging
         )
           `catchError` reportFilesystemError
+      ensureDestinationParent parentIdentity
       case acquired of
-        Nothing -> cleanup >> return ExitSuccess
+        Nothing -> return False
         Just metadata -> do
           catchError
             ( validateStaging staging
+                >> ensureDestinationParent parentIdentity
                 >> publishStaging metadata staging destination
-                >> cleanup
-                >> return ()
+                >> ensureDestinationParentAfterPublication parentIdentity
+                >> return True
             )
             reportFilesystemError
-          enrolled <-
-            catchCommandExit
-              (Init.initWithFacts [] noInteractive factsFile facts)
-              (\exitCode -> enrollmentFailed destination >> abortCommand exitCode)
-          case enrolled of
-            ExitFailure _ -> return enrolled
-            ExitSuccess -> do
-              shouldApply <-
-                if acceptApply
-                  then return True
-                  else
-                    confirmPrompt
-                      "Apply this repository to the current machine now?"
-              if shouldApply
-                then Apply.apply False []
-                else do
-                  printStderr' Note $
-                    "Repository acquired and enrolled without applying it."
-                  return ExitSuccess
+    finishBootstrap = do
+      enrolled <-
+        catchCommandExit
+          (Init.initWithFacts [] noInteractive factsFile facts)
+          (\exitCode -> enrollmentFailed destination >> abortCommand exitCode)
+      case enrolled of
+        ExitFailure _ -> return enrolled
+        ExitSuccess -> do
+          shouldApply <-
+            if acceptApply
+              then return True
+              else
+                confirmPrompt
+                  "Apply this repository to the current machine now?"
+          if shouldApply
+            then Apply.apply False []
+            else do
+              printStderr' Note $
+                "Repository acquired and enrolled without applying it."
+              return ExitSuccess
 
 
 ensureAvailableDestination
@@ -302,6 +335,79 @@ ensureAvailableDestination destination = do
       "Choose a repository directory that does not exist yet with "
         <> "`-r`/`--repository-dir`."
     abortCommand cliError
+
+
+captureDestinationParent
+  :: (MonadFileSystem i, AppEffects i)
+  => OsPath
+  -> App i DestinationParentIdentity
+captureDestinationParent destination = do
+  let parent = takeDirectory destination
+  directory <- isDirectory parent `catchError` reportFilesystemError
+  unless directory $
+    die'
+      cliError
+      "Bootstrap destination parent does not exist or is not a directory."
+  canonicalParent <-
+    canonicalizePath parent `catchError` reportFilesystemError
+  identity <-
+    captureDirectoryPathIdentity canonicalParent
+      `catchError` reportFilesystemError
+  case identity of
+    Just value ->
+      return $
+        DestinationParentIdentity parent canonicalParent value
+    Nothing ->
+      die'
+        cliError
+        "Bootstrap destination parent is not a stable directory path."
+
+
+data DestinationParentIdentity
+  = DestinationParentIdentity OsPath OsPath DirectoryPathIdentity
+
+
+ensureDestinationParent
+  :: (MonadFileSystem i, AppEffects i)
+  => DestinationParentIdentity
+  -> App i ()
+ensureDestinationParent identity = do
+  unchanged <- destinationParentUnchanged identity
+  unless unchanged $
+    die'
+      cliError
+      "Bootstrap destination parent changed during acquisition."
+
+
+ensureDestinationParentAfterPublication
+  :: (MonadFileSystem i, AppEffects i)
+  => DestinationParentIdentity
+  -> App i ()
+ensureDestinationParentAfterPublication identity = do
+  unchanged <- destinationParentUnchanged identity
+  unless unchanged $ do
+    printStderr' Warning $
+      "The destination parent changed during publication.  A repository copy "
+        <> "may exist at an unintended location and require manual removal."
+    die'
+      cliError
+      "Bootstrap destination parent changed during publication."
+
+
+destinationParentUnchanged
+  :: (MonadFileSystem i, AppEffects i)
+  => DestinationParentIdentity
+  -> App i Bool
+destinationParentUnchanged
+  (DestinationParentIdentity parent canonicalParent identity) =
+    ( do
+        currentParent <- canonicalizePath parent
+        chainUnchanged <- matchesDirectoryPathIdentity identity
+        return $
+          equalDestinationPath canonicalParent currentParent
+            && chainUnchanged
+    )
+      `catchError` const (return False)
 
 
 newStagingPath
@@ -502,16 +608,38 @@ defaultTransportConfigPath platform
 validateStaging
   :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 validateStaging staging = do
-  validateStagedManifestPath staging
-  _ <-
-    local
-      (\environment -> environment{sourceDirectory = staging})
-      ensureManifest
+  manifest <- validateStagedManifestPath staging
+  manifestRead <-
+    readRegularFileBounded maximumManifestBytes manifest
+      `catchError` \err ->
+        if isDoesNotExistError err
+          then do
+            printStderr' Error "No manifest found in the acquired repository."
+            printStderr'
+              Hint
+              "Check that `--from` points to a Dojang repository."
+            abortCommand manifestUninitialized
+          else throwError err
+  case manifestRead of
+    NotRegularFile ->
+      die' cliError "Bootstrap manifest must be a regular file."
+    FileSizeLimitExceeded ->
+      die' cliError "Bootstrap manifest exceeds the safe size limit."
+    FileChangedDuringRead ->
+      die'
+        cliError
+        ( "Bootstrap manifest changed during validation.  Retry with a stable "
+            <> "source."
+        )
+    BoundedFileContents contents ->
+      case readManifestBytes contents of
+        Left err -> dieWithErrors manifestReadError $ formatErrors err
+        Right _ -> return ()
   printStderr "Staged repository manifest validated."
 
 
 validateStagedManifestPath
-  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i OsPath
 validateStagedManifestPath staging = do
   configuredManifest <- asks (.manifestFile)
   parentComponent <- encodePath ".."
@@ -537,6 +665,11 @@ validateStagedManifestPath staging = do
     die'
       cliError
       "Bootstrap manifest path cannot contain symbolic links."
+  return $ staging </> normalizedManifest
+
+
+maximumManifestBytes :: Int
+maximumManifestBytes = 16 * 1024 * 1024
 
 
 publishStaging
@@ -563,14 +696,24 @@ cleanupStaging
   => OsPath
   -> FileIdentity
   -> App i ()
-cleanupStaging staging identity =
-  void
-    (removeDirectoryRecursivelyIfIdentity staging identity)
-    `catchError` \err ->
-      printStderr' Warning $
-        "Could not clean the bootstrap staging directory: "
-          <> Text.pack (displayException err)
-          <> "."
+cleanupStaging staging identity = do
+  removed <-
+    removeDirectoryRecursivelyIfIdentity staging identity
+      `catchError` \err ->
+        printStderr'
+          Warning
+          ( "Could not clean the bootstrap staging directory: "
+              <> Text.pack (displayException err)
+              <> "."
+          )
+          >> return True
+  unless removed $ do
+    pathStyle <- pathStyleFor StandardError
+    printStderr' Warning $
+      "Could not clean the bootstrap staging directory because "
+        <> pathStyle staging
+        <> " no longer identifies the directory created by Dojang.  "
+        <> "The original staging tree may require manual removal."
 
 
 reportFilesystemError :: (AppEffects i) => IOError -> App i a

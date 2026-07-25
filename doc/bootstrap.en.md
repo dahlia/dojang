@@ -99,6 +99,16 @@ in progress.  On POSIX, Dojang passes the native byte representation of the
 source, staging destination, and inherited environment values to the child
 process without transcoding it through Unicode.
 
+Dojang resolves the destination parent once and records the filesystem identity
+of that physical directory and each ancestor before staging begins.  It
+rechecks the lexical target and complete physical chain after preparation,
+acquisition, validation, and publication, and aborts when it observes a
+replacement.  These boundary checks are not an atomic lock: a replacement
+between a check and the following filesystem mutation can leave staging or a
+published copy at another location.  Dojang warns when cleanup or the
+post-publication check detects that situation so the leftover can be removed
+manually.
+
 The default configuration file is:
 
  -  Linux and other POSIX systems:
@@ -152,7 +162,10 @@ changing target files.
 The selected manifest path must be relative without a drive prefix, remain
 inside the acquired repository, and contain no parent or symbolic-link
 components.  This ensures staged validation and post-publication enrollment
-observe the same manifest.
+observe the same manifest.  The manifest must be a regular file no larger than
+16 MiB.  Dojang parses the bytes read through that validated handle, rejecting
+a FIFO or device without reading it and rejecting in-place changes observed
+during the read.
 
 Noninteractive bootstrap requires explicit approval:
 

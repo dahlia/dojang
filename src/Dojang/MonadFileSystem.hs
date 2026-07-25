@@ -8,6 +8,7 @@
 
 module Dojang.MonadFileSystem
   ( BoundedFileRead (..)
+  , DirectoryPathIdentity
   , DryRunIO
   , FileIdentity
   , FileModeSnapshot (..)
@@ -16,7 +17,9 @@ module Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , dryRunIO
   , dryRunIO'
+  , captureDirectoryPathIdentity
   , fileSnapshotIdentity
+  , matchesDirectoryPathIdentity
   , tryDryRunIO
   , writeFileAtomically
   ) where
@@ -215,6 +218,16 @@ data FileIdentity = FileIdentity Integer Integer
   deriving (Eq, Ord, Show)
 
 
+-- | Stable identities for every directory from a filesystem root through a
+-- selected directory path.
+--
+-- The constructor is intentionally hidden so callers can only compare a later
+-- observation with the complete captured chain.
+data DirectoryPathIdentity
+  = DirectoryPathIdentity OsPath [(OsPath, FileIdentity)]
+  deriving (Eq, Show)
+
+
 -- | The identity and change metadata of a regular file at one instant.
 --
 -- The representation is intentionally opaque.  A snapshot can be passed back
@@ -238,6 +251,47 @@ data FileModeSnapshot
 -- | Gets the stable entry identity retained by a regular-file snapshot.
 fileSnapshotIdentity :: FileSnapshot -> FileIdentity
 fileSnapshotIdentity (FileSnapshot identity _ _ _) = identity
+
+
+-- | Captures a non-symbolic-link directory and all of its ancestors.
+--
+-- The chain is observed twice and accepted only when both observations agree,
+-- so a replacement during capture fails closed.
+captureDirectoryPathIdentity
+  :: (MonadFileSystem m) => OsPath -> m (Maybe DirectoryPathIdentity)
+captureDirectoryPathIdentity path = do
+  first <- observe
+  second <- observe
+  return $
+    if first == second
+      then DirectoryPathIdentity normalized <$> first
+      else Nothing
+ where
+  normalized = normalise path
+  paths =
+    map joinPath $
+      drop 1 $
+        inits $
+          splitDirectories normalized
+  observe = do
+    entries <-
+      forM paths $ \entry -> do
+        symbolicLink <- isSymlink entry
+        directory <- isDirectory entry
+        if symbolicLink || not directory
+          then return Nothing
+          else do
+            identity <- getFileIdentity entry
+            return $ fmap (\value -> (entry, value)) identity
+    return $ sequence entries
+
+
+-- | Checks whether a directory and its complete ancestor chain still match a
+-- previously captured observation.
+matchesDirectoryPathIdentity
+  :: (MonadFileSystem m) => DirectoryPathIdentity -> m Bool
+matchesDirectoryPathIdentity expected@(DirectoryPathIdentity path _) =
+  (== Just expected) <$> captureDirectoryPathIdentity path
 
 
 -- | The result of reading a regular file with an explicit byte limit.
@@ -2166,6 +2220,41 @@ readFileFromDryRunIO seqOffset src = do
       `ioeSetErrorString` "is a directory"
 
 
+readRegularFileBoundedFromDryRunIO
+  :: SeqNo -> Int -> OsPath -> DryRunIO BoundedFileRead
+readRegularFileBoundedFromDryRunIO seqOffset limit src = do
+  oFiles <- gets overlaidFiles
+  case oFiles !? normalise src of
+    Nothing -> fallback
+    Just changes ->
+      let filteredChanges = filter (\(no, _) -> no <= seqOffset) changes
+      in case filteredChanges of
+           [] -> fallback
+           (_, Contents contents) : _ -> return $ bounded contents
+           (seqNo, Copied source) : _ ->
+             readRegularFileBoundedFromDryRunIO seqNo limit source
+           (_, SymlinkTo target _) : _ -> do
+             resolved <-
+               chaseOverlaidLinksAt "readRegularFileBounded" seqOffset $
+                 resolveLinkTarget src target
+             readRegularFileBoundedFromDryRunIO seqOffset limit resolved
+           (_, Gone) : _ -> do
+             src' <- decodePath src
+             throwError $
+               mkIOError
+                 doesNotExistErrorType
+                 "readRegularFileBounded"
+                 Nothing
+                 (Just src')
+                 `ioeSetErrorString` "no such file"
+           (_, Directory') : _ -> return NotRegularFile
+ where
+  fallback = liftIO $ readRegularFileBoundedIO limit src
+  bounded contents
+    | Data.ByteString.length contents > limit = FileSizeLimitExceeded
+    | otherwise = BoundedFileContents contents
+
+
 instance MonadFileSystem DryRunIO where
   encodePath = liftIO . encodeFS
 
@@ -2235,6 +2324,11 @@ instance MonadFileSystem DryRunIO where
   readFile src = do
     seqNo <- gets currentSequenceNumber
     readFileFromDryRunIO seqNo src
+
+
+  readRegularFileBounded limit src = do
+    seqNo <- gets currentSequenceNumber
+    readRegularFileBoundedFromDryRunIO seqNo limit src
 
 
   copyRegularFileWithSnapshot expectedSnapshot source destination = do

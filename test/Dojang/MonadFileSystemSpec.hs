@@ -92,7 +92,9 @@ import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , FileType (..)
   , MonadFileSystem (..)
+  , captureDirectoryPathIdentity
   , dryRunIO
+  , matchesDirectoryPathIdentity
   , tryDryRunIO
   )
 import Dojang.TestUtils (withTempDir)
@@ -533,6 +535,41 @@ spec = do
       isDirectory testP `shouldReturn` True
       isDirectory nonExistentP `shouldReturn` False
 
+    specify
+      "directory path identities reject arbitrary replaced ancestors"
+      $ hedgehog
+      $ do
+        depth <- forAll $ Gen.int $ constantFrom 1 1 8
+        suffix <-
+          forAll $
+            Gen.string
+              (constantFrom 1 1 24)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        unchanged <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              rootName <- encodeFS $ "root-" <> suffix
+              movedName <- encodeFS $ "moved-" <> suffix
+              childNames <-
+                traverse
+                  (encodeFS . ("child-" <>) . show)
+                  [1 .. depth]
+              let root = tmpDir </> rootName
+                  moved = tmpDir </> movedName
+                  selected = foldl (</>) root childNames
+              createDirectories selected
+              Just identity <- captureDirectoryPathIdentity selected
+              renameDirectory root moved
+              createDirectory root
+              case childNames of
+                [] -> fail "A generated directory path had no child."
+                first : _ ->
+                  renameDirectory
+                    (moved </> first)
+                    (root </> first)
+              matchesDirectoryPathIdentity identity
+        unchanged === False
+
     symSpecify "isSymlink" $ do
       isSymlink packageYamlP `shouldReturn` False
       isSymlink testP `shouldReturn` False
@@ -849,6 +886,23 @@ spec = do
       filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicode
       filePath' <- liftIO $ dryRunIO (encodePath filePath >>= decodePath)
       filePath' === filePath
+
+    specify "readRegularFileBounded enforces arbitrary copied-file limits" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        limit <- forAll $ Gen.int $ constantFrom 0 0 4096
+        observed <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              let source = tmpDir </> foo
+                  copied = tmpDir </> bar
+              writeFile source contents
+              dryRunIO $ do
+                copyFile source copied
+                readRegularFileBounded limit copied
+        if Data.ByteString.length contents > limit
+          then observed === FileSizeLimitExceeded
+          else observed === BoundedFileContents contents
 
     specify "makeAbsolute" $ do
       currentDirectory <- OsDirectory.getCurrentDirectory

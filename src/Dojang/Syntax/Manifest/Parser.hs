@@ -10,10 +10,12 @@ module Dojang.Syntax.Manifest.Parser
   , Error (..)
   , formatErrors
   , readManifest
+  , readManifestBytes
   , readManifestFile
   ) where
 
 import Data.Bifunctor (Bifunctor (first))
+import Data.ByteString (ByteString)
 import Data.Either (lefts)
 import Data.List (nub)
 import Data.List.NonEmpty (NonEmpty ((:|)))
@@ -213,6 +215,18 @@ readManifest toml = case decode $ unpack toml of
   Failure [] -> Left $ TomlErrors $ "unknown error" :| []
 
 
+-- | Decodes a UTF-8 manifest from strict bytes.
+readManifestBytes
+  :: ByteString
+  -- ^ A UTF-8 TOML document.
+  -> Either Error (Manifest, [TomlWarning])
+  -- ^ A decoded manifest with warnings, or a list of errors.
+readManifestBytes content =
+  case decodeUtf8' content of
+    Left err -> Left $ InvalidUtf8 $ pack $ show err
+    Right source -> readManifest source
+
+
 -- | Reads a 'Manifest' file from the given path.  It assumes that the file
 -- is encoded in UTF-8.  Throws an 'IOError' if the file cannot be read.
 readManifestFile
@@ -223,9 +237,7 @@ readManifestFile
   -- ^ A decoded manifest with warnings, or a list of errors.
 readManifestFile filePath = do
   content <- readFile filePath
-  return $ case decodeUtf8' content of
-    Left err -> Left $ InvalidUtf8 $ pack $ show err
-    Right source -> readManifest source
+  return $ readManifestBytes content
 
 
 -- | Format error messages.

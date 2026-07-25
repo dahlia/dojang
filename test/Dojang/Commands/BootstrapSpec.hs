@@ -31,6 +31,7 @@ import System.IO
 import System.IO.Temp (withSystemTempFile)
 import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, takeDirectory, (</>))
+import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
   , describe
@@ -63,6 +64,7 @@ import Dojang.ExitCodes
   , externalProgramNonZeroExit
   , machineStateError
   , manifestReadError
+  , manifestUninitialized
   )
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
@@ -655,6 +657,26 @@ spec = sequential $ do
         parentEntries
           `shouldSatisfy` all (not . isPrefixOf ".dojang-bootstrap-")
 
+    it "reports a missing manifest as an uninitialized repository" $
+      withBootstrapFixture $ \source sourceText destination _ home appEnv -> do
+        manifestName <- encodeFS "dojang.toml"
+        removeFile $ source </> manifestName
+        withHome
+          home
+          ( runAppWithoutLogging appEnv $
+              bootstrap
+                sourceText
+                Nothing
+                Nothing
+                []
+                True
+                True
+                Nothing
+                []
+          )
+          `shouldThrow` (== manifestUninitialized)
+        exists destination `shouldReturn` False
+
     it "reports a missing destination parent as a command-line error" $
       withBootstrapFixture $ \_ sourceText destination _ home appEnv -> do
         missingName <- encodeFS "missing"
@@ -682,24 +704,32 @@ spec = sequential $ do
       withBootstrapFixture $ \source sourceText destination _ home appEnv -> do
         manifestName <- encodeFS "dojang.toml"
         writeFile (source </> manifestName) legacyManifest
-        withHome
-          home
-          ( runAppWithoutLogging appEnv $
-              bootstrap
-                sourceText
-                Nothing
-                Nothing
-                []
-                True
-                True
-                Nothing
-                []
-          )
-          `shouldThrow` (== machineStateError)
+        (output, ()) <-
+          captureStderr $
+            withHome
+              home
+              ( runAppWithoutLogging appEnv $
+                  bootstrap
+                    sourceText
+                    Nothing
+                    Nothing
+                    []
+                    True
+                    True
+                    Nothing
+                    []
+              )
+              `shouldThrow` (== machineStateError)
+        output
+          `shouldSatisfy` (not . ByteString.isInfixOf "may require manual removal")
         readFile (destination </> manifestName)
           `shouldReturn` legacyManifest
 
     externalTransportSpec
+    specialTransportManifestSpec
+    destinationParentReplacementSpec
+    symbolicLinkParentSpec
+    symbolicLinkParentReplacementSpec
     cleanupWarningSpec
 
 
@@ -890,6 +920,290 @@ externalTransportSpec =
         exists failureStateRoot `shouldReturn` False
         entries <- traverse decodeFS =<< listDirectory tmp
         entries `shouldSatisfy` all (not . isPrefixOf ".dojang-bootstrap-")
+
+#ifdef mingw32_HOST_OS
+specialTransportManifestSpec :: Spec
+specialTransportManifestSpec = return ()
+
+
+destinationParentReplacementSpec :: Spec
+destinationParentReplacementSpec = return ()
+
+
+symbolicLinkParentSpec :: Spec
+symbolicLinkParentSpec = return ()
+
+
+symbolicLinkParentReplacementSpec :: Spec
+symbolicLinkParentReplacementSpec = return ()
+#else
+specialTransportManifestSpec :: Spec
+specialTransportManifestSpec =
+  it "rejects a special-file manifest created by a transport" $
+    withTempDir $ \tmp _ -> do
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      scriptName <- encodeFS "fifo-transport.sh"
+      configName <- encodeFS "fifo-transport.toml"
+      let source = tmp </> sourceName
+          destination = tmp </> destinationName
+          stateRoot = tmp </> stateName
+          home = tmp </> homeName
+          script = tmp </> scriptName
+          config = tmp </> configName
+          appEnv =
+            AppEnv
+              destination
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      createDirectory source
+      createDirectory home
+      writeFile script $
+        "#!/bin/sh\n"
+          <> "mkdir -p -- \"$2\"\n"
+          <> "mkfifo -- \"$2/dojang.toml\"\n"
+      setPortableMode script 0o755
+      scriptPath <- decodeFS script
+      writeFile config $
+        encodeUtf8 $
+          Text.pack $
+            "[transports.fifo]\ncommand = ["
+              <> show scriptPath
+              <> ", \"{source}\", \"{destination}\"]\n"
+      sourceText <- decodeFS source
+      result <-
+        timeout 30000000 $
+          Exception.try $
+            withHome home $
+              runAppWithoutLogging appEnv $
+                bootstrap
+                  sourceText
+                  (Just "fifo")
+                  (Just config)
+                  []
+                  True
+                  True
+                  Nothing
+                  []
+      result `shouldBe` Just (Left cliError)
+      exists destination `shouldReturn` False
+
+
+destinationParentReplacementSpec :: Spec
+destinationParentReplacementSpec =
+  it "rejects a destination parent replaced during transport" $
+    withTempDir $ \tmp _ -> do
+      repositoriesName <- encodeFS "repositories"
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      redirectedName <- encodeFS "redirected"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      scriptName <- encodeFS "replace-parent.sh"
+      configName <- encodeFS "replace-parent.toml"
+      let repositories = tmp </> repositoriesName
+          source = tmp </> sourceName
+          destination = repositories </> destinationName
+          redirected = tmp </> redirectedName
+          redirectedDestination = redirected </> destinationName
+          stateRoot = tmp </> stateName
+          home = tmp </> homeName
+          script = tmp </> scriptName
+          config = tmp </> configName
+          appEnv =
+            AppEnv
+              destination
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      createDirectory repositories
+      createDirectory source
+      createDirectory home
+      writeFile (source </> manifestName) validManifest
+      writeFile script $
+        "#!/bin/sh\n"
+          <> "parent=$(dirname -- \"$(dirname -- \"$2\")\")\n"
+          <> "mv -- \"$parent\" \"$parent-moved\"\n"
+          <> "mkdir -p -- \"$3\"\n"
+          <> "ln -s -- \"$3\" \"$parent\"\n"
+          <> "mkdir -p -- \"$2\"\n"
+          <> "cp -- \"$1/dojang.toml\" \"$2/dojang.toml\"\n"
+      setPortableMode script 0o755
+      scriptPath <- decodeFS script
+      redirectedPath <- decodeFS redirected
+      writeFile config $
+        encodeUtf8 $
+          Text.pack $
+            "[transports.replace]\ncommand = ["
+              <> show scriptPath
+              <> ", \"{source}\", \"{destination}\", "
+              <> show redirectedPath
+              <> "]\n"
+      sourceText <- decodeFS source
+      (output, result) <-
+        captureStderr $
+          Exception.try $
+          withHome home $
+            runAppWithoutLogging appEnv $
+              bootstrap
+                sourceText
+                (Just "replace")
+                (Just config)
+                []
+                True
+                True
+                Nothing
+                []
+      result `shouldBe` Left cliError
+      exists redirectedDestination `shouldReturn` False
+      output
+        `shouldSatisfy`
+          ByteString.isInfixOf
+            "The original staging tree may require manual removal"
+
+
+symbolicLinkParentSpec :: Spec
+symbolicLinkParentSpec =
+  it "accepts a destination beneath a stable symbolic-link parent" $
+    withTempDir $ \tmp _ -> do
+      actualName <- encodeFS "actual"
+      linkName <- encodeFS "linked"
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let actual = tmp </> actualName
+          linked = tmp </> linkName
+          source = tmp </> sourceName
+          destination = linked </> destinationName
+          published = actual </> destinationName
+          stateRoot = tmp </> stateName
+          home = tmp </> homeName
+          appEnv =
+            AppEnv
+              destination
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      createDirectory actual
+      createDirectory source
+      createDirectory home
+      writeFile (source </> manifestName) validManifest
+      System.Directory.OsPath.createDirectoryLink actual linked
+      sourceText <- decodeFS source
+      result <-
+        withHome home $
+          runAppWithoutLogging appEnv $
+            bootstrap
+              sourceText
+              Nothing
+              Nothing
+              []
+              True
+              True
+              Nothing
+              []
+      result `shouldBe` ExitSuccess
+      readFile (published </> manifestName)
+        `shouldReturn` validManifest
+
+
+symbolicLinkParentReplacementSpec :: Spec
+symbolicLinkParentReplacementSpec =
+  it "rejects a destination parent symlink repointed during transport" $
+    withTempDir $ \tmp _ -> do
+      actualName <- encodeFS "actual"
+      evilName <- encodeFS "evil"
+      linkName <- encodeFS "linked"
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      scriptName <- encodeFS "repoint-parent.sh"
+      configName <- encodeFS "repoint-parent.toml"
+      let actual = tmp </> actualName
+          evil = tmp </> evilName
+          linked = tmp </> linkName
+          source = tmp </> sourceName
+          destination = linked </> destinationName
+          redirectedDestination = evil </> destinationName
+          stateRoot = tmp </> stateName
+          home = tmp </> homeName
+          script = tmp </> scriptName
+          config = tmp </> configName
+          appEnv =
+            AppEnv
+              destination
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      createDirectory actual
+      createDirectory evil
+      createDirectory source
+      createDirectory home
+      writeFile (source </> manifestName) validManifest
+      System.Directory.OsPath.createDirectoryLink actual linked
+      writeFile script $
+        "#!/bin/sh\n"
+          <> "parent=$(dirname -- \"$(dirname -- \"$2\")\")\n"
+          <> "ln -sfn -- \"$3\" \"$parent\"\n"
+          <> "mkdir -p -- \"$2\"\n"
+          <> "cp -- \"$1/dojang.toml\" \"$2/dojang.toml\"\n"
+      setPortableMode script 0o755
+      scriptPath <- decodeFS script
+      evilPath <- decodeFS evil
+      writeFile config $
+        encodeUtf8 $
+          Text.pack $
+            "[transports.repoint]\ncommand = ["
+              <> show scriptPath
+              <> ", \"{source}\", \"{destination}\", "
+              <> show evilPath
+              <> "]\n"
+      sourceText <- decodeFS source
+      result <-
+        Exception.try $
+          withHome home $
+            runAppWithoutLogging appEnv $
+              bootstrap
+                sourceText
+                (Just "repoint")
+                (Just config)
+                []
+                True
+                True
+                Nothing
+                []
+      result `shouldBe` Left cliError
+      exists redirectedDestination `shouldReturn` False
+#endif
 
 #ifdef mingw32_HOST_OS
 cleanupWarningSpec :: Spec

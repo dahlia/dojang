@@ -69,11 +69,20 @@ To be released.
     reports its recovery path instead of silently hiding it.
     Directory traversal pins each opened directory and opens children without
     following links, so a transient directory-link replacement cannot redirect
-    enumeration outside the source.  Noninteractive bootstrap requires both
+    enumeration outside the source.  Bootstrap also resolves and records the
+    destination parent and its complete physical ancestor identity chain,
+    revalidating the lexical target and that chain across preparation,
+    acquisition, validation, and publication so an observed replacement aborts
+    the operation.  These boundary checks are not atomic with the following
+    path mutation; cleanup and post-publication mismatches therefore warn that
+    staging or a published copy may require manual removal.  Noninteractive
+    bootstrap requires both
     `--no-interactive` and `--yes`.  The selected bootstrap manifest must use a
     drive-less relative path inside the acquired repository without parent or
-    symbolic-link components, so validation and enrollment cannot resolve it
-    to different files before and after publication.  [[#47], [#74]]
+    symbolic-link components, and it must be a regular file no larger than
+    16 MiB.  Staged validation parses bytes read through the validated handle,
+    so a transport-created special file cannot block or redirect it.  [[#47],
+    [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's
