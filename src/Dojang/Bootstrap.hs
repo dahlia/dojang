@@ -364,6 +364,7 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
                 userError
                   "filesystem cannot atomically exchange the bootstrap destination"
             withExchangedDestinationRollback
+              destinationIdentity
               destinationMode
               staging
               destination
@@ -378,32 +379,40 @@ publishStagedDirectoryWithMetadata metadata staging destination = do
 
 withExchangedDestinationRollback
   :: (MonadFileSystem m, MonadMask m)
-  => PortableMode
+  => Maybe FileIdentity
+  -> PortableMode
   -> OsPath
   -> OsPath
   -> m a
   -> m a
-withExchangedDestinationRollback mode staging destination action = do
-  outcome <-
-    catchError
-      (Right <$> try action)
-      (return . Left)
-  case outcome of
-    Left filesystemError -> uninterruptibleMask_ $ do
-      restoreExchangedDestinationMode
-        mode
-        staging
-        destination
-      throwError filesystemError
-    Right (Left (exception :: SomeException)) -> uninterruptibleMask_ $ do
-      restoreExchangedDestinationMode
-        mode
-        staging
-        destination
-      case fromException exception of
-        Just filesystemError -> throwError filesystemError
-        Nothing -> throwM exception
-    Right (Right value) -> return value
+withExchangedDestinationRollback
+  identity
+  mode
+  staging
+  destination
+  action = do
+    outcome <-
+      catchError
+        (Right <$> try action)
+        (return . Left)
+    case outcome of
+      Left filesystemError -> uninterruptibleMask_ $ do
+        restoreExchangedDestinationMode
+          identity
+          mode
+          staging
+          destination
+        throwError filesystemError
+      Right (Left (exception :: SomeException)) -> uninterruptibleMask_ $ do
+        restoreExchangedDestinationMode
+          identity
+          mode
+          staging
+          destination
+        case fromException exception of
+          Just filesystemError -> throwError filesystemError
+          Nothing -> throwM exception
+      Right (Right value) -> return value
 
 
 resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
@@ -447,24 +456,25 @@ restoreExchangedDestination staging destination = do
 
 
 restoreExchangedDestinationMode
-  :: (MonadFileSystem m, MonadCatch m)
-  => PortableMode
+  :: (MonadFileSystem m)
+  => Maybe FileIdentity
+  -> PortableMode
   -> OsPath
   -> OsPath
   -> m ()
-restoreExchangedDestinationMode mode staging destination = do
-  modeResult <-
-    catchError
-      (try $ restorePortableMode staging mode)
-      (return . Left)
-  restoreExchangedDestination staging destination
-  case modeResult of
-    Left (err :: IOError) -> throwError err
-    Right False ->
-      throwError $
-        userError
-          "bootstrap destination permissions could not be restored"
-    Right True -> return ()
+restoreExchangedDestinationMode
+  expectedIdentity
+  mode
+  staging
+  destination = do
+    restoreExchangedDestination staging destination
+    actualIdentity <- getFileIdentity destination
+    when (actualIdentity == expectedIdentity) $ do
+      restored <- restorePortableMode destination mode
+      unless restored $
+        throwError $
+          userError
+            "bootstrap destination permissions could not be restored"
 
 
 copyDirectoryTree

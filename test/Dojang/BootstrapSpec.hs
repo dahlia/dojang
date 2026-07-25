@@ -33,6 +33,7 @@ import Control.Concurrent
   , putMVar
   , takeMVar
   , threadDelay
+  , tryPutMVar
   , tryTakeMVar
   )
 import Control.Exception
@@ -1482,6 +1483,8 @@ data CurrentDirectoryRace
       OsPath
       OsPath
       ByteString.ByteString
+      Word
+  | ReplaceDestinationWithSymlinkBeforeExchange OsPath OsPath OsPath
   | InterruptAfterExchange
       OsPath
       OsPath
@@ -1663,6 +1666,7 @@ instance MonadFileSystem CurrentDirectoryIO where
             racedStaging
             racedDestination
             contents
+            replacementMode
           )
           | source == racedStaging && destination == racedDestination ->
               liftIO $ do
@@ -1671,6 +1675,20 @@ instance MonadFileSystem CurrentDirectoryIO where
                 when (null destinationEntries) $ do
                   removeDirectory destination
                   writeFile destination contents
+                  setPortableMode destination replacementMode
+      Just
+        ( ReplaceDestinationWithSymlinkBeforeExchange
+            racedStaging
+            racedDestination
+            target
+          )
+          | source == racedStaging && destination == racedDestination ->
+              liftIO $ do
+                destinationEntries <-
+                  System.Directory.OsPath.listDirectory destination
+                when (null destinationEntries) $ do
+                  removeDirectory destination
+                  createSymbolicLink target destination File
       _ -> return ()
     concurrentPresent <- case racedEntry of
       Just (CreateAfterExchange racedDestination concurrentPath _)
@@ -1698,8 +1716,9 @@ instance MonadFileSystem CurrentDirectoryIO where
             _
           )
           | destination == racedDestination && exchanged -> liftIO $ do
-              writeFile concurrentPath contents
-              putMVar exchangeDone ()
+              firstExchange <- tryPutMVar exchangeDone ()
+              when firstExchange $
+                writeFile concurrentPath contents
       _ -> return ()
     return exchanged
   writeTemporaryFile directory template contents =
@@ -1785,14 +1804,14 @@ instance MonadFileSystem CurrentDirectoryIO where
             createSymbolicLink victimPath racedPath File
       Just
         ( InterruptDuringExchangeRollback
+            racedDestination
             _
-            concurrentPath
             _
             exchangeDone
             rollbackStarted
             releaseRollback
           )
-          | path == takeDirectory concurrentPath -> liftIO $ do
+          | path == racedDestination -> liftIO $ do
               exchanged <- tryTakeMVar exchangeDone
               case exchanged of
                 Just () -> do
@@ -2252,9 +2271,12 @@ symlinkSpecs = do
     hedgehog $ do
       concurrentContents <-
         forAll $ Gen.bytes $ Range.linear 0 4096
+      replacementMode <-
+        forAll $ (0o600 .|.) <$> Gen.word (Range.linear 0 0o77)
       ( published
         , destinationIsFile
         , destinationContents
+        , destinationMode
         , stagingIsDirectory
         , stagingContents
         ) <-
@@ -2268,6 +2290,7 @@ symlinkSpecs = do
             createDirectory staging
             createDirectory destination
             writeFile (staging </> manifestName) "manifest"
+            setPortableMode destination 0o500
             result <-
               runCurrentDirectoryIOWithRace
                 tmpDir
@@ -2275,11 +2298,13 @@ symlinkSpecs = do
                     staging
                     destination
                     concurrentContents
+                    replacementMode
                 )
                 (publishStagedDirectory staging destination)
             destinationRegular <- isRegularFile destination
             destinationValue <-
               if destinationRegular then readFile destination else return ""
+            destinationMode' <- getPortableMode destination
             stagingDirectory <- isDirectory staging
             stagingValue <-
               if stagingDirectory
@@ -2289,13 +2314,54 @@ symlinkSpecs = do
               ( result
               , destinationRegular
               , destinationValue
+              , destinationMode'
               , stagingDirectory
               , stagingValue
               )
       isLeft published === True
       destinationIsFile === True
       destinationContents === concurrentContents
+      destinationMode === portableModeFromBits replacementMode
       stagingIsDirectory === True
+      stagingContents === "manifest"
+
+  it "preserves a symlink target raced into a directory exchange" $
+    hedgehog $ do
+      targetContents <- forAll $ Gen.bytes $ Range.linear 0 4096
+      targetMode <-
+        forAll $ (0o600 .|.) <$> Gen.word (Range.linear 0 0o77)
+      (published, destinationIsSymlink, observedMode, stagingContents) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            targetName <- encodeFS "target"
+            manifestName <- encodeFS "dojang.toml"
+            let staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                target = tmpDir </> targetName
+            createDirectory staging
+            createDirectory destination
+            writeFile (staging </> manifestName) "manifest"
+            writeFile target targetContents
+            setPortableMode destination 0o500
+            setPortableMode target targetMode
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                ( ReplaceDestinationWithSymlinkBeforeExchange
+                    staging
+                    destination
+                    target
+                )
+                (publishStagedDirectory staging destination)
+            symbolicLink <- isSymlink destination
+            mode <- getPortableMode target
+            staged <- readFile $ staging </> manifestName
+            return (result, symbolicLink, mode, staged)
+      isLeft published === True
+      destinationIsSymlink === True
+      observedMode === portableModeFromBits targetMode
       stagingContents === "manifest"
 
   it "rolls back an interrupted directory exchange" $
