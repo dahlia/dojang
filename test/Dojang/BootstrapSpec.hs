@@ -1076,6 +1076,30 @@ archiveSpecialFileSpecs = do
       result `shouldBe` Right (Left ArchiveChangedDuringAcquisition)
       exists staging `shouldReturn` False
 
+  it "reports a staging cleanup failure with the acquisition failure" $
+    withTempDir $ \tmpDir _ -> do
+      archiveName <- encodeFS "cleanup-failure.tar"
+      stagingName <- encodeFS "cleanup-failure-staging"
+      let archivePath = tmpDir </> archiveName
+          staging = tmpDir </> stagingName
+      writeFile archivePath $
+        LazyByteString.toStrict $
+          Tar.write [tarFileEntry "cleanup-trigger" "contents"]
+      result <-
+        runFailingModeIO $
+          stageBuiltinSource
+            (ArchiveSource TarArchive archivePath)
+            staging
+      case result of
+        Left err -> do
+          Exception.displayException err
+            `shouldSatisfy` isInfixOf "injected extraction failure"
+          Exception.displayException err
+            `shouldSatisfy` isInfixOf "additionally, staging cleanup failed"
+          Exception.displayException err
+            `shouldSatisfy` isInfixOf "injected cleanup failure"
+        Right _ -> expectationFailure "staging unexpectedly succeeded"
+
   it "lets asynchronous archive-decoding exceptions escape" $
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "interrupted.zip"
@@ -1280,7 +1304,11 @@ instance MonadFileSystem FailingModeIO where
         snapshot
         source
         destination
-  writeFile path contents = liftIO (writeFile path contents :: IO ())
+  writeFile path contents = do
+    path' <- liftIO (decodePath path :: IO FilePath)
+    if FilePath.takeFileName path' == "cleanup-trigger"
+      then throwError $ userError "injected extraction failure"
+      else liftIO (writeFile path contents :: IO ())
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
   renameDirectory source destination = do
@@ -1306,6 +1334,13 @@ instance MonadFileSystem FailingModeIO where
     liftIO (createPrivateDirectory value :: IO ())
   removeFile value = liftIO (removeFile value :: IO ())
   removeDirectory value = liftIO (removeDirectory value :: IO ())
+  removeDirectoryRecursivelyIfIdentity value identity = do
+    path <- liftIO (decodePath value :: IO FilePath)
+    if FilePath.takeFileName path == "cleanup-failure-staging"
+      then throwError $ userError "injected cleanup failure"
+      else
+        liftIO $
+          removeDirectoryRecursivelyIfIdentity value identity
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
   getFileSize value = liftIO (getFileSize value :: IO Integer)
   getFileIdentity value =

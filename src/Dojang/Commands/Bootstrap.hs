@@ -533,7 +533,11 @@ cleanupStaging
 cleanupStaging staging identity =
   void
     (removeDirectoryRecursivelyIfIdentity staging identity)
-    `catchError` const (return ())
+    `catchError` \err ->
+      printStderr' Warning $
+        "Could not clean the bootstrap staging directory: "
+          <> Text.pack (displayException err)
+          <> "."
 
 
 reportFilesystemError :: (AppEffects i) => IOError -> App i a

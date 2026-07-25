@@ -62,9 +62,14 @@ To be released.
     paths to 4,096 characters, and path depth to 256 components, including
     bounded gzip decoding.  Broken Windows directory links retain their
     intrinsic link type, and interrupted publication widens restrictive
-    staging before cleanup.  Cleanup checks the staging root's recorded
-    filesystem identity immediately before removal and preserves a path that
-    already has a different identity.  Noninteractive bootstrap requires both
+    staging before cleanup.  Cleanup first moves the staging root to an
+    operating-system-random quarantine path, checks the moved entry's recorded
+    filesystem identity, and never recursively removes a concurrently created
+    replacement.  A failed restoration leaves the quarantine intact and
+    reports its recovery path instead of silently hiding it.
+    Directory traversal pins each opened directory and opens children without
+    following links, so a transient directory-link replacement cannot redirect
+    enumeration outside the source.  Noninteractive bootstrap requires both
     `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and

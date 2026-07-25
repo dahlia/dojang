@@ -696,10 +696,17 @@ cleanupStagingOnError
   :: (MonadFileSystem m) => OsPath -> FileIdentity -> m a -> m a
 cleanupStagingOnError staging identity action =
   action `catchError` \err -> do
-    void
-      (removeDirectoryRecursivelyIfIdentity staging identity)
-      `catchError` const (return ())
-    throwError err
+    cleanupResult <-
+      (removeDirectoryRecursivelyIfIdentity staging identity >> return Nothing)
+        `catchError` (return . Just)
+    case cleanupResult of
+      Nothing -> throwError err
+      Just cleanupError ->
+        throwError $
+          userError $
+            displayException err
+              <> "; additionally, staging cleanup failed: "
+              <> displayException cleanupError
 
 
 createOwnedPrivateDirectory

@@ -444,6 +444,7 @@ spec = sequential $ do
           `shouldReturn` legacyManifest
 
     externalTransportSpec
+    cleanupWarningSpec
 
 
 withBootstrapFixture
@@ -633,6 +634,77 @@ externalTransportSpec =
         exists failureStateRoot `shouldReturn` False
         entries <- traverse decodeFS =<< listDirectory tmp
         entries `shouldSatisfy` all (not . isPrefixOf ".dojang-bootstrap-")
+
+#ifdef mingw32_HOST_OS
+cleanupWarningSpec :: Spec
+cleanupWarningSpec = return ()
+#else
+cleanupWarningSpec :: Spec
+cleanupWarningSpec =
+  it "warns when a failed transport staging tree cannot be cleaned" $
+    withTempDir $ \tmp _ -> do
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      scriptName <- encodeFS "cleanup-failure.sh"
+      configName <- encodeFS "cleanup-failure.toml"
+      let source = tmp </> sourceName
+          destination = tmp </> destinationName
+          stateRoot = tmp </> stateName
+          home = tmp </> homeName
+          script = tmp </> scriptName
+          config = tmp </> configName
+          appEnv =
+            AppEnv
+              destination
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      createDirectory source
+      createDirectory home
+      writeFile script $
+        "#!/bin/sh\n"
+          <> "chmod 0500 \"$(dirname -- \"$(dirname -- \"$2\")\")\"\n"
+          <> "exit 23\n"
+      setPortableMode script 0o755
+      scriptPath <- decodeFS script
+      writeFile config $
+        encodeUtf8 $
+          Text.pack $
+            "[transports.copy]\ncommand = ["
+              <> show scriptPath
+              <> ", \"{source}\", \"{destination}\"]\n"
+      sourceText <- decodeFS source
+      (output, ()) <-
+        captureStderr $
+          ( withHome
+              home
+              ( runAppWithoutLogging appEnv $
+                  bootstrap
+                    sourceText
+                    (Just "copy")
+                    (Just config)
+                    []
+                    True
+                    True
+                    Nothing
+                    []
+              )
+              `shouldThrow` (== externalProgramNonZeroExit)
+          )
+            `Exception.finally` setPortableMode tmp 0o700
+      output
+        `shouldSatisfy`
+          ByteString.isInfixOf
+            "Could not clean the bootstrap staging directory"
+#endif
 
 #ifdef mingw32_HOST_OS
 nativeTransportInputSpec :: Spec

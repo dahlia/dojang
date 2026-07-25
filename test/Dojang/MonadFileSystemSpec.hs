@@ -17,6 +17,9 @@ import Control.Concurrent
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (xor)
+import Data.Char (chr)
+import Data.Either (isRight)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (sort, sortOn)
 import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import System.IO.Error
@@ -31,6 +34,7 @@ import System.IO.Error
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
+import Control.Monad (replicateM)
 import Control.Monad.Except (MonadError (catchError), tryError)
 import Data.ByteString qualified (length, map, readFile, writeFile)
 import Hedgehog.Gen qualified as Gen
@@ -136,6 +140,14 @@ posixDryRunPortableModeSpec = pure ()
 
 posixCopyInterruptionSpec :: Spec
 posixCopyInterruptionSpec = pure ()
+
+
+posixTraversalRaceSpec :: Spec
+posixTraversalRaceSpec = pure ()
+
+
+posixNativeTraversalSpec :: Spec
+posixNativeTraversalSpec = pure ()
 #else
 posixRegularFileSpec :: Spec
 posixRegularFileSpec =
@@ -328,6 +340,7 @@ posixCopyInterruptionSpec = do
       copied `shouldBe` Just False
       exists destination `shouldReturn` False
 
+
   specify "readRegularFileBounded rejects an in-place source mutation" $
     withTempDir $ \tmpDir tmpDir' -> do
       sourceName <- encodeFS "source"
@@ -366,6 +379,80 @@ posixCopyInterruptionSpec = do
       timeout 5000000 (takeMVar mutationFinished)
         `shouldReturn` Just ()
       observed `shouldBe` Just FileChangedDuringRead
+
+
+posixTraversalRaceSpec :: Spec
+posixTraversalRaceSpec =
+  specify "listDirectoryRecursively never follows a raced directory link" $
+    withTempDir $ \tmpDir _ -> do
+      nestedName <- encodeFS "nested"
+      parkedName <- encodeFS "parked"
+      outsideName <- encodeFS "outside"
+      sentinelName <- encodeFS "outside-sentinel"
+      fillerNames <-
+        traverse (encodeFS . ("filler-" <>) . show) [1 .. 512 :: Int]
+      let nested = tmpDir </> nestedName
+          parked = tmpDir </> parkedName
+          outside = tmpDir </> outsideName
+          escaped = nestedName </> sentinelName
+      createDirectory nested
+      createDirectory outside
+      writeFile (outside </> sentinelName) "outside"
+      mapM_ (\name -> writeFile (tmpDir </> name) "") fillerNames
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      completedMutations <- newIORef (0 :: Int)
+      _ <-
+        forkFinally
+          ( let mutate = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      OsDirectory.renameDirectory nested parked
+                      createDirectoryLink outside nested
+                      removeFile nested
+                      OsDirectory.renameDirectory parked nested
+                      atomicModifyIORef' completedMutations $ \count ->
+                        (count + 1, ())
+                      mutate
+            in mutate
+          )
+          (putMVar mutationFinished)
+      outcomes <-
+        replicateM 100 (tryError $ listDirectoryRecursively tmpDir [])
+          `Exception.finally` putMVar stopMutating ()
+      mutationOutcome <- timeout 5000000 $ takeMVar mutationFinished
+      case mutationOutcome of
+        Nothing -> expectationFailure "the mutation thread did not stop"
+        Just (Left exception) ->
+          expectationFailure $
+            "the mutation thread failed: " <> show exception
+        Just (Right ()) -> return ()
+      readIORef completedMutations >>= (`shouldSatisfy` (> 0))
+      outcomes `shouldSatisfy` any isRight
+      outcomes
+        `shouldSatisfy` all
+          ( \case
+              Left _ -> True
+              Right entries -> (File, escaped) `notElem` entries
+          )
+
+
+posixNativeTraversalSpec :: Spec
+posixNativeTraversalSpec =
+  specify "listDirectoryRecursively preserves arbitrary native name bytes" $
+    hedgehog $ do
+      byte <- forAll $ Gen.word8 $ constantFrom 0x80 0x80 0xff
+      observed <-
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            name <- encodeFS [chr $ 0xdc00 + fromIntegral byte]
+            writeFile (tmpDir </> name) ""
+            entries <- listDirectoryRecursively tmpDir []
+            return (name, entries)
+      case observed of
+        (name, entries) -> entries === [(File, name)]
 #endif
 
 
@@ -678,21 +765,28 @@ spec = do
           `shouldReturn` True
         exists owned `shouldReturn` False
 
-    specify "removeDirectoryRecursivelyIfIdentity preserves a replacement" $
-      withTempDir $ \tmpDir _ -> do
-        ownedName <- encodeFS "owned"
-        movedName <- encodeFS "moved"
-        sentinelName <- encodeFS "sentinel"
-        let owned = tmpDir </> ownedName
-            moved = tmpDir </> movedName
-        createDirectory owned
-        Just identity <- getFileIdentity owned
-        renameDirectory owned moved
-        createDirectory owned
-        writeFile (owned </> sentinelName) "replacement"
-        removeDirectoryRecursivelyIfIdentity owned identity
-          `shouldReturn` False
-        readFile (owned </> sentinelName) `shouldReturn` "replacement"
+    specify
+      "removeDirectoryRecursivelyIfIdentity preserves arbitrary replacements"
+      $ hedgehog
+      $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            ownedName <- encodeFS "owned"
+            movedName <- encodeFS "moved"
+            sentinelName <- encodeFS "sentinel"
+            let owned = tmpDir </> ownedName
+                moved = tmpDir </> movedName
+            createDirectory owned
+            Just identity <- getFileIdentity owned
+            renameDirectory owned moved
+            createDirectory owned
+            writeFile (owned </> sentinelName) contents
+            removeDirectoryRecursivelyIfIdentity owned identity
+              `shouldReturn` False
+            readFile (owned </> sentinelName) `shouldReturn` contents
+            sort <$> listDirectory tmpDir
+              `shouldReturn` sort [ownedName, movedName]
 
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir
@@ -734,6 +828,9 @@ spec = do
                          , (Symlink, corge)
                          , (File, foo)
                          ]
+
+      posixTraversalRaceSpec
+      posixNativeTraversalSpec
 
     specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
       Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"

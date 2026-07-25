@@ -19,6 +19,10 @@ private in staging, then publishes it with one atomic no-replace directory
 rename.  If another process creates the destination first, publication fails
 without modifying that entry.  Filesystems without an atomic no-replace rename
 are rejected instead of using an entry-by-entry fallback.
+When cleanup is needed, Dojang first moves the staging tree to an
+operating-system-random quarantine name and verifies the moved entry's identity.
+It restores a raced replacement instead of deleting it.  If restoration fails,
+Dojang leaves the quarantine intact and prints its recovery path.
 
 
 Local directories and archives
@@ -36,16 +40,19 @@ creating staging.  Choose a sibling or otherwise disjoint destination instead.
 Dojang copies symbolic links as links instead of following them.  Other entries
 in a directory source must be regular files or directories; FIFOs, sockets,
 devices, and other special files are rejected before they are read.  Dojang
-rejects source paths that collide after case folding or Unicode normalization,
-before copying any entry.  This prevents distinct names on a case-sensitive
-source filesystem from collapsing in staging.  Dojang pins the identity of the
-source root and every entry during validation.  Stored directory permissions
-come from the same filesystem observation as the corresponding identity.
-Regular files are checked through the same open handle used to copy them, and
-the source tree is enumerated again after copying.  If an entry was added or
-removed, changed type, or no longer matches its recorded identity and change
-metadata, bootstrap stops without publishing the staged copy.  Dojang also
-accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
+holds each directory open while enumerating it and opens child directories
+without following links.  Replacing a directory with a link during traversal
+therefore stops or observes the link itself instead of scanning its target.
+It rejects source paths that collide after case folding or Unicode
+normalization before copying any entry.  This prevents distinct names on a
+case-sensitive source filesystem from collapsing in staging.  Dojang pins the
+identity of the source root and every entry during validation.  Stored
+directory permissions come from the same filesystem observation as the
+corresponding identity.  Regular files are checked through the same open handle
+used to copy them, and the source tree is enumerated again after copying.  If an
+entry was added or removed, changed type, or no longer matches its recorded
+identity and change metadata, bootstrap stops without publishing the staged
+copy.  Dojang also accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz

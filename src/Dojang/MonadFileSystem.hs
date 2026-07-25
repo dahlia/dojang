@@ -69,9 +69,11 @@ import Data.ByteString qualified
   , length
   , null
   , readFile
+  , unpack
   , writeFile
   )
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
+import Numeric (showHex)
 import System.Directory qualified as Directory
 import System.Directory.OsPath
   ( doesDirectoryExist
@@ -82,6 +84,7 @@ import System.Directory.OsPath
   , removeDirectoryRecursive
   )
 import System.Directory.OsPath qualified as OsDirectory
+import System.Entropy (getEntropy)
 import System.FileLock qualified as FileLock
 
 import Dojang.Types.RouteMetadata
@@ -111,16 +114,21 @@ import System.Win32.Time qualified as Win32Time
 import System.Win32.Types qualified as Win32
 #else
 import Foreign.C.Error qualified as CError
-import Foreign.C.Types (CInt (CInt))
+import Foreign.C.String (CString)
+import Foreign.C.Types (CInt (CInt), CSize (CSize))
+import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Ptr (Ptr)
+import GHC.Foreign qualified as GHC
+import GHC.IO.Encoding (getFileSystemEncoding)
 import GHC.IO.Exception qualified as GHCIO
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
-import Foreign.C.String (CString)
 import Foreign.C.Types (CUInt (CUInt))
-import System.Posix.Internals qualified as PosixInternal
 #endif
 import System.Posix.Directory qualified as PosixDirectory
 import System.Posix.Files qualified as Posix
 import System.Posix.IO qualified as Posix
+import System.Posix.Internals qualified as PosixInternal
+import System.Posix.Types (Fd)
 #endif
 import System.FilePattern (FilePattern, Step (stepApply, stepDone), step_)
 import System.IO
@@ -583,11 +591,16 @@ class (MonadError IOError m) => MonadFileSystem m where
       `mapError` (`ioePrependLocation` "removeDirectoryRecursively")
 
 
-  -- | Checks a directory root's identity immediately before recursively
-  -- removing it.
+  -- | Removes a directory root only when it has the expected identity.
   --
-  -- Returns 'False' without starting removal when the path is absent, its
-  -- identity already differs, or the interpreter cannot verify identities.
+  -- Returns 'False' without removing anything when the path is absent, its
+  -- identity differs, or the interpreter cannot verify identities.
+  -- Filesystem-backed implementations must bind the final identity check to
+  -- the entry being removed, for example by atomically moving it to an
+  -- exclusively allocated quarantine path before checking and recursively
+  -- deleting it.  A raced replacement may be moved briefly and restored.
+  -- Restoration failures must name the preserved quarantine path in the
+  -- resulting error.
   removeDirectoryRecursivelyIfIdentity
     :: (HasCallStack) => OsPath -> FileIdentity -> m Bool
   removeDirectoryRecursivelyIfIdentity path expectedIdentity = do
@@ -608,6 +621,9 @@ class (MonadError IOError m) => MonadFileSystem m where
   --
   -- Note that it doesn't follow symbolic links.  Instead, it returns the
   -- symbolic links themselves with the 'Symlink' file type.
+  -- Filesystem-backed implementations must keep each traversed directory
+  -- pinned and open child directories without following links, so a concurrent
+  -- pathname replacement cannot redirect traversal.
   listDirectoryRecursively
     :: (HasCallStack)
     => OsPath
@@ -756,6 +772,261 @@ listDirectoryRecursively' path ptnStep = do
     subentries <- listDirectoryRecursively' (path </> dir) step
     return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
   return $ files' ++ symlinks' ++ concat dirs'
+
+#ifdef mingw32_HOST_OS
+listDirectoryRecursivelyIO
+  :: OsPath -> [FilePattern] -> IO [(FileType, OsPath)]
+listDirectoryRecursivelyIO path ignorePatterns = do
+  resolved <- OsDirectory.canonicalizePath path
+  withPinnedDirectory resolved $ go resolved (step_ ignorePatterns)
+ where
+  go current ptnStep = do
+    unfilteredEntries <- OsDirectory.listDirectory current
+    entriesWithSteps <- forM unfilteredEntries $ \entry -> do
+      decoded <- decodeFS entry
+      return (entry, stepApply ptnStep decoded)
+    fmap concat $
+      forM
+        [ pair
+        | pair@(_, nextStep) <- entriesWithSteps
+        , null $ stepDone nextStep
+        ]
+        $ \(entry, nextStep) -> do
+          let entryPath = current </> entry
+          ( withPinnedEntry entryPath $ \fileType -> case fileType of
+              Directory -> do
+                descendants <- go entryPath nextStep
+                return $
+                  (Directory, entry)
+                    : fmap (fmap (entry </>)) descendants
+              entryType -> return [(entryType, entry)]
+            )
+            `catchError` \err ->
+              if isDoesNotExistError err
+                then return []
+                else throwError err
+
+
+withPinnedDirectory :: OsPath -> IO a -> IO a
+withPinnedDirectory path action =
+  withPinnedEntry path $ \fileType ->
+    if fileType == Directory
+      then action
+      else throwPinnedDirectoryError path "not a directory"
+
+
+withPinnedEntry :: OsPath -> (FileType -> IO a) -> IO a
+withPinnedEntry path action =
+  withEntryHandle
+    path
+    ( Win32.fILE_SHARE_READ
+        .|. Win32.fILE_SHARE_WRITE
+        .|. Win32.fILE_SHARE_DELETE
+    )
+    $ \information -> do
+      let attributes = information.bhfiFileAttributes
+      if attributes .&. Win32.fILE_ATTRIBUTE_REPARSE_POINT /= 0
+        then action Symlink
+        else
+          if attributes .&. Win32.fILE_ATTRIBUTE_DIRECTORY /= 0
+            then
+              withPinnedDirectoryEntry
+                path
+                (fileIdentityFromInformation information)
+                (action Directory)
+            else action File
+
+
+withPinnedDirectoryEntry
+  :: OsPath -> FileIdentity -> IO a -> IO a
+withPinnedDirectoryEntry path expectedIdentity action =
+  withEntryHandle
+    path
+    (Win32.fILE_SHARE_READ .|. Win32.fILE_SHARE_WRITE)
+    $ \information -> do
+      let attributes = information.bhfiFileAttributes
+          supported =
+            attributes .&. Win32.fILE_ATTRIBUTE_REPARSE_POINT == 0
+              && attributes .&. Win32.fILE_ATTRIBUTE_DIRECTORY /= 0
+          unchanged =
+            fileIdentityFromInformation information == expectedIdentity
+      if supported && unchanged
+        then action
+        else throwPinnedDirectoryError path "directory changed during traversal"
+
+
+withEntryHandle
+  :: OsPath
+  -> Win32.DWORD
+  -> (Win32.BY_HANDLE_FILE_INFORMATION -> IO a)
+  -> IO a
+withEntryHandle path shareMode action = do
+  path' <- decodeFS path
+  Exception.bracket
+    ( Win32.createFile
+        path'
+        Win32.gENERIC_NONE
+        shareMode
+        Nothing
+        Win32.oPEN_EXISTING
+        (Win32.fILE_FLAG_BACKUP_SEMANTICS .|. fileFlagOpenReparsePoint)
+        Nothing
+    )
+    Win32.closeHandle
+    $ \handle ->
+      Win32.getFileInformationByHandle handle >>= action
+ where
+  fileFlagOpenReparsePoint = 0x00200000
+
+
+throwPinnedDirectoryError :: OsPath -> String -> IO a
+throwPinnedDirectoryError path message = do
+  path' <- decodeFS path
+  ioError $
+    mkIOError InappropriateType "listDirectoryRecursively" Nothing (Just path')
+      `ioeSetErrorString` message
+#else
+data DirectoryStream
+
+
+foreign import ccall unsafe "dojang_fdopendir"
+  c_fdopendir :: CInt -> IO (Ptr DirectoryStream)
+
+
+foreign import ccall unsafe "dojang_readdir_name"
+  -- Returns 1 for one copied name, 0 at end of stream, or a negated errno.
+  c_readdirName
+    :: Ptr DirectoryStream -> CString -> CSize -> IO CInt
+
+
+foreign import ccall unsafe "dojang_closedir"
+  c_closedir :: Ptr DirectoryStream -> IO ()
+
+
+foreign import ccall unsafe "dojang_file_type_at"
+  -- Returns 1 for a directory, 2 for a symbolic link, 3 for another entry,
+  -- or a negated errno.
+  c_fileTypeAt :: CInt -> CString -> IO CInt
+
+
+listDirectoryRecursivelyIO
+  :: OsPath -> [FilePattern] -> IO [(FileType, OsPath)]
+listDirectoryRecursivelyIO path ignorePatterns = do
+  resolved <- OsDirectory.canonicalizePath path
+  path' <- decodeFS resolved
+  withPinnedDirectoryFd Nothing path' $ \descriptor ->
+    go descriptor (step_ ignorePatterns)
+ where
+ go descriptor ptnStep = do
+    unfilteredEntries <- listDirectoryFd descriptor
+    entriesWithSteps <- forM unfilteredEntries $ \entry -> do
+      decoded <- decodeFS entry
+      return (entry, decoded, stepApply ptnStep decoded)
+    fmap concat $
+      forM
+        [ triple
+        | triple@(_, _, nextStep) <- entriesWithSteps
+        , null $ stepDone nextStep
+        ]
+        $ \(entry, entry', nextStep) -> do
+          entryType <- getFileTypeAt descriptor entry'
+          case entryType of
+            Nothing -> return []
+            Just Symlink -> return [(Symlink, entry)]
+            Just Directory ->
+              ( withPinnedDirectoryFd
+                  (Just descriptor)
+                  entry'
+                  $ \childDescriptor -> do
+                    descendants <- go childDescriptor nextStep
+                    return $
+                      (Directory, entry)
+                        : fmap (fmap (entry </>)) descendants
+              )
+                `catchError` \err ->
+                  if isDoesNotExistError err
+                    then return []
+                    else throwError err
+            Just File -> return [(File, entry)]
+
+
+withPinnedDirectoryFd
+  :: Maybe Fd -> FilePath -> (Fd -> IO a) -> IO a
+withPinnedDirectoryFd parent path action =
+  Exception.bracket
+    ( Posix.openFdAt
+        parent
+        path
+        Posix.ReadOnly
+        Posix.defaultFileFlags
+          { Posix.nonBlock = True
+          , Posix.nofollow = True
+          , Posix.cloexec = True
+          , Posix.directory = True
+          }
+    )
+    Posix.closeFd
+    action
+
+
+listDirectoryFd :: Fd -> IO [OsPath]
+listDirectoryFd descriptor =
+  Exception.bracket acquire c_closedir $ \stream -> do
+    encoding <- getFileSystemEncoding
+    allocaBytes maximumNameBytes $ \buffer -> go encoding stream buffer []
+ where
+  acquire = do
+    duplicated <- Posix.dup descriptor
+    stream <-
+      CError.throwErrnoIfNull "fdopendir" (c_fdopendir $ fromIntegral duplicated)
+        `Exception.onException` Posix.closeFd duplicated
+    return stream
+
+  go encoding stream buffer entries = do
+    result <-
+      c_readdirName
+        stream
+        buffer
+        (fromIntegral maximumNameBytes)
+    case compare result 0 of
+      LT -> throwErrnoCode "readdir" $ negate result
+      EQ -> return $ reverse entries
+      GT -> do
+        entry <- GHC.peekCString encoding buffer
+        if entry == "." || entry == ".."
+          then go encoding stream buffer entries
+          else do
+            encoded <- encodeFS entry
+            go encoding stream buffer $ encoded : entries
+
+  maximumNameBytes = 4096
+
+
+getFileTypeAt :: Fd -> FilePath -> IO (Maybe FileType)
+getFileTypeAt descriptor entry =
+  PosixInternal.withFilePath entry $ \entryPath -> do
+    result <- c_fileTypeAt (fromIntegral descriptor) entryPath
+    case result of
+      1 -> return $ Just Directory
+      2 -> return $ Just Symlink
+      3 -> return $ Just File
+      value
+        | value < 0 && CError.Errno (negate value) == CError.eNOENT ->
+            return Nothing
+        | value < 0 -> throwErrnoCode "fstatat" $ negate value
+        | otherwise ->
+            ioError $ userError "fstatat returned an invalid file type"
+
+
+throwErrnoCode :: String -> CInt -> IO a
+throwErrnoCode location err =
+  Exception.throwIO $
+    CError.errnoToIOError
+      location
+      (CError.Errno err)
+      Nothing
+      Nothing
+#endif
 
 #if defined(linux_HOST_OS)
 atFdcwd :: CInt
@@ -1324,6 +1595,87 @@ throwNoReplaceUnsupported destination =
 #endif
 
 
+removeDirectoryRecursivelyIfIdentityIO
+  :: OsPath -> FileIdentity -> IO Bool
+removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
+  Exception.mask $ \restore -> do
+    initialIdentity <- getFileIdentityIO path
+    if initialIdentity /= Just expectedIdentity
+      then return False
+      else do
+        quarantined <- quarantineDirectory maximumQuarantineAttempts path
+        case quarantined of
+          Nothing -> return False
+          Just quarantine -> do
+            actualIdentity <- getFileIdentityIO quarantine
+            if actualIdentity == Just expectedIdentity
+              then restore (removeDirectoryRecursivelyIO quarantine) >> return True
+              else do
+                restore (restoreQuarantine quarantine)
+                return False
+ where
+  quarantineDirectory attempts source
+    | attempts < 1 =
+        throwError $
+          userError "could not allocate a unique cleanup quarantine path"
+    | otherwise = do
+        randomBytes <- getEntropy 16
+        name <-
+          encodeFS $
+            ".dojang-cleanup-" <> encodeHex (Data.ByteString.unpack randomBytes)
+        let quarantine = takeDirectory source </> name
+        ( ( retryOnPermissionErrorsOnWindows 10 $
+              renameDirectoryNoReplaceIO source quarantine
+          )
+            >> return (Just quarantine)
+          )
+          `catchError` \err ->
+            if isDoesNotExistError err
+              then return Nothing
+              else
+                if isAlreadyExistsError err
+                  then quarantineDirectory (attempts - 1) source
+                  else throwError err
+
+  restoreQuarantine quarantine =
+    ( retryOnPermissionErrorsOnWindows 10 $
+        renameDirectoryNoReplaceIO quarantine path
+    )
+      `catchError` \err -> do
+        quarantine' <- decodeFS quarantine
+        throwError $
+          userError $
+            "cleanup preserved a concurrently replaced directory at "
+              <> quarantine'
+              <> ": "
+              <> Exception.displayException err
+
+  maximumQuarantineAttempts :: Int
+  maximumQuarantineAttempts = 128
+
+  encodeHex = concatMap $ \byte ->
+    let encoded = showHex byte ""
+    in if length encoded < 2 then '0' : encoded else encoded
+
+
+removeDirectoryRecursivelyIO :: OsPath -> IO ()
+removeDirectoryRecursivelyIO =
+  retryOnPermissionErrorsOnWindows 10 . removeDirectoryRecursive
+
+
+retryOnPermissionErrorsOnWindows :: Int -> IO () -> IO ()
+retryOnPermissionErrorsOnWindows retry action
+  | os /= "mingw32" = action
+  | retry < 1 = action
+  | otherwise =
+      action `catchError` \err ->
+        if isPermissionError err
+          then do
+            threadDelay 100
+            retryOnPermissionErrorsOnWindows (retry - 1) action
+          else throwError err
+
+
 readRegularFileBoundedIO :: Int -> OsPath -> IO BoundedFileRead
 readRegularFileBoundedIO limit path = do
   result <-
@@ -1532,24 +1884,18 @@ instance MonadFileSystem IO where
   removeDirectory = OsDirectory.removeDirectory
 
 
-  removeDirectoryRecursively =
-    retryOnPermissionErrorsOnWindows 10 . removeDirectoryRecursive
-   where
-    -- See also: https://github.com/jaspervdj/hakyll/pull/783
-    retryOnPermissionErrorsOnWindows :: Int -> IO () -> IO ()
-    retryOnPermissionErrorsOnWindows retry action
-      | os /= "mingw32" = action
-      | retry < 1 = action
-      | otherwise =
-          action `catchError` \e ->
-            if isPermissionError e
-              then do
-                threadDelay 100
-                retryOnPermissionErrorsOnWindows (retry - 1) action
-              else throwError e
+  -- See also: https://github.com/jaspervdj/hakyll/pull/783
+  removeDirectoryRecursively = removeDirectoryRecursivelyIO
+
+
+  removeDirectoryRecursivelyIfIdentity =
+    removeDirectoryRecursivelyIfIdentityIO
 
 
   listDirectory = OsDirectory.listDirectory
+
+
+  listDirectoryRecursively = listDirectoryRecursivelyIO
 
 
   getFileSize path = do
