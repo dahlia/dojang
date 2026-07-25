@@ -13,8 +13,8 @@ module Dojang.Commands.Bootstrap
   ) where
 
 import Control.Exception (displayException)
-import Control.Monad (unless, when)
-import Control.Monad.Catch (onException)
+import Control.Monad (unless, void, when)
+import Control.Monad.Catch (mask, onException)
 import Control.Monad.Except (MonadError (catchError))
 import Control.Monad.Reader (asks, local)
 import Data.List (isPrefixOf)
@@ -71,7 +71,7 @@ import Dojang.ExitCodes
   ( cliError
   , externalProgramNonZeroExit
   )
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem (FileIdentity, MonadFileSystem (..))
 import Dojang.Syntax.Transport qualified as TransportSyntax
 import Dojang.Types.PathIdentity (pathIdentityComponents)
 import Dojang.Types.Transport
@@ -219,17 +219,25 @@ bootstrapInto
     stagingRoot <- newStagingPath destination
     repositoryName <- encodePath "repository"
     let staging = stagingRoot </> repositoryName
-        cleanup = cleanupStaging stagingRoot
-    catchCommandExit
-      ( onException
-          (bootstrapAction preparedBuiltin stagingRoot staging)
-          cleanup
-      )
-      (\exitCode -> cleanup >> abortCommand exitCode)
+    mask $ \restore -> do
+      stagingIdentity <-
+        (createPrivateDirectory stagingRoot >> getFileIdentity stagingRoot)
+          `catchError` reportFilesystemError
+      identity <- case stagingIdentity of
+        Just value -> return value
+        Nothing ->
+          -- Failing closed avoids touching an unidentifiable replacement.
+          reportFilesystemError $
+            userError "filesystem cannot identify bootstrap staging"
+      let cleanup = cleanupStaging stagingRoot identity
+      catchCommandExit
+        ( onException
+            (restore $ bootstrapAction preparedBuiltin cleanup staging)
+            cleanup
+        )
+        (\exitCode -> cleanup >> abortCommand exitCode)
    where
-    bootstrapAction preparedBuiltin stagingRoot staging = do
-      createPrivateDirectory stagingRoot
-        `catchError` reportFilesystemError
+    bootstrapAction preparedBuiltin cleanup staging = do
       acquired <-
         ( case requestedTransport of
             Nothing ->
@@ -245,12 +253,13 @@ bootstrapInto
         )
           `catchError` reportFilesystemError
       case acquired of
-        Nothing -> cleanupStaging stagingRoot >> return ExitSuccess
+        Nothing -> cleanup >> return ExitSuccess
         Just metadata -> do
           catchError
             ( validateStaging staging
                 >> publishStaging metadata staging destination
-                >> cleanupStaging stagingRoot
+                >> cleanup
+                >> return ()
             )
             reportFilesystemError
           enrolled <-
@@ -517,16 +526,14 @@ publishStaging metadata staging destination = do
 
 
 cleanupStaging
-  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
-cleanupStaging staging = do
-  symbolicLink <- isSymlink staging
-  directory <- isDirectory staging
-  present <- exists staging
-  if directory && not symbolicLink
-    then removeDirectoryRecursively staging `catchError` const (return ())
-    else
-      when (symbolicLink || present) $
-        removeFile staging `catchError` const (return ())
+  :: (MonadFileSystem i, AppEffects i)
+  => OsPath
+  -> FileIdentity
+  -> App i ()
+cleanupStaging staging identity =
+  void
+    (removeDirectoryRecursivelyIfIdentity staging identity)
+    `catchError` const (return ())
 
 
 reportFilesystemError :: (AppEffects i) => IOError -> App i a
@@ -577,6 +584,12 @@ reportAcquisitionError err =
       "Unsupported archive entry: " <> Text.pack path <> "."
     UnsupportedSourceEntry path ->
       "Unsupported directory source entry: " <> Text.pack path <> "."
+    ConflictingSourceEntry path ->
+      "Conflicting directory source entry: " <> Text.pack path <> "."
+    SourceChangedDuringAcquisition path ->
+      "Bootstrap directory source changed during acquisition: "
+        <> Text.pack path
+        <> ".  Retry with a stable source."
     ConflictingArchiveEntry path ->
       "Conflicting archive entry: " <> Text.pack path <> "."
     ArchiveResourceLimitExceeded ->

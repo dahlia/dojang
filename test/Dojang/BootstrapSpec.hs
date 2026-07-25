@@ -29,6 +29,7 @@ import Control.Exception
   , throw
   )
 import Control.Exception qualified as Exception
+import Control.Monad (forM_)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except
   ( ExceptT (..)
@@ -80,6 +81,7 @@ import Dojang.Bootstrap
 import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , FileIdentity
+  , FileModeSnapshot (..)
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
@@ -232,6 +234,43 @@ spec = do
           `shouldThrow` anyIOException
         listDirectory destination `shouldReturn` []
         readFile (staging </> manifestName) `shouldReturn` "manifest"
+
+    it "rejects arbitrary portable directory-source path collisions" $
+      hedgehog $ do
+        suffix <-
+          forAll $
+            Gen.string
+              (Range.linear 0 90)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        (firstPrefix, secondPrefix) <-
+          forAll $
+            Gen.element
+              [ ("entry-a", "entry-A")
+              , ("caf\233-", "cafe\769-")
+              ]
+        let firstName = firstPrefix <> suffix
+            secondName = secondPrefix <> suffix
+        (result, stagingExists) <-
+          evalIO $
+            withTempDir $ \tmpDir _ -> do
+              sourceName <- encodeFS "source"
+              stagingName <- encodeFS "staging"
+              first <- encodeFS firstName
+              second <- encodeFS secondName
+              let source = tmpDir </> sourceName
+                  staging = tmpDir </> stagingName
+              dryRunIO $ do
+                createDirectory source
+                writeFile (source </> first) "first"
+                writeFile (source </> second) "second"
+                staged <-
+                  stageBuiltinSource
+                    (DirectorySource source)
+                    staging
+                present <- isDirectory staging
+                return (staged, present)
+        assert $ isConflictingSource result
+        stagingExists === False
 
     symlinkSpecs
 
@@ -755,6 +794,11 @@ isConflictingArchive :: Either AcquisitionError () -> Bool
 isConflictingArchive (Left (ConflictingArchiveEntry _)) = True
 isConflictingArchive _ = False
 
+
+isConflictingSource :: Either AcquisitionError () -> Bool
+isConflictingSource (Left (ConflictingSourceEntry _)) = True
+isConflictingSource _ = False
+
 #ifdef mingw32_HOST_OS
 archiveModeSpecs :: Spec
 archiveModeSpecs = return ()
@@ -1268,6 +1312,12 @@ instance MonadFileSystem FailingModeIO where
     liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
   getFileSnapshot value =
     liftIO (getFileSnapshot value :: IO (Maybe FileSnapshot))
+  getFileModeSnapshot value = do
+    identity <- getFileIdentity value
+    case identity of
+      Nothing -> return Nothing
+      Just entryIdentity ->
+        Just . FileModeSnapshot entryIdentity <$> getPortableMode value
   getPortableMode value = do
     path <- liftIO (decodePath value :: IO FilePath)
     case FilePath.takeFileName path of
@@ -1291,6 +1341,9 @@ data CurrentDirectoryRace
   = ModifySourceBeforeCopy OsPath ByteString.ByteString
   | AddSourceEntryBeforeCopy OsPath ByteString.ByteString
   | ReplaceSourceBeforeCopy FileType OsPath OsPath
+  | SwapDirectoryDuringModeRead OsPath OsPath OsPath
+  | ChangeSourceModeBeforeCopy OsPath Word
+  | ChangeSourceModeDuringValidation OsPath Word
 
 newtype CurrentDirectoryIO a
   = CurrentDirectoryIO
@@ -1380,6 +1433,10 @@ instance MonadFileSystem CurrentDirectoryIO where
             replacementTarget
             sourceEntry
             sourceType
+      Just (SwapDirectoryDuringModeRead _ _ _) -> return ()
+      Just (ChangeSourceModeBeforeCopy sourceEntry mode) ->
+        liftIO $ setPortableMode sourceEntry mode
+      Just (ChangeSourceModeDuringValidation _ _) -> return ()
       Nothing -> return ()
   removeFile value = liftIO (removeFile value :: IO ())
   removeDirectory value = liftIO (removeDirectory value :: IO ())
@@ -1389,7 +1446,30 @@ instance MonadFileSystem CurrentDirectoryIO where
     liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
   getFileSnapshot value =
     liftIO (getFileSnapshot value :: IO (Maybe FileSnapshot))
-  getPortableMode value = liftIO (getPortableMode value :: IO PortableMode)
+  getFileModeSnapshot value = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just (ChangeSourceModeDuringValidation sourceEntry changedMode)
+        | value == sourceEntry ->
+            liftIO $ do
+              snapshot <- getFileModeSnapshot value
+              setPortableMode value changedMode
+              return snapshot
+      _ ->
+        liftIO (getFileModeSnapshot value :: IO (Maybe FileModeSnapshot))
+  getPortableMode value = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just (SwapDirectoryDuringModeRead sourceEntry replacement backup)
+        | value == sourceEntry ->
+            liftIO $ do
+              renameDirectory sourceEntry backup
+              renameDirectory replacement sourceEntry
+              mode <- getPortableMode sourceEntry
+              renameDirectory sourceEntry replacement
+              renameDirectory backup sourceEntry
+              return mode
+      _ -> liftIO (getPortableMode value :: IO PortableMode)
   setPortableMode path mode =
     liftIO (setPortableMode path mode :: IO ())
   setPortableWritable path writable =
@@ -1404,6 +1484,129 @@ symlinkSpecs = return ()
 #else
 symlinkSpecs :: Spec
 symlinkSpecs = do
+  it "binds arbitrary retained directory modes to source identities" $
+    hedgehog $ do
+      originalMode <-
+        forAll $
+          Gen.word $ Range.linear 0o700 0o707
+      replacementMode <-
+        forAll $
+          Gen.word $ Range.linear 0o750 0o757
+      retainedMode <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            directoryName <- encodeFS "directory"
+            replacementName <- encodeFS "replacement"
+            backupName <- encodeFS "backup"
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            let source = tmpDir </> sourceName
+                sourceDirectory = source </> directoryName
+                replacement = tmpDir </> replacementName
+                backup = tmpDir </> backupName
+                staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+            createDirectory source
+            createDirectory sourceDirectory
+            createDirectory replacement
+            setPortableMode sourceDirectory originalMode
+            setPortableMode replacement replacementMode
+            Right (Right metadata) <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                ( SwapDirectoryDuringModeRead
+                    sourceDirectory
+                    replacement
+                    backup
+                )
+                ( stageBuiltinSourceWithMetadata
+                    (DirectorySource source)
+                    staging
+                )
+            _ <-
+              publishStagedDirectoryWithMetadata
+                metadata
+                staging
+                destination
+            mode <- getPortableMode $ destination </> directoryName
+            return mode.posixBits
+      retainedMode === Just originalMode
+
+  it "classifies arbitrary source-root changes during validation" $
+    hedgehog $ do
+      originalMode <-
+        forAll $
+          Gen.word $ Range.linear 0o700 0o707
+      changedMode <-
+        forAll $
+          Gen.word $ Range.linear 0o750 0o757
+      (stagedResult, stagingExists, sourcePath) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            stagingName <- encodeFS "staging"
+            let source = tmpDir </> sourceName
+                staging = tmpDir </> stagingName
+            createDirectory source
+            setPortableMode source originalMode
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (ChangeSourceModeDuringValidation source changedMode)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            decodedSource <- decodePath source
+            return (result, present, decodedSource)
+      stagedResult
+        === Right (Left $ SourceChangedDuringAcquisition sourcePath)
+      stagingExists === False
+
+  forM_
+    [ ("source root", False)
+    , ("nested directory", True)
+    ]
+    $ \(label, nested) ->
+      it ("rejects arbitrary mode changes to the " <> label) $
+        hedgehog $ do
+          originalMode <-
+            forAll $
+              Gen.word $ Range.linear 0o700 0o707
+          changedMode <-
+            forAll $
+              Gen.word $ Range.linear 0o750 0o757
+          (stagedResult, stagingExists) <-
+            evalIO $
+              withTempDir $ \tmpDir _ -> do
+                sourceName <- encodeFS "source"
+                directoryName <- encodeFS "directory"
+                stagingName <- encodeFS "staging"
+                let source = tmpDir </> sourceName
+                    sourceDirectory = source </> directoryName
+                    changedPath =
+                      if nested then sourceDirectory else source
+                    staging = tmpDir </> stagingName
+                createDirectory source
+                createDirectory sourceDirectory
+                setPortableMode changedPath originalMode
+                result <-
+                  runCurrentDirectoryIOWithRace
+                    tmpDir
+                    (ChangeSourceModeBeforeCopy changedPath changedMode)
+                    ( stageBuiltinSource
+                        (DirectorySource source)
+                        staging
+                    )
+                present <- exists staging
+                return (result, present)
+          case stagedResult of
+            Left err ->
+              assert $
+                "bootstrap source entry changed during acquisition"
+                  `isInfixOf` Exception.displayException err
+            Right _ -> assert False
+          stagingExists === False
+
   it "rejects arbitrary entries added after directory enumeration" $
     hedgehog $ do
       addedContents <- forAll $ Gen.bytes $ Range.linear 0 4096

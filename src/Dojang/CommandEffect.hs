@@ -485,10 +485,13 @@ instance MonadFileSystem CommandEffectTest where
   createPrivateDirectory = liftCommandEffectBase . createPrivateDirectory
   removeFile = liftCommandEffectBase . removeFile
   removeDirectory = liftCommandEffectBase . removeDirectory
+  removeDirectoryRecursivelyIfIdentity path =
+    liftCommandEffectBase . removeDirectoryRecursivelyIfIdentity path
   listDirectory = liftCommandEffectBase . listDirectory
   getFileSize = liftCommandEffectBase . getFileSize
   getFileIdentity = liftCommandEffectBase . getFileIdentity
   getFileSnapshot = liftCommandEffectBase . getFileSnapshot
+  getFileModeSnapshot = liftCommandEffectBase . getFileModeSnapshot
   getPortableMode = liftCommandEffectBase . getPortableMode
   setPortableMode path = liftCommandEffectBase . setPortableMode path
   setPortableWritable path = liftCommandEffectBase . setPortableWritable path

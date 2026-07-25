@@ -18,8 +18,8 @@ To be released.
     entries, including names that are reserved or invalid on Windows, and
     rejects paths that collide after case folding or Unicode normalization.  It
     preserves recorded POSIX permissions where the destination filesystem
-    supports them, requires an absent destination, and cleans unpublished work
-    after failure.
+    supports them, requires an absent destination, and attempts to clean
+    unpublished work after failure.
     Archive sources must resolve to regular files, so FIFOs and other special
     files are rejected without blocking.  Unsupported permission metadata
     produces a warning without discarding the acquired contents.  Stored
@@ -36,10 +36,14 @@ To be released.
     sources whose native representation is not UTF-8.
     Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
     other unsupported entry types before reading or extraction.  Directory
-    source identities are pinned during validation, regular files are checked
-    through the same handles used to copy them, and the source tree membership
-    and recorded entries are revalidated after copying.  Concurrent additions,
-    removals, replacements, and type changes therefore stop publication.
+    sources also reject paths that collide after case folding or Unicode
+    normalization before copying begins.  Directory source identities are
+    pinned during validation, retained modes come from the same filesystem
+    observations as their identities, regular files are checked through the
+    same handles used to copy them, and the source tree membership and recorded
+    entries are revalidated after copying.  Concurrent additions, removals,
+    replacements, type changes, and permission changes therefore stop
+    publication.
     Archives changed while their bounded read is in progress are rejected with
     a retryable source-change error.  ZIP directories marked with the DOS
     directory attribute are accepted even when their names omit a trailing
@@ -58,7 +62,9 @@ To be released.
     paths to 4,096 characters, and path depth to 256 components, including
     bounded gzip decoding.  Broken Windows directory links retain their
     intrinsic link type, and interrupted publication widens restrictive
-    staging before cleanup.  Noninteractive bootstrap requires both
+    staging before cleanup.  Cleanup checks the staging root's recorded
+    filesystem identity immediately before removal and preserves a path that
+    already has a different identity.  Noninteractive bootstrap requires both
     `--no-interactive` and `--yes`.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and

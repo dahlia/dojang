@@ -36,12 +36,16 @@ creating staging.  Choose a sibling or otherwise disjoint destination instead.
 Dojang copies symbolic links as links instead of following them.  Other entries
 in a directory source must be regular files or directories; FIFOs, sockets,
 devices, and other special files are rejected before they are read.  Dojang
-pins the identity of the source root and every entry during validation, checks
-regular files through the same open handle used to copy them, and enumerates
-the source tree again after copying.  If an entry was added or removed, changed
-type, or no longer matches its recorded identity and change metadata,
-bootstrap stops without publishing the staged copy.  Dojang also accepts
-`.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
+rejects source paths that collide after case folding or Unicode normalization,
+before copying any entry.  This prevents distinct names on a case-sensitive
+source filesystem from collapsing in staging.  Dojang pins the identity of the
+source root and every entry during validation.  Stored directory permissions
+come from the same filesystem observation as the corresponding identity.
+Regular files are checked through the same open handle used to copy them, and
+the source tree is enumerated again after copying.  If an entry was added or
+removed, changed type, or no longer matches its recorded identity and change
+metadata, bootstrap stops without publishing the staged copy.  Dojang also
+accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 
 ~~~~ console
 $ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz

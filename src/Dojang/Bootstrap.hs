@@ -75,9 +75,11 @@ import Prelude hiding (readFile, writeFile)
 import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , FileIdentity
+  , FileModeSnapshot (..)
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
+  , fileSnapshotIdentity
   )
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
@@ -119,6 +121,10 @@ data AcquisitionError
     UnsupportedArchiveEntry FilePath
   | -- | A directory source contains a non-regular, non-link entry.
     UnsupportedSourceEntry FilePath
+  | -- | Two directory-source entries collide by portable path identity.
+    ConflictingSourceEntry FilePath
+  | -- | A directory source changed while it was being validated.
+    SourceChangedDuringAcquisition FilePath
   | -- | Two entries conflict by path or file type.
     ConflictingArchiveEntry FilePath
   | -- | The archive exceeds the bounded acquisition resource limits.
@@ -139,8 +145,8 @@ data StagedMode = StagedMode FilePath FileType PortableMode
 
 
 data DirectoryEntrySnapshot
-  = DirectoryEntryIdentity FileIdentity
-  | DirectoryFileSnapshot FileSnapshot
+  = DirectoryEntryIdentity FileIdentity (Maybe PortableMode)
+  | DirectoryFileSnapshot FileSnapshot PortableMode
 
 
 -- | Permission metadata retained until a staged source is published.
@@ -275,8 +281,8 @@ stageBuiltinSourceWithMetadata (ArchiveSource format source) staging = do
               return $ Left $ InvalidArchive $ Text.pack $ displayException err
         Right (Left err) -> return $ Left err
         Right (Right entries) -> do
-          createPrivateDirectory staging
-          cleanupStagingOnError staging $ do
+          stagingIdentity <- createOwnedPrivateDirectory staging
+          cleanupStagingOnError staging stagingIdentity $ do
             forM_ entries $ \case
               StagedDirectory "" _ -> return ()
               StagedDirectory relative _ -> do
@@ -350,24 +356,58 @@ copyDirectoryTree
   -> m (Either AcquisitionError StagedMetadata)
 copyDirectoryTree source destination = do
   entries <- listDirectoryRecursively source []
-  validation <- identifyDirectoryEntries source entries
-  case validation of
+  layout <- validateDirectoryEntryLayout entries
+  case layout of
     Left err -> return $ Left err
-    Right (sourceIdentity, entryIdentities) -> do
-      metadata <- captureStagedMetadata source entries
-      createPrivateDirectory destination
-      cleanupStagingOnError destination $ do
-        copyDirectoryEntries
-          source
-          destination
-          entryIdentities
-          entries
-        verifyDirectorySource
-          source
-          sourceIdentity
-          entryIdentities
-          entries
-      return $ Right metadata
+    Right () -> do
+      validation <- identifyDirectoryEntries source entries
+      case validation of
+        Left err -> return $ Left err
+        Right
+          ( sourceIdentity
+            , resolvedSource
+            , rootModeSnapshot
+            , entryIdentities
+            ) -> do
+            metadata <-
+              captureStagedMetadata
+                rootModeSnapshot
+                entryIdentities
+                entries
+            stagingIdentity <- createOwnedPrivateDirectory destination
+            cleanupStagingOnError destination stagingIdentity $ do
+              copyDirectoryEntries
+                source
+                destination
+                entryIdentities
+                entries
+              verifyDirectorySource
+                source
+                sourceIdentity
+                resolvedSource
+                rootModeSnapshot
+                entryIdentities
+                entries
+            return $ Right metadata
+
+
+validateDirectoryEntryLayout
+  :: (MonadFileSystem m)
+  => [(FileType, OsPath)]
+  -> m (Either AcquisitionError ())
+validateDirectoryEntryLayout entries = do
+  decoded <- traverse (decodePath . snd) entries
+  let groups =
+        Map.fromListWith (<>) $
+          fmap (\path -> (archivePathKey path, [path])) decoded
+  return $
+    case [ path
+         | group <- Map.elems groups
+         , length group > 1
+         , path : _ <- [group]
+         ] of
+      conflict : _ -> Left $ ConflictingSourceEntry conflict
+      [] -> Right ()
 
 
 identifyDirectoryEntries
@@ -377,7 +417,11 @@ identifyDirectoryEntries
   -> m
        ( Either
            AcquisitionError
-           (FileIdentity, Map.Map OsPath DirectoryEntrySnapshot)
+           ( FileIdentity
+           , OsPath
+           , FileModeSnapshot
+           , Map.Map OsPath DirectoryEntrySnapshot
+           )
        )
 identifyDirectoryEntries source entries = do
   sourceIdentity <- getFileIdentity source
@@ -386,36 +430,80 @@ identifyDirectoryEntries source entries = do
       path <- decodePath source
       return $ Left $ UnsupportedSourceEntry path
     Just identity -> do
+      resolvedSource <- canonicalizePath source
+      rootModeSnapshot <- getFileModeSnapshot resolvedSource
+      supportedRoot <- isDirectory resolvedSource
       identified <- go Map.empty entries
-      return $ fmap (\entryIdentities -> (identity, entryIdentities)) identified
+      sourceIdentityAfter <- getFileIdentity source
+      rootModeSnapshotAfter <- getFileModeSnapshot resolvedSource
+      case (rootModeSnapshot, identified) of
+        (_, Left err) -> return $ Left err
+        (Nothing, _) -> unsupported source
+        (Just _, _)
+          | not supportedRoot -> unsupported source
+        (Just rootSnapshot, Right entryIdentities)
+          | sourceIdentityAfter == Just identity
+              && rootModeSnapshotAfter == Just rootSnapshot ->
+              return $
+                Right
+                  ( identity
+                  , resolvedSource
+                  , rootSnapshot
+                  , entryIdentities
+                  )
+        _ -> sourceChanged source
  where
   go identities [] = return $ Right identities
   go identities ((fileType, relative) : remaining) = do
     let path = source </> relative
     identified <- case fileType of
-      File -> fmap DirectoryFileSnapshot <$> getFileSnapshot path
-      Directory ->
-        identifyEntry path $
-          (&&) <$> isDirectory path <*> (not <$> isSymlink path)
-      Symlink -> identifyEntry path $ isSymlink path
+      File -> identifyFile path
+      Directory -> identifyDirectory path
+      Symlink ->
+        identifyEntry path (isSymlink path) $
+          flip DirectoryEntryIdentity Nothing
     case identified of
       Just snapshot ->
         go (Map.insert relative snapshot identities) remaining
       Nothing -> unsupported relative
 
-  identifyEntry path supported = do
+  identifyFile path = do
+    fileSnapshot <- getFileSnapshot path
+    modeSnapshot <- getFileModeSnapshot path
+    return $ case (fileSnapshot, modeSnapshot) of
+      (Just snapshot, Just (FileModeSnapshot identity mode))
+        | fileSnapshotIdentity snapshot == identity ->
+            Just $ DirectoryFileSnapshot snapshot mode
+      _ -> Nothing
+
+  identifyDirectory path = do
+    modeSnapshotBefore <- getFileModeSnapshot path
+    supported <-
+      (&&) <$> isDirectory path <*> (not <$> isSymlink path)
+    modeSnapshotAfter <- getFileModeSnapshot path
+    return $ case modeSnapshotBefore of
+      Just (FileModeSnapshot identity mode)
+        | supported && modeSnapshotAfter == modeSnapshotBefore ->
+            Just $ DirectoryEntryIdentity identity $ Just mode
+      _ -> Nothing
+
+  identifyEntry path supported makeSnapshot = do
     identityBefore <- getFileIdentity path
     supported' <- supported
     identityAfter <- getFileIdentity path
     return $ case identityBefore of
       Just identity
         | supported' && identityAfter == Just identity ->
-            Just $ DirectoryEntryIdentity identity
+            Just $ makeSnapshot identity
       _ -> Nothing
 
   unsupported relative = do
     decoded <- decodePath relative
     return $ Left $ UnsupportedSourceEntry decoded
+
+  sourceChanged path = do
+    decoded <- decodePath path
+    return $ Left $ SourceChangedDuringAcquisition decoded
 
 
 copyDirectoryEntries
@@ -463,28 +551,42 @@ verifyDirectorySource
   :: (MonadFileSystem m)
   => OsPath
   -> FileIdentity
+  -> OsPath
+  -> FileModeSnapshot
   -> Map.Map OsPath DirectoryEntrySnapshot
   -> [(FileType, OsPath)]
   -> m ()
-verifyDirectorySource source sourceIdentity identities entries = do
-  verifyPathIdentity source source sourceIdentity
-  currentEntries <- listDirectoryRecursively source []
-  let expectedMembership = directoryMembership entries
-      currentMembership = directoryMembership currentEntries
-      allPaths =
-        Map.keysSet expectedMembership
-          `Set.union` Map.keysSet currentMembership
-  case [ relative
-       | relative <- Set.toAscList allPaths
-       , Map.lookup relative expectedMembership
-           /= Map.lookup relative currentMembership
-       ] of
-    changed : _ -> throwSourceEntryChanged changed
-    [] -> return ()
-  forM_ entries $ \(_, relative) -> do
-    expectedSnapshot <- expectedEntrySnapshot identities relative
-    verifyEntrySnapshot source relative expectedSnapshot
-  verifyPathIdentity source source sourceIdentity
+verifyDirectorySource
+  source
+  sourceIdentity
+  resolvedSource
+  rootModeSnapshot
+  identities
+  entries = do
+    verifyPathIdentity source source sourceIdentity
+    currentRootModeSnapshot <- getFileModeSnapshot resolvedSource
+    unless (currentRootModeSnapshot == Just rootModeSnapshot) $
+      throwSourceEntryChanged source
+    currentEntries <- listDirectoryRecursively source []
+    let expectedMembership = directoryMembership entries
+        currentMembership = directoryMembership currentEntries
+        allPaths =
+          Map.keysSet expectedMembership
+            `Set.union` Map.keysSet currentMembership
+    case [ relative
+         | relative <- Set.toAscList allPaths
+         , Map.lookup relative expectedMembership
+             /= Map.lookup relative currentMembership
+         ] of
+      changed : _ -> throwSourceEntryChanged changed
+      [] -> return ()
+    forM_ entries $ \(_, relative) -> do
+      expectedSnapshot <- expectedEntrySnapshot identities relative
+      verifyEntrySnapshot source relative expectedSnapshot
+    verifyPathIdentity source source sourceIdentity
+    finalRootModeSnapshot <- getFileModeSnapshot resolvedSource
+    unless (finalRootModeSnapshot == Just rootModeSnapshot) $
+      throwSourceEntryChanged source
 
 
 directoryMembership :: [(FileType, OsPath)] -> Map.Map OsPath FileType
@@ -500,9 +602,16 @@ verifyEntrySnapshot
   -> m ()
 verifyEntrySnapshot source relative expectedSnapshot =
   case expectedSnapshot of
-    DirectoryEntryIdentity expectedIdentity ->
+    DirectoryEntryIdentity expectedIdentity Nothing ->
       verifyEntryIdentity source relative expectedIdentity
-    DirectoryFileSnapshot expectedFileSnapshot -> do
+    DirectoryEntryIdentity expectedIdentity (Just expectedMode) -> do
+      actualSnapshot <- getFileModeSnapshot $ source </> relative
+      unless
+        ( actualSnapshot
+            == Just (FileModeSnapshot expectedIdentity expectedMode)
+        )
+        $ throwSourceEntryChanged relative
+    DirectoryFileSnapshot expectedFileSnapshot _ -> do
       actualSnapshot <- getFileSnapshot $ source </> relative
       unless (actualSnapshot == Just expectedFileSnapshot) $
         throwSourceEntryChanged relative
@@ -558,7 +667,7 @@ expectedDirectoryEntryIdentity
   => OsPath
   -> DirectoryEntrySnapshot
   -> m FileIdentity
-expectedDirectoryEntryIdentity _ (DirectoryEntryIdentity identity) =
+expectedDirectoryEntryIdentity _ (DirectoryEntryIdentity identity _) =
   return identity
 expectedDirectoryEntryIdentity relative _ =
   throwSourceEntryTypeChanged relative
@@ -569,7 +678,7 @@ expectedDirectoryFileSnapshot
   => OsPath
   -> DirectoryEntrySnapshot
   -> m FileSnapshot
-expectedDirectoryFileSnapshot _ (DirectoryFileSnapshot snapshot) =
+expectedDirectoryFileSnapshot _ (DirectoryFileSnapshot snapshot _) =
   return snapshot
 expectedDirectoryFileSnapshot relative _ =
   throwSourceEntryTypeChanged relative
@@ -584,11 +693,30 @@ throwSourceEntryTypeChanged path = do
 
 
 cleanupStagingOnError
-  :: (MonadFileSystem m) => OsPath -> m a -> m a
-cleanupStagingOnError staging action =
+  :: (MonadFileSystem m) => OsPath -> FileIdentity -> m a -> m a
+cleanupStagingOnError staging identity action =
   action `catchError` \err -> do
-    removeDirectoryRecursively staging `catchError` const (return ())
+    void
+      (removeDirectoryRecursivelyIfIdentity staging identity)
+      `catchError` const (return ())
     throwError err
+
+
+createOwnedPrivateDirectory
+  :: (MonadFileSystem m) => OsPath -> m FileIdentity
+createOwnedPrivateDirectory path = do
+  createPrivateDirectory path
+  identity <- getFileIdentity path
+  case identity of
+    Just value -> return value
+    Nothing -> do
+      decoded <- decodePath path
+      -- A filesystem-backed interpreter returns 'Nothing' only when the path
+      -- disappeared.  Do not issue another pathname-based removal here: an
+      -- unidentifiable replacement must be preserved.
+      throwError $
+        userError $
+          "filesystem cannot identify private staging directory: " <> decoded
 
 
 decodeArchive
@@ -735,23 +863,28 @@ entryType (StagedFile _ _ _) = File
 
 captureStagedMetadata
   :: (MonadFileSystem m)
-  => OsPath
+  => FileModeSnapshot
+  -> Map.Map OsPath DirectoryEntrySnapshot
   -> [(FileType, OsPath)]
   -> m StagedMetadata
-captureStagedMetadata source entries =
-  do
-    resolvedSource <- canonicalizePath source
-    rootMode <- getPortableMode resolvedSource
+captureStagedMetadata
+  (FileModeSnapshot _ rootMode)
+  identities
+  entries = do
     descendants <- concat <$> traverse capture entries
     return $
       StagedMetadata $
         StagedMode "" Directory rootMode : descendants
- where
-  capture (Symlink, _) = return []
-  capture (fileType, relative) = do
-    mode <- getPortableMode $ source </> relative
-    path <- decodePath relative
-    return [StagedMode path fileType mode]
+   where
+    capture (Symlink, _) = return []
+    capture (fileType, relative) = do
+      snapshot <- expectedEntrySnapshot identities relative
+      mode <- case snapshot of
+        DirectoryEntryIdentity _ (Just value) -> return value
+        DirectoryFileSnapshot _ value -> return value
+        _ -> throwSourceEntryTypeChanged relative
+      path <- decodePath relative
+      return [StagedMode path fileType mode]
 
 
 applyStagedMetadata

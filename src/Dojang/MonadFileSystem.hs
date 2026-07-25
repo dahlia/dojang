@@ -10,11 +10,13 @@ module Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , DryRunIO
   , FileIdentity
+  , FileModeSnapshot (..)
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
   , dryRunIO'
+  , fileSnapshotIdentity
   , tryDryRunIO
   , writeFileAtomically
   ) where
@@ -213,6 +215,21 @@ data FileIdentity = FileIdentity Integer Integer
 data FileSnapshot
   = FileSnapshot FileIdentity Integer Rational (Maybe Rational)
   deriving (Eq, Show)
+
+
+-- | A filesystem entry's identity and portable mode observed together.
+--
+-- Filesystem-backed implementations capture both values from one stat result
+-- or open handle so a pathname replacement cannot pair one entry's identity
+-- with another entry's permissions.
+data FileModeSnapshot
+  = FileModeSnapshot FileIdentity PortableMode
+  deriving (Eq, Show)
+
+
+-- | Gets the stable entry identity retained by a regular-file snapshot.
+fileSnapshotIdentity :: FileSnapshot -> FileIdentity
+fileSnapshotIdentity (FileSnapshot identity _ _ _) = identity
 
 
 -- | The result of reading a regular file with an explicit byte limit.
@@ -566,6 +583,20 @@ class (MonadError IOError m) => MonadFileSystem m where
       `mapError` (`ioePrependLocation` "removeDirectoryRecursively")
 
 
+  -- | Checks a directory root's identity immediately before recursively
+  -- removing it.
+  --
+  -- Returns 'False' without starting removal when the path is absent, its
+  -- identity already differs, or the interpreter cannot verify identities.
+  removeDirectoryRecursivelyIfIdentity
+    :: (HasCallStack) => OsPath -> FileIdentity -> m Bool
+  removeDirectoryRecursivelyIfIdentity path expectedIdentity = do
+    actualIdentity <- getFileIdentity path
+    if actualIdentity == Just expectedIdentity
+      then removeDirectoryRecursively path >> return True
+      else return False
+
+
   -- | Lists all files and directories in a directory except for @.@ and @..@,
   -- without recursing into subdirectories.
   listDirectory :: (HasCallStack) => OsPath -> m [OsPath]
@@ -612,6 +643,26 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- the interpreter cannot represent a stable snapshot.
   getFileSnapshot :: (HasCallStack) => OsPath -> m (Maybe FileSnapshot)
   getFileSnapshot _ = return Nothing
+
+
+  -- | Captures an entry's identity and portable mode in one observation.
+  --
+  -- Filesystem-backed implementations must derive both values from the same
+  -- stat result or open handle.  Returns 'Nothing' when the entry does not
+  -- exist or the interpreter cannot provide a stable identity.
+  getFileModeSnapshot
+    :: (HasCallStack) => OsPath -> m (Maybe FileModeSnapshot)
+  getFileModeSnapshot path = do
+    identityBefore <- getFileIdentity path
+    case identityBefore of
+      Nothing -> return Nothing
+      Just identity -> do
+        mode <- getPortableMode path
+        identityAfter <- getFileIdentity path
+        return $
+          if identityAfter == Just identity
+            then Just $ FileModeSnapshot identity mode
+            else Nothing
 
 
   -- | Observes the portable permission state of a filesystem entry without
@@ -828,6 +879,44 @@ getFileIdentityIO path = do
       if isDoesNotExistError err then return Nothing else throwError err
  where
  fileFlagOpenReparsePoint = 0x00200000
+
+
+getFileModeSnapshotIO :: OsPath -> IO (Maybe FileModeSnapshot)
+getFileModeSnapshotIO path = do
+  path' <- decodeFS path
+  ( Just
+      <$> Exception.bracket
+        ( Win32.createFile
+            path'
+            Win32.gENERIC_NONE
+            ( Win32.fILE_SHARE_READ
+                .|. Win32.fILE_SHARE_WRITE
+                .|. Win32.fILE_SHARE_DELETE
+            )
+            Nothing
+            Win32.oPEN_EXISTING
+            (Win32.fILE_FLAG_BACKUP_SEMANTICS .|. fileFlagOpenReparsePoint)
+            Nothing
+        )
+        Win32.closeHandle
+        ( \handle -> do
+            information <- Win32.getFileInformationByHandle handle
+            return $
+              FileModeSnapshot
+                (fileIdentityFromInformation information)
+                PortableMode
+                  { posixBits = Nothing
+                  , writable =
+                      information.bhfiFileAttributes
+                        .&. Win32.fILE_ATTRIBUTE_READONLY
+                        == 0
+                  }
+        )
+    )
+    `catchError` \err ->
+      if isDoesNotExistError err then return Nothing else throwError err
+ where
+  fileFlagOpenReparsePoint = 0x00200000
 
 
 fileIdentityFromInformation
@@ -1096,6 +1185,24 @@ getFileIdentityIO path = do
   ( do
       status <- Posix.getSymbolicLinkStatus path'
       return $ Just $ fileIdentityFromStatus status
+    )
+    `catchError` \err ->
+      if isDoesNotExistError err then return Nothing else throwError err
+
+
+getFileModeSnapshotIO :: OsPath -> IO (Maybe FileModeSnapshot)
+getFileModeSnapshotIO path = do
+  path' <- decodeFS path
+  ( do
+      status <- Posix.getSymbolicLinkStatus path'
+      return $
+        Just $
+          FileModeSnapshot
+            (fileIdentityFromStatus status)
+            ( portableModeFromBits $
+                fromIntegral $
+                  Posix.fileMode status .&. 0o777
+            )
     )
     `catchError` \err ->
       if isDoesNotExistError err then return Nothing else throwError err
@@ -1459,6 +1566,9 @@ instance MonadFileSystem IO where
 
 
   getFileSnapshot = getFileSnapshotIO
+
+
+  getFileModeSnapshot = getFileModeSnapshotIO
 
 
   copyFile = OsDirectory.copyFile
@@ -2280,6 +2390,14 @@ instance MonadFileSystem DryRunIO where
             )
             identity
       Nothing -> liftIO $ getFileSnapshotIO path
+
+
+  getFileModeSnapshot path = do
+    identity <- getFileIdentity path
+    case identity of
+      Nothing -> return Nothing
+      Just value ->
+        Just . FileModeSnapshot value <$> getPortableMode path
 
 
 -- | Performs 'DryRunIO' action in the sandbox and returns the result.

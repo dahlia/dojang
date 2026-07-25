@@ -666,6 +666,34 @@ spec = do
       removeDirectoryRecursively tmpDirP `shouldThrow` \e ->
         isDoesNotExistError e && ioeGetFileName e == Just tmpDirFP
 
+    specify "removeDirectoryRecursivelyIfIdentity removes its directory" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        childName <- encodeFS "child"
+        let owned = tmpDir </> ownedName
+        createDirectory owned
+        writeFile (owned </> childName) "owned"
+        Just identity <- getFileIdentity owned
+        removeDirectoryRecursivelyIfIdentity owned identity
+          `shouldReturn` True
+        exists owned `shouldReturn` False
+
+    specify "removeDirectoryRecursivelyIfIdentity preserves a replacement" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        movedName <- encodeFS "moved"
+        sentinelName <- encodeFS "sentinel"
+        let owned = tmpDir </> ownedName
+            moved = tmpDir </> movedName
+        createDirectory owned
+        Just identity <- getFileIdentity owned
+        renameDirectory owned moved
+        createDirectory owned
+        writeFile (owned </> sentinelName) "replacement"
+        removeDirectoryRecursivelyIfIdentity owned identity
+          `shouldReturn` False
+        readFile (owned </> sentinelName) `shouldReturn` "replacement"
+
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir
       sort result `shouldBe` [bar, baz, foo]

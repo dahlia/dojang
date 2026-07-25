@@ -300,10 +300,13 @@ instance
   createPrivateDirectory = App . lift . lift . lift . createPrivateDirectory
   removeFile = App . lift . lift . lift . removeFile
   removeDirectory = App . lift . lift . lift . removeDirectory
+  removeDirectoryRecursivelyIfIdentity path =
+    App . lift . lift . lift . removeDirectoryRecursivelyIfIdentity path
   listDirectory = App . lift . lift . lift . listDirectory
   getFileSize = App . lift . lift . lift . getFileSize
   getFileIdentity = App . lift . lift . lift . getFileIdentity
   getFileSnapshot = App . lift . lift . lift . getFileSnapshot
+  getFileModeSnapshot = App . lift . lift . lift . getFileModeSnapshot
   getPortableMode = App . lift . lift . lift . getPortableMode
   setPortableMode path = App . lift . lift . lift . setPortableMode path
   setPortableWritable path = App . lift . lift . lift . setPortableWritable path
