@@ -13,14 +13,16 @@ import Control.Concurrent
   , putMVar
   , readMVar
   , takeMVar
+  , threadDelay
   , tryReadMVar
   )
+import Control.Exception qualified as Exception
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (xor)
 import Data.Char (chr)
 import Data.Either (isRight)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.List (sort, sortOn)
+import Data.List (isPrefixOf, sort, sortOn)
 import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
 import System.IO.Error
   ( alreadyExistsErrorType
@@ -30,6 +32,7 @@ import System.IO.Error
   , ioeGetLocation
   , isAlreadyExistsError
   , isDoesNotExistError
+  , isPermissionError
   )
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
@@ -51,23 +54,28 @@ import System.FilePath (combine)
 
 
 #ifndef mingw32_HOST_OS
-import Control.Concurrent (threadDelay)
-import Control.Exception qualified as Exception
 import Data.Bits ((.&.))
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Posix.Files qualified as Posix
 import System.IO (IOMode (WriteMode), hSetFileSize, withBinaryFile)
-import System.OsPath (decodeFS)
 import System.Process
   ( CreateProcess (env)
   , proc
   , readCreateProcessWithExitCode
   )
-import System.Timeout (timeout)
 #endif
 
-import System.OsPath (OsPath, dropFileName, encodeFS, normalise, (</>))
+import System.Info (os)
+import System.OsPath
+  ( OsPath
+  , decodeFS
+  , dropFileName
+  , encodeFS
+  , normalise
+  , (</>)
+  )
+import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
   , describe
@@ -456,6 +464,109 @@ posixNativeTraversalSpec =
       case observed of
         (name, entries) -> entries === [(File, name)]
 #endif
+
+
+vanishedEntryTraversalSpecs :: Spec
+vanishedEntryTraversalSpecs = do
+  specify "tolerant traversal omits entries vanished after enumeration" $ do
+    (outcomes, stableName, _) <-
+      runVanishedEntryTraversalRace $ \path ->
+        listDirectoryRecursively path []
+    outcomes `shouldSatisfy` all isToleratedTraversalOutcome
+    outcomes `shouldSatisfy` all (containsStableEntry stableName)
+
+  specify "strict traversal rejects entries vanished after enumeration" $ do
+    (outcomes, stableName, rootPath) <-
+      runVanishedEntryTraversalRace $ \path ->
+        listDirectoryRecursivelyStrict path []
+    outcomes
+      `shouldSatisfy` any
+        ( \case
+            Left err ->
+              isDoesNotExistError err || isWindowsDeletePendingError err
+            Right _ -> False
+        )
+    outcomes `shouldSatisfy` all (containsStableEntry stableName)
+    [err | Left err <- outcomes, isDoesNotExistError err]
+      `shouldSatisfy` all
+        ( maybe False (rootPath `isPrefixOf`)
+            . ioeGetFileName
+        )
+
+
+runVanishedEntryTraversalRace
+  :: (OsPath -> IO [(FileType, OsPath)])
+  -> IO ([Either IOError [(FileType, OsPath)]], OsPath, FilePath)
+runVanishedEntryTraversalRace listTree =
+  withTempDir $ \tmpDir _ -> do
+    stableName <- encodeFS "stable"
+    racedNames <-
+      mapM (encodeFS . ("raced-" <>) . show) [1 .. 64 :: Int]
+    fillerNames <-
+      mapM (encodeFS . ("filler-" <>) . show) [1 .. 2048 :: Int]
+    writeFile (tmpDir </> stableName) ""
+    mapM_ (\name -> writeFile (tmpDir </> name) "") racedNames
+    mapM_ (\name -> writeFile (tmpDir </> name) "") fillerNames
+    stopMutating <- newEmptyMVar
+    mutationFinished <- newEmptyMVar
+    completedMutations <- newIORef (0 :: Int)
+    _ <-
+      forkFinally
+        ( let mutate (name : remaining) = do
+                stopped <- tryReadMVar stopMutating
+                case stopped of
+                  Just () -> return ()
+                  Nothing -> do
+                    removeFile $ tmpDir </> name
+                    threadDelay 50
+                    recreateRacedFile $ tmpDir </> name
+                    atomicModifyIORef' completedMutations $ \count ->
+                      (count + 1, ())
+                    mutate remaining
+              mutate [] = mutate racedNames
+          in mutate racedNames
+        )
+        (putMVar mutationFinished)
+    outcomes <-
+      replicateM 100 (tryError $ listTree tmpDir)
+        `Exception.finally` putMVar stopMutating ()
+    mutationOutcome <- timeout 5000000 $ takeMVar mutationFinished
+    case mutationOutcome of
+      Nothing -> expectationFailure "the mutation thread did not stop"
+      Just (Left exception) ->
+        expectationFailure $
+          "the mutation thread failed: " <> show exception
+      Just (Right ()) -> return ()
+    readIORef completedMutations >>= (`shouldSatisfy` (> 0))
+    rootPath <- decodeFS tmpDir
+    return (outcomes, stableName, rootPath)
+
+
+containsStableEntry
+  :: OsPath -> Either IOError [(FileType, OsPath)] -> Bool
+containsStableEntry _ (Left _) = True
+containsStableEntry stableName (Right entries) =
+  (File, stableName) `elem` entries
+
+
+isToleratedTraversalOutcome
+  :: Either IOError [(FileType, OsPath)] -> Bool
+isToleratedTraversalOutcome (Left err) =
+  isWindowsDeletePendingError err
+isToleratedTraversalOutcome (Right _) = True
+
+
+recreateRacedFile :: OsPath -> IO ()
+recreateRacedFile path =
+  writeFile path "" `catchError` \err ->
+    if isWindowsDeletePendingError err
+      then threadDelay 50 >> recreateRacedFile path
+      else ioError err
+
+
+isWindowsDeletePendingError :: IOError -> Bool
+isWindowsDeletePendingError err =
+  os == "mingw32" && isPermissionError err
 
 
 isInappropriateTypeError :: Either IOError a -> Bool
@@ -868,6 +979,7 @@ spec = do
 
       posixTraversalRaceSpec
       posixNativeTraversalSpec
+      vanishedEntryTraversalSpecs
 
     specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
       Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"

@@ -35,11 +35,17 @@ import Control.Monad.Except
   ( ExceptT (..)
   , MonadError (throwError)
   , runExceptT
+  , tryError
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import System.Directory.OsPath qualified
 import System.FilePath qualified as FilePath
+import System.IO.Error
+  ( doesNotExistErrorType
+  , isPermissionError
+  , mkIOError
+  )
 import System.OsPath (OsPath)
 import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
@@ -1379,6 +1385,8 @@ data CurrentDirectoryRace
   | SwapDirectoryDuringModeRead OsPath OsPath OsPath
   | ChangeSourceModeBeforeCopy OsPath Word
   | ChangeSourceModeDuringValidation OsPath Word
+  | VanishSourceEntryDuringEnumeration OsPath OsPath
+  | VanishSourceEntryDuringVerification OsPath OsPath OsPath
 
 newtype CurrentDirectoryIO a
   = CurrentDirectoryIO
@@ -1472,10 +1480,45 @@ instance MonadFileSystem CurrentDirectoryIO where
       Just (ChangeSourceModeBeforeCopy sourceEntry mode) ->
         liftIO $ setPortableMode sourceEntry mode
       Just (ChangeSourceModeDuringValidation _ _) -> return ()
+      Just (VanishSourceEntryDuringEnumeration _ _) -> return ()
+      Just (VanishSourceEntryDuringVerification _ _ _) -> return ()
       Nothing -> return ()
   removeFile value = liftIO (removeFile value :: IO ())
   removeDirectory value = liftIO (removeDirectory value :: IO ())
   listDirectory value = liftIO (listDirectory value :: IO [OsPath])
+  listDirectoryRecursivelyStrict value ignorePatterns = do
+    (_, racedEntry) <- CurrentDirectoryIO ask
+    case racedEntry of
+      Just (VanishSourceEntryDuringEnumeration source vanished)
+        | value == source -> do
+            path <- decodePath vanished
+            throwError $
+              mkIOError
+                doesNotExistErrorType
+                "fstatat"
+                Nothing
+                (Just path)
+      Just (VanishSourceEntryDuringVerification source vanished staging)
+        | value == source -> do
+            stagingExists <- exists staging
+            if stagingExists
+              then do
+                path <- decodePath vanished
+                throwError $
+                  mkIOError
+                    doesNotExistErrorType
+                    "fstatat"
+                    Nothing
+                    (Just path)
+              else delegate
+      _ ->
+        delegate
+   where
+    delegate =
+      liftIO
+        ( listDirectoryRecursivelyStrict value ignorePatterns
+            :: IO [(FileType, OsPath)]
+        )
   getFileSize value = liftIO (getFileSize value :: IO Integer)
   getFileIdentity value =
     liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
@@ -1519,6 +1562,93 @@ symlinkSpecs = return ()
 #else
 symlinkSpecs :: Spec
 symlinkSpecs = do
+  it "preserves dry-run permission errors during strict traversal" $
+    withTempDir $ \tmpDir _ -> do
+      sourceName <- encodeFS "source"
+      directoryName <- encodeFS "restricted"
+      entryName <- encodeFS "entry"
+      stagingName <- encodeFS "staging"
+      let source = tmpDir </> sourceName
+          restricted = source </> directoryName
+          staging = tmpDir </> stagingName
+      createDirectory source
+      createDirectory restricted
+      writeFile (restricted </> entryName) "contents"
+      setPortableMode restricted 0o400
+      result <-
+        Exception.finally
+          ( tryError $
+              dryRunIO $
+                stageBuiltinSource (DirectorySource source) staging
+          )
+          (setPortableMode restricted 0o700)
+      case result of
+        Left err -> err `shouldSatisfy` isPermissionError
+        Right value ->
+          expectationFailure $
+            "Expected a permission error, got: " <> show value
+
+  it "classifies arbitrary vanished enumerated entries as source changes" $
+    hedgehog $ do
+      suffix <-
+        forAll $
+          Gen.string (Range.linear 1 32) Gen.alphaNum
+      (stagedResult, stagingExists, vanishedPath) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            entryName <- encodeFS $ "entry-" <> suffix
+            stagingName <- encodeFS "staging"
+            let source = tmpDir </> sourceName
+                vanished = source </> entryName
+                staging = tmpDir </> stagingName
+            createDirectory source
+            writeFile vanished "contents"
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (VanishSourceEntryDuringEnumeration source vanished)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            decodedVanished <- decodePath vanished
+            return (result, present, decodedVanished)
+      stagedResult
+        === Right (Left $ SourceChangedDuringAcquisition vanishedPath)
+      stagingExists === False
+
+  it "reports arbitrary entries vanished during final verification" $
+    hedgehog $ do
+      suffix <-
+        forAll $
+          Gen.string (Range.linear 1 32) Gen.alphaNum
+      (stagedResult, stagingExists, vanishedPath) <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            sourceName <- encodeFS "source"
+            entryName <- encodeFS $ "entry-" <> suffix
+            stagingName <- encodeFS "staging"
+            let source = tmpDir </> sourceName
+                vanished = source </> entryName
+                staging = tmpDir </> stagingName
+            createDirectory source
+            writeFile vanished "contents"
+            result <-
+              runCurrentDirectoryIOWithRace
+                tmpDir
+                (VanishSourceEntryDuringVerification source vanished staging)
+                (stageBuiltinSource (DirectorySource source) staging)
+            present <- exists staging
+            decodedVanished <- decodePath vanished
+            return (result, present, decodedVanished)
+      assert $ case stagedResult of
+        Left err ->
+          ( "bootstrap source entry changed during acquisition: "
+              <> vanishedPath
+          )
+            `isInfixOf` Exception.displayException err
+        Right _ -> False
+      stagingExists === False
+
   it "binds arbitrary retained directory modes to source identities" $
     hedgehog $ do
       originalMode <-

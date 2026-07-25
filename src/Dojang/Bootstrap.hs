@@ -64,6 +64,7 @@ import Data.Text.Encoding (decodeUtf8')
 import Data.Text.Normalize qualified as Unicode
 import GHC.Generics (Generic)
 import System.FilePath.Posix qualified as Posix
+import System.IO.Error (ioeGetFileName, isDoesNotExistError)
 import System.OsPath
   ( OsPath
   , takeDirectory
@@ -355,40 +356,57 @@ copyDirectoryTree
   -> OsPath
   -> m (Either AcquisitionError StagedMetadata)
 copyDirectoryTree source destination = do
-  entries <- listDirectoryRecursively source []
-  layout <- validateDirectoryEntryLayout entries
-  case layout of
-    Left err -> return $ Left err
-    Right () -> do
-      validation <- identifyDirectoryEntries source entries
-      case validation of
+  entriesResult <- listDirectorySourceSnapshot source
+  case entriesResult of
+    Left path -> return $ Left $ SourceChangedDuringAcquisition path
+    Right entries -> do
+      layout <- validateDirectoryEntryLayout entries
+      case layout of
         Left err -> return $ Left err
-        Right
-          ( sourceIdentity
-            , resolvedSource
-            , rootModeSnapshot
-            , entryIdentities
-            ) -> do
-            metadata <-
-              captureStagedMetadata
-                rootModeSnapshot
-                entryIdentities
-                entries
-            stagingIdentity <- createOwnedPrivateDirectory destination
-            cleanupStagingOnError destination stagingIdentity $ do
-              copyDirectoryEntries
-                source
-                destination
-                entryIdentities
-                entries
-              verifyDirectorySource
-                source
-                sourceIdentity
-                resolvedSource
-                rootModeSnapshot
-                entryIdentities
-                entries
-            return $ Right metadata
+        Right () -> do
+          validation <- identifyDirectoryEntries source entries
+          case validation of
+            Left err -> return $ Left err
+            Right
+              ( sourceIdentity
+                , resolvedSource
+                , rootModeSnapshot
+                , entryIdentities
+                ) -> do
+                metadata <-
+                  captureStagedMetadata
+                    rootModeSnapshot
+                    entryIdentities
+                    entries
+                stagingIdentity <- createOwnedPrivateDirectory destination
+                cleanupStagingOnError destination stagingIdentity $ do
+                  copyDirectoryEntries
+                    source
+                    destination
+                    entryIdentities
+                    entries
+                  verifyDirectorySource
+                    source
+                    sourceIdentity
+                    resolvedSource
+                    rootModeSnapshot
+                    entryIdentities
+                    entries
+                return $ Right metadata
+
+
+listDirectorySourceSnapshot
+  :: (MonadFileSystem m)
+  => OsPath
+  -> m (Either FilePath [(FileType, OsPath)])
+listDirectorySourceSnapshot source =
+  (Right <$> listDirectoryRecursivelyStrict source [])
+    `catchError` \err ->
+      if isDoesNotExistError err
+        then do
+          path <- maybe (decodePath source) return $ ioeGetFileName err
+          return $ Left path
+        else throwError err
 
 
 validateDirectoryEntryLayout
@@ -567,7 +585,10 @@ verifyDirectorySource
     currentRootModeSnapshot <- getFileModeSnapshot resolvedSource
     unless (currentRootModeSnapshot == Just rootModeSnapshot) $
       throwSourceEntryChanged source
-    currentEntries <- listDirectoryRecursively source []
+    currentEntriesResult <- listDirectorySourceSnapshot source
+    currentEntries <- case currentEntriesResult of
+      Left path -> throwSourceEntryChangedPath path
+      Right value -> return value
     let expectedMembership = directoryMembership entries
         currentMembership = directoryMembership currentEntries
         allPaths =
@@ -642,9 +663,15 @@ verifyPathIdentity displayPath path expectedIdentity = do
 throwSourceEntryChanged :: (MonadFileSystem m) => OsPath -> m a
 throwSourceEntryChanged path = do
   decoded <- decodePath path
+  throwSourceEntryChangedPath decoded
+
+
+throwSourceEntryChangedPath
+  :: (MonadFileSystem m) => FilePath -> m a
+throwSourceEntryChangedPath path =
   throwError $
     userError $
-      "bootstrap source entry changed during acquisition: " <> decoded
+      "bootstrap source entry changed during acquisition: " <> path
 
 
 expectedEntrySnapshot

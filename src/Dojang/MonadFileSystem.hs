@@ -26,7 +26,7 @@ module Dojang.MonadFileSystem
 
 import Control.Concurrent (threadDelay)
 import Control.Exception qualified as Exception
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (complement, (.&.), (.|.))
@@ -45,6 +45,7 @@ import System.IO.Error
   , doesNotExistErrorType
   , ioeGetLocation
   , ioeSetErrorString
+  , ioeSetFileName
   , ioeSetLocation
   , isAlreadyExistsError
   , isDoesNotExistError
@@ -678,6 +679,8 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- Filesystem-backed implementations must keep each traversed directory
   -- pinned and open child directories without following links, so a concurrent
   -- pathname replacement cannot redirect traversal.
+  -- Entries that vanish during traversal may be omitted; use
+  -- 'listDirectoryRecursivelyStrict' when membership must be consistent.
   listDirectoryRecursively
     :: (HasCallStack)
     => OsPath
@@ -689,8 +692,33 @@ class (MonadError IOError m) => MonadFileSystem m where
     -- ^ The list of pairs of file types and paths.  The paths are relative
     -- to the given directory.
   listDirectoryRecursively path ignorePatterns =
-    listDirectoryRecursively' path (step_ ignorePatterns)
+    listDirectoryRecursively'
+      TolerateVanishedEntries
+      path
+      (step_ ignorePatterns)
       `mapError` (`ioePrependLocation` "listDirectoryRecursively")
+
+
+  -- | Lists a directory recursively while rejecting names that vanish after
+  -- enumeration.
+  --
+  -- This is the strict counterpart of 'listDirectoryRecursively' for callers
+  -- that require a consistent membership snapshot.  Implementations must
+  -- throw a does-not-exist 'IOError' when a name returned by directory
+  -- enumeration disappears before it can be classified or opened.
+  listDirectoryRecursivelyStrict
+    :: (HasCallStack)
+    => OsPath
+    -- ^ The directory to list recursively.
+    -> [FilePattern]
+    -- ^ The file patterns to ignore.
+    -> m [(FileType, OsPath)]
+  listDirectoryRecursivelyStrict path ignorePatterns =
+    listDirectoryRecursively'
+      RejectVanishedEntries
+      path
+      (step_ ignorePatterns)
+      `mapError` (`ioePrependLocation` "listDirectoryRecursivelyStrict")
 
 
   -- | Gets the size of a file in bytes.  If the file doesn't exist or is
@@ -803,10 +831,11 @@ writeFileAtomically destination template contents = do
 
 listDirectoryRecursively'
   :: (HasCallStack, MonadFileSystem m)
-  => OsPath
+  => DirectoryTraversalMode
+  -> OsPath
   -> Step ()
   -> m [(FileType, OsPath)]
-listDirectoryRecursively' path ptnStep = do
+listDirectoryRecursively' mode path ptnStep = do
   unfilteredEntries <- listDirectory path
   entriesWithSteps <- forM unfilteredEntries $ \entry -> do
     decoded <- decodePath entry
@@ -821,16 +850,61 @@ listDirectoryRecursively' path ptnStep = do
     partitionM (isSymlink . (path </>) . fst) filteredEntries
   (dirs, files) <- partitionM (isDirectory . (path </>) . fst) entries'
   symlinks' <- forM symlinks $ \(symlink, _) -> return (Symlink, symlink)
-  files' <- forM files $ \(file, _) -> return (File, file)
+  files' <- forM files $ \(file, _) -> do
+    when (mode == RejectVanishedEntries) $ do
+      let filePath = path </> file
+      void (getPortableMode filePath) `catchError` \err ->
+        if isDoesNotExistError err
+          then throwVanishedDirectoryEntry filePath
+          else throwError err
+    return (File, file)
   dirs' <- forM dirs $ \(dir, step) -> do
-    subentries <- listDirectoryRecursively' (path </> dir) step
+    subentries <- listDirectoryRecursively' mode (path </> dir) step
     return $ (Directory, dir) : (fmap (dir </>) <$> subentries)
   return $ files' ++ symlinks' ++ concat dirs'
 
+
+throwVanishedDirectoryEntry
+  :: (MonadFileSystem m) => OsPath -> m a
+throwVanishedDirectoryEntry path = do
+  path' <- decodePath path
+  throwError $
+    mkIOError
+      doesNotExistErrorType
+      "listDirectoryRecursivelyStrict"
+      Nothing
+      (Just path')
+
+
+data DirectoryTraversalMode
+  = TolerateVanishedEntries
+  | RejectVanishedEntries
+  deriving (Eq)
+
+
+handleVanishedEntry
+  :: DirectoryTraversalMode -> OsPath -> IO [a] -> IO [a]
+handleVanishedEntry mode path action =
+  action `catchError` handle
+ where
+  handle err
+    | not $ isDoesNotExistError err = throwError err
+    | mode == TolerateVanishedEntries = return []
+    | ioeGetLocation err == "listDirectoryRecursivelyStrict" = throwError err
+    | otherwise = do
+        path' <- decodeFS path
+        throwError $
+          ioeSetFileName
+            (ioeSetLocation err "listDirectoryRecursivelyStrict")
+            path'
+
 #ifdef mingw32_HOST_OS
 listDirectoryRecursivelyIO
-  :: OsPath -> [FilePattern] -> IO [(FileType, OsPath)]
-listDirectoryRecursivelyIO path ignorePatterns = do
+  :: DirectoryTraversalMode
+  -> OsPath
+  -> [FilePattern]
+  -> IO [(FileType, OsPath)]
+listDirectoryRecursivelyIO mode path ignorePatterns = do
   resolved <- OsDirectory.canonicalizePath path
   withPinnedDirectory resolved $ go resolved (step_ ignorePatterns)
  where
@@ -847,18 +921,14 @@ listDirectoryRecursivelyIO path ignorePatterns = do
         ]
         $ \(entry, nextStep) -> do
           let entryPath = current </> entry
-          ( withPinnedEntry entryPath $ \fileType -> case fileType of
+          handleVanishedEntry mode entryPath $
+            withPinnedEntry entryPath $ \fileType -> case fileType of
               Directory -> do
                 descendants <- go entryPath nextStep
                 return $
                   (Directory, entry)
                     : fmap (fmap (entry </>)) descendants
               entryType -> return [(entryType, entry)]
-            )
-            `catchError` \err ->
-              if isDoesNotExistError err
-                then return []
-                else throwError err
 
 
 withPinnedDirectory :: OsPath -> IO a -> IO a
@@ -964,14 +1034,17 @@ foreign import ccall unsafe "dojang_file_type_at"
 
 
 listDirectoryRecursivelyIO
-  :: OsPath -> [FilePattern] -> IO [(FileType, OsPath)]
-listDirectoryRecursivelyIO path ignorePatterns = do
+  :: DirectoryTraversalMode
+  -> OsPath
+  -> [FilePattern]
+  -> IO [(FileType, OsPath)]
+listDirectoryRecursivelyIO mode path ignorePatterns = do
   resolved <- OsDirectory.canonicalizePath path
   path' <- decodeFS resolved
   withPinnedDirectoryFd Nothing path' $ \descriptor ->
-    go descriptor (step_ ignorePatterns)
+    go resolved descriptor (step_ ignorePatterns)
  where
- go descriptor ptnStep = do
+  go current descriptor ptnStep = do
     unfilteredEntries <- listDirectoryFd descriptor
     entriesWithSteps <- forM unfilteredEntries $ \entry -> do
       decoded <- decodeFS entry
@@ -983,25 +1056,21 @@ listDirectoryRecursivelyIO path ignorePatterns = do
         , null $ stepDone nextStep
         ]
         $ \(entry, entry', nextStep) -> do
-          entryType <- getFileTypeAt descriptor entry'
-          case entryType of
-            Nothing -> return []
-            Just Symlink -> return [(Symlink, entry)]
-            Just Directory ->
-              ( withPinnedDirectoryFd
+          let entryPath = current </> entry
+          handleVanishedEntry mode entryPath $ do
+            entryType <- getFileTypeAt descriptor entry'
+            case entryType of
+              Symlink -> return [(Symlink, entry)]
+              Directory ->
+                withPinnedDirectoryFd
                   (Just descriptor)
                   entry'
                   $ \childDescriptor -> do
-                    descendants <- go childDescriptor nextStep
+                    descendants <- go entryPath childDescriptor nextStep
                     return $
                       (Directory, entry)
                         : fmap (fmap (entry </>)) descendants
-              )
-                `catchError` \err ->
-                  if isDoesNotExistError err
-                    then return []
-                    else throwError err
-            Just File -> return [(File, entry)]
+              File -> return [(File, entry)]
 
 
 withPinnedDirectoryFd
@@ -1056,18 +1125,17 @@ listDirectoryFd descriptor =
   maximumNameBytes = 4096
 
 
-getFileTypeAt :: Fd -> FilePath -> IO (Maybe FileType)
+getFileTypeAt :: Fd -> FilePath -> IO FileType
 getFileTypeAt descriptor entry =
   PosixInternal.withFilePath entry $ \entryPath -> do
     result <- c_fileTypeAt (fromIntegral descriptor) entryPath
     case result of
-      1 -> return $ Just Directory
-      2 -> return $ Just Symlink
-      3 -> return $ Just File
+      1 -> return Directory
+      2 -> return Symlink
+      3 -> return File
       value
-        | value < 0 && CError.Errno (negate value) == CError.eNOENT ->
-            return Nothing
-        | value < 0 -> throwErrnoCode "fstatat" $ negate value
+        | value < 0 ->
+            throwErrnoCode "fstatat" $ negate value
         | otherwise ->
             ioError $ userError "fstatat returned an invalid file type"
 
@@ -1949,7 +2017,12 @@ instance MonadFileSystem IO where
   listDirectory = OsDirectory.listDirectory
 
 
-  listDirectoryRecursively = listDirectoryRecursivelyIO
+  listDirectoryRecursively =
+    listDirectoryRecursivelyIO TolerateVanishedEntries
+
+
+  listDirectoryRecursivelyStrict =
+    listDirectoryRecursivelyIO RejectVanishedEntries
 
 
   getFileSize path = do

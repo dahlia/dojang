@@ -69,7 +69,9 @@ To be released.
     reports its recovery path instead of silently hiding it.
     Directory traversal pins each opened directory and opens children without
     following links, so a transient directory-link replacement cannot redirect
-    enumeration outside the source.  Bootstrap also resolves and records the
+    enumeration outside the source.  An entry that vanishes after its name is
+    enumerated is rejected as a concurrent source change instead of being
+    silently omitted.  Bootstrap also resolves and records the
     destination parent and its complete physical ancestor identity chain,
     revalidating the lexical target and that chain across preparation,
     acquisition, validation, and publication so an observed replacement aborts

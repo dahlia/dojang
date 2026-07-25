@@ -305,6 +305,8 @@ instance
   listDirectory = App . lift . lift . lift . listDirectory
   listDirectoryRecursively path =
     App . lift . lift . lift . listDirectoryRecursively path
+  listDirectoryRecursivelyStrict path =
+    App . lift . lift . lift . listDirectoryRecursivelyStrict path
   getFileSize = App . lift . lift . lift . getFileSize
   getFileIdentity = App . lift . lift . lift . getFileIdentity
   getFileSnapshot = App . lift . lift . lift . getFileSnapshot

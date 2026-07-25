@@ -43,6 +43,8 @@ devices, and other special files are rejected before they are read.  Dojang
 holds each directory open while enumerating it and opens child directories
 without following links.  Replacing a directory with a link during traversal
 therefore stops or observes the link itself instead of scanning its target.
+An entry name that vanishes after enumeration is treated as a concurrent source
+change instead of being omitted from the acquired snapshot.
 It rejects source paths that collide after case folding or Unicode
 normalization before copying any entry.  This prevents distinct names on a
 case-sensitive source filesystem from collapsing in staging.  Dojang pins the
