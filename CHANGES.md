@@ -94,8 +94,13 @@ To be released.
     drive-less relative path inside the acquired repository without parent or
     symbolic-link components, and it must be a regular file no larger than
     16 MiB.  Staged validation parses bytes read through the validated handle,
-    so a transport-created special file cannot block or redirect it.  [[#47],
-    [#74]]
+    so a transport-created special file cannot block or redirect it.  Manifest
+    creation now writes complete bytes to a sibling temporary file before an
+    atomic rename, while retaining ordinary creation permissions, so concurrent
+    initialization and other readers cannot observe a partially written
+    manifest.  The rename avoids replacing a manifest created concurrently
+    where the filesystem supports that operation, and otherwise uses its
+    ordinary atomic file rename.  [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

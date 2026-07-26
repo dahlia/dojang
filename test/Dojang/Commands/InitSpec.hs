@@ -969,6 +969,11 @@ instance MonadFileSystem CoordinatedInitIO where
   isSymlink value = liftIO (isSymlink value :: IO Bool)
   readFile filename = liftIO (readFile filename :: IO ByteString)
   writeFile filename contents = liftIO (writeFile filename contents :: IO ())
+  createFileAtomicallyWithDefaultPermissions filename template contents =
+    liftIO
+      ( createFileAtomicallyWithDefaultPermissions filename template contents
+          :: IO ()
+      )
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
   copyFileWithMetadata source destination =

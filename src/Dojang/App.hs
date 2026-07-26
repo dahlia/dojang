@@ -280,6 +280,12 @@ instance
   copyRegularFileWithSnapshot snapshot src =
     App . lift . lift . lift . copyRegularFileWithSnapshot snapshot src
   writeFile dst = App . lift . lift . lift . writeFile dst
+  createFileAtomicallyWithDefaultPermissions dst template =
+    App
+      . lift
+      . lift
+      . lift
+      . createFileAtomicallyWithDefaultPermissions dst template
   replaceFile src = App . lift . lift . lift . replaceFile src
   renameDirectory src = App . lift . lift . lift . renameDirectory src
   writeTemporaryFile directory template contents =

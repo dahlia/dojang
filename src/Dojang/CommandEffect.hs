@@ -467,6 +467,9 @@ instance MonadFileSystem CommandEffectTest where
   copyRegularFileWithSnapshot snapshot source =
     liftCommandEffectBase . copyRegularFileWithSnapshot snapshot source
   writeFile path = liftCommandEffectBase . writeFile path
+  createFileAtomicallyWithDefaultPermissions path template =
+    liftCommandEffectBase
+      . createFileAtomicallyWithDefaultPermissions path template
   replaceFile source = liftCommandEffectBase . replaceFile source
   renameDirectory source =
     liftCommandEffectBase . renameDirectory source

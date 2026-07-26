@@ -19,8 +19,8 @@ import Data.ByteString qualified as ByteString
 
 #ifndef mingw32_HOST_OS
 import Data.ByteString.Lazy qualified as LazyByteString
-#endif
 import Data.Char (chr)
+#endif
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
@@ -30,6 +30,7 @@ import Hedgehog (evalIO, forAll)
 
 #ifndef mingw32_HOST_OS
 import Hedgehog (assert)
+import System.Timeout (timeout)
 #endif
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -46,7 +47,6 @@ import System.IO
 import System.IO.Temp (withSystemTempFile)
 import System.Info (os)
 import System.OsPath (OsPath, decodeFS, encodeFS, takeDirectory, (</>))
-import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
   , describe

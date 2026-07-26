@@ -10,12 +10,10 @@ import Codec.Archive.Tar qualified as Tar
 import Codec.Archive.Tar.Entry qualified as Tar
 import Codec.Archive.Zip qualified as Zip
 import Codec.Compression.GZip qualified as GZip
-import Data.Bits (shiftL, (.&.), (.|.))
+import Data.Bits (shiftL, (.|.))
 import Data.ByteString.Char8 qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower, toUpper)
-import Data.Either (isLeft)
-import Data.List (isInfixOf)
 import Data.Word (Word16, Word32)
 import Hedgehog (assert, evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
@@ -39,6 +37,9 @@ import Control.Monad.Except
   )
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
+import Data.Bits ((.&.))
+import Data.Either (isLeft)
+import Data.List (isInfixOf)
 import System.Directory.OsPath qualified
 import System.FilePath qualified as FilePath
 import System.IO.Error
@@ -49,13 +50,13 @@ import System.IO.Error
 import System.OsPath (OsPath)
 import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
+import Test.Hspec (expectationFailure)
 #endif
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec
   ( Spec
   , anyIOException
   , describe
-  , expectationFailure
   , it
   , shouldBe
   , shouldReturn
@@ -71,7 +72,6 @@ import Dojang.Bootstrap
   , BuiltinSource (..)
   , archiveFormatFromFilePath
   , detectBuiltinSource
-  , emptyStagedMetadata
   , normalizeArchiveEntryPath
   , publishStagedDirectory
   , stageBuiltinSource
@@ -80,16 +80,19 @@ import Dojang.Bootstrap
 
 #ifndef mingw32_HOST_OS
 import Dojang.Bootstrap
-  ( publishStagedDirectoryWithMetadata
+  ( emptyStagedMetadata
+  , publishStagedDirectoryWithMetadata
   , stageBuiltinSourceWithMetadata
   )
-#endif
 import Dojang.MonadFileSystem
   ( BoundedFileRead (..)
   , FileIdentity
   , FileModeSnapshot (..)
   , FileSnapshot
-  , FileType (..)
+  )
+#endif
+import Dojang.MonadFileSystem
+  ( FileType (..)
   , MonadFileSystem (..)
   , dryRunIO
   )

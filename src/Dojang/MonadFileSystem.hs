@@ -19,7 +19,9 @@ module Dojang.MonadFileSystem
   , dryRunIO'
   , captureDirectoryPathIdentity
   , fileSnapshotIdentity
+  , isNoReplaceUnsupportedError
   , matchesDirectoryPathIdentity
+  , noReplaceUnsupportedError
   , tryDryRunIO
   , writeFileAtomically
   ) where
@@ -37,12 +39,14 @@ import GHC.IO.Exception
   ( IOErrorType
       ( InappropriateType
       , InvalidArgument
+      , UnsupportedOperation
       )
   )
 import GHC.Stack (HasCallStack)
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
+  , ioeGetErrorType
   , ioeGetLocation
   , ioeSetErrorString
   , ioeSetFileName
@@ -124,7 +128,6 @@ import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr)
 import GHC.Foreign qualified as GHC
 import GHC.IO.Encoding (getFileSystemEncoding)
-import GHC.IO.Exception qualified as GHCIO
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
 import Foreign.C.Types (CUInt (CUInt))
 #endif
@@ -142,6 +145,7 @@ import System.IO
   , hFlush
   , openBinaryFile
   , openBinaryTempFile
+  , openBinaryTempFileWithDefaultPermissions
   )
 import System.OsPath
   ( OsPath
@@ -452,6 +456,28 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Writes contents into a file.
   writeFile :: (HasCallStack) => OsPath -> ByteString -> m ()
+
+
+  -- | Creates a complete file through an atomic sibling rename.
+  --
+  -- The new file must receive the platform's default permissions, and the
+  -- operation must fail rather than replace a destination created
+  -- concurrently.  Virtual and test filesystems may use the default
+  -- single-write implementation.
+  createFileAtomicallyWithDefaultPermissions
+    :: (HasCallStack) => OsPath -> FilePath -> ByteString -> m ()
+  createFileAtomicallyWithDefaultPermissions destination _ contents = do
+    destinationExists <- exists destination
+    if not destinationExists
+      then writeFile destination contents
+      else do
+        destination' <- decodePath destination
+        throwError $
+          mkIOError
+            alreadyExistsErrorType
+            "createFileAtomicallyWithDefaultPermissions"
+            Nothing
+            (Just destination')
 
 
   -- | Replaces the destination file with the source file.
@@ -851,6 +877,54 @@ writeFileAtomically destination template contents = do
       temporaryExists <- exists temporary
       when temporaryExists $ removeFile temporary
       throwError err
+
+
+createFileAtomicallyWithDefaultPermissionsIO
+  :: OsPath -> FilePath -> ByteString -> IO ()
+createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
+  directory <- decodeFS $ takeDirectory destination
+  Exception.bracketOnError
+    (openBinaryTempFileWithDefaultPermissions directory template)
+    discardTemporary
+    publishTemporary
+ where
+  discardTemporary (temporary, handle) = do
+    hClose handle `catchError` const (return ())
+    Directory.removeFile temporary `catchError` const (return ())
+
+  publishTemporary (temporary, handle) = do
+    Data.ByteString.hPut handle contents
+    hFlush handle
+    hClose handle
+    temporaryPath <- encodeFS temporary
+    renameDirectoryNoReplaceIO temporaryPath destination
+      `catchError` \err ->
+        if isNoReplaceUnsupportedError err
+          then replaceFileIO temporaryPath destination
+          else throwError err
+
+
+-- | Tests whether a no-replace rename is unsupported by the filesystem.
+--
+-- This classification is shared by atomic file creation and the platform
+-- no-replace implementation so unsupported filesystems can retain atomic
+-- publication through their ordinary rename operation.
+isNoReplaceUnsupportedError :: IOError -> Bool
+isNoReplaceUnsupportedError err =
+  ioeGetErrorType err == UnsupportedOperation
+
+
+-- | Constructs the error used when atomic no-replace rename is unavailable.
+--
+-- The supplied path is attached to the error for diagnostics.
+noReplaceUnsupportedError :: FilePath -> IOError
+noReplaceUnsupportedError destination =
+  mkIOError
+    UnsupportedOperation
+    "renameFileNoReplace"
+    Nothing
+    (Just destination)
+    `ioeSetErrorString` "filesystem lacks atomic no-replace rename"
 
 
 listDirectoryRecursively'
@@ -1730,13 +1804,7 @@ checkNoReplaceResult unsupportedErrors destination action = do
 
 throwNoReplaceUnsupported :: FilePath -> IO a
 throwNoReplaceUnsupported destination =
-  Exception.throwIO $
-    mkIOError
-      GHCIO.UnsupportedOperation
-      "renameDirectory"
-      Nothing
-      (Just destination)
-      `ioeSetErrorString` "filesystem lacks atomic no-replace rename"
+  Exception.throwIO $ noReplaceUnsupportedError destination
 #endif
 
 
@@ -1971,6 +2039,10 @@ instance MonadFileSystem IO where
   writeFile dst contents = do
     dst' <- decodePath dst
     Data.ByteString.writeFile dst' contents
+
+
+  createFileAtomicallyWithDefaultPermissions =
+    createFileAtomicallyWithDefaultPermissionsIO
 
 
   replaceFile = replaceFileIO

@@ -19,12 +19,12 @@ import Control.Concurrent
 import Control.Exception qualified as Exception
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (xor)
-import Data.Char (chr)
-import Data.Either (isRight)
 import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf, sort, sortOn)
-import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
+import GHC.IO.Exception
+  ( IOErrorType (InappropriateType, InvalidArgument)
+  )
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
@@ -34,6 +34,7 @@ import System.IO.Error
   , isAlreadyExistsError
   , isDoesNotExistError
   , isPermissionError
+  , mkIOError
   )
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
@@ -56,6 +57,8 @@ import System.FilePath (combine)
 
 #ifndef mingw32_HOST_OS
 import Data.Bits ((.&.))
+import Data.Char (chr)
+import Data.Either (isRight)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Posix.Files qualified as Posix
@@ -103,7 +106,9 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
   , dryRunIO
+  , isNoReplaceUnsupportedError
   , matchesDirectoryPathIdentity
+  , noReplaceUnsupportedError
   , tryDryRunIO
   )
 import Dojang.TestUtils (withTempDir)
@@ -862,6 +867,18 @@ spec = do
           `shouldThrow` isAlreadyExistsError
         isDirectory (tmpDir </> foo) `shouldReturn` True
         isDirectory (tmpDir </> baz) `shouldReturn` True
+
+    specify "classifies only unsupported no-replace errors for fallback" $ do
+      let invalid =
+            mkIOError
+              InvalidArgument
+              "renameDirectory"
+              Nothing
+              Nothing
+      isNoReplaceUnsupportedError
+        (noReplaceUnsupportedError "destination")
+        `shouldBe` True
+      isNoReplaceUnsupportedError invalid `shouldBe` False
 
     specify "renameDirectory allows only one concurrent publisher" $
       withTempDir $ \tmpDir _ -> do
