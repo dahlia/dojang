@@ -475,6 +475,15 @@ class (MonadError IOError m) => MonadFileSystem m where
     -> m ()
   renameDirectory source destination = do
     entries <- listDirectoryRecursively source []
+    rootMode <- getPortableMode source
+    nestedDirectoryModes <-
+      forM
+        [relative | (Directory, relative) <- entries]
+        $ \relative -> do
+          let sourceEntry = source </> relative
+              destinationEntry = destination </> relative
+          mode <- getPortableMode sourceEntry
+          return (destinationEntry, mode)
     createDirectory destination
     forM_ entries $ \(fileType, relative) -> do
       let sourceEntry = source </> relative
@@ -489,6 +498,17 @@ class (MonadError IOError m) => MonadFileSystem m where
             target
             destinationEntry
             linkType
+    let directoryModes =
+          (destination, rootMode) : nestedDirectoryModes
+    forM_
+      ( sortOn
+          (Down . length . splitDirectories . fst)
+          directoryModes
+      )
+      $ \(path, mode) ->
+        case mode.posixBits of
+          Just bits -> setPortableMode path bits
+          Nothing -> setPortableWritable path mode.writable
     removeDirectoryRecursively source
 
 

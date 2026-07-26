@@ -21,6 +21,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (xor)
 import Data.Char (chr)
 import Data.Either (isRight)
+import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf, sort, sortOn)
 import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
@@ -1739,6 +1740,36 @@ spec = do
           result `shouldBe` (False, True, "contents")
           OsDirectory.doesDirectoryExist (tmpDir </> baz)
             `shouldReturn` False
+
+      it "preserves arbitrary virtual directory modes" $
+        hedgehog $ do
+          modes <-
+            forAll $
+              Gen.list
+                (constantFrom 1 1 6)
+                (Gen.word $ constantFrom 0o000 0o000 0o777)
+          observed <-
+            liftIO $
+              withTempDir $ \tmpDir _ -> do
+                components <-
+                  traverse
+                    (encodeFS . ("nested-" <>) . show)
+                    [1 .. length modes - 1]
+                let source = tmpDir </> foo
+                    destination = tmpDir </> baz
+                    sourceDirectories = scanl (</>) source components
+                    destinationDirectories =
+                      scanl (</>) destination components
+                dryRunIO $ do
+                  traverse_ createDirectory sourceDirectories
+                  sequence_ $
+                    zipWith
+                      setPortableMode
+                      sourceDirectories
+                      modes
+                  renameDirectory source destination
+                  traverse getPortableMode destinationDirectories
+          observed === fmap portableModeFromBits modes
 
       it "refuses an existing virtual destination" $ do
         Left err <- tryDryRunIO $ do

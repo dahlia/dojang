@@ -198,6 +198,9 @@ $ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
 A dry run does not publish the repository, save enrollment, or apply files.
 It applies the same requirement that the destination does not exist, then
 models acquisition and publication without changing the filesystem.
+For local directory and archive sources, virtual publication retains the staged
+root and nested directory permissions, so enrollment and apply previews observe
+the same metadata as a real rename.
 For an external transport, Dojang redacts the source argument and environment
 values when it prints the executable request, including source arguments whose
 native representation is not UTF-8, and does not start the program.  Because

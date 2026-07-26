@@ -33,7 +33,10 @@ To be released.
     destination arguments and inherited environment values retain their native
     byte representation on POSIX.  A dry run does not start an external
     transport and redacts its source argument and environment values, including
-    sources whose native representation is not UTF-8.
+    sources whose native representation is not UTF-8.  For local directory and
+    archive sources, virtual publication preserves staged root and nested
+    directory permissions so enrollment and apply previews match real
+    execution.
     Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
     other unsupported entry types before reading or extraction.  Directory
     sources also reject paths that collide after case folding or Unicode
