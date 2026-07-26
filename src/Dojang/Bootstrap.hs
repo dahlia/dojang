@@ -1095,6 +1095,8 @@ data ZipEntryKind
 
 zipEntryKind :: Zip.Entry -> ZipEntryKind
 zipEntryKind entry
+  -- ZIP metadata is untrusted, so reject symlink bits before consulting any
+  -- claimed creator system. Forged or ambiguous combinations must fail closed.
   | unixFileType == 0o120000 = ZipUnsupported
   | zipCreatorSystem entry `notElem` [3, 19] = inferredKind
   | unixFileType == 0 = inferredKind

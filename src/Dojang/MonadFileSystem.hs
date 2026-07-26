@@ -173,14 +173,14 @@ foreign import ccall unsafe "ConvertStringSecurityDescriptorToSecurityDescriptor
 foreign import ccall unsafe "LocalFree"
   c_localFree :: Win32.LPVOID -> IO Win32.LPVOID
 
-foreign import ccall unsafe "GetVolumePathNameW"
+foreign import ccall safe "GetVolumePathNameW"
   c_getVolumePathName
     :: Win32.LPCTSTR
     -> Win32.LPTSTR
     -> Win32.DWORD
     -> IO Win32.BOOL
 
-foreign import ccall unsafe "GetVolumeInformationW"
+foreign import ccall safe "GetVolumeInformationW"
   c_getVolumeInformation
     :: Win32.LPCTSTR
     -> Win32.LPTSTR

@@ -181,16 +181,16 @@ jobs:
     def test_windows_ffi_selects_the_native_calling_convention(self) -> None:
         self.assertNotIn("foreign import stdcall", self.monad_file_system)
         functions = (
-            "ConvertStringSecurityDescriptorToSecurityDescriptorW",
-            "LocalFree",
-            "GetVolumePathNameW",
-            "GetVolumeInformationW",
-            "GetFileInformationByHandleEx",
+            ("ConvertStringSecurityDescriptorToSecurityDescriptorW", "unsafe"),
+            ("LocalFree", "unsafe"),
+            ("GetVolumePathNameW", "safe"),
+            ("GetVolumeInformationW", "safe"),
+            ("GetFileInformationByHandleEx", "unsafe"),
         )
-        for function in functions:
+        for function, safety in functions:
             with self.subTest(function=function):
                 self.assertIn(
-                    f'foreign import ccall unsafe "{function}"',
+                    f'foreign import ccall {safety} "{function}"',
                     self.monad_file_system,
                 )
 
