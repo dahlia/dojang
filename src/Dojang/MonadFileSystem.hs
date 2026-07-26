@@ -109,7 +109,7 @@ import Foreign
   , poke
   , sizeOf
   )
-import Foreign.C.Types (CInt)
+import Foreign.C.Types (CInt (CInt))
 import Data.Int (Int64)
 import System.IO (IOMode (ReadMode), hIsSeekable)
 import System.Win32.File qualified as Win32
@@ -1179,7 +1179,7 @@ renameNoreplace :: CUInt
 renameNoreplace = 1
 
 
-foreign import ccall unsafe "renameat2"
+foreign import ccall unsafe "dojang_renameat2"
   c_renameat2
     :: CInt
     -> CString
@@ -1362,12 +1362,11 @@ getFileSnapshotIO path = do
         let unsupportedAttributes =
               Win32.fILE_ATTRIBUTE_DIRECTORY
                 .|. Win32.fILE_ATTRIBUTE_REPARSE_POINT
-        return $
-          if information.bhfiFileAttributes .&. unsupportedAttributes == 0
-            then
-              Just . fileSnapshotFromInformation information
-                <$> getFileChangeTime handle
-            else Nothing
+        if information.bhfiFileAttributes .&. unsupportedAttributes == 0
+          then
+            Just . fileSnapshotFromInformation information
+              <$> getFileChangeTime handle
+          else return Nothing
     )
     `catchError` \err ->
       if isDoesNotExistError err then return Nothing else throwError err

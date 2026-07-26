@@ -49,6 +49,23 @@ class ContainerBuildTests(unittest.TestCase):
         self.assertNotIn("cabal v2-update", self.contents)
         self.assertNotIn("cabal v2-install", self.contents)
 
+    def test_dependency_layer_supplies_local_package_paths(self) -> None:
+        dependency_build = self.contents.index("--only-dependencies")
+        self.assertLess(
+            self.contents.index("mkdir -p app cbits src test"),
+            dependency_build,
+        )
+        self.assertLess(
+            self.contents.index(
+                "touch CHANGES.md LICENSE README.md cbits/filesystem.c"
+            ),
+            dependency_build,
+        )
+        self.assertIn(
+            "RUN set -eux; \\\n    mkdir -p app cbits src test",
+            self.contents[:dependency_build],
+        )
+
     def test_runs_tests_as_an_unprivileged_user(self) -> None:
         self.assertIn("adduser -D builder", self.contents)
         self.assertIn("USER builder", self.contents)

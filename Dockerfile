@@ -118,6 +118,9 @@ WORKDIR /src/dojang
 
 # Resolve locked dependencies before copying frequently changing sources.
 COPY stack.yaml stack.yaml.lock package.yaml ./
+RUN set -eux; \
+    mkdir -p app cbits src test; \
+    touch CHANGES.md LICENSE README.md cbits/filesystem.c
 RUN stack build \
       --only-dependencies \
       --system-ghc \

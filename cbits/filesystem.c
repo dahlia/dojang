@@ -1,11 +1,20 @@
 #ifndef _WIN32
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/stat.h>
+
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 void *dojang_fdopendir(int fd)
 {
@@ -38,6 +47,31 @@ void dojang_closedir(void *stream)
 {
     (void) closedir((DIR *) stream);
 }
+
+#ifdef __linux__
+int dojang_renameat2(
+    int old_directory,
+    const char *old_path,
+    int new_directory,
+    const char *new_path,
+    unsigned int flags
+)
+{
+#ifdef SYS_renameat2
+    return (int) syscall(
+        SYS_renameat2,
+        old_directory,
+        old_path,
+        new_directory,
+        new_path,
+        flags
+    );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+#endif
 
 /*
  * Return 1 for a directory, 2 for a symbolic link, 3 for another entry, or a
