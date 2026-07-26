@@ -1011,7 +1011,9 @@ externalTransportSpec =
     if os == "mingw32"
       then pendingWith "The fixture uses a POSIX shell script."
       else withTempDir $ \tmp _ -> do
-        sourceName <- encodeFS "source-token-secret;touch-pwned"
+        sourceName <-
+          encodeFS
+            "source-token-secret$(touch${IFS}$INJECTION_MARKER)"
         destinationName <- encodeFS "destination"
         stateName <- encodeFS "state"
         homeName <- encodeFS "home"
@@ -1032,6 +1034,7 @@ externalTransportSpec =
             config = tmp </> configName
             failingConfig = tmp </> failingConfigName
             marker = tmp </> markerName
+            pwned = tmp </> pwnedName
             appEnv =
               bootstrapAppEnv destination stateRoot manifestName envName
         createDirectory source
@@ -1043,11 +1046,12 @@ externalTransportSpec =
             <> "test -n \"$(find \"$(dirname -- \"$2\")\""
             <> " -prune -perm 0700 -print)\""
             <> " || exit 24\n"
-            <> "/bin/touch -- \"$3\"\n"
-            <> "exec /bin/cp -R -- \"$1\" \"$2\"\n"
+            <> ": > \"$3\"\n"
+            <> "exec cp -R -- \"$1\" \"$2\"\n"
         setPortableMode script 0o755
         scriptPath <- decodeFS script
         markerPath <- decodeFS marker
+        pwnedPath <- decodeFS pwned
         writeFile config $
           encodeUtf8 $
             Text.pack $
@@ -1056,7 +1060,11 @@ externalTransportSpec =
                 <> ", \"{source}\", \"{destination}\", "
                 <> show markerPath
                 <> "]\n"
+                <> "inherit-environment = [\"PATH\"]\n"
                 <> "[transports.copy.environment]\n"
+                <> "INJECTION_MARKER = "
+                <> show pwnedPath
+                <> "\n"
                 <> "TOKEN = \"transport-secret\"\n"
         sourceText <- decodeFS source
         (dryRunOutput, dryRunResult) <-
@@ -1100,7 +1108,7 @@ externalTransportSpec =
           `shouldReturn` validManifest
         exists marker `shouldReturn` True
 
-        exists (tmp </> pwnedName) `shouldReturn` False
+        exists pwned `shouldReturn` False
 
         failureDestinationName <- encodeFS "failure destination"
         failureStateName <- encodeFS "failure state"
@@ -1112,7 +1120,7 @@ externalTransportSpec =
                 , stateDirectory = failureStateRoot
                 }
         writeFile failingScript $
-          "#!/bin/sh\n/bin/touch -- \"$2\"\nexit 23\n"
+          "#!/bin/sh\n: > \"$2\"\nexit 23\n"
         setPortableMode failingScript 0o755
         failingScriptPath <- decodeFS failingScript
         writeFile failingConfig $
