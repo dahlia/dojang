@@ -429,8 +429,8 @@ spec = do
             Gen.string
               (Range.linear 0 90)
               (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
-        let firstPath = "nested/a" <> suffix
-            secondPath = "nested/A" <> suffix
+        let firstPath = "nested/file-a" <> suffix
+            secondPath = "nested/FILE-A" <> suffix
         conflicting <-
           evalIO $
             withTempDir $ \tmpDir _ -> do
