@@ -11,27 +11,72 @@ The release installer downloads the executable and the release's
 *SHA256SUMS* file.  It verifies the selected archive before installing
 anything.
 
-On Linux or macOS:
+On Linux or macOS, download the installer into a fresh temporary directory:
 
 ~~~~ bash
-curl -fsSLO https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
-less install.sh
-sh ./install.sh
+installer_directory="$(
+  mktemp -d "${TMPDIR:-/tmp}/dojang-install.XXXXXX"
+)"
+if test -z "$installer_directory" ||
+  ! curl -fsSLo "$installer_directory/install.sh" \
+    https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
+then
+  test -z "$installer_directory" || rm -rf "$installer_directory"
+  installer_directory=
+fi
+~~~~
+
+Inspect the downloaded script:
+
+~~~~ bash
+test -n "$installer_directory" &&
+  less "$installer_directory/install.sh"
+~~~~
+
+After inspection, run it:
+
+~~~~ bash
+test -n "$installer_directory" &&
+  sh "$installer_directory/install.sh"
 ~~~~
 
 The POSIX installer supports x86-64 and AArch64.  It installs to
 *~/.local/bin* by default.
 
-On x86-64 Windows, run this in PowerShell:
+On x86-64 Windows, download the installer in PowerShell:
 
 ~~~~ powershell
-Invoke-WebRequest `
-  https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
-  -OutFile install.ps1 `
-  -UseBasicParsing
-Get-Content .\install.ps1
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\install.ps1
+$installerDirectory = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
+$installer = Join-Path $installerDirectory install.ps1
+New-Item -ItemType Directory -Path $installerDirectory | Out-Null
+try {
+  Invoke-WebRequest `
+    https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
+    -OutFile $installer `
+    -UseBasicParsing `
+    -ErrorAction Stop
+} catch {
+  Remove-Item $installerDirectory -Recurse -Force -ErrorAction Ignore
+  $installer = $null
+  throw
+}
+~~~~
+
+Inspect the downloaded script:
+
+~~~~ powershell
+if ($installer) {
+  Get-Content $installer
+}
+~~~~
+
+After inspection, run it:
+
+~~~~ powershell
+if ($installer) {
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+  & $installer
+}
 ~~~~
 
 Set `DOJANG_INSTALL_DIR` to choose another directory.  To install a specific
@@ -44,16 +89,20 @@ directory receives both the archive and the release's *SHA256SUMS* file.  For
 example, after downloading and inspecting `install.sh` as above:
 
 ~~~~ bash
-DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" sh ./install.sh
+test -n "$installer_directory" &&
+  DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" \
+    sh "$installer_directory/install.sh"
 ~~~~
 
 On Windows, after downloading and inspecting `install.ps1` as above, set the
 same environment variable and then run the local script:
 
 ~~~~ powershell
-$env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\install.ps1
+if ($installer) {
+  $env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+  & $installer
+}
 ~~~~
 
 

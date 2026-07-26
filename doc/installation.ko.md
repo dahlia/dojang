@@ -10,27 +10,72 @@
 릴리스 설치 스크립트는 실행 파일과 해당 릴리스의 *SHA256SUMS* 파일을
 다운로드합니다.  선택한 아카이브의 체크섬을 확인한 뒤 설치합니다.
 
-Linux 또는 macOS에서는 다음 명령을 실행합니다.
+Linux 또는 macOS에서는 새 임시 디렉터리에 설치 스크립트를 다운로드합니다.
 
 ~~~~ bash
-curl -fsSLO https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
-less install.sh
-sh ./install.sh
+installer_directory="$(
+  mktemp -d "${TMPDIR:-/tmp}/dojang-install.XXXXXX"
+)"
+if test -z "$installer_directory" ||
+  ! curl -fsSLo "$installer_directory/install.sh" \
+    https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
+then
+  test -z "$installer_directory" || rm -rf "$installer_directory"
+  installer_directory=
+fi
+~~~~
+
+다운로드한 스크립트를 확인합니다.
+
+~~~~ bash
+test -n "$installer_directory" &&
+  less "$installer_directory/install.sh"
+~~~~
+
+확인한 뒤 실행합니다.
+
+~~~~ bash
+test -n "$installer_directory" &&
+  sh "$installer_directory/install.sh"
 ~~~~
 
 POSIX 설치 스크립트는 x86-64와 AArch64를 지원하며, 기본 설치 경로는
 *~/.local/bin*입니다.
 
-x86-64 Windows에서는 PowerShell에서 다음 명령을 실행합니다.
+x86-64 Windows에서는 PowerShell에서 설치 스크립트를 다운로드합니다.
 
 ~~~~ powershell
-Invoke-WebRequest `
-  https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
-  -OutFile install.ps1 `
-  -UseBasicParsing
-Get-Content .\install.ps1
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\install.ps1
+$installerDirectory = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
+$installer = Join-Path $installerDirectory install.ps1
+New-Item -ItemType Directory -Path $installerDirectory | Out-Null
+try {
+  Invoke-WebRequest `
+    https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
+    -OutFile $installer `
+    -UseBasicParsing `
+    -ErrorAction Stop
+} catch {
+  Remove-Item $installerDirectory -Recurse -Force -ErrorAction Ignore
+  $installer = $null
+  throw
+}
+~~~~
+
+다운로드한 스크립트를 확인합니다.
+
+~~~~ powershell
+if ($installer) {
+  Get-Content $installer
+}
+~~~~
+
+확인한 뒤 실행합니다.
+
+~~~~ powershell
+if ($installer) {
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+  & $installer
+}
 ~~~~
 
 다른 디렉터리를 선택하려면 `DOJANG_INSTALL_DIR`을 설정하세요.  최신 버전 대신
@@ -43,16 +88,20 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 같이 `install.sh`를 다운로드하여 확인한 다음 실행하세요.
 
 ~~~~ bash
-DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" sh ./install.sh
+test -n "$installer_directory" &&
+  DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" \
+    sh "$installer_directory/install.sh"
 ~~~~
 
 Windows에서는 위와 같이 `install.ps1`을 다운로드하여 확인한 다음 같은 환경
 변수를 설정하고 로컬 스크립트를 실행합니다.
 
 ~~~~ powershell
-$env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\install.ps1
+if ($installer) {
+  $env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+  & $installer
+}
 ~~~~
 
 
