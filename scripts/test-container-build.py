@@ -9,6 +9,21 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 DOCKERFILE = REPOSITORY_ROOT / "Dockerfile"
 BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "build.yaml"
+WINDOWS_SMOKE_TEST = REPOSITORY_ROOT / "scripts" / "smoke-test-dist.ps1"
+POSIX_SMOKE_TEST = REPOSITORY_ROOT / "scripts" / "smoke-test-dist.sh"
+
+
+def workflow_job(contents: str, name: str) -> str:
+    """Returns one top-level job from a GitHub Actions workflow."""
+    marker = re.search(rf"(?m)^  {re.escape(name)}:\n", contents)
+    if marker is None:
+        raise AssertionError(f"workflow job not found: {name}")
+    start = marker.start()
+    following = contents[marker.end() :]
+    next_job = re.search(r"(?m)^  [A-Za-z0-9_-]+:\n", following)
+    if next_job is None:
+        return contents[start:]
+    return contents[start : marker.end() + next_job.start()]
 
 
 class ContainerBuildTests(unittest.TestCase):
@@ -16,6 +31,23 @@ class ContainerBuildTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.contents = DOCKERFILE.read_text(encoding="utf-8")
         cls.workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
+        cls.windows_smoke_test = WINDOWS_SMOKE_TEST.read_text(encoding="utf-8")
+        cls.posix_smoke_test = POSIX_SMOKE_TEST.read_text(encoding="utf-8")
+
+    def test_workflow_job_ignores_nested_keys(self) -> None:
+        workflow = """\
+jobs:
+  check:
+    steps:
+      - with:
+          build:
+  build:
+    runs-on: ubuntu-latest
+"""
+        self.assertEqual(
+            workflow_job(workflow, "build"),
+            "  build:\n    runs-on: ubuntu-latest\n",
+        )
 
     def test_pins_official_tool_versions_and_checksums(self) -> None:
         expected_values = (
@@ -84,13 +116,45 @@ class ContainerBuildTests(unittest.TestCase):
     def test_release_workflow_smoke_tests_every_final_binary_archive(
         self,
     ) -> None:
-        self.assertEqual(
-            self.workflow.count("scripts/smoke-test-dist.sh"),
-            2,
+        portable_build = workflow_job(self.workflow, "build")
+        linux_build = workflow_job(self.workflow, "build-linux")
+        self.assertIn("shopt -s nullglob", portable_build)
+        self.assertIn("scripts/smoke-test-dist.sh", portable_build)
+        self.assertIn(r"scripts\smoke-test-dist.ps1", portable_build)
+        self.assertIn("shopt -s nullglob", linux_build)
+        self.assertIn("scripts/smoke-test-dist.sh", linux_build)
+
+    def test_static_link_check_requires_readelf_to_succeed(self) -> None:
+        self.assertNotIn("! readelf", self.contents)
+        self.assertIn(
+            "readelf -l /out/dojang > /tmp/dojang-headers.txt",
+            self.contents,
         )
-        self.assertEqual(
-            self.workflow.count(r"scripts\smoke-test-dist.ps1"),
-            1,
+        self.assertIn(
+            "grep -q \"Program Headers\" /tmp/dojang-headers.txt",
+            self.contents,
+        )
+        self.assertIn(
+            "! grep -q INTERP /tmp/dojang-headers.txt",
+            self.contents,
+        )
+
+    def test_archive_smoke_tests_bootstrap_a_repository(self) -> None:
+        for script in (self.posix_smoke_test, self.windows_smoke_test):
+            with self.subTest(script=script[:20]):
+                self.assertIn("--from", script)
+                self.assertIn("--yes", script)
+
+    def test_windows_smoke_test_isolates_profile_paths(self) -> None:
+        self.assertIn("$env:USERPROFILE = $bootstrapHome", self.windows_smoke_test)
+        self.assertIn("$env:APPDATA = $bootstrapHome", self.windows_smoke_test)
+        self.assertIn("$env:USERPROFILE = $previousUserProfile", self.windows_smoke_test)
+        self.assertIn("$env:APPDATA = $previousAppData", self.windows_smoke_test)
+
+    def test_posix_smoke_test_isolates_config_paths(self) -> None:
+        self.assertIn(
+            'XDG_CONFIG_HOME="$bootstrap_home/.config"',
+            self.posix_smoke_test,
         )
 
 

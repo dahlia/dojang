@@ -63,7 +63,7 @@ try {
     -OutFile $checksums `
     -UseBasicParsing
 
-  $matches = @(
+  $expectedChecksums = @(
     foreach ($line in Get-Content -LiteralPath $checksums) {
       if ($line -match "^([A-Fa-f0-9]{64})\s+\*?(.+)$") {
         if ($Matches[2] -ceq $asset) {
@@ -72,7 +72,7 @@ try {
       }
     }
   )
-  if ($matches.Count -ne 1) {
+  if ($expectedChecksums.Count -ne 1) {
     Stop-Install `
       "SHA256SUMS does not contain exactly one checksum for $asset."
   }
@@ -80,7 +80,7 @@ try {
   $actualChecksum = (
     Get-FileHash -LiteralPath $archive -Algorithm SHA256
   ).Hash.ToLowerInvariant()
-  if ($actualChecksum -cne $matches[0]) {
+  if ($actualChecksum -cne $expectedChecksums[0]) {
     Stop-Install "checksum verification failed for $asset."
   }
 

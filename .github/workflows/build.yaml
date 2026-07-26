@@ -109,6 +109,7 @@ jobs:
         set -e
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins/"
+        shopt -s nullglob
         archives=(dojang-*.tar.xz)
         [[ "${#archives[@]}" -eq 1 ]]
         scripts/smoke-test-dist.sh "${archives[0]}"
@@ -198,6 +199,7 @@ jobs:
         test -s "$RUNNER_TEMP/dojang-bins/dojang"
         cp ./LICENSE "$RUNNER_TEMP/dojang-bins/"
         scripts/make-dist.sh "$RUNNER_TEMP/dojang-bins"
+        shopt -s nullglob
         archives=(dojang-*.tar.xz)
         [[ "${#archives[@]}" -eq 1 ]]
         scripts/smoke-test-dist.sh "${archives[0]}"

@@ -172,7 +172,9 @@ RUN set -eux; \
       --ghc-options="$ghc_options" \
       --copy-bins \
       --local-bin-path=/out; \
-    ! readelf -l /out/dojang | grep -q INTERP
+    readelf -l /out/dojang > /tmp/dojang-headers.txt; \
+    grep -q "Program Headers" /tmp/dojang-headers.txt; \
+    ! grep -q INTERP /tmp/dojang-headers.txt
 
 FROM alpine:3.23
 

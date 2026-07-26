@@ -17,9 +17,17 @@ temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/dojang-smoke.XXXXXX")"
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 extracted="$temporary_directory/extracted"
 repository="$temporary_directory/repository"
+bootstrapped_repository="$temporary_directory/bootstrapped-repository"
 home="$temporary_directory/home"
 state_root="$temporary_directory/state"
-mkdir -p "$extracted" "$home" "$state_root"
+bootstrap_home="$temporary_directory/bootstrap-home"
+bootstrap_state_root="$temporary_directory/bootstrap-state"
+mkdir -p \
+  "$extracted" \
+  "$home" \
+  "$state_root" \
+  "$bootstrap_home" \
+  "$bootstrap_state_root"
 
 tar -xJf "$archive" -C "$extracted"
 executable="$extracted/dojang"
@@ -39,9 +47,24 @@ case "$(uname -s)-$(uname -m)" in
   *) error "unsupported smoke-test platform: $(uname -s)-$(uname -m)" ;;
 esac
 
-HOME="$home" XDG_DATA_HOME="$state_root" \
+HOME="$home" \
+  XDG_CONFIG_HOME="$home/.config" \
+  XDG_DATA_HOME="$state_root" \
   "$executable" -r "$repository" init "$preset" --no-interactive
 [[ -f "$repository/dojang.toml" ]] ||
   error "dojang init did not create a manifest."
-HOME="$home" XDG_DATA_HOME="$state_root" \
+HOME="$home" \
+  XDG_CONFIG_HOME="$home/.config" \
+  XDG_DATA_HOME="$state_root" \
   "$executable" -r "$repository" status
+HOME="$bootstrap_home" \
+  XDG_CONFIG_HOME="$bootstrap_home/.config" \
+  XDG_DATA_HOME="$bootstrap_state_root" \
+  "$executable" \
+  -r "$bootstrapped_repository" \
+  init \
+  --from "$repository" \
+  --no-interactive \
+  --yes
+[[ -f "$bootstrapped_repository/dojang.toml" ]] ||
+  error "dojang init --from did not copy the manifest."

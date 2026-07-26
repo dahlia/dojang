@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import http.server
 import os
@@ -30,7 +31,7 @@ POSIX_PLATFORMS = (
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     """Serves fixture releases without writing request logs."""
 
-    def log_message(self, format: str, *args: object) -> None:
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass
 
 
@@ -46,8 +47,9 @@ class InstallerTests(unittest.TestCase):
         self.release_directory.mkdir()
         self.expected_contents: dict[str, bytes] = {}
         self._make_release()
-        handler = lambda *args, **kwargs: QuietHandler(
-            *args, directory=str(self.root), **kwargs
+        handler = functools.partial(
+            QuietHandler,
+            directory=str(self.root),
         )
         self.server = ThreadingServer(("127.0.0.1", 0), handler)
         self.server_thread = threading.Thread(target=self.server.serve_forever)
@@ -96,11 +98,39 @@ class InstallerTests(unittest.TestCase):
 
     def _environment(self, install_directory: Path) -> dict[str, str]:
         return {
-            **os.environ,
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("DOJANG_INSTALL_")
+            },
             "DOJANG_INSTALL_BASE_URL": self.base_url,
             "DOJANG_INSTALL_VERSION": VERSION,
             "DOJANG_INSTALL_DIR": str(install_directory),
         }
+
+    def test_environment_removes_ambient_installer_overrides(self) -> None:
+        installer_variables = (
+            "DOJANG_INSTALL_ARCH",
+            "DOJANG_INSTALL_DOWNLOAD_DIR",
+            "DOJANG_INSTALL_OS",
+        )
+        previous = {
+            name: os.environ.get(name)
+            for name in installer_variables
+        }
+        try:
+            for name in installer_variables:
+                os.environ[name] = "ambient"
+            environment = self._environment(self.root / "install")
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        for name in installer_variables:
+            with self.subTest(name=name):
+                self.assertNotIn(name, environment)
 
     @unittest.skipUnless(shutil.which("sh"), "POSIX shell is unavailable")
     def test_posix_installer_verifies_every_supported_artifact(self) -> None:
