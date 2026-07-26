@@ -202,8 +202,9 @@ models acquisition and publication without changing the filesystem.
 For local directory and archive sources, virtual publication retains the staged
 root and nested directory permissions, so enrollment and apply previews observe
 the same metadata as a real rename.
-For an external transport, Dojang redacts the source argument and environment
-values when it prints the executable request, including source arguments whose
-native representation is not UTF-8, and does not start the program.  Because
-no files are fetched, that dry run cannot validate the remote manifest.  Run a
-real bootstrap to perform the staged manifest check.
+For an external transport, Dojang redacts the source argument, named credential
+argument values, and environment values when it prints the executable request,
+including source arguments whose native representation is not UTF-8, and does
+not start the program.  Because no files are fetched, that dry run cannot
+validate the remote manifest.  Run a real bootstrap to perform the staged
+manifest check.

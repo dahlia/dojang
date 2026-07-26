@@ -68,7 +68,9 @@ import Control.Monad.State.Strict (StateT)
 import Control.Monad.Trans.Class (lift)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.Char qualified as Char
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List (isSuffixOf)
 import Data.Text (Text, pack, unpack)
 import Data.Text.IO qualified as TextIO
 import Data.Time (UTCTime, getCurrentTime)
@@ -170,7 +172,7 @@ instance Show ProcessRequest where
     "ProcessRequest {executable = "
       <> show request.executable
       <> ", arguments = "
-      <> show request.arguments
+      <> show (redactProcessArguments request.arguments)
       <> ", workingDirectory = "
       <> show request.workingDirectory
       <> ", environment = "
@@ -182,6 +184,162 @@ instance Show ProcessRequest where
       <> ", captureOutput = "
       <> show request.captureOutput
       <> "}"
+
+
+-- | Redacts common credential-bearing argument forms for diagnostics.
+--
+-- This is a defense-in-depth fallback.  Callers that know an opaque value is
+-- sensitive must still redact that value before rendering the request.
+redactProcessArguments :: [String] -> [String]
+redactProcessArguments [] = []
+redactProcessArguments (argument : remaining)
+  | isStandaloneSensitiveOption argument =
+      argument : redactSensitiveOptionValue remaining
+redactProcessArguments (argument : remaining) =
+  redactInlineSecret argument : redactProcessArguments remaining
+
+
+redactSensitiveOptionValue :: [String] -> [String]
+redactSensitiveOptionValue [] = []
+redactSensitiveOptionValue (value : remaining) =
+  "<redacted>"
+    : if isStandaloneSensitiveOption value
+      then redactSensitiveOptionValue remaining
+      else redactProcessArguments remaining
+
+
+isStandaloneSensitiveOption :: String -> Bool
+isStandaloneSensitiveOption argument =
+  looksLikeOption argument
+    && isStandaloneSensitiveArgumentName argument
+
+
+looksLikeOption :: String -> Bool
+looksLikeOption ('-' : _ : _) = True
+looksLikeOption ('/' : name) =
+  not (null name)
+    && all
+      ( \character ->
+          Char.isAlphaNum character || character `elem` ("-_" :: String)
+      )
+      name
+looksLikeOption _ = False
+
+
+isStandaloneSensitiveArgumentName :: String -> Bool
+isStandaloneSensitiveArgumentName argument =
+  not (any (`elem` ("=:" :: String)) argument)
+    && isSensitiveArgumentName argument
+
+
+redactInlineSecret :: String -> String
+redactInlineSecret argument =
+  case redactUrlUserInfo argument of
+    Just redacted -> redacted
+    Nothing ->
+      case break (`elem` ("=:" :: String)) argument of
+        (name, separator : value)
+          | isSensitiveArgumentName name ->
+              name <> [separator] <> "<redacted>"
+          | otherwise ->
+              let redactedValue = redactInlineSecret value
+              in if redactedValue == value
+                   then argument
+                   else name <> [separator] <> redactedValue
+        _ -> argument
+
+
+redactUrlUserInfo :: String -> Maybe String
+redactUrlUserInfo argument =
+  case splitUrlAuthority argument of
+    Nothing -> Nothing
+    Just (prefix, authorityAndSuffix) ->
+      let (authority, suffix) =
+            span (`notElem` ("/?#" :: String)) authorityAndSuffix
+      in case break (== '@') $ reverse authority of
+           (reversedHost, '@' : reversedUserInfo)
+             | not (null reversedHost) ->
+                 case break (== ':') $ reverse reversedUserInfo of
+                   (user, ':' : _) ->
+                     Just $
+                       prefix
+                         <> user
+                         <> ":<redacted>@"
+                         <> reverse reversedHost
+                         <> suffix
+                   _
+                     | isHttpUrlPrefix prefix ->
+                         Just $
+                           prefix
+                             <> "<redacted>@"
+                             <> reverse reversedHost
+                             <> suffix
+                   _ -> Nothing
+           _ -> Nothing
+
+
+isHttpUrlPrefix :: String -> Bool
+isHttpUrlPrefix prefix =
+  let lowercase = fmap Char.toLower prefix
+  in "http://" `isSuffixOf` lowercase
+       || "https://" `isSuffixOf` lowercase
+
+
+splitUrlAuthority :: String -> Maybe (String, String)
+splitUrlAuthority = go []
+ where
+  go reversedPrefix (':' : '/' : '/' : remaining) =
+    Just (reverse reversedPrefix <> "://", remaining)
+  go reversedPrefix (character : remaining) =
+    go (character : reversedPrefix) remaining
+  go _ [] = Nothing
+
+
+-- | Recognizes credential-like option names while exempting path-like values.
+isSensitiveArgumentName :: String -> Bool
+isSensitiveArgumentName name =
+  not (hasNonSecretSuffix parts)
+    && ( normalized
+           `elem` [ "accesstoken"
+                  , "accesskey"
+                  , "apikey"
+                  , "authtoken"
+                  , "bearertoken"
+                  , "clientsecret"
+                  , "privatekey"
+                  , "refreshtoken"
+                  , "secretkey"
+                  ]
+           || any
+             ( `elem`
+                 [ "authorization"
+                 , "credential"
+                 , "credentials"
+                 , "pass"
+                 , "passwd"
+                 , "password"
+                 , "secret"
+                 , "token"
+                 ]
+             )
+             parts
+       )
+ where
+  normalized = fmap Char.toLower $ filter Char.isAlphaNum name
+  parts = argumentNameParts name
+  hasNonSecretSuffix [] = False
+  hasNonSecretSuffix values =
+    last values `elem` ["dir", "directory", "file", "id", "name", "path"]
+
+
+argumentNameParts :: String -> [String]
+argumentNameParts [] = []
+argumentNameParts value =
+  case dropWhile (not . Char.isAlphaNum) value of
+    [] -> []
+    remaining ->
+      let (part, rest) = span Char.isAlphaNum remaining
+      in fmap Char.toLower part : argumentNameParts rest
 
 
 -- | A process request with inherited environment and streams.

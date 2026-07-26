@@ -472,6 +472,88 @@ spec = do
       rendered `shouldSatisfy` \value ->
         not $ isInfixOf "super-secret" value
 
+    it "redacts named process secrets from diagnostics" $ hedgehog $ do
+      secret <- forAll $ Gen.string (Range.linear 1 30) Gen.unicode
+      let request =
+            emptyProcessRequest
+              { executable = "transport"
+              , arguments =
+                  [ "clone"
+                  , "--token=" <> secret
+                  , "--password"
+                  , secret
+                  , "--depth=1"
+                  ]
+              }
+      show request
+        === "ProcessRequest {executable = \"transport\", arguments = "
+        <> show
+          ( [ "clone"
+            , "--token=<redacted>"
+            , "--password"
+            , "<redacted>"
+            , "--depth=1"
+            ]
+              :: [String]
+          )
+        <> ", workingDirectory = Nothing, environment = Nothing, "
+        <> "captureOutput = False}"
+
+    it "never renders credentials in supported argument forms" $ hedgehog $ do
+      suffix <- forAll $ Gen.string (Range.linear 1 30) Gen.alphaNum
+      arguments <-
+        forAll $
+          Gen.element
+            [ ["--token", "DOJANG_SECRET_" <> suffix]
+            , ["--password", "-DOJANG_SECRET_" <> suffix]
+            , ["--token=DOJANG_SECRET_" <> suffix]
+            , ["--github-token", "DOJANG_SECRET_" <> suffix]
+            , ["--API-KEY=DOJANG_SECRET_" <> suffix]
+            , ["/PASSWORD:DOJANG_SECRET_" <> suffix]
+            , ["https://user:DOJANG_SECRET_" <> suffix <> "@example.com/repo"]
+            , ["https://DOJANG_SECRET_" <> suffix <> "@example.com/repo"]
+            , ["--credentials", "--token", "DOJANG_SECRET_" <> suffix]
+            , ["Authorization: Bearer DOJANG_SECRET_" <> suffix]
+            , ["http.extraHeader=Authorization: Bearer DOJANG_SECRET_" <> suffix]
+            ]
+      let secret = "DOJANG_SECRET_" <> suffix
+          request =
+            emptyProcessRequest
+              { executable = "transport"
+              , arguments = arguments
+              }
+      isInfixOf secret (show request) === False
+
+    it "preserves non-sensitive process diagnostics" $ hedgehog $ do
+      executable <- forAll $ Gen.string (Range.linear 1 30) Gen.alphaNum
+      argument <- forAll $ Gen.string (Range.linear 0 30) Gen.unicode
+      let request =
+            emptyProcessRequest
+              { executable = executable
+              , arguments =
+                  [ "secret"
+                  , "set"
+                  , "--token-file=/tmp/token"
+                  , "ssh://git@example.com/repo"
+                  , "ordinary-" <> argument
+                  , "--password"
+                  ]
+              }
+      show request
+        === "ProcessRequest {executable = "
+        <> show executable
+        <> ", arguments = "
+        <> show
+          [ "secret"
+          , "set"
+          , "--token-file=/tmp/token"
+          , "ssh://git@example.com/repo"
+          , "ordinary-" <> argument
+          , "--password"
+          ]
+        <> ", workingDirectory = Nothing, environment = Nothing, "
+        <> "captureOutput = False}"
+
     it "separates arbitrary process starts from waits" $ hedgehog $ do
       code <- forAll $ Gen.int (Range.linear 1 255)
       let request =
