@@ -55,7 +55,11 @@ To be released.
     Permission restoration is verified after it is applied, so partial
     filesystem support produces the documented warning.  POSIX reapplies mode
     `0700` after creating staging, so a restrictive umask cannot leave it
-    unusable.  External transports run beneath an owner-only staging parent.
+    unusable.  Bootstrap rereads and parses the manifest under its final stored
+    permissions before publication, rejecting archives that would make the
+    published repository inaccessible.  Explicit zero permission modes from
+    Unix ZIP entries are retained instead of being treated as absent metadata.
+    External transports run beneath an owner-only staging parent.
     Windows creates that parent with a protected, inheritable owner-only ACL and
     rejects filesystems that cannot enforce persistent ACLs.  Archive input is
     limited to 16 MiB, expanded file contents to 64 MiB, entry counts to 10,000,

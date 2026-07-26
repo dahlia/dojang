@@ -23,7 +23,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import System.Exit (ExitCode (..))
-import System.IO.Error (isDoesNotExistError)
+import System.IO.Error (isDoesNotExistError, isPermissionError)
 import System.OsPath
   ( OsPath
   , dropTrailingPathSeparator
@@ -50,7 +50,7 @@ import Dojang.Bootstrap
   , StagedMetadata
   , detectBuiltinSource
   , emptyStagedMetadata
-  , publishStagedDirectoryWithMetadata
+  , publishStagedDirectoryWithMetadataChecked
   , stageBuiltinSourceWithMetadata
   )
 import Dojang.CommandEffect
@@ -608,6 +608,13 @@ defaultTransportConfigPath platform
 validateStaging
   :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
 validateStaging staging = do
+  validateStagingContents staging
+  printStderr "Staged repository manifest validated."
+
+
+validateStagingContents
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
+validateStagingContents staging = do
   manifest <- validateStagedManifestPath staging
   manifestRead <-
     readRegularFileBounded maximumManifestBytes manifest
@@ -635,7 +642,6 @@ validateStaging staging = do
       case readManifestBytes contents of
         Left err -> dieWithErrors manifestReadError $ formatErrors err
         Right _ -> return ()
-  printStderr "Staged repository manifest validated."
 
 
 validateStagedManifestPath
@@ -679,8 +685,19 @@ publishStaging
   -> OsPath
   -> App i ()
 publishStaging metadata staging destination = do
+  publication <-
+    publishStagedDirectoryWithMetadataChecked
+      metadata
+      staging
+      destination
+      ( catchCommandExit
+          (Right <$> validateFinalStagingContents staging)
+          (return . Left)
+      )
   modeFailures <-
-    publishStagedDirectoryWithMetadata metadata staging destination
+    case publication of
+      Left exitCode -> abortCommand exitCode
+      Right failures -> return failures
   unless (null modeFailures) $
     printStderr' Warning $
       "Could not restore stored permissions for "
@@ -689,6 +706,25 @@ publishStaging metadata staging destination = do
         <> if length modeFailures == 1 then "entry." else "entries."
   pathStyle <- pathStyleFor StandardError
   printStderr $ "Repository published: " <> pathStyle destination <> "."
+
+
+validateFinalStagingContents
+  :: (MonadFileSystem i, AppEffects i) => OsPath -> App i ()
+validateFinalStagingContents staging =
+  validateStagingContents staging
+    `catchError` \err ->
+      if isPermissionError err
+        then do
+          printStderr'
+            Error
+            "The acquired repository's stored permissions make its manifest unreadable."
+          printStderr'
+            Hint
+            ( "Make the repository manifest readable and its parent "
+                <> "directories traversable in the bootstrap source."
+            )
+          abortCommand cliError
+        else throwError err
 
 
 cleanupStaging

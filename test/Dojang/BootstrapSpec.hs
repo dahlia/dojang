@@ -949,6 +949,49 @@ archiveModeSpecs = do
       observed <- getPortableMode $ destination </> scriptName
       observed.posixBits `shouldSatisfy` (/= Just 0)
 
+  it "preserves explicit zero modes from arbitrary Unix ZIP entry types" $
+    hedgehog $ do
+      directory <- forAll Gen.bool
+      observed <-
+        evalIO $
+          withTempDir $ \tmpDir _ -> do
+            archiveName <- encodeFS "repository.zip"
+            stagingName <- encodeFS "staging"
+            destinationName <- encodeFS "destination"
+            entryName <- encodeFS "entry"
+            let archivePath = tmpDir </> archiveName
+                staging = tmpDir </> stagingName
+                destination = tmpDir </> destinationName
+                path = if directory then "entry/" else "entry"
+                fileType =
+                  if directory
+                    then 0o040000
+                    else 0o100000
+                entry =
+                  (Zip.toEntry path 0 "")
+                    { Zip.eVersionMadeBy = (3 `shiftL` 8) .|. 20
+                    , Zip.eExternalFileAttributes =
+                        (fileType :: Word32) `shiftL` 16
+                    }
+            writeFile archivePath $
+              LazyByteString.toStrict $
+                Zip.fromArchive $
+                  Zip.addEntryToArchive entry Zip.emptyArchive
+            Right metadata <-
+              stageBuiltinSourceWithMetadata
+                (ArchiveSource ZipArchive archivePath)
+                staging
+            _ <-
+              publishStagedDirectoryWithMetadata
+                metadata
+                staging
+                destination
+            let publishedEntry = destination </> entryName
+            observedMode <- getPortableMode publishedEntry
+            setPortableMode publishedEntry 0o700
+            return observedMode
+      observed.posixBits === Just 0
+
   it "publishes contents when the filesystem cannot restore modes" $
     withTempDir $ \tmpDir _ -> do
       archiveName <- encodeFS "repository.tar"

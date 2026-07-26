@@ -18,6 +18,7 @@ module Dojang.Bootstrap
   , normalizeArchiveEntryPath
   , publishStagedDirectory
   , publishStagedDirectoryWithMetadata
+  , publishStagedDirectoryWithMetadataChecked
   , stageBuiltinSource
   , stageBuiltinSourceWithMetadata
   ) where
@@ -62,6 +63,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeUtf8')
 import Data.Text.Normalize qualified as Unicode
+import Data.Void (Void, absurd)
 import GHC.Generics (Generic)
 import System.FilePath.Posix qualified as Posix
 import System.IO.Error (ioeGetFileName, isDoesNotExistError)
@@ -321,19 +323,63 @@ publishStagedDirectoryWithMetadata
   -> OsPath
   -> OsPath
   -> m [FilePath]
-publishStagedDirectoryWithMetadata metadata staging destination = do
-  destinationSymlink <- isSymlink destination
-  when destinationSymlink $
-    throwError $
-      userError "bootstrap destination is a symbolic link"
-  destinationExists <- exists destination
-  when destinationExists $
-    throwError $
-      userError "bootstrap destination already exists"
-  protectRestrictedStaging staging metadata $ do
-    modeFailures <- applyStagedMetadata staging metadata
-    renameDirectory staging destination
-    return modeFailures
+publishStagedDirectoryWithMetadata metadata staging destination =
+  do
+    result <-
+      publishStagedDirectoryWithMetadataChecked
+        metadata
+        staging
+        destination
+        (return (Right () :: Either Void ()))
+    return $ either absurd id result
+
+
+-- | Publishes a staged tree after applying retained permissions and running a
+-- final private validation.
+--
+-- The validation action runs after stored permissions are applied but before
+-- the atomic no-replace rename.  A 'Left' result or a raised exception widens
+-- restrictive staging permissions for cleanup and leaves the destination
+-- absent.
+publishStagedDirectoryWithMetadataChecked
+  :: (MonadFileSystem m, MonadMask m)
+  => StagedMetadata
+  -- ^ Permissions retained while staging.
+  -> OsPath
+  -- ^ Private staging directory.
+  -> OsPath
+  -- ^ Missing publication destination.
+  -> m (Either validationError ())
+  -- ^ Final validation result under the retained permissions.
+  -> m (Either validationError [FilePath])
+  -- ^ A validation rejection, or entries whose exact permissions could not be
+  -- restored.
+publishStagedDirectoryWithMetadataChecked
+  metadata
+  staging
+  destination
+  validate = do
+    destinationSymlink <- isSymlink destination
+    when destinationSymlink $
+      throwError $
+        userError "bootstrap destination is a symbolic link"
+    destinationExists <- exists destination
+    when destinationExists $
+      throwError $
+        userError "bootstrap destination already exists"
+    protectRestrictedStaging staging metadata $ do
+      modeFailures <- applyStagedMetadata staging metadata
+      validation <- validate
+      case validation of
+        Left err -> do
+          widenDirectoryForCleanup staging
+            `catchError` const (return ())
+          widenStagedMetadata staging metadata
+            `catchError` const (return ())
+          return $ Left err
+        Right () -> do
+          renameDirectory staging destination
+          return $ Right modeFailures
 
 
 resolvesToRegularFile :: (MonadFileSystem m) => OsPath -> m Bool
@@ -1068,13 +1114,15 @@ zipEntryKind entry
 zipEntryMode :: Zip.Entry -> Maybe Word
 zipEntryMode entry
   | zipCreatorSystem entry `elem` [3, 19]
-      && permissionBits /= 0 =
+      && unixMode /= 0 =
       Just $
         fromIntegral permissionBits
   | otherwise = Nothing
  where
+  unixMode =
+    (Zip.eExternalFileAttributes entry `shiftR` 16) .&. 0xffff
   permissionBits =
-    (Zip.eExternalFileAttributes entry `shiftR` 16) .&. 0o777
+    unixMode .&. 0o777
 
 
 zipCreatorSystem :: Zip.Entry -> Word

@@ -5,17 +5,32 @@
 
 module Dojang.Commands.BootstrapSpec (spec) where
 
+
+#ifndef mingw32_HOST_OS
+import Codec.Archive.Tar qualified as Tar
+import Codec.Archive.Tar.Entry qualified as Tar
+#endif
 import Control.Exception (bracket)
 import Control.Exception qualified as Exception
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+
+
+#ifndef mingw32_HOST_OS
+import Data.ByteString.Lazy qualified as LazyByteString
+#endif
 import Data.Char (chr)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Hedgehog (evalIO, forAll)
+
+
+#ifndef mingw32_HOST_OS
+import Hedgehog (assert)
+#endif
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import System.Directory.OsPath qualified
@@ -50,6 +65,16 @@ import Dojang.App
   ( AppEnv (..)
   , runAppWithoutLogging
   )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.Bootstrap
+  ( ArchiveFormat (TarArchive)
+  , BuiltinSource (ArchiveSource)
+  , publishStagedDirectoryWithMetadataChecked
+  , stageBuiltinSourceWithMetadata
+  )
+#endif
 import Dojang.CommandEffect (ProcessRequest (..))
 import Dojang.Commands.Bootstrap
   ( bootstrap
@@ -77,6 +102,11 @@ import Dojang.Types.MachineState
   , listRepositoryStates
   , readMachineId
   )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.Types.RouteMetadata (PortableMode (..))
+#endif
 import Dojang.Types.Transport (lookupTransport)
 
 
@@ -213,6 +243,8 @@ spec = sequential $ do
           Right value -> return value
           Left err -> fail $ "Unexpected state error: " <> show err
         fmap (.firstApplied) states `shouldBe` [True]
+
+    finalManifestPermissionSpec
 
     it "rejects a manifest symlink that changes target after publication" $
       if os == "mingw32"
@@ -772,6 +804,131 @@ validManifest =
     <> "[files]\n"
     <> "[ignores]\n"
     <> "[monikers]\n"
+
+#ifdef mingw32_HOST_OS
+finalManifestPermissionSpec :: Spec
+finalManifestPermissionSpec =
+  it "rejects unreadable final manifest permissions before publication" $
+    pendingWith "POSIX archive permission bits are not available on Windows."
+#else
+finalManifestPermissionSpec :: Spec
+finalManifestPermissionSpec =
+  describe "final manifest permissions" $ do
+    it "rejects arbitrary unreadable final manifest permissions before publication" $
+      hedgehog $ do
+        restrictAncestor <- forAll Gen.bool
+        manifestFilePath <-
+          forAll $ Gen.element ["dojang.toml", "config.toml"]
+        mode <-
+          forAll $
+            Gen.element $
+              if restrictAncestor
+                then [0o000, 0o400, 0o600]
+                else [0o000, 0o100, 0o200, 0o300]
+        (output, result, destinationExists, stateExists, parentEntries) <-
+          evalIO $
+            withBootstrapFixture $
+              \source _ destination stateRoot home appEnv -> do
+                archiveName <- encodeFS "repository.tar"
+                manifestName <- encodeFS manifestFilePath
+                let archive = takeDirectory source </> archiveName
+                    rootEntry =
+                      (Tar.directoryEntry $ bootstrapTarPath "./")
+                        { Tar.entryPermissions =
+                            if restrictAncestor then mode else 0o700
+                        }
+                    manifestEntry =
+                      ( Tar.fileEntry
+                          (bootstrapTarPath $ "./" <> manifestFilePath)
+                          (LazyByteString.fromStrict validManifest)
+                      )
+                        { Tar.entryPermissions =
+                            if restrictAncestor then 0o600 else mode
+                        }
+                writeFile archive $
+                  LazyByteString.toStrict $
+                    Tar.write [rootEntry, manifestEntry]
+                sourceText <- decodeFS archive
+                (stderrOutput, commandResult) <-
+                  captureStderr $
+                    Exception.try $
+                      withHome home $
+                        runAppWithoutLogging appEnv{manifestFile = manifestName} $
+                          bootstrap
+                            sourceText
+                            Nothing
+                            Nothing
+                            []
+                            True
+                            True
+                            Nothing
+                            []
+                present <- exists destination
+                statePresent <- exists stateRoot
+                entries <-
+                  traverse decodeFS =<< listDirectory (takeDirectory destination)
+                return
+                  ( stderrOutput
+                  , commandResult
+                  , present
+                  , statePresent
+                  , entries
+                  )
+        result === Left cliError
+        destinationExists === False
+        stateExists === False
+        assert $
+          ByteString.isInfixOf
+            "stored permissions make its manifest unreadable"
+            output
+        assert $
+          ByteString.isInfixOf
+            "Make the repository manifest readable and its parent directories traversable in the bootstrap source."
+            output
+        assert $ all (not . isPrefixOf ".dojang-bootstrap-") parentEntries
+
+    it "widens restrictive staging when final validation aborts" $
+      withBootstrapFixture $
+        \source _ destination _ _ appEnv -> do
+          archiveName <- encodeFS "abort.tar"
+          stagingName <- encodeFS "abort-staging"
+          let parent = takeDirectory source
+              archive = parent </> archiveName
+              staging = parent </> stagingName
+              rootEntry =
+                (Tar.directoryEntry $ bootstrapTarPath "./")
+                  { Tar.entryPermissions = 0o000
+                  }
+              manifestEntry =
+                Tar.fileEntry
+                  (bootstrapTarPath "./dojang.toml")
+                  (LazyByteString.fromStrict validManifest)
+          writeFile archive $
+            LazyByteString.toStrict $
+              Tar.write [rootEntry, manifestEntry]
+          Right metadata <-
+            stageBuiltinSourceWithMetadata
+              (ArchiveSource TarArchive archive)
+              staging
+          result <-
+            runAppWithoutLogging appEnv $
+              publishStagedDirectoryWithMetadataChecked
+                metadata
+                staging
+                destination
+                (return $ Left cliError)
+          result `shouldBe` Left cliError
+          mode <- getPortableMode staging
+          mode.posixBits `shouldBe` Just 0o700
+          removeDirectoryRecursively staging
+
+
+bootstrapTarPath :: FilePath -> Tar.TarPath
+bootstrapTarPath path =
+  case Tar.toTarPath False path of
+    Left err -> error err
+    Right value -> value
+#endif
 
 
 legacyManifest :: ByteString

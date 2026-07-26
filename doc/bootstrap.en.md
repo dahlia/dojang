@@ -83,9 +83,13 @@ bits, are restored when the destination filesystem supports them.
 Bootstrap verifies the resulting permissions instead of assuming that a
 successful filesystem call restored every bit.  If exact restoration is
 unavailable, bootstrap publishes the contents and warns that the permissions
-could not be restored.  A newly created destination inherits the directory
-source or tar root permissions.  When the directory source itself is a symbolic
-link, these permissions come from the target directory rather than the link.
+could not be restored.  Before atomic publication, Dojang reads and parses the
+manifest again after applying the final stored permissions.  An archive whose
+final file or ancestor permissions make the manifest inaccessible is rejected
+while the repository is still in private staging.  A newly created destination
+inherits the directory source or tar root permissions.  When the directory
+source itself is a symbolic link, these permissions come from the target
+directory rather than the link.
 
 
 External transports
