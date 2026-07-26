@@ -123,7 +123,8 @@ The default configuration file is:
         relative
  -  macOS: *~/Library/Application Support/dojang/transports.toml*
  -  Windows: *%APPDATA%\\dojang\\transports.toml*, falling back to
-    *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml*
+    *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml* when `APPDATA`
+    is unset or relative
 
 For example, this configuration adds a Git transport:
 

@@ -323,18 +323,19 @@ spec = do
         let archiveBytes = zipBytes "nested/dojang.toml" "zip"
             tarArchiveBytes = tarBytes "nested/dojang.toml" "tar"
             cases =
-              [ (archiveName, archiveBytes, "zip")
-              , (tarName, tarArchiveBytes, "tar")
+              [ ("repository.zip", archiveName, archiveBytes, "zip")
+              , ("repository.tar", tarName, tarArchiveBytes, "tar")
               ,
-                ( tarGzipName
+                ( "repository.tar.gz"
+                , tarGzipName
                 , GZip.compress tarArchiveBytes
                 , "tar"
                 )
-              , (tgzName, GZip.compress tarArchiveBytes, "tar")
+              , ("repository.tgz", tgzName, GZip.compress tarArchiveBytes, "tar")
               ]
         mapM_
-          ( \(name, bytes, expected) -> do
-              stagingName <- encodeFS $ ".staging-" <> show name
+          ( \(label, name, bytes, expected) -> do
+              stagingName <- encodeFS $ ".staging-" <> label
               let source = tmpDir </> name
                   staging = tmpDir </> stagingName
               writeFile source $ LazyByteString.toStrict bytes
@@ -719,6 +720,38 @@ spec = do
         readFile (staging </> longName) `shouldReturn` "long"
         readFile (staging </> paxDirectoryName </> paxFileName)
           `shouldReturn` "pax"
+
+    it "rejects pax record lengths outside a machine Int" $
+      withTempDir $ \tmpDir _ -> do
+        let cases =
+              [ ("excess-digits", "18446744073709551646 a=values\n")
+              , ("out-of-range", "9999999999999999999 a=v\n")
+              ]
+        mapM_
+          ( \(label, paxContents) -> do
+              archiveName <- encodeFS $ "overflow-pax-" <> label <> ".tar"
+              stagingName <- encodeFS $ "staging-" <> label
+              let archivePath = tmpDir </> archiveName
+                  staging = tmpDir </> stagingName
+                  paxEntry =
+                    Tar.simpleEntry
+                      (tarPath "pax_extended_header")
+                      ( Tar.OtherEntryType
+                          'x'
+                          paxContents
+                          (LazyByteString.length paxContents)
+                      )
+              writeFile archivePath $
+                LazyByteString.toStrict $
+                  Tar.write [paxEntry, tarFileEntry "dojang.toml" "manifest"]
+              result <-
+                stageBuiltinSource
+                  (ArchiveSource TarArchive archivePath)
+                  staging
+              result `shouldSatisfy` isInvalidArchive
+              isDirectory staging `shouldReturn` False
+          )
+          cases
 
 
 zipBytes :: FilePath -> LazyByteString.ByteString -> LazyByteString.ByteString

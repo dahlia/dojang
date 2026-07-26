@@ -67,13 +67,17 @@ To be released.
     rejects filesystems that cannot enforce persistent ACLs.  Archive input is
     limited to 16 MiB, expanded file contents to 64 MiB, entry counts to 10,000,
     paths to 4,096 characters, and path depth to 256 components, including
-    bounded gzip decoding.  Broken Windows directory links retain their
-    intrinsic link type, and interrupted publication widens restrictive
-    staging before cleanup.  Cleanup first moves the staging root to an
-    operating-system-random quarantine path, checks the moved entry's recorded
-    filesystem identity, and never recursively removes a concurrently created
-    replacement.  A failed restoration leaves the quarantine intact and
-    reports its recovery path instead of silently hiding it.
+    bounded gzip decoding.  Malformed PAX record lengths are rejected before
+    conversion to a machine-sized integer.  A relative Windows `APPDATA`
+    transport override falls back to the user's roaming application-data
+    directory instead of resolving from the working directory.  Broken Windows
+    directory links retain their intrinsic link type, and interrupted
+    publication widens restrictive staging before cleanup.  Cleanup first moves
+    the staging root to an operating-system-random quarantine path, checks the
+    moved entry's recorded filesystem identity, and never recursively removes
+    a concurrently created replacement.  A failed restoration leaves the
+    quarantine intact and reports its recovery path instead of silently hiding
+    it.
     Directory traversal pins each opened directory and opens children without
     following links, so a transient directory-link replacement cannot redirect
     enumeration outside the source.  An entry that vanishes after its name is

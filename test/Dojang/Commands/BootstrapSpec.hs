@@ -50,6 +50,7 @@ import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
   , describe
+  , expectationFailure
   , it
   , pendingWith
   , sequential
@@ -75,9 +76,14 @@ import Dojang.Bootstrap
   , stageBuiltinSourceWithMetadata
   )
 #endif
-import Dojang.CommandEffect (ProcessRequest (..))
+import Dojang.CommandEffect
+  ( CommandEffectResponse (EnvironmentValue)
+  , ProcessRequest (..)
+  , runCommandEffectTest
+  )
 import Dojang.Commands.Bootstrap
   ( bootstrap
+  , defaultTransportConfigPath
   , initialize
   , makeTransportProcessRequest
   , normalizeBootstrapDestination
@@ -150,6 +156,10 @@ spec = sequential $ do
                 ( "[transports.copy]\n"
                     <> "command = [\"copy\", \"--\", \"{source}\", "
                     <> "\"{destination}\"]\n"
+                    <> "[transports.copy.environment]\n"
+                    <> "TOKEN = \""
+                    <> Text.pack credential
+                    <> "\"\n"
                 )
             Right transport = lookupTransport "copy" config
             request =
@@ -159,9 +169,70 @@ spec = sequential $ do
                 transport
                 source
                 destination
-            rendered = show $ redactTransportSource source request
+            redacted = redactTransportSource source request
+            rendered = show redacted
         (source `isInfixOf` rendered) === False
         ("<redacted>" `isInfixOf` rendered) === True
+        redacted.environment === Just [("TOKEN", "<redacted>")]
+
+    it "falls back from arbitrary relative Windows APPDATA values" $
+      hedgehog $ do
+        relative <-
+          forAll $ Gen.string (Range.linear 1 100) Gen.alphaNum
+        appDataName <- evalIO $ encodeFS "AppData/Roaming"
+        configName <- evalIO $ encodeFS "dojang/transports.toml"
+        evalIO $
+          withTempDir $ \tmp _ -> do
+            homeName <- encodeFS "home"
+            destinationName <- encodeFS "destination"
+            stateName <- encodeFS "state"
+            manifestName <- encodeFS "dojang.toml"
+            envName <- encodeFS "dojang-env.toml"
+            let home = tmp </> homeName
+                appEnv =
+                  bootstrapAppEnv
+                    (tmp </> destinationName)
+                    (tmp </> stateName)
+                    manifestName
+                    envName
+            createDirectory home
+            result <-
+              withHome home $
+                runCommandEffectTest [EnvironmentValue $ Just relative] $
+                  runAppWithoutLogging appEnv $
+                    defaultTransportConfigPath "mingw32"
+            case result of
+              Right (path, _) ->
+                path `shouldBe` home </> appDataName </> configName
+              Left err -> expectationFailure $ show err
+
+    it "honors arbitrary absolute Windows APPDATA values" $
+      hedgehog $ do
+        appDataLeaf <-
+          forAll $ Gen.string (Range.linear 1 100) Gen.alphaNum
+        configName <- evalIO $ encodeFS "dojang/transports.toml"
+        evalIO $
+          withTempDir $ \tmp _ -> do
+            appDataLeafName <- encodeFS appDataLeaf
+            destinationName <- encodeFS "destination"
+            stateName <- encodeFS "state"
+            manifestName <- encodeFS "dojang.toml"
+            envName <- encodeFS "dojang-env.toml"
+            let appData = tmp </> appDataLeafName
+                appEnv =
+                  bootstrapAppEnv
+                    (tmp </> destinationName)
+                    (tmp </> stateName)
+                    manifestName
+                    envName
+            appDataPath <- decodeFS appData
+            result <-
+              runCommandEffectTest [EnvironmentValue $ Just appDataPath] $
+                runAppWithoutLogging appEnv $
+                  defaultTransportConfigPath "mingw32"
+            case result of
+              Right (path, _) -> path `shouldBe` appData </> configName
+              Left err -> expectationFailure $ show err
 
     nativeTransportInputSpec
 
@@ -267,15 +338,7 @@ spec = sequential $ do
               stateRoot = tmp </> stateName
               home = tmp </> homeName
               appEnv =
-                AppEnv
-                  destination
-                  True
-                  Nothing
-                  stateRoot
-                  manifestName
-                  envName
-                  False
-                  False
+                bootstrapAppEnv destination stateRoot manifestName envName
           createDirectory repositories
           createDirectory source
           createDirectory home
@@ -321,15 +384,11 @@ spec = sequential $ do
             stateRoot = tmp </> stateName
             home = tmp </> homeName
             appEnv =
-              AppEnv
+              bootstrapAppEnv
                 destination
-                True
-                Nothing
                 stateRoot
                 escapingManifest
                 envName
-                False
-                False
         createDirectory repositories
         createDirectory source
         createDirectory (source </> childName)
@@ -419,15 +478,11 @@ spec = sequential $ do
               stateRoot = tmp </> stateName
               home = tmp </> homeName
               appEnv =
-                AppEnv
+                bootstrapAppEnv
                   destination
-                  True
-                  Nothing
                   stateRoot
                   configuredManifest
                   envName
-                  False
-                  False
           createDirectory repositories
           createDirectory source
           createDirectory stagedConfig
@@ -781,20 +836,26 @@ withBootstrapFixture action =
         stateRoot = tmp </> stateName
         home = tmp </> homeName
         appEnv =
-          AppEnv
-            destination
-            True
-            Nothing
-            stateRoot
-            manifestName
-            envName
-            False
-            False
+          bootstrapAppEnv destination stateRoot manifestName envName
     createDirectory source
     createDirectory home
     writeFile (source </> manifestName) validManifest
     sourceText <- decodeFS source
     action source sourceText destination stateRoot home appEnv
+
+
+bootstrapAppEnv :: OsPath -> OsPath -> OsPath -> OsPath -> AppEnv
+bootstrapAppEnv destination stateRoot manifestName envName =
+  AppEnv
+    { sourceDirectory = destination
+    , repositoryExplicit = True
+    , intermediateDirectory = Nothing
+    , stateDirectory = stateRoot
+    , manifestFile = manifestName
+    , envFile = envName
+    , dryRun = False
+    , debug = False
+    }
 
 
 validManifest :: ByteString
@@ -967,15 +1028,7 @@ externalTransportSpec =
             failingConfig = tmp </> failingConfigName
             marker = tmp </> markerName
             appEnv =
-              AppEnv
-                destination
-                True
-                Nothing
-                stateRoot
-                manifestName
-                envName
-                False
-                False
+              bootstrapAppEnv destination stateRoot manifestName envName
         createDirectory source
         createDirectory home
         setPortableMode tmp 0o755
@@ -998,6 +1051,8 @@ externalTransportSpec =
                 <> ", \"{source}\", \"{destination}\", "
                 <> show markerPath
                 <> "]\n"
+                <> "[transports.copy.environment]\n"
+                <> "TOKEN = \"transport-secret\"\n"
         sourceText <- decodeFS source
         (dryRunOutput, dryRunResult) <-
           captureStderr $
@@ -1016,6 +1071,8 @@ externalTransportSpec =
         dryRunResult `shouldBe` ExitSuccess
         dryRunOutput
           `shouldSatisfy` (not . ByteString.isInfixOf "token-secret")
+        dryRunOutput
+          `shouldSatisfy` (not . ByteString.isInfixOf "transport-secret")
         dryRunOutput
           `shouldSatisfy` ByteString.isInfixOf "<redacted>"
         exists marker `shouldReturn` False
@@ -1113,15 +1170,7 @@ specialTransportManifestSpec =
           script = tmp </> scriptName
           config = tmp </> configName
           appEnv =
-            AppEnv
-              destination
-              True
-              Nothing
-              stateRoot
-              manifestName
-              envName
-              False
-              False
+            bootstrapAppEnv destination stateRoot manifestName envName
       createDirectory source
       createDirectory home
       writeFile script $
@@ -1179,15 +1228,7 @@ destinationParentReplacementSpec =
           script = tmp </> scriptName
           config = tmp </> configName
           appEnv =
-            AppEnv
-              destination
-              True
-              Nothing
-              stateRoot
-              manifestName
-              envName
-              False
-              False
+            bootstrapAppEnv destination stateRoot manifestName envName
       createDirectory repositories
       createDirectory source
       createDirectory home
@@ -1254,15 +1295,7 @@ symbolicLinkParentSpec =
           stateRoot = tmp </> stateName
           home = tmp </> homeName
           appEnv =
-            AppEnv
-              destination
-              True
-              Nothing
-              stateRoot
-              manifestName
-              envName
-              False
-              False
+            bootstrapAppEnv destination stateRoot manifestName envName
       createDirectory actual
       createDirectory source
       createDirectory home
@@ -1312,15 +1345,7 @@ symbolicLinkParentReplacementSpec =
           script = tmp </> scriptName
           config = tmp </> configName
           appEnv =
-            AppEnv
-              destination
-              True
-              Nothing
-              stateRoot
-              manifestName
-              envName
-              False
-              False
+            bootstrapAppEnv destination stateRoot manifestName envName
       createDirectory actual
       createDirectory evil
       createDirectory source
@@ -1385,15 +1410,7 @@ cleanupWarningSpec =
           script = tmp </> scriptName
           config = tmp </> configName
           appEnv =
-            AppEnv
-              destination
-              True
-              Nothing
-              stateRoot
-              manifestName
-              envName
-              False
-              False
+            bootstrapAppEnv destination stateRoot manifestName envName
       createDirectory source
       createDirectory home
       writeFile script $
@@ -1427,10 +1444,21 @@ cleanupWarningSpec =
               `shouldThrow` (== externalProgramNonZeroExit)
           )
             `Exception.finally` setPortableMode tmp 0o700
+      tmpPath <- decodeFS tmp
       output
         `shouldSatisfy`
           ByteString.isInfixOf
             "Could not clean the bootstrap staging directory"
+      output
+        `shouldSatisfy`
+          ByteString.isInfixOf (encodeUtf8 $ Text.pack tmpPath)
+      output
+        `shouldSatisfy`
+          ByteString.isInfixOf
+            "The original staging tree may require manual removal"
+      output
+        `shouldSatisfy`
+          (not . ByteString.isInfixOf "no longer identifies the directory")
 #endif
 
 #ifdef mingw32_HOST_OS

@@ -7,6 +7,7 @@
 -- | End-to-end repository bootstrap orchestration.
 module Dojang.Commands.Bootstrap
   ( bootstrap
+  , defaultTransportConfigPath
   , initialize
   , makeTransportProcessRequest
   , normalizeBootstrapDestination
@@ -554,11 +555,12 @@ makeTransportProcessRequest platform hostEnvironment transport source destinatio
       transport
 
 
--- | Redacts an expanded transport source before rendering a process request.
+-- | Redacts an expanded transport source and child environment before
+-- rendering a process request.
 --
 -- Validated transports contain the source as exactly one whole argument, so
--- replacing exact matches hides embedded credentials without altering the
--- request that will actually be executed.
+-- replacing exact matches hides embedded credentials.  Environment names are
+-- retained for diagnostics while their values are discarded.
 redactTransportSource :: FilePath -> ProcessRequest -> ProcessRequest
 redactTransportSource source request =
   request
@@ -566,20 +568,29 @@ redactTransportSource source request =
         fmap
           (\argument -> if argument == source then "<redacted>" else argument)
           request.arguments
+    , environment =
+        fmap
+          (fmap $ \(name, _) -> (name, "<redacted>"))
+          request.environment
     }
 
 
+-- | Selects the platform-default external transport configuration path.
+--
+-- Relative environment overrides are rejected so the path remains anchored
+-- to the current user's configuration directory.
 defaultTransportConfigPath
   :: (MonadFileSystem i, AppEffects i) => String -> App i OsPath
 defaultTransportConfigPath platform
   | platform == "mingw32" = do
       appData <- lookupEnvironmentVariable "APPDATA"
       base <- case appData of
-        Just value -> encodePath value
-        Nothing -> do
-          home <- getHomeDirectory
-          suffix <- encodePath "AppData/Roaming"
-          return $ home </> suffix
+        Just value -> do
+          path <- encodePath value
+          if isAbsolute path
+            then return path
+            else defaultWindowsBase
+        Nothing -> defaultWindowsBase
       appendConfigPath base
   | platform == "darwin" = do
       home <- getHomeDirectory
@@ -596,6 +607,10 @@ defaultTransportConfigPath platform
         Nothing -> defaultPosixBase
       appendConfigPath base
  where
+  defaultWindowsBase = do
+    home <- getHomeDirectory
+    suffix <- encodePath "AppData/Roaming"
+    return $ home </> suffix
   defaultPosixBase = do
     home <- getHomeDirectory
     suffix <- encodePath ".config"
@@ -733,23 +748,44 @@ cleanupStaging
   -> FileIdentity
   -> App i ()
 cleanupStaging staging identity = do
-  removed <-
-    removeDirectoryRecursivelyIfIdentity staging identity
-      `catchError` \err ->
+  result <-
+    ( do
+        removed <- removeDirectoryRecursivelyIfIdentity staging identity
+        return $
+          if removed
+            then StagingRemoved
+            else StagingIdentityMismatch
+    )
+      `catchError` \err -> do
+        pathStyle <- pathStyleFor StandardError
         printStderr'
           Warning
-          ( "Could not clean the bootstrap staging directory: "
+          ( "Could not clean the bootstrap staging directory "
+              <> pathStyle staging
+              <> ": "
               <> Text.pack (displayException err)
               <> "."
           )
-          >> return True
-  unless removed $ do
-    pathStyle <- pathStyleFor StandardError
-    printStderr' Warning $
-      "Could not clean the bootstrap staging directory because "
-        <> pathStyle staging
-        <> " no longer identifies the directory created by Dojang.  "
-        <> "The original staging tree may require manual removal."
+        return StagingRemovalFailed
+  case result of
+    StagingRemoved -> return ()
+    StagingIdentityMismatch -> do
+      pathStyle <- pathStyleFor StandardError
+      printStderr' Warning $
+        "Could not clean the bootstrap staging directory because "
+          <> pathStyle staging
+          <> " no longer identifies the directory created by Dojang.  "
+          <> "The original staging tree may require manual removal."
+    StagingRemovalFailed ->
+      printStderr' Warning $
+        "The original staging tree may require manual removal.  Inspect its "
+          <> "original path and any quarantine path in the preceding error."
+
+
+data StagingCleanupResult
+  = StagingRemoved
+  | StagingIdentityMismatch
+  | StagingRemovalFailed
 
 
 reportFilesystemError :: (AppEffects i) => IOError -> App i a

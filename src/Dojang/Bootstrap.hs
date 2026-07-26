@@ -910,6 +910,9 @@ validateEntryLayout entries =
 
 archivePathKey :: FilePath -> Text
 archivePathKey =
+  -- Normalize before folding so canonically equivalent paths enter the same
+  -- case-folding domain, then normalize again because folding can introduce
+  -- decomposed sequences.
   Unicode.normalize Unicode.NFC
     . Text.toCaseFold
     . Unicode.normalize Unicode.NFC
@@ -1208,12 +1211,21 @@ parsePaxHeaders = go Map.empty . LazyByteString.toStrict
     | ByteString.null bytes = Right headers
     | otherwise = do
         let (digits, afterDigits) = ByteString.Char8.span isDigit bytes
-        recordLength <-
-          case readMaybe $ ByteString.Char8.unpack digits of
+        when
+          ( ByteString.null digits
+              || ByteString.length digits
+                > length (show (maxBound :: Int))
+          )
+          malformed
+        recordLengthInteger <-
+          case readMaybe (ByteString.Char8.unpack digits) :: Maybe Integer of
             Nothing -> malformed
             Just value -> Right value
+        recordLength <-
+          if recordLengthInteger > fromIntegral (maxBound :: Int)
+            then malformed
+            else Right $ fromIntegral recordLengthInteger
         if
-          | ByteString.null digits -> malformed
           | ByteString.null afterDigits -> malformed
           | ByteString.head afterDigits /= 0x20 -> malformed
           | recordLength <= ByteString.length digits + 2 -> malformed

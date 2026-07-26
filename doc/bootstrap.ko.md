@@ -114,8 +114,8 @@ Dojang은 대상 상위 디렉터리를 한 번 해석하고 준비를 시작하
      -  `XDG_CONFIG_HOME`이 없거나 상대 경로이면
         *~/.config/dojang/transports.toml*
  -  macOS: *~/Library/Application Support/dojang/transports.toml*
- -  Windows: *%APPDATA%\\dojang\\transports.toml*. `APPDATA`가 없으면
-    *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml*
+ -  Windows: *%APPDATA%\\dojang\\transports.toml*. `APPDATA`가 없거나 상대
+    경로이면 *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml*
 
 다음 예시는 Git 전송 방식을 추가합니다.
 
