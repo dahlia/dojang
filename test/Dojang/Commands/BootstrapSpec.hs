@@ -103,6 +103,11 @@ import Dojang.MonadFileSystem
   )
 import Dojang.Syntax.Transport (readTransportConfig)
 import Dojang.TestUtils (withHome, withTempDir)
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.TestUtils (requireNonUtf8FileNames)
+#endif
 import Dojang.Types.MachineState
   ( MachineState (firstApplied)
   , listRepositoryStates
@@ -1501,6 +1506,7 @@ nativeSourcePathSpec :: Spec
 nativeSourcePathSpec =
   it "preserves non-UTF-8 bytes in a local source path" $
     withBootstrapFixture $ \source _ destination _ home appEnv -> do
+      requireNonUtf8FileNames $ takeDirectory source
       sourceName <- encodeFS $ "source-" <> [toEnum 0xdc80]
       let nativeSource = takeDirectory source </> sourceName
       renameDirectory source nativeSource

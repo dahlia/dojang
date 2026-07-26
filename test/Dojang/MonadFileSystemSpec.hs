@@ -111,7 +111,15 @@ import Dojang.MonadFileSystem
   , noReplaceUnsupportedError
   , tryDryRunIO
   )
-import Dojang.TestUtils (withTempDir)
+import Dojang.TestUtils
+  ( withTempDir
+  )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.TestUtils (supportsNonUtf8FileNames)
+import Test.Hspec (pendingWith)
+#endif
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
@@ -456,19 +464,30 @@ posixTraversalRaceSpec =
 
 
 posixNativeTraversalSpec :: Spec
-posixNativeTraversalSpec =
-  specify "listDirectoryRecursively preserves arbitrary native name bytes" $
-    hedgehog $ do
-      byte <- forAll $ Gen.word8 $ constantFrom 0x80 0x80 0xff
-      observed <-
-        liftIO $
-          withTempDir $ \tmpDir _ -> do
-            name <- encodeFS [chr $ 0xdc00 + fromIntegral byte]
-            writeFile (tmpDir </> name) ""
-            entries <- listDirectoryRecursively tmpDir []
-            return (name, entries)
-      case observed of
-        (name, entries) -> entries === [(File, name)]
+posixNativeTraversalSpec = do
+  supported <-
+    runIO $
+      withTempDir $ \tmpDir _ ->
+        supportsNonUtf8FileNames tmpDir
+  let description =
+        "listDirectoryRecursively preserves arbitrary native name bytes"
+  if supported
+    then
+      specify description $
+        hedgehog $ do
+          byte <- forAll $ Gen.word8 $ constantFrom 0x80 0x80 0xff
+          observed <-
+            liftIO $
+              withTempDir $ \tmpDir _ -> do
+                name <- encodeFS [chr $ 0xdc00 + fromIntegral byte]
+                writeFile (tmpDir </> name) ""
+                entries <- listDirectoryRecursively tmpDir []
+                return (name, entries)
+          case observed of
+            (name, entries) -> entries === [(File, name)]
+    else
+      specify description $
+        pendingWith "The filesystem rejects filenames that are not valid UTF-8."
 #endif
 
 
