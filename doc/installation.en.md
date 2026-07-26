@@ -13,8 +13,10 @@ anything.
 
 On Linux or macOS:
 
-~~~~ console
-$ curl -fsSL https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh | sh
+~~~~ bash
+curl -fsSLO https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
+less install.sh
+sh ./install.sh
 ~~~~
 
 The POSIX installer supports x86-64 and AArch64.  It installs to
@@ -23,7 +25,13 @@ The POSIX installer supports x86-64 and AArch64.  It installs to
 On x86-64 Windows, run this in PowerShell:
 
 ~~~~ powershell
-irm https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 | iex
+Invoke-WebRequest `
+  https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
+  -OutFile install.ps1 `
+  -UseBasicParsing
+Get-Content .\install.ps1
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+.\install.ps1
 ~~~~
 
 Set `DOJANG_INSTALL_DIR` to choose another directory.  To install a specific
@@ -33,24 +41,18 @@ to `0.3.0`, before running the script.
 Set `DOJANG_INSTALL_DOWNLOAD_DIR` to an explicit directory to download and
 verify the selected archive without extracting or installing it.  The
 directory receives both the archive and the release's *SHA256SUMS* file.  For
-example, the following manual workflow avoids piping a network response
-directly into a shell:
+example, after downloading and inspecting `install.sh` as above:
 
-~~~~ console
-$ curl -fsSLO https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.sh
-$ less install.sh
-$ DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" sh ./install.sh
+~~~~ bash
+DOJANG_INSTALL_DOWNLOAD_DIR="$PWD/dojang-download" sh ./install.sh
 ~~~~
 
-On Windows, download and inspect `install.ps1`, set the same environment
-variable, and then run the local script:
+On Windows, after downloading and inspecting `install.ps1` as above, set the
+same environment variable and then run the local script:
 
 ~~~~ powershell
-Invoke-WebRequest `
-  https://raw.githubusercontent.com/dahlia/dojang/main/scripts/install.ps1 `
-  -OutFile install.ps1
-Get-Content .\install.ps1
 $env:DOJANG_INSTALL_DOWNLOAD_DIR = "$PWD\dojang-download"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\install.ps1
 ~~~~
 
@@ -61,9 +63,9 @@ Homebrew (macOS & Linux)
 Dojang can be automatically installed via [Homebrew] by downloading its
 executable.  Enter the following command in the terminal:
 
-~~~~ console
-$ brew tap dahlia/dojang https://github.com/dahlia/dojang.git
-$ brew install --cask dahlia/dojang/dojang
+~~~~ bash
+brew tap dahlia/dojang https://github.com/dahlia/dojang.git
+brew install --cask dahlia/dojang/dojang
 ~~~~
 
 > [!TIP]
@@ -80,9 +82,9 @@ Scoop (Windows)
 Dojang can be automatically installed via [Scoop] by downloading its executable.
 Enter the following command in the terminal:
 
-~~~~ console
-$ scoop bucket add dojang https://github.com/dahlia/dojang.git
-$ scoop install dojang
+~~~~ bash
+scoop bucket add dojang https://github.com/dahlia/dojang.git
+scoop install dojang
 ~~~~
 
 [Scoop]: https://scoop.sh/
@@ -94,8 +96,8 @@ mise (cross-platform)
 If you use [mise] for managing development tools, Dojang can be installed via
 the GitHub backend.  Enter the following command in the terminal:
 
-~~~~ console
-$ mise use -g github:dahlia/dojang
+~~~~ bash
+mise use -g github:dahlia/dojang
 ~~~~
 
 [mise]: https://mise.jdx.dev/
@@ -107,17 +109,17 @@ Container image and static Linux executable
 Linux releases also publish a multi-architecture container image for x86-64
 and AArch64.  To check a tagged image:
 
-~~~~ console
-$ docker run --rm ghcr.io/dahlia/dojang:0.3.0 version
+~~~~ bash
+docker run --rm ghcr.io/dahlia/dojang:0.3.0 version
 ~~~~
 
 The image contains a statically linked executable.  You can extract it on a
 Linux machine with the same architecture as the image:
 
-~~~~ console
-$ docker run --rm --entrypoint cat ghcr.io/dahlia/dojang:0.3.0 \
->   /usr/local/bin/dojang > dojang
-$ chmod +x dojang
+~~~~ bash
+docker run --rm --entrypoint cat ghcr.io/dahlia/dojang:0.3.0 \
+  /usr/local/bin/dojang > dojang
+chmod +x dojang
 ~~~~
 
 
@@ -131,11 +133,11 @@ the terminal, the installation is complete.
 
 Now you are ready to build Dojang.  Enter the following command in the terminal:
 
-~~~~ console
-$ git clone https://github.com/dahlia/dojang.git
-$ cd dojang/
-$ stack build
-$ stack install
+~~~~ bash
+git clone https://github.com/dahlia/dojang.git
+cd dojang/
+stack build
+stack install
 ~~~~
 
 The `stack install` command installs the `dojang` executable in
@@ -145,8 +147,8 @@ If you want to install it in a different directory, use the `stack install`
 command with the `--local-bin-path` option. For example, the following command
 will install the `dojang` executable in the *~/bin* directory:
 
-~~~~ console
-$ stack install --local-bin-path ~/bin
+~~~~ bash
+stack install --local-bin-path ~/bin
 ~~~~
 
 [Haskell Tool Stack]: https://haskellstack.org/

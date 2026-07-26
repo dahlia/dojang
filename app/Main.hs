@@ -323,7 +323,8 @@ cmdP stateRoot defaultRepoPath =
                         <$> strOption
                           ( long "transport"
                               <> metavar "NAME"
-                              <> help "Use a configured external transport"
+                              <> help
+                                "Use a configured external transport (requires --from)"
                           )
                     )
                   <*> optional
@@ -331,13 +332,15 @@ cmdP stateRoot defaultRepoPath =
                         ( long "transport-file"
                             <> metavar "PATH"
                             <> action "file"
-                            <> help "Read external transports from PATH"
+                            <> help
+                              "Read external transports from PATH (requires --transport)"
                         )
                     )
                   <*> switch
                     ( long "yes"
                         <> short 'y'
-                        <> help "Accept the first mutating apply"
+                        <> help
+                          "Accept the first mutating apply (requires --from)"
                     )
                   <**> helper
                   & initializationCommandP

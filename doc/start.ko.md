@@ -23,10 +23,12 @@ Dojang은 설정 파일의 기기 간 동기화를 제공하지 않으며, 앞�
 ----
 
 검증된 릴리스 설치 스크립트, 패키지 관리자, Stack 중 하나로 Dojang을 설치할 수
-있습니다.  지원하는 방법은 [설치](installation.ko.md) 문서를 참고하세요.
+있습니다.  지원하는 방법은 [설치] 문서를 참고하세요.
 
 설치가 완료되면 `dojang` 명령을 사용할 수 있습니다.  `dojang --help` 명령으로
 사용법을 확인할 수 있습니다.
+
+[설치]: installation.ko.md
 
 
 기본 개념
@@ -86,9 +88,10 @@ $ dojang init
 
 저장소가 이미 다른 머신이나 아카이브에 있다면 `dojang init --from`을
 사용하세요.  로컬 및 설정된 외부 전송 방식은
-[부트스트랩 안내](bootstrap.ko.md)를 참고하세요.
+[부트스트랩 안내]를 참고하세요.
 
 [#4]: https://github.com/dahlia/dojang/issues/4
+[부트스트랩 안내]: bootstrap.ko.md
 
 
 상황 파악

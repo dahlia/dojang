@@ -30,8 +30,8 @@ Dojang은 준비된 *dojang.toml*을 확인한 뒤 저장소를 게시하므로,
 
 로컬 디렉터리에는 전송 방식 옵션이 필요하지 않습니다.
 
-~~~~ console
-$ dojang -r ~/.dotfiles init --from /media/backup/dotfiles
+~~~~ bash
+dojang -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 Dojang은 로컬 디렉터리 원본 안에 있는 대상 경로를 준비 영역을 만들기 전에
@@ -55,8 +55,8 @@ Dojang은 심볼릭 링크를 따라가지 않고 링크로 복사합니다.  �
 더 이상 일치하지 않으면 준비된 사본을 게시하지 않고 중단합니다.  `.zip`,
 `.tar`, `.tar.gz`, `.tgz` 아카이브도 사용할 수 있습니다.
 
-~~~~ console
-$ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
+~~~~ bash
+dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
 ~~~~
 
 아카이브 원본은 정규 파일로 확인되어야 합니다.  정규 아카이브 파일을 가리키는
@@ -110,8 +110,9 @@ Dojang은 대상 상위 디렉터리를 한 번 해석하고 준비를 시작하
 기본 설정 파일 경로는 다음과 같습니다.
 
  -  Linux 및 그 밖의 POSIX 시스템:
-    *$XDG\_CONFIG\_HOME/dojang/transports.toml*. `XDG_CONFIG_HOME`이 없거나 상대
-    경로이면 *~/.config/dojang/transports.toml*
+     -  *$XDG\_CONFIG\_HOME/dojang/transports.toml*, 또는
+     -  `XDG_CONFIG_HOME`이 없거나 상대 경로이면
+        *~/.config/dojang/transports.toml*
  -  macOS: *~/Library/Application Support/dojang/transports.toml*
  -  Windows: *%APPDATA%\\dojang\\transports.toml*. `APPDATA`가 없으면
     *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml*
@@ -135,10 +136,10 @@ GIT_TERMINAL_PROMPT = "1"
 
 전송 방식 이름을 지정하여 사용합니다.
 
-~~~~ console
-$ dojang -r ~/.dotfiles init \
->   --from git@github.com:USER/dotfiles.git \
->   --transport git
+~~~~ bash
+dojang -r ~/.dotfiles init \
+  --from git@github.com:USER/dotfiles.git \
+  --transport git
 ~~~~
 
 다른 설정 파일을 선택하려면 `--transport NAME`과 함께
@@ -164,11 +165,11 @@ ASCII 문자로 시작해야 하며, ASCII 문자, 숫자, 하이픈, 밑줄을 
 
 비대화식 부트스트랩에는 명시적인 승인이 필요합니다.
 
-~~~~ console
-$ dojang -r ~/.dotfiles init \
->   --from /media/backup/dotfiles.tar.gz \
->   --no-interactive \
->   --yes
+~~~~ bash
+dojang -r ~/.dotfiles init \
+  --from /media/backup/dotfiles.tar.gz \
+  --no-interactive \
+  --yes
 ~~~~
 
 `--yes`는 최초 변경 적용만 승인합니다.  선언 파일, 머신 정보, 대상 디렉터리,
@@ -180,8 +181,8 @@ $ dojang -r ~/.dotfiles init \
 
 전역 `--dry-run` 옵션은 `init` 앞에 둡니다.
 
-~~~~ console
-$ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
+~~~~ bash
+dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 모의 실행은 저장소를 게시하거나 머신 등록을 저장하거나 파일을 적용하지

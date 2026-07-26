@@ -30,8 +30,8 @@ Local directories and archives
 
 Local directories need no transport option:
 
-~~~~ console
-$ dojang -r ~/.dotfiles init --from /media/backup/dotfiles
+~~~~ bash
+dojang -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 Dojang rejects a destination nested inside its local directory source before
@@ -56,8 +56,8 @@ entry was added or removed, changed type, or no longer matches its recorded
 identity and change metadata, bootstrap stops without publishing the staged
 copy.  Dojang also accepts `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives:
 
-~~~~ console
-$ dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
+~~~~ bash
+dojang -r ~/.dotfiles init --from ~/Downloads/dotfiles.tar.gz
 ~~~~
 
 An archive source must resolve to a regular file.  Symbolic links to regular
@@ -118,9 +118,9 @@ manually.
 The default configuration file is:
 
  -  Linux and other POSIX systems:
-    *$XDG\_CONFIG\_HOME/dojang/transports.toml*, or
-    *~/.config/dojang/transports.toml* when `XDG_CONFIG_HOME` is unset or
-    relative
+     -  *$XDG\_CONFIG\_HOME/dojang/transports.toml*, or
+     -  *~/.config/dojang/transports.toml* when `XDG_CONFIG_HOME` is unset or
+        relative
  -  macOS: *~/Library/Application Support/dojang/transports.toml*
  -  Windows: *%APPDATA%\\dojang\\transports.toml*, falling back to
     *%USERPROFILE%\\AppData\\Roaming\\dojang\\transports.toml*
@@ -144,10 +144,10 @@ inherited values.  Keep credentials out of this file.
 
 Use the transport by name:
 
-~~~~ console
-$ dojang -r ~/.dotfiles init \
->   --from git@github.com:USER/dotfiles.git \
->   --transport git
+~~~~ bash
+dojang -r ~/.dotfiles init \
+  --from git@github.com:USER/dotfiles.git \
+  --transport git
 ~~~~
 
 Use `--transport-file PATH` with `--transport NAME` to select another
@@ -175,11 +175,11 @@ during the read.
 
 Noninteractive bootstrap requires explicit approval:
 
-~~~~ console
-$ dojang -r ~/.dotfiles init \
->   --from /media/backup/dotfiles.tar.gz \
->   --no-interactive \
->   --yes
+~~~~ bash
+dojang -r ~/.dotfiles init \
+  --from /media/backup/dotfiles.tar.gz \
+  --no-interactive \
+  --yes
 ~~~~
 
 `--yes` accepts only the first mutating apply.  It does not bypass manifest,
@@ -191,8 +191,8 @@ Previewing a bootstrap
 
 Put the global `--dry-run` option before `init`:
 
-~~~~ console
-$ dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
+~~~~ bash
+dojang --dry-run -r ~/.dotfiles init --from /media/backup/dotfiles
 ~~~~
 
 A dry run does not publish the repository, save enrollment, or apply files.

@@ -25,10 +25,12 @@ Installation
 ------------
 
 Install Dojang with a verified release installer, a package manager, or Stack.
-See the [installation](installation.en.md) docs for the supported methods.
+See the [installation] docs for the supported methods.
 
 Once the installation is complete, the `dojang` command will be available.
 You can check how to use the `dojang` command with the `dojang --help` command.
+
+[installation]: installation.en.md
 
 
 Basic ideas
@@ -95,10 +97,10 @@ see the [manifest](manifest.en.md) docs.
 
 If the repository already exists on another machine or in an archive, use
 `dojang init --from` instead.  The
-[bootstrap guide](bootstrap.en.md) covers local and configured external
-transports.
+[bootstrap guide] covers local and configured external transports.
 
 [#4]: https://github.com/dahlia/dojang/issues/4
+[bootstrap guide]: bootstrap.en.md
 
 
 Checking things out
