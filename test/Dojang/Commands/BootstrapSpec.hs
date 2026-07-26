@@ -201,14 +201,17 @@ spec = sequential $ do
                     manifestName
                     envName
             createDirectory home
-            result <-
-              withHome home $
-                runCommandEffectTest [EnvironmentValue $ Just relative] $
-                  runAppWithoutLogging appEnv $
-                    defaultTransportConfigPath "mingw32"
+            (expectedHome, result) <-
+              withHome home $ do
+                expectedHome <- System.Directory.OsPath.getHomeDirectory
+                result <-
+                  runCommandEffectTest [EnvironmentValue $ Just relative] $
+                    runAppWithoutLogging appEnv $
+                      defaultTransportConfigPath "mingw32"
+                return (expectedHome, result)
             case result of
               Right (path, _) ->
-                path `shouldBe` home </> appDataName </> configName
+                path `shouldBe` expectedHome </> appDataName </> configName
               Left err -> expectationFailure $ show err
 
     it "honors arbitrary absolute Windows APPDATA values" $

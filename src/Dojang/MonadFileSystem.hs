@@ -237,7 +237,8 @@ data DirectoryPathIdentity
 --
 -- The representation is intentionally opaque.  A snapshot can be passed back
 -- to 'copyRegularFileWithSnapshot' to reject both pathname replacements and
--- in-place changes made since the snapshot was captured.
+-- in-place changes that the filesystem reports through size or change
+-- metadata since the snapshot was captured.
 data FileSnapshot
   = FileSnapshot FileIdentity Integer Rational (Maybe Rational)
   deriving (Eq, Show)
@@ -432,10 +433,10 @@ class (MonadError IOError m) => MonadFileSystem m where
   --
   -- Filesystem-backed implementations must compare identity and change
   -- metadata obtained from the same handle used for copying.  This prevents
-  -- pathname replacements and in-place changes between directory-source
-  -- validation and acquisition from redirecting or corrupting the copy.  They
-  -- must also recheck change metadata from that handle after copying and
-  -- discard the destination if the source changed in place.
+  -- pathname replacements and filesystem-reported in-place changes between
+  -- directory-source validation and acquisition from redirecting or corrupting
+  -- the copy.  They must also recheck change metadata from that handle after
+  -- copying and discard the destination if the source changed in place.
   -- Returns 'False' without retaining the destination when the identity
   -- differs, the source changes, or the opened source is not a regular file.
   copyRegularFileWithSnapshot

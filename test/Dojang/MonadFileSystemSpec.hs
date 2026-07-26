@@ -22,6 +22,7 @@ import Data.Bits (xor)
 import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf, sort, sortOn)
+import Data.Time.Clock (addUTCTime)
 import GHC.IO.Exception
   ( IOErrorType (InappropriateType, InvalidArgument)
   )
@@ -844,8 +845,12 @@ spec = do
               let source = tmpDir </> foo
                   destination = tmpDir </> baz
               writeFile source original
+              originalTime <- OsDirectory.getModificationTime source
               Just snapshot <- getFileSnapshot source
               writeFile source replacement
+              OsDirectory.setModificationTime
+                source
+                (addUTCTime 2 originalTime)
               result <-
                 copyRegularFileWithSnapshot
                   snapshot
