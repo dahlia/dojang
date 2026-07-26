@@ -158,7 +158,7 @@ import System.OsPath
 
 
 #ifdef mingw32_HOST_OS
-foreign import stdcall unsafe "ConvertStringSecurityDescriptorToSecurityDescriptorW"
+foreign import ccall unsafe "ConvertStringSecurityDescriptorToSecurityDescriptorW"
   c_convertStringSecurityDescriptor
     :: Win32.LPCTSTR
     -> Win32.DWORD
@@ -166,17 +166,17 @@ foreign import stdcall unsafe "ConvertStringSecurityDescriptorToSecurityDescript
     -> Win32.LPDWORD
     -> IO Win32.BOOL
 
-foreign import stdcall unsafe "LocalFree"
+foreign import ccall unsafe "LocalFree"
   c_localFree :: Win32.LPVOID -> IO Win32.LPVOID
 
-foreign import stdcall unsafe "GetVolumePathNameW"
+foreign import ccall unsafe "GetVolumePathNameW"
   c_getVolumePathName
     :: Win32.LPCTSTR
     -> Win32.LPTSTR
     -> Win32.DWORD
     -> IO Win32.BOOL
 
-foreign import stdcall unsafe "GetVolumeInformationW"
+foreign import ccall unsafe "GetVolumeInformationW"
   c_getVolumeInformation
     :: Win32.LPCTSTR
     -> Win32.LPTSTR
@@ -188,7 +188,7 @@ foreign import stdcall unsafe "GetVolumeInformationW"
     -> Win32.DWORD
     -> IO Win32.BOOL
 
-foreign import stdcall unsafe "GetFileInformationByHandleEx"
+foreign import ccall unsafe "GetFileInformationByHandleEx"
   c_getFileInformationByHandleEx
     :: Win32.HANDLE
     -> CInt
@@ -615,7 +615,7 @@ class (MonadError IOError m) => MonadFileSystem m where
           isSymlink' <- isSymlink ancestor
           when isSymlink' $ do
             ancestor' <- decodePath ancestor
-            throwError $ fileError ancestor'
+            throwError $ symlinkError ancestor'
           isDir <- isDirectory ancestor
           unless isDir $ do
             exists' <- isFile ancestor
@@ -641,6 +641,10 @@ class (MonadError IOError m) => MonadFileSystem m where
     fileError path' =
       mkIOError InappropriateType "createDirectories" Nothing (Just path')
         `ioeSetErrorString` "one of its ancestors is a non-directory file"
+    symlinkError :: FilePath -> IOError
+    symlinkError path' =
+      mkIOError InappropriateType "createDirectories" Nothing (Just path')
+        `ioeSetErrorString` "one of its ancestors is a symbolic link"
 
 
   -- | Removes a regular file.

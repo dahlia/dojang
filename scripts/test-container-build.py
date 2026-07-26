@@ -11,6 +11,7 @@ DOCKERFILE = REPOSITORY_ROOT / "Dockerfile"
 BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "build.yaml"
 WINDOWS_SMOKE_TEST = REPOSITORY_ROOT / "scripts" / "smoke-test-dist.ps1"
 POSIX_SMOKE_TEST = REPOSITORY_ROOT / "scripts" / "smoke-test-dist.sh"
+MONAD_FILE_SYSTEM = REPOSITORY_ROOT / "src" / "Dojang" / "MonadFileSystem.hs"
 
 
 def workflow_job(contents: str, name: str) -> str:
@@ -33,6 +34,7 @@ class ContainerBuildTests(unittest.TestCase):
         cls.workflow = BUILD_WORKFLOW.read_text(encoding="utf-8")
         cls.windows_smoke_test = WINDOWS_SMOKE_TEST.read_text(encoding="utf-8")
         cls.posix_smoke_test = POSIX_SMOKE_TEST.read_text(encoding="utf-8")
+        cls.monad_file_system = MONAD_FILE_SYSTEM.read_text(encoding="utf-8")
 
     def test_workflow_job_ignores_nested_keys(self) -> None:
         workflow = """\
@@ -156,6 +158,39 @@ jobs:
             'XDG_CONFIG_HOME="$bootstrap_home/.config"',
             self.posix_smoke_test,
         )
+
+    def test_posix_smoke_test_uses_a_physical_temporary_path(self) -> None:
+        allocation = self.posix_smoke_test.index(
+            'temporary_directory="$(mktemp -d'
+        )
+        physical_path = self.posix_smoke_test.index(
+            'temporary_directory="$(cd "$temporary_directory" && pwd -P)"'
+        )
+        self.assertLess(allocation, physical_path)
+        self.assertLess(
+            physical_path,
+            self.posix_smoke_test.index("trap '"),
+        )
+        self.assertLess(
+            physical_path,
+            self.posix_smoke_test.index('extracted="$temporary_directory'),
+        )
+
+    def test_windows_ffi_selects_the_native_calling_convention(self) -> None:
+        self.assertNotIn("foreign import stdcall", self.monad_file_system)
+        functions = (
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            "LocalFree",
+            "GetVolumePathNameW",
+            "GetVolumeInformationW",
+            "GetFileInformationByHandleEx",
+        )
+        for function in functions:
+            with self.subTest(function=function):
+                self.assertIn(
+                    f'foreign import ccall unsafe "{function}"',
+                    self.monad_file_system,
+                )
 
 
 if __name__ == "__main__":

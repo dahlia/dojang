@@ -691,6 +691,19 @@ spec = do
         createFileLink foo (tmpDir </> bar)
         isSymlink (tmpDir </> bar) `shouldReturn` True
 
+    symSpecify "createDirectories rejects a symbolic-link ancestor" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> foo
+        createDirectoryLink foo $ tmpDir </> bar
+        barPath <- decodePath $ tmpDir </> bar
+        Left failure <-
+          tryError $ createDirectories $ tmpDir </> bar </> baz
+        ioeGetErrorType failure `shouldBe` InappropriateType
+        ioeGetFileName failure `shouldBe` Just barPath
+        ioeGetLocation failure `shouldStartWith` "createDirectories"
+        show failure
+          `shouldContain` "one of its ancestors is a symbolic link"
+
     specify "readFile" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
       contents <- readFile $ tmpDir </> foo

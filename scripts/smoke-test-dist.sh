@@ -14,6 +14,7 @@ archive="$1"
 [[ -f "$archive" ]] || error "archive not found: $archive"
 
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/dojang-smoke.XXXXXX")"
+temporary_directory="$(cd "$temporary_directory" && pwd -P)"
 trap 'rm -rf "$temporary_directory"' EXIT HUP INT TERM
 extracted="$temporary_directory/extracted"
 repository="$temporary_directory/repository"
