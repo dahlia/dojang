@@ -17,7 +17,7 @@ import Control.Concurrent
   )
 import Control.Exception (SomeException)
 import Control.Exception qualified as Exception
-import Control.Monad (replicateM, void, when)
+import Control.Monad (forM_, replicateM, void, when)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -73,6 +73,7 @@ import Dojang.Commands.Init qualified as Init
 import Dojang.ExitCodes
   ( cliError
   , envFileReadError
+  , fileWriteError
   , machineStateError
   , manifestAlreadyExists
   , missingMachineFactError
@@ -80,6 +81,7 @@ import Dojang.ExitCodes
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
   , dryRunIO
+  , noReplaceUnsupportedError
   )
 import Dojang.TestUtils (withHome, withTempDir)
 import Dojang.Types.Environment
@@ -180,7 +182,13 @@ spec = sequential $ do
       createDirectories home
       checkCount <- newIORef 0
       secondCheck <- newEmptyMVar
-      let gate = ManifestCheckGate manifestPath checkCount secondCheck
+      let gate =
+            ManifestCheckGate
+              { manifestPath = manifestPath
+              , checkCount = checkCount
+              , secondCheck = Just secondCheck
+              , manifestWriteError = Nothing
+              }
       let appEnv =
             AppEnv
               checkout
@@ -205,6 +213,48 @@ spec = sequential $ do
           (\result -> isSuccessful result || isManifestAlreadyExists result)
       repositoryStates <- listDirectory $ stateRoot </> repositoriesName
       length repositoryStates `shouldBe` 1
+
+  it "reports unsupported atomic manifest creation as a file write failure" $
+    withTempDir $ \tmp _ -> do
+      checkoutName <- encodeFS "checkout"
+      stateName <- encodeFS "state"
+      homeName <- encodeFS "home"
+      manifestName <- encodeFS "dojang.toml"
+      envName <- encodeFS "dojang-env.toml"
+      let checkout = tmp </> checkoutName
+      let stateRoot = tmp </> stateName
+      let home = tmp </> homeName
+      let manifestPath = checkout </> manifestName
+      createDirectories checkout
+      createDirectories home
+      checkCount <- newIORef 0
+      manifestPath' <- decodeFS manifestPath
+      let gate =
+            ManifestCheckGate
+              { manifestPath = manifestPath
+              , checkCount = checkCount
+              , secondCheck = Nothing
+              , manifestWriteError =
+                  Just $ noReplaceUnsupportedError manifestPath'
+              }
+      let appEnv =
+            AppEnv
+              checkout
+              True
+              Nothing
+              stateRoot
+              manifestName
+              envName
+              False
+              False
+      withHome
+        home
+        ( runCoordinatedInitIO gate $
+            runAppWithoutLogging appEnv $
+              Init.init [Init.Amd64Linux] True
+        )
+        `shouldThrow` (== fileWriteError)
+      exists manifestPath `shouldReturn` False
 
   it "does not inherit legacy first-apply history for a new identity" $
     withTempDir $ \tmp _ -> do
@@ -907,7 +957,8 @@ spec = sequential $ do
 data ManifestCheckGate = ManifestCheckGate
   { manifestPath :: OsPath
   , checkCount :: IORef Int
-  , secondCheck :: MVar ()
+  , secondCheck :: Maybe (MVar ())
+  , manifestWriteError :: Maybe IOError
   }
 
 
@@ -948,20 +999,22 @@ instance MonadFileSystem CoordinatedInitIO where
   getHomeDirectory = liftIO (getHomeDirectory :: IO OsPath)
   exists value = do
     gate <- ask
-    when (value == gate.manifestPath) $ liftIO $ do
-      checkNumber <-
-        atomicModifyIORef' gate.checkCount $ \count ->
-          let next = count + 1 in (next, next)
-      case checkNumber of
-        1 -> do
-          arrived <- timeout 5000000 $ readMVar gate.secondCheck
-          case arrived of
-            Nothing ->
-              Exception.throwIO $
-                userError "second manifest check never arrived"
-            Just () -> return ()
-        2 -> void $ tryPutMVar gate.secondCheck ()
-        _ -> return ()
+    when (value == gate.manifestPath) $
+      forM_ gate.secondCheck $ \secondCheck ->
+        liftIO $ do
+          checkNumber <-
+            atomicModifyIORef' gate.checkCount $ \count ->
+              let next = count + 1 in (next, next)
+          case checkNumber of
+            1 -> do
+              arrived <- timeout 5000000 $ readMVar secondCheck
+              case arrived of
+                Nothing ->
+                  Exception.throwIO $
+                    userError "second manifest check never arrived"
+                Just () -> return ()
+            2 -> void $ tryPutMVar secondCheck ()
+            _ -> return ()
     liftIO (exists value :: IO Bool)
   isFile value = liftIO (isFile value :: IO Bool)
   isRegularFile value = liftIO (isRegularFile value :: IO Bool)
@@ -970,10 +1023,19 @@ instance MonadFileSystem CoordinatedInitIO where
   readFile filename = liftIO (readFile filename :: IO ByteString)
   writeFile filename contents = liftIO (writeFile filename contents :: IO ())
   createFileAtomicallyWithDefaultPermissions filename template contents =
-    liftIO
-      ( createFileAtomicallyWithDefaultPermissions filename template contents
-          :: IO ()
-      )
+    CoordinatedInitIO $ do
+      gate <- ask
+      case gate.manifestWriteError of
+        Just err
+          | filename == gate.manifestPath -> liftIO $ Exception.throwIO err
+        _ ->
+          liftIO
+            ( createFileAtomicallyWithDefaultPermissions
+                filename
+                template
+                contents
+                :: IO ()
+            )
   replaceFile source destination =
     liftIO (replaceFile source destination :: IO ())
   copyFileWithMetadata source destination =

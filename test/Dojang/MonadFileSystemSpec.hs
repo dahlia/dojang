@@ -892,7 +892,7 @@ spec = do
         isDirectory (tmpDir </> foo) `shouldReturn` True
         isDirectory (tmpDir </> baz) `shouldReturn` True
 
-    specify "classifies only unsupported no-replace errors for fallback" $ do
+    specify "classifies only unsupported no-replace errors" $ do
       let invalid =
             mkIOError
               InvalidArgument

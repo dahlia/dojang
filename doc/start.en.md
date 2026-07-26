@@ -75,6 +75,11 @@ create a manifest file:
 $ dojang init
 ~~~~
 
+Creating the manifest requires a filesystem with an atomic no-replace rename.
+If the repository filesystem does not provide one, `dojang init` stops with a
+file-write error rather than risk replacing a manifest created concurrently.
+Move the repository to a supported local filesystem and retry.
+
 When asked about the types of devices you use,
 you can select everything you use.
 

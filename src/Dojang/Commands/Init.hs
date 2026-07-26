@@ -17,7 +17,7 @@ module Dojang.Commands.Init
   ) where
 
 import Control.Monad (foldM, forM, forM_, void, when)
-import Control.Monad.Except (MonadError (catchError))
+import Control.Monad.Except (MonadError (catchError, throwError))
 import Data.Function ((&))
 import Data.List (maximumBy, sortOn)
 import Data.List.NonEmpty as NonEmpty (NonEmpty ((:|)), toList)
@@ -98,7 +98,11 @@ import Dojang.ExitCodes
   , missingMachineFactError
   , unsupportedOnEnvError
   )
-import Dojang.MonadFileSystem (FileType (..), MonadFileSystem (..))
+import Dojang.MonadFileSystem
+  ( FileType (..)
+  , MonadFileSystem (..)
+  , isNoReplaceUnsupportedError
+  )
 import Dojang.Syntax.Env (readFactsFile)
 import Dojang.Syntax.Manifest.Writer (formatWriteError, writeManifest)
 import Dojang.Types.Environment
@@ -472,7 +476,15 @@ initializeNew presets noInteractive factsFile assignments = do
           let dirPath = repoDir </> path'
           createDirectories dirPath
           printStderr $ "Directory created: " <> pathStyle dirPath <> "."
-      filename <- saveManifest manifest
+      filename <-
+        saveManifest manifest `catchError` \err ->
+          if isNoReplaceUnsupportedError err
+            then
+              die' fileWriteError $
+                "This filesystem cannot create the manifest with an atomic "
+                  <> "no-replace rename.  Move the repository to a supported "
+                  <> "filesystem and retry."
+            else throwError err
       printStderr $ "Manifest created: " <> pathStyle filename <> "."
     _ <- enrollMachineFacts state manifest noInteractive factsFile assignments
     debug' <- asks (.debug)

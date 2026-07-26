@@ -98,9 +98,11 @@ To be released.
     creation now writes complete bytes to a sibling temporary file before an
     atomic rename, while retaining ordinary creation permissions, so concurrent
     initialization and other readers cannot observe a partially written
-    manifest.  The rename avoids replacing a manifest created concurrently
-    where the filesystem supports that operation, and otherwise uses its
-    ordinary atomic file rename.  [[#47], [#74]]
+    manifest.  The rename never replaces a manifest created concurrently and
+    rejects filesystems without an atomic no-replace primitive.  On an
+    unsupported filesystem, ordinary `dojang init` now reports a file-write
+    error and asks the user to move the repository before retrying.
+    [[#47], [#74]]
 
  -  Added verified release installers for Linux and macOS on x86-64 and
     AArch64, and for Windows on x86-64.  Installers download the release's

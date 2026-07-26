@@ -898,18 +898,10 @@ createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
     hFlush handle
     hClose handle
     temporaryPath <- encodeFS temporary
-    renameDirectoryNoReplaceIO temporaryPath destination
-      `catchError` \err ->
-        if isNoReplaceUnsupportedError err
-          then replaceFileIO temporaryPath destination
-          else throwError err
+    renameNoReplaceIO "renameFileNoReplace" temporaryPath destination
 
 
 -- | Tests whether a no-replace rename is unsupported by the filesystem.
---
--- This classification is shared by atomic file creation and the platform
--- no-replace implementation so unsupported filesystems can retain atomic
--- publication through their ordinary rename operation.
 isNoReplaceUnsupportedError :: IOError -> Bool
 isNoReplaceUnsupportedError err =
   ioeGetErrorType err == UnsupportedOperation
@@ -920,9 +912,14 @@ isNoReplaceUnsupportedError err =
 -- The supplied path is attached to the error for diagnostics.
 noReplaceUnsupportedError :: FilePath -> IOError
 noReplaceUnsupportedError destination =
+  noReplaceUnsupportedErrorAt "renameFileNoReplace" destination
+
+
+noReplaceUnsupportedErrorAt :: String -> FilePath -> IOError
+noReplaceUnsupportedErrorAt location destination =
   mkIOError
     UnsupportedOperation
-    "renameFileNoReplace"
+    location
     Nothing
     (Just destination)
     `ioeSetErrorString` "filesystem lacks atomic no-replace rename"
@@ -1591,8 +1588,8 @@ withPrivateSecurityAttributes action =
             action attributes
 
 
-renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
-renameDirectoryNoReplaceIO source destination = do
+renameNoReplaceIO :: String -> OsPath -> OsPath -> IO ()
+renameNoReplaceIO _location source destination = do
   source' <- decodeFS source
   destination' <- decodeFS destination
   Win32.moveFile source' destination'
@@ -1757,8 +1754,8 @@ createPrivateDirectoryIO path = do
     `Exception.onException` OsDirectory.removeDirectory path
 
 
-renameDirectoryNoReplaceIO :: OsPath -> OsPath -> IO ()
-renameDirectoryNoReplaceIO source destination = do
+renameNoReplaceIO :: String -> OsPath -> OsPath -> IO ()
+renameNoReplaceIO location source destination = do
   destination' <- decodeFS destination
 #if defined(linux_HOST_OS)
   source' <- decodeFS source
@@ -1766,6 +1763,7 @@ renameDirectoryNoReplaceIO source destination = do
     PosixInternal.withFilePath destination' $ \destinationPath ->
       checkNoReplaceResult
         [CError.eINVAL, CError.eNOSYS, CError.eNOTSUP, CError.eOPNOTSUPP]
+        location
         destination'
         $ c_renameat2
             atFdcwd
@@ -1779,33 +1777,35 @@ renameDirectoryNoReplaceIO source destination = do
     PosixInternal.withFilePath destination' $ \destinationPath ->
       checkNoReplaceResult
         [CError.eNOTSUP, CError.eOPNOTSUPP]
+        location
         destination'
         $ c_renamex_np sourcePath destinationPath renameExcl
 #else
   _ <- decodeFS source
-  throwNoReplaceUnsupported destination'
+  throwNoReplaceUnsupported location destination'
 #endif
 
 
-checkNoReplaceResult :: [CError.Errno] -> FilePath -> IO CInt -> IO ()
-checkNoReplaceResult unsupportedErrors destination action = do
+checkNoReplaceResult
+  :: [CError.Errno] -> String -> FilePath -> IO CInt -> IO ()
+checkNoReplaceResult unsupportedErrors location destination action = do
   result <- action
   when (result == -1) $ do
     err <- CError.getErrno
     if err `elem` unsupportedErrors
-      then throwNoReplaceUnsupported destination
+      then throwNoReplaceUnsupported location destination
       else
         Exception.throwIO $
           CError.errnoToIOError
-            "renameDirectory"
+            location
             err
             Nothing
             (Just destination)
 
 
-throwNoReplaceUnsupported :: FilePath -> IO a
-throwNoReplaceUnsupported destination =
-  Exception.throwIO $ noReplaceUnsupportedError destination
+throwNoReplaceUnsupported :: String -> FilePath -> IO a
+throwNoReplaceUnsupported location destination =
+  Exception.throwIO $ noReplaceUnsupportedErrorAt location destination
 #endif
 
 
@@ -1839,7 +1839,7 @@ removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
             ".dojang-cleanup-" <> encodeHex (Data.ByteString.unpack randomBytes)
         let quarantine = takeDirectory source </> name
         ( ( retryOnPermissionErrorsOnWindows 10 $
-              renameDirectoryNoReplaceIO source quarantine
+              renameNoReplaceIO "renameDirectory" source quarantine
           )
             >> return (Just quarantine)
           )
@@ -1853,7 +1853,7 @@ removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
 
   restoreQuarantine quarantine =
     ( retryOnPermissionErrorsOnWindows 10 $
-        renameDirectoryNoReplaceIO quarantine path
+        renameNoReplaceIO "renameDirectory" quarantine path
     )
       `catchError` \err -> do
         quarantine' <- decodeFS quarantine
@@ -2049,7 +2049,7 @@ instance MonadFileSystem IO where
   replaceFile = replaceFileIO
 
 
-  renameDirectory = renameDirectoryNoReplaceIO
+  renameDirectory = renameNoReplaceIO "renameDirectory"
 
 
   copyFileWithMetadata = OsDirectory.copyFileWithMetadata
