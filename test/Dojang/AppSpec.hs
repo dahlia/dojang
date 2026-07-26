@@ -17,7 +17,7 @@ import Data.Map.Strict qualified as Map
 import Control.Exception (bracket_)
 import System.IO.Error (isAlreadyExistsError)
 import System.Posix.Files qualified as Posix
-import System.OsPath (decodeFS)
+import System.OsPath (OsPath, decodeFS)
 #endif
 
 import Options.Applicative.Path (hyphen)
@@ -1111,7 +1111,7 @@ atomicPublicationSpec =
         childName <- encodeFS "child"
         let staging = tmp </> stagingName
             destination = tmp </> destinationName
-            appEnv = AppEnv tmp True Nothing tmp tmp tmp False False
+            appEnv = atomicPublicationAppEnv tmp
         createDirectories staging
         writeFile (staging </> childName) "contents"
         stagingPath <- decodeFS staging
@@ -1130,7 +1130,7 @@ atomicPublicationSpec =
         destinationName <- encodeFS "dojang.toml"
         let target = tmp </> targetName
             destination = tmp </> destinationName
-            appEnv = AppEnv tmp True Nothing tmp tmp tmp False False
+            appEnv = atomicPublicationAppEnv tmp
         System.Directory.OsPath.createFileLink targetName destination
         runAppResultWithoutLogging
           appEnv
@@ -1145,6 +1145,20 @@ atomicPublicationSpec =
         exists target `shouldReturn` False
         entries <- listDirectory tmp
         length entries `shouldBe` 1
+
+
+atomicPublicationAppEnv :: OsPath -> AppEnv
+atomicPublicationAppEnv path =
+  AppEnv
+    { sourceDirectory = path
+    , repositoryExplicit = True
+    , intermediateDirectory = Nothing
+    , stateDirectory = path
+    , manifestFile = path
+    , envFile = path
+    , dryRun = False
+    , debug = False
+    }
 #endif
 
 #ifdef mingw32_HOST_OS

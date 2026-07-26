@@ -11,7 +11,7 @@ module Dojang.TestUtils
   )
 where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, finally, mask)
 import Control.Monad (forM_, unless, void)
 import Data.Char (chr)
 import GHC.IO.Exception (IOErrorType (InvalidArgument))
@@ -47,14 +47,18 @@ requireNonUtf8FileNames parent =
 -- | Tests whether a directory's filesystem accepts filenames that are not
 -- valid UTF-8.
 supportsNonUtf8FileNames :: OsPath -> IO Bool
-supportsNonUtf8FileNames parent = do
+supportsNonUtf8FileNames parent = mask $ \restore -> do
   probeName <- encodeFS [chr 0xdc80]
   let probe = parent </> probeName
-  tryIOError (Dojang.MonadFileSystem.writeFile probe ByteString.empty) >>= \case
-    Left err
-      | ioeGetErrorType err == InvalidArgument -> return False
-      | otherwise -> ioError err
-    Right () -> removeFile probe >> return True
+  tryIOError
+    (restore $ Dojang.MonadFileSystem.writeFile probe ByteString.empty)
+    >>= \case
+      Left err
+        | ioeGetErrorType err == InvalidArgument -> return False
+        | otherwise -> ioError err
+      Right () ->
+        restore (return True)
+          `finally` Dojang.MonadFileSystem.removeFile probe
 
 
 -- | Runs an action with both home-directory environment variables set to the

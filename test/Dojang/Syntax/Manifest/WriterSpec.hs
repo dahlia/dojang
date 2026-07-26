@@ -9,7 +9,6 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text, isInfixOf, unpack)
 import qualified Hedgehog.Gen as Hedgehog
 import qualified Hedgehog.Range as Range
-import qualified System.Directory.OsPath as Directory
 import qualified System.Info as Info
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec
@@ -485,7 +484,7 @@ spec = do
                 Map.empty
                 Map.empty
         FileSystem.writeFile targetPath "old"
-        Directory.createFileLink targetPath linkPath
+        FileSystem.createSymbolicLink targetPath linkPath File
         writeManifestFile manifest' linkPath
         FileSystem.isSymlink linkPath `shouldReturn` True
         contents <- FileSystem.readFile targetPath
