@@ -1068,8 +1068,6 @@ decodeZip bytes = do
   decodeEntry remaining entry
     | Zip.isEncryptedEntry entry =
         Left $ UnsupportedArchiveEntry $ Zip.eRelativePath entry
-    | Zip.isEntrySymbolicLink entry =
-        Left $ UnsupportedArchiveEntry $ Zip.eRelativePath entry
     | otherwise = do
         relative <- normalizeArchiveEntryPath $ Zip.eRelativePath entry
         case zipEntryKind entry of
@@ -1097,6 +1095,7 @@ data ZipEntryKind
 
 zipEntryKind :: Zip.Entry -> ZipEntryKind
 zipEntryKind entry
+  | unixFileType == 0o120000 = ZipUnsupported
   | zipCreatorSystem entry `notElem` [3, 19] = inferredKind
   | unixFileType == 0 = inferredKind
   | unixFileType == 0o100000 && not directoryPath = ZipRegularFile

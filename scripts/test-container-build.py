@@ -12,6 +12,7 @@ BUILD_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "build.yaml"
 WINDOWS_SMOKE_TEST = REPOSITORY_ROOT / "scripts" / "smoke-test-dist.ps1"
 POSIX_SMOKE_TEST = REPOSITORY_ROOT / "scripts" / "smoke-test-dist.sh"
 MONAD_FILE_SYSTEM = REPOSITORY_ROOT / "src" / "Dojang" / "MonadFileSystem.hs"
+BOOTSTRAP = REPOSITORY_ROOT / "src" / "Dojang" / "Bootstrap.hs"
 
 
 def workflow_job(contents: str, name: str) -> str:
@@ -35,6 +36,7 @@ class ContainerBuildTests(unittest.TestCase):
         cls.windows_smoke_test = WINDOWS_SMOKE_TEST.read_text(encoding="utf-8")
         cls.posix_smoke_test = POSIX_SMOKE_TEST.read_text(encoding="utf-8")
         cls.monad_file_system = MONAD_FILE_SYSTEM.read_text(encoding="utf-8")
+        cls.bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
 
     def test_workflow_job_ignores_nested_keys(self) -> None:
         workflow = """\
@@ -191,6 +193,10 @@ jobs:
                     f'foreign import ccall unsafe "{function}"',
                     self.monad_file_system,
                 )
+
+    def test_zip_validation_uses_cross_platform_entry_metadata(self) -> None:
+        self.assertNotIn("Zip.isEntrySymbolicLink", self.bootstrap)
+        self.assertIn("unixFileType == 0o120000", self.bootstrap)
 
 
 if __name__ == "__main__":

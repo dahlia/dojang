@@ -4,6 +4,7 @@
 .idea/
 .stack-work/
 .venv/
+__pycache__/
 dist-newstyle/
 dojang.cabal
 dojang.iml

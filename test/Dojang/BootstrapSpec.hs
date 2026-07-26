@@ -16,7 +16,7 @@ import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower, toUpper)
 import Data.Either (isLeft)
 import Data.List (isInfixOf)
-import Data.Word (Word32)
+import Data.Word (Word16, Word32)
 import Hedgehog (assert, evalIO, forAll)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
@@ -519,6 +519,7 @@ spec = do
               [ 0o010000
               , 0o020000
               , 0o060000
+              , 0o120000
               , 0o140000
               ]
         permissions <- forAll $ Gen.word32 $ Range.linear 0 0o777
@@ -538,6 +539,49 @@ spec = do
           evalIO $
             withTempDir $ \tmpDir _ -> do
               archiveName <- encodeFS "special.zip"
+              stagingName <- encodeFS "staging"
+              let archivePath = tmpDir </> archiveName
+                  staging = tmpDir </> stagingName
+              writeFile archivePath $
+                LazyByteString.toStrict $
+                  Zip.fromArchive $
+                    Zip.addEntryToArchive entry Zip.emptyArchive
+              result <-
+                stageBuiltinSource
+                  (ArchiveSource ZipArchive archivePath)
+                  staging
+              stagingExists <- isDirectory staging
+              return (result, stagingExists)
+        rejected
+          === (Left (UnsupportedArchiveEntry path), False)
+
+    it "rejects arbitrary non-Unix ZIP symbolic-link metadata" $
+      hedgehog $ do
+        creatorSystem <-
+          forAll $
+            Gen.filter (`notElem` [3, 19]) $
+              Gen.word16 $
+                Range.linear 0 255
+        permissions <- forAll $ Gen.word32 $ Range.linear 0 0o777
+        suffix <-
+          forAll $
+            Gen.string
+              (Range.linear 1 40)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        let path = "link-" <> suffix
+            attributes =
+              ((0o120000 :: Word32) .|. permissions) `shiftL` 16
+            madeBy =
+              (creatorSystem `shiftL` 8) .|. (20 :: Word16)
+            entry =
+              (Zip.toEntry path 0 "../outside")
+                { Zip.eVersionMadeBy = madeBy
+                , Zip.eExternalFileAttributes = attributes
+                }
+        rejected <-
+          evalIO $
+            withTempDir $ \tmpDir _ -> do
+              archiveName <- encodeFS "link.zip"
               stagingName <- encodeFS "staging"
               let archivePath = tmpDir </> archiveName
                   staging = tmpDir </> stagingName
