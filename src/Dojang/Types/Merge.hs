@@ -163,6 +163,8 @@ data MergeResultError
     MissingMergeResult OsPath
   | -- | The result path is not a regular file.
     UnsupportedMergeResult OsPath
+  | -- | The result file cannot be read.
+    UnreadableMergeResult OsPath
   | -- | The result changed while it was being read.
     ChangedMergeResult OsPath
   | -- | The result contains a NUL byte and is treated as binary.
@@ -459,18 +461,23 @@ readMergeResult path = do
         then return $ Left $ UnsupportedMergeResult path
         else return $ Left $ MissingMergeResult path
     Just snapshot -> do
-      contents <- readRegularFile path
-      snapshotAfter <- getFileSnapshot path
-      if
-        | contents == Nothing || snapshotAfter /= Just snapshot ->
-            return $ Left $ ChangedMergeResult path
-        | otherwise ->
-            return $
-              validateText
-                (NulMergeResult path)
-                (InvalidUtf8MergeResult path)
-                id
-                (maybe ByteString.empty id contents)
+      contentsResult <-
+        (Right <$> readRegularFile path)
+          `catchError` const (return $ Left $ UnreadableMergeResult path)
+      case contentsResult of
+        Left err -> return $ Left err
+        Right contents -> do
+          snapshotAfter <- getFileSnapshot path
+          if
+            | contents == Nothing || snapshotAfter /= Just snapshot ->
+                return $ Left $ ChangedMergeResult path
+            | otherwise ->
+                return $
+                  validateText
+                    (NulMergeResult path)
+                    (InvalidUtf8MergeResult path)
+                    id
+                    (maybe ByteString.empty id contents)
 
 
 classifyAbsentOrUnsupported

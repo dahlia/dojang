@@ -11,6 +11,7 @@ import Control.Monad.Except (throwError)
 import Data.ByteString (ByteString)
 import Data.Char (isLower, isUpper, toLower, toUpper)
 import Data.HashMap.Strict (singleton)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Text.Encoding qualified as Text
@@ -42,6 +43,7 @@ import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 import Dojang.App
   ( App
   , AppEnv (..)
+  , liftApp
   , prepareMachineState
   , runAppWithoutLogging
   )
@@ -60,6 +62,7 @@ import Dojang.Commands.Merge
   )
 import Dojang.ExitCodes
   ( conflictError
+  , externalProgramNonZeroExit
   , fileNotRoutedError
   , fileWriteError
   , machineStateError
@@ -474,6 +477,50 @@ spec = sequential $ do
               []
           )
           `shouldThrow` (== fileWriteError)
+
+    it "does not traverse driver-created retained workspace subtrees" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          privateName <- encodeFS "driver-private"
+          privatePathRef <- newIORef Nothing
+          let unresolvedRunner :: ProcessRequest -> App IO ProcessResult
+              unresolvedRunner request = do
+                let Just workspace = request.workingDirectory
+                workspacePath <- encodePath workspace
+                let privatePath = workspacePath </> privateName
+                createPrivateDirectory privatePath
+                setPortableMode privatePath 0o000
+                liftApp $ writeIORef privatePathRef $ Just privatePath
+                return $ ProcessCompleted (ExitFailure 1) "" ""
+              resolvedRunner :: ProcessRequest -> App IO ProcessResult
+              resolvedRunner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath "merged"
+                return $ ProcessCompleted ExitSuccess "" ""
+          mergeWith fixture unresolvedRunner
+            `shouldThrow` (== conflictError)
+          Just privatePath <- readIORef privatePathRef
+          bracket_
+            (return ())
+            (setPortableMode privatePath 0o700)
+            (mergeWith fixture resolvedRunner `shouldReturn` ExitSuccess)
+          readReplicas fixture `shouldReturn` replicate 3 "merged"
+
+    it "maps an unreadable successful result to the driver exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          let runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath "merged"
+                setPortableMode resultPath 0o000
+                return $ ProcessCompleted ExitSuccess "" ""
+          mergeWith fixture runner
+            `shouldThrow` (== externalProgramNonZeroExit)
+          readReplicas fixture
+            `shouldReturn` ["source", "base", "destination"]
 
     it "skips a stale publication marker after route policy changes" $
       withFixture $ \fixture -> do

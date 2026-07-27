@@ -1144,15 +1144,31 @@ findPendingPublications machineState markerNames = do
   if not repositoryRootExists || repositoryRootSymlink
     then return Map.empty
     else do
-      entries <- listDirectoryRecursively repositoryRoot []
+      invocationNames <- listDirectory repositoryRoot
+      workspaces <-
+        concat
+          <$> forM
+            invocationNames
+            ( \name -> do
+                let invocation = repositoryRoot </> name
+                workspaceNames <- safeDirectoryEntries invocation
+                return $ (invocation </>) <$> workspaceNames
+            )
+      markers <-
+        concat
+          <$> forM
+            workspaces
+            ( \workspace -> do
+                entries <- safeDirectoryEntries workspace
+                return
+                  [ workspace </> entry
+                  | entry <- entries
+                  , entry `Set.member` markerNames
+                  ]
+            )
       pending <-
         catMaybes
-          <$> forM
-            [ repositoryRoot </> entry
-            | (_, entry) <- entries
-            , takeFileName entry `Set.member` markerNames
-            ]
-            observePendingPublication
+          <$> forM markers observePendingPublication
       return $
         Map.fromListWith
           (<>)
@@ -1160,6 +1176,15 @@ findPendingPublications machineState markerNames = do
           | publication <- pending
           ]
  where
+  safeDirectoryEntries path =
+    ( do
+        directory <- isDirectory path
+        symbolicLink <- isSymlink path
+        if directory && not symbolicLink
+          then listDirectory path
+          else return []
+    )
+      `catchError` const (return [])
   observePendingPublication marker = do
     regular <- isRegularFile marker
     let workspace = takeDirectory marker
@@ -1410,6 +1435,8 @@ formatResultError pathStyle = \case
     prefix path <> " does not exist."
   UnsupportedMergeResult path ->
     prefix path <> " is not a regular file."
+  UnreadableMergeResult path ->
+    prefix path <> " could not be read."
   ChangedMergeResult path ->
     prefix path <> " changed while it was being read."
   NulMergeResult path ->

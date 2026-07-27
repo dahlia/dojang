@@ -5,6 +5,7 @@
 
 module Dojang.Types.MergeSpec (spec) where
 
+import Control.Exception (bracket_)
 import Control.Monad.Except
   ( ExceptT
   , MonadError
@@ -21,6 +22,7 @@ import Data.Text.Encoding qualified as Text
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
+import System.Info (os)
 import System.OsPath (OsPath, encodeFS, takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, runIO, xit)
 import Test.Hspec.Expectations.Pretty
@@ -246,6 +248,17 @@ spec = do
         FileSystem.createSymbolicLink target link FileSystem.File
         readMergeResult link
           `shouldReturn` Left (UnsupportedMergeResult link)
+
+    it "classifies an unreadable regular result" $
+      if os == "mingw32"
+        then return ()
+        else withMergeFile "merged" $ \path ->
+          bracket_
+            (FileSystem.setPortableMode path 0o000)
+            (FileSystem.setPortableMode path 0o600)
+            ( readMergeResult path
+                `shouldReturn` Left (UnreadableMergeResult path)
+            )
 
   describe "mergeCommitOrder" $ do
     it "commits source, destination, and intermediate exactly once in order" $

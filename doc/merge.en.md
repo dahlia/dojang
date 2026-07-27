@@ -109,8 +109,12 @@ retained and printed in the error output.  Successful workspaces are removed.
 `dojang forget` removes every retained merge workspace for the repository.
 Immediately before publishing machine state, Dojang re-observes all three
 replicas.  Lost convergence reports a conflict and keeps the recovery journal.
+Pending-publication recovery scans only the known invocation and conflict
+directory levels; it does not recurse into subdirectories created by a driver.
 Workspace setup removes partial private copies when possible.  Later filesystem
-failures retain the workspace and use exit status 2.
+failures retain the workspace and use exit status 2.  A driver result that
+cannot be read is invalid output instead: it is rejected before any replica
+write and uses exit status 4.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection and `post-merge` hooks after a successful command.  See [hooks] for
