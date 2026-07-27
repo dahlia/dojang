@@ -7,9 +7,11 @@
 module Dojang.Commands.MergeSpec (spec) where
 
 import Control.Exception (bracket_)
+import Control.Monad.Except (throwError)
 import Data.ByteString (ByteString)
 import Data.Char (isLower, isUpper, toLower, toUpper)
 import Data.HashMap.Strict (singleton)
+import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Text.Encoding qualified as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
@@ -17,6 +19,7 @@ import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.Info (os)
 import System.OsPath
   ( OsPath
+  , decodeFS
   , encodeFS
   , takeDirectory
   , takeFileName
@@ -34,7 +37,12 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 
-import Dojang.App (App, AppEnv (..), runAppWithoutLogging)
+import Dojang.App
+  ( App
+  , AppEnv (..)
+  , prepareMachineState
+  , runAppWithoutLogging
+  )
 import Dojang.CommandEffect
   ( MonadCommandEffect (abortCommand)
   , ProcessRequest (..)
@@ -45,10 +53,13 @@ import Dojang.Commands.Merge
   , makeMergeDriverProcessRequest
   , mergeWithDriverRunner
   , mergeWithDriverRunnerAndPublisher
+  , mergeWithDriverRunnerAndPublisherAndPreparer
+  , persistMergedTarget
   )
 import Dojang.ExitCodes
   ( conflictError
   , fileNotRoutedError
+  , fileWriteError
   , machineStateError
   )
 import Dojang.MonadFileSystem
@@ -78,6 +89,7 @@ import Dojang.Types.Manifest
   ( Manifest (fileRoutes, repositoryId)
   , manifest
   )
+import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
 import Dojang.Types.MergeDriver (makeMergeDriverSpec)
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, parseRepositoryId)
@@ -87,6 +99,7 @@ import Dojang.Types.RouteMetadata (PortableMode (writable))
 data Fixture = Fixture
   { fixtureEnv :: AppEnv
   , fixtureRepositoryId :: RepositoryId
+  , fixtureManifest :: Manifest
   , fixtureRetargetedManifest :: Manifest
   , fixtureReadOnlyManifest :: Manifest
   , fixtureConfigPath :: OsPath
@@ -203,6 +216,35 @@ spec = sequential $ do
           mergeWith fixture runner `shouldThrow` (== conflictError)
         readReplicas fixture
           `shouldReturn` ["source", "base", "destination"]
+
+    it "rejects a repository identity changed while the driver is running" $
+      withFixture $ \fixture -> do
+        let Right changedRepositoryId =
+              parseRepositoryId "123e4567-e89b-42d3-a456-426614174001"
+            changedManifest =
+              fixture.fixtureManifest
+                { repositoryId = Just changedRepositoryId
+                }
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              writeManifestFile
+                changedManifest
+                ( fixture.fixtureEnv.sourceDirectory
+                    </> fixture.fixtureEnv.manifestFile
+                )
+              return $ ProcessCompleted ExitSuccess "" ""
+        mergeWith fixture runner `shouldThrow` (== conflictError)
+        readReplicas fixture
+          `shouldReturn` ["source", "base", "destination"]
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        readRepositoryState
+          fixture.fixtureEnv.stateDirectory
+          changedRepositoryId
+          machineId
+          `shouldReturn` Right Nothing
 
     it "retries a merge whose baseline mode update was interrupted" $
       withFixture $ \fixture -> do
@@ -334,6 +376,102 @@ spec = sequential $ do
               []
           )
           `shouldReturn` ExitSuccess
+
+    it "retains publication when any replica loses convergence" $
+      hedgehog $ do
+        changedReplica <- forAll $ Gen.int $ Range.linear 0 2
+        concurrentText <-
+          forAll $
+            Gen.filter
+              (/= "merged")
+              (Gen.text (Range.linear 1 80) Gen.alphaNum)
+        let merged = "merged"
+            concurrent = Text.encodeUtf8 concurrentText
+        evalIO $ withFixture $ \fixture -> do
+          let replicaPaths =
+                [ fixture.sourcePath
+                , fixture.basePath
+                , fixture.destinationPath
+                ]
+              changedPath = replicaPaths !! changedReplica
+              runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath merged
+                return $ ProcessCompleted ExitSuccess "" ""
+              publishAfterDivergence ctx machineState managed = do
+                writeFile changedPath concurrent
+                persistMergedTarget ctx machineState managed
+              expectedReplicas =
+                take changedReplica (replicate 3 merged)
+                  <> [concurrent]
+                  <> drop (changedReplica + 1) (replicate 3 merged)
+          ( runAppWithoutLogging fixture.fixtureEnv $
+              mergeWithDriverRunnerAndPublisher
+                publishAfterDivergence
+                runner
+                Nothing
+                (Just fixture.fixtureConfigPath)
+                []
+            )
+            `shouldThrow` (== conflictError)
+          readReplicas fixture `shouldReturn` expectedReplicas
+          pendingPublicationCount fixture `shouldReturn` 1
+
+    it "maps replica write failures to the file-write exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          let runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath "merged"
+                setPortableMode
+                  fixture.fixtureEnv.sourceDirectory
+                  0o500
+                return $ ProcessCompleted ExitSuccess "" ""
+              restore =
+                setPortableMode fixture.fixtureEnv.sourceDirectory 0o700
+          bracket_
+            (return ())
+            restore
+            (mergeWith fixture runner `shouldThrow` (== fileWriteError))
+
+    it "maps invocation-root failures to the file-write exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          workspaceName <- encodeFS "merge-workspaces"
+          let workspaceRoot =
+                fixture.fixtureEnv.stateDirectory </> workspaceName
+              restore = setPortableMode workspaceRoot 0o700
+          _ <-
+            runAppWithoutLogging fixture.fixtureEnv $
+              prepareMachineState fixture.fixtureManifest
+          createDirectories workspaceRoot
+          setPortableMode workspaceRoot 0o500
+          bracket_
+            (return ())
+            restore
+            ( mergeWith fixture (error "invocation failure ran a driver")
+                `shouldThrow` (== fileWriteError)
+            )
+
+    it "maps workspace preparation failures to the file-write exit code" $
+      withFixture $ \fixture -> do
+        let failPreparation root _ _ _ = do
+              createPrivateDirectory root
+              throwError $ userError "injected workspace preparation failure"
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisherAndPreparer
+              persistMergedTarget
+              failPreparation
+              (error "preparation failure ran a driver")
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== fileWriteError)
 
     it "skips a stale publication marker after route policy changes" $
       withFixture $ \fixture -> do
@@ -535,6 +673,7 @@ withFixture action = withTempDir $ \root _ -> do
         Fixture
           appEnv
           repositoryId
+          manifest'
           retargetedManifest
           readOnlyManifest
           configPath
@@ -568,6 +707,21 @@ readReplicas fixture =
   mapM
     readFile
     [fixture.sourcePath, fixture.basePath, fixture.destinationPath]
+
+
+pendingPublicationCount :: Fixture -> IO Int
+pendingPublicationCount fixture = do
+  root <-
+    mergeWorkspaceRepositoryRoot
+      fixture.fixtureEnv.stateDirectory
+      fixture.fixtureRepositoryId
+  rootExists <- isDirectory root
+  if not rootExists
+    then return 0
+    else do
+      entries <- listDirectoryRecursively root []
+      names <- mapM (decodeFS . takeFileName . snd) entries
+      return $ length $ filter ("pending-" `isPrefixOf`) names
 
 
 mergeDriverConfig :: ByteString

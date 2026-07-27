@@ -26,7 +26,8 @@ module Dojang.Types.Merge
   , revalidateMergeTextInput
   ) where
 
-import Control.Monad (filterM)
+import Control.Monad (filterM, forM_)
+import Control.Monad.Except (MonadError (catchError, throwError))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.List.NonEmpty (NonEmpty)
@@ -392,7 +393,9 @@ revalidateMergeTextInput input = do
 
 
 -- | Creates an owner-only workspace and writes its four owner-only regular
--- files.  The supplied root must not already exist.
+-- files.  The supplied root must not already exist.  If setup fails after
+-- creation, the function removes the root only while it retains the captured
+-- filesystem identity, ignores cleanup errors, and rethrows the setup error.
 prepareMergeWorkspace
   :: (MonadFileSystem m)
   => OsPath
@@ -406,24 +409,34 @@ prepareMergeWorkspace
   -> m MergeWorkspace
 prepareMergeWorkspace root source base destination = do
   createPrivateDirectory root
-  sourceName <- encodePathName "source"
-  baseName <- encodePathName "base"
-  destinationName <- encodePathName "destination"
-  resultName <- encodePathName "result"
-  let workspace =
-        MergeWorkspace
-          { root = root
-          , source = root </> sourceName
-          , base = root </> baseName
-          , destination = root </> destinationName
-          , result = root </> resultName
-          }
-  writePrivate workspace.source source.contents
-  writePrivate workspace.base base.contents
-  writePrivate workspace.destination destination.contents
-  writePrivate workspace.result destination.contents
-  return workspace
+  identity <- getFileIdentity root
+  prepareContents `catchError` cleanAfterFailure identity
  where
+  prepareContents = do
+    sourceName <- encodePathName "source"
+    baseName <- encodePathName "base"
+    destinationName <- encodePathName "destination"
+    resultName <- encodePathName "result"
+    let workspace =
+          MergeWorkspace
+            { root = root
+            , source = root </> sourceName
+            , base = root </> baseName
+            , destination = root </> destinationName
+            , result = root </> resultName
+            }
+    writePrivate workspace.source source.contents
+    writePrivate workspace.base base.contents
+    writePrivate workspace.destination destination.contents
+    writePrivate workspace.result destination.contents
+    return workspace
+  cleanAfterFailure identity err = do
+    forM_ identity $ \expected -> do
+      _ <-
+        removeDirectoryRecursivelyIfIdentity root expected
+          `catchError` const (return False)
+      return ()
+    throwError err
   encodePathName = encodePath
   writePrivate path contents = do
     writeFile path contents

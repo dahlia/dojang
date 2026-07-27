@@ -25,6 +25,7 @@ module Dojang.App
   , currentEnvironment'
   , currentEnvironmentWithFacts
   , clearLegacyFirstApplyHistory
+  , contextFromExistingMachineState
   , doesManifestExist
   , ensureContext
   , ensureManifest
@@ -1069,6 +1070,29 @@ ensureContext
   :: (MonadFileSystem i, AppEffects i) => App i (Context (App i))
 ensureContext = do
   repo <- ensureRepository
+  contextForRepository repo
+
+
+-- | Builds a command context from one already-read manifest and machine-state
+-- record without creating or updating machine state.
+contextFromExistingMachineState
+  :: (MonadFileSystem i, AppEffects i)
+  => Manifest
+  -- ^ Manifest snapshot used for route evaluation.
+  -> MachineState
+  -- ^ Existing state whose intermediate path belongs to the repository.
+  -> App i (Context (App i))
+contextFromExistingMachineState manifest state = do
+  sourceDir <- asks (normalise . (.sourceDirectory))
+  contextForRepository $
+    Repository sourceDir state.intermediatePath manifest
+
+
+contextForRepository
+  :: (MonadFileSystem i, AppEffects i)
+  => Repository
+  -> App i (Context (App i))
+contextForRepository repo = do
   currentEnv <- currentEnvironment'
   $(logDebugSH) currentEnv
   resolved <-

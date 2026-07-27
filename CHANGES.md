@@ -14,14 +14,17 @@ To be released.
     destination, and result, with explicit argument placeholders, environment
     allowlists, and exit-code classifications.  Dojang validates every
     selected conflict before starting a driver, rechecks authoritative inputs
-    before each write, and rejects results if the selected route changes while
-    its driver runs.  It commits source, destination, then intermediate,
+    before each write, and rejects results if the route or repository-state
+    identity changes while its driver runs.  It commits source, destination,
+    then intermediate, rechecks convergence before publishing machine state,
     records successful targets as updated by `merge`, and recognizes an
     interrupted final write or destination/intermediate mode update when the
     command is retried.  Failed, unresolved, and canceled workspaces remain
-    available for recovery until `dojang forget` removes them.  Driver outcome
-    codes are limited to the portable range 1–255.  The command supports
-    source, destination, and directory selectors, `--driver`, `--driver-file`,
+    available for recovery until `dojang forget` removes them.  Partial
+    workspace setup is cleaned when possible, and later filesystem failures
+    retain recovery data and use exit status 2.  Driver outcome codes are
+    limited to the portable range 1–255.  The command supports source,
+    destination, and directory selectors, `--driver`, `--driver-file`,
     `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version 0.3 supports
     identity-copy routes whose three replicas are regular UTF-8 files.
     [[#48], [#75]]

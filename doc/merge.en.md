@@ -95,7 +95,8 @@ shell.  Before each accepted result is written, Dojang checks that the
 authoritative files still match the bytes, identities, and modes observed
 during validation.  After the driver exits, it also reloads the routing context
 and rejects the result if the selected route or its resolved paths, kind, mode,
-codec, or provenance changed.
+codec, or provenance changed.  A changed repository, machine, or state
+generation identity also rejects the result.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
@@ -106,6 +107,10 @@ or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
 to recover the operation.  Failed, unresolved, and canceled workspaces are
 retained and printed in the error output.  Successful workspaces are removed.
 `dojang forget` removes every retained merge workspace for the repository.
+Immediately before publishing machine state, Dojang re-observes all three
+replicas.  Lost convergence reports a conflict and keeps the recovery journal.
+Workspace setup removes partial private copies when possible.  Later filesystem
+failures retain the workspace and use exit status 2.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection and `post-merge` hooks after a successful command.  See [hooks] for

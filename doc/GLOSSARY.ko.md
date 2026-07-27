@@ -79,6 +79,7 @@
 | provenance                   | 결정 근거                  | 단순한 출처를 뜻할 때는 “출처”로 쓸 수 있습니다.                                             |
 | quarantine                   | 격리 영역                  | 롤백 중 파일 시스템 항목을 안전하게 검사하는 비공개 임시 영역을 뜻합니다.                    |
 | record                       | 레코드, 기록하다           | 명사와 동사를 구분합니다.                                                                    |
+| recovery journal             | 복구 저널                  | 완료되지 않은 파일 시스템 작업을 다음 명령에서 재개하기 위한 상태를 뜻합니다.                |
 | reflection, reflect          | 반영, 반영하다             | 명령 이름 `dojang reflect`는 그대로 씁니다.                                                  |
 | reflection policy            | 반영 정책                  | 코덱 구현이 `identity`, `reject`, `re-add` 중 하나로 정합니다.                               |
 | regular file                 | 정규 파일                  | FIFO, 소켓, 장치 같은 특수 파일이 아닌 일반 파일을 뜻합니다.                                 |
@@ -99,6 +100,7 @@
 | special file                 | 특수 파일                  |                                                                                              |
 | specificity                  | 구체성                     |                                                                                              |
 | standard output              | 표준 출력                  | `stdout` 식별자는 그대로 씁니다.                                                             |
+| state generation             | 상태 세대                  | 저장소 상태를 다시 만들 때 이전 상태와 구분하는 식별 단위입니다.                             |
 | state record                 | 상태 레코드                |                                                                                              |
 | state store                  | 상태 저장소                |                                                                                              |
 | symbolic link                | 심볼릭 링크                |                                                                                              |

@@ -1,10 +1,18 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Dojang.Types.MergeSpec (spec) where
 
-import Control.Monad.Except (catchError, throwError, tryError)
+import Control.Monad.Except
+  ( ExceptT
+  , MonadError
+  , catchError
+  , runExceptT
+  , throwError
+  , tryError
+  )
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString qualified as ByteString
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -13,7 +21,7 @@ import Data.Text.Encoding qualified as Text
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
-import System.OsPath (OsPath, encodeFS, (</>))
+import System.OsPath (OsPath, encodeFS, takeDirectory, (</>))
 import Test.Hspec (Spec, describe, it, runIO, xit)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -190,6 +198,16 @@ spec = do
           , workspace.destination
           , workspace.result
           ]
+
+    it "removes partial contents when private-file setup fails" $
+      withThreeInputs $ \source base destination -> do
+        workspaceName <- encodeFS "workspace"
+        let workspacePath = takeDirectory source.path </> workspaceName
+        result <-
+          runFailingWorkspaceIO $
+            prepareMergeWorkspace workspacePath source base destination
+        result `shouldSatisfy` either (const True) (const False)
+        FileSystem.exists workspacePath `shouldReturn` False
 
   describe "readMergeResult" $ do
     it "accepts arbitrary UTF-8 text from a regular result file" $ hedgehog $ do
@@ -464,3 +482,102 @@ assertPrivateFile path = do
   mode <- FileSystem.getPortableMode path
   mode.writable `shouldBe` True
   mode.posixBits `shouldSatisfy` maybe True (== 0o600)
+
+
+newtype FailingWorkspaceIO a
+  = FailingWorkspaceIO (ExceptT IOError IO a)
+  deriving (Functor, Applicative, Monad, MonadError IOError)
+
+
+runFailingWorkspaceIO
+  :: FailingWorkspaceIO a
+  -> IO (Either IOError a)
+runFailingWorkspaceIO (FailingWorkspaceIO action) = runExceptT action
+
+
+instance FileSystem.MonadFileSystem FailingWorkspaceIO where
+  encodePath value =
+    FailingWorkspaceIO $ liftIO (FileSystem.encodePath value :: IO OsPath)
+  decodePath value =
+    FailingWorkspaceIO $ liftIO (FileSystem.decodePath value :: IO FilePath)
+  getCurrentDirectory =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.getCurrentDirectory :: IO OsPath)
+  getHomeDirectory =
+    FailingWorkspaceIO $ liftIO (FileSystem.getHomeDirectory :: IO OsPath)
+  exists value =
+    FailingWorkspaceIO $ liftIO (FileSystem.exists value :: IO Bool)
+  isFile value =
+    FailingWorkspaceIO $ liftIO (FileSystem.isFile value :: IO Bool)
+  isRegularFile value =
+    FailingWorkspaceIO $ liftIO (FileSystem.isRegularFile value :: IO Bool)
+  isDirectory value =
+    FailingWorkspaceIO $ liftIO (FileSystem.isDirectory value :: IO Bool)
+  isSymlink value =
+    FailingWorkspaceIO $ liftIO (FileSystem.isSymlink value :: IO Bool)
+  readFile value =
+    FailingWorkspaceIO $ liftIO (FileSystem.readFile value)
+  writeFile path contents =
+    FailingWorkspaceIO $ liftIO (FileSystem.writeFile path contents :: IO ())
+  replaceFile source destination =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.replaceFile source destination :: IO ())
+  writeTemporaryFile directory template contents =
+    FailingWorkspaceIO $
+      liftIO $
+        ( FileSystem.writeTemporaryFile directory template contents
+            :: IO OsPath
+        )
+  withFileLock _ action = action
+  canonicalizePath value =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.canonicalizePath value :: IO OsPath)
+  readSymlinkTarget value =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.readSymlinkTarget value :: IO OsPath)
+  copyFile source destination =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.copyFile source destination :: IO ())
+  copyFileWithMetadata source destination =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.copyFileWithMetadata source destination :: IO ())
+  copyFilePermissions source destination =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.copyFilePermissions source destination :: IO ())
+  createDirectory value =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.createDirectory value :: IO ())
+  removeFile value =
+    FailingWorkspaceIO $ liftIO (FileSystem.removeFile value :: IO ())
+  removeDirectory value =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.removeDirectory value :: IO ())
+  removeDirectoryRecursivelyIfIdentity value identity =
+    FailingWorkspaceIO $
+      liftIO $
+        ( FileSystem.removeDirectoryRecursivelyIfIdentity value identity
+            :: IO Bool
+        )
+  listDirectory value =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.listDirectory value :: IO [OsPath])
+  getFileSize value =
+    FailingWorkspaceIO $ liftIO (FileSystem.getFileSize value :: IO Integer)
+  getFileIdentity value =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.getFileIdentity value :: IO (Maybe FileSystem.FileIdentity))
+  getPortableMode value =
+    FailingWorkspaceIO $ liftIO (FileSystem.getPortableMode value)
+  setPortableMode _ bits
+    | bits == 0o600 =
+        throwError $ userError "injected private-file mode failure"
+  setPortableMode path bits =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.setPortableMode path bits :: IO ())
+  setPortableWritable path writable =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.setPortableWritable path writable :: IO ())
+  createSymbolicLink target link fileType =
+    FailingWorkspaceIO $
+      liftIO $
+        (FileSystem.createSymbolicLink target link fileType :: IO ())
