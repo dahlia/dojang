@@ -21,18 +21,20 @@ module Dojang.Types.Transport
   , transportNameText
   ) where
 
-import Data.Char (isAscii, isAsciiLower, isAsciiUpper, isDigit, toLower)
-import Data.List (find)
+import Data.Char (isAscii, isAsciiLower, isAsciiUpper, isDigit)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 
-import Dojang.Types.ManifestVariable (parseManifestVariableName)
+import Dojang.Types.ExternalCommand
+  ( EnvironmentNameCase (..)
+  , ExternalEnvironmentConfigurationError (..)
+  , resolveExternalEnvironmentNative
+  , validateExternalEnvironment
+  )
 
 
 -- | A case-sensitive name for a configured external transport.
@@ -62,15 +64,6 @@ data TransportSpec = TransportSpec
   , environment :: Map Text Text
   -- ^ Fixed child environment values, overriding inherited values.
   }
-  deriving (Eq, Show)
-
-
--- | Whether environment names use POSIX or Windows comparison rules.
-data EnvironmentNameCase
-  = -- | Treat differently cased names as distinct, as on POSIX.
-    CaseSensitiveEnvironment
-  | -- | Treat differently cased names as equal, as on Windows.
-    CaseInsensitiveEnvironment
   deriving (Eq, Show)
 
 
@@ -165,11 +158,12 @@ makeTransportSpec command inherited environment = do
     "{destination}"
     MissingDestinationPlaceholder
     DuplicateDestinationPlaceholder
-  mapM_ validateEnvironmentName inherited
-  mapM_ validateEnvironmentName $ Map.keys environment
-  case firstDuplicate inherited of
-    Just duplicate -> Left $ DuplicateInheritedEnvironmentName duplicate
-    Nothing -> Right $ TransportSpec validatedCommand inherited environment
+  case validateExternalEnvironment inherited environment of
+    Left (InvalidExternalEnvironmentName name) ->
+      Left $ InvalidEnvironmentName name
+    Left (DuplicateExternalInheritedEnvironmentName name) ->
+      Left $ DuplicateInheritedEnvironmentName name
+    Right () -> Right $ TransportSpec validatedCommand inherited environment
  where
   placeholder value =
     Text.isInfixOf "{source}" value
@@ -185,17 +179,6 @@ makeTransportSpec command inherited environment = do
       0 -> Left missing
       1 -> Right ()
       _ -> Left duplicate
-  validateEnvironmentName name =
-    case parseManifestVariableName name of
-      Left _ -> Left $ InvalidEnvironmentName name
-      Right _ -> Right ()
-  firstDuplicate = go Set.empty
-   where
-    go :: Set Text -> [Text] -> Maybe Text
-    go _ [] = Nothing
-    go seen (name : names)
-      | Set.member name seen = Just name
-      | otherwise = go (Set.insert name seen) names
 
 
 -- | Constructs a transport configuration from already validated entries.
@@ -218,7 +201,9 @@ lookupTransport name (TransportConfig transports) = do
 
 -- | Builds a deterministic child environment without transcoding opaque host
 -- values. Fixed entries override inherited entries according to the selected
--- platform's environment-name comparison rules.
+-- platform's environment-name comparison rules.  If fixed names differ only
+-- by case on a case-insensitive platform, the lexicographically greatest
+-- configured spelling wins.
 resolveTransportEnvironmentNative
   :: EnvironmentNameCase
   -- ^ Platform-specific environment-name comparison.
@@ -228,28 +213,11 @@ resolveTransportEnvironmentNative
   -- ^ Validated transport specification.
   -> [(String, String)]
 resolveTransportEnvironmentNative nameCase host transport =
-  Map.elems $
-    foldl'
-      insertFixed
-      (foldl' inherit Map.empty transport.inheritedEnvironment)
-      (Map.toAscList transport.environment)
- where
-  canonical =
-    case nameCase of
-      CaseSensitiveEnvironment -> id
-      CaseInsensitiveEnvironment -> fmap toLower
-  inherit result requestedText =
-    let requested = Text.unpack requestedText
-    in case find ((== canonical requested) . canonical . fst) host of
-         Nothing -> result
-         Just (_, value) ->
-           Map.insert (canonical requested) (requested, value) result
-  insertFixed result (nameText, valueText) =
-    let name = Text.unpack nameText
-    in Map.insert
-         (canonical name)
-         (name, Text.unpack valueText)
-         result
+  resolveExternalEnvironmentNative
+    nameCase
+    host
+    transport.inheritedEnvironment
+    transport.environment
 
 
 -- | Expands placeholders without transcoding opaque source and destination
