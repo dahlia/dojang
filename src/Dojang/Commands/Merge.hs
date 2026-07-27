@@ -620,17 +620,33 @@ selectCandidates
 selectCandidates [] _ candidates = return candidates
 selectCandidates paths managed candidates = do
   selected <- mapM makeAbsolute paths
+  managedPaths <- mapM absoluteManagedPaths managed
+  candidatePaths <-
+    forM candidates $ \candidate -> do
+      absolute <- absoluteManagedPaths candidate.managed
+      return (candidate, absolute)
   pathStyle <- pathStyleFor StandardError
   forM_ (zip paths selected) $ \(shown, absolute) ->
-    unless (any (matchesPath absolute) managed) $
+    unless (any (matchesPath absolute) managedPaths) $
       die' fileNotRoutedError $
         "Path " <> pathStyle shown <> " is not tracked by this repository."
   return
     $ nubBy
       (\left right -> sameManagedCorrespondence left.managed right.managed)
-    $ filter
-      (\item -> any (`matchesPath` item.managed) selected)
-      candidates
+    $ [ candidate
+      | (candidate, absolute) <- candidatePaths
+      , any (`matchesPath` absolute) selected
+      ]
+
+
+absoluteManagedPaths
+  :: (MonadFileSystem i, AppEffects i)
+  => ManagedCorrespondence
+  -> App i (OsPath, OsPath)
+absoluteManagedPaths managed = do
+  source <- makeAbsolute managed.correspondence.source.path
+  destination <- makeAbsolute managed.correspondence.destination.path
+  return (source, destination)
 
 
 sameManagedCorrespondence
@@ -642,16 +658,14 @@ sameManagedCorrespondence left right =
       == pathIdentityComponents right.correspondence.destination.path
 
 
-matchesPath :: OsPath -> ManagedCorrespondence -> Bool
-matchesPath selected managed =
+matchesPath :: OsPath -> (OsPath, OsPath) -> Bool
+matchesPath selected (source, destination) =
   selectedComponents `isPrefixOf` sourceComponents
     || selectedComponents `isPrefixOf` destinationComponents
  where
   selectedComponents = pathIdentityComponents selected
-  sourceComponents =
-    pathIdentityComponents managed.correspondence.source.path
-  destinationComponents =
-    pathIdentityComponents managed.correspondence.destination.path
+  sourceComponents = pathIdentityComponents source
+  destinationComponents = pathIdentityComponents destination
 
 
 prepareCandidate

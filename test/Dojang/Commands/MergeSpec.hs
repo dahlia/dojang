@@ -14,6 +14,7 @@ import Data.HashMap.Strict (singleton)
 import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Text.Encoding qualified as Text
+import System.Directory.OsPath qualified as OsDirectory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.Info (os)
@@ -21,6 +22,7 @@ import System.OsPath
   ( OsPath
   , decodeFS
   , encodeFS
+  , joinPath
   , takeDirectory
   , takeFileName
   , (</>)
@@ -540,6 +542,35 @@ spec = sequential $ do
         if os == "mingw32"
           then runSelected `shouldReturn` ExitSuccess
           else runSelected `shouldThrow` (== fileNotRoutedError)
+
+    it "matches relative source selectors for a relative repository" $
+      hedgehog $ do
+        dotDepth <- forAll $ Gen.int (Range.linear 0 4)
+        outcome <- evalIO $ withFixture $ \fixture -> do
+          dot <- encodeFS "."
+          let repository = takeDirectory fixture.sourcePath
+              selected =
+                joinPath $
+                  replicate dotDepth dot
+                    <> [takeFileName fixture.sourcePath]
+              relativeEnv =
+                fixture.fixtureEnv{sourceDirectory = dot}
+              runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath "merged"
+                return $ ProcessCompleted ExitSuccess "" ""
+          result <-
+            OsDirectory.withCurrentDirectory repository $
+              runAppWithoutLogging relativeEnv $
+                mergeWithDriverRunner
+                  runner
+                  Nothing
+                  (Just fixture.fixtureConfigPath)
+                  [selected]
+          replicas <- readReplicas fixture
+          return (result, replicas)
+        outcome === (ExitSuccess, replicate 3 "merged")
 
   describe "makeMergeDriverProcessRequest" $
     it "expands arguments and exposes only the configured environment" $ do
