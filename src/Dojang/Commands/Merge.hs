@@ -771,8 +771,9 @@ classifyAction managed candidate source base destination =
               FileModeSnapshot _ baseMode = base.modeSnapshot
               FileModeSnapshot _ destinationMode =
                 destination.modeSnapshot
-          in satisfiesPortableMode destinationMode declared
-               && not (satisfiesPortableMode baseMode declared)
+          in not $
+               satisfiesPortableMode destinationMode declared
+                 && satisfiesPortableMode baseMode declared
 
 
 processPrepared

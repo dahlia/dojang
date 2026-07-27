@@ -382,6 +382,39 @@ spec = sequential $ do
           )
           `shouldReturn` ExitSuccess
 
+    it "repairs destination mode before retrying target publication" $
+      withFixture $ \fixture -> do
+        let merged = "base"
+            manifestPath =
+              fixture.fixtureEnv.sourceDirectory
+                </> fixture.fixtureEnv.manifestFile
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+        writeManifestFile fixture.fixtureReadOnlyManifest manifestPath
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        readReplicas fixture `shouldReturn` replicate 3 merged
+        setPortableMode fixture.destinationPath 0o644
+        removeFile fixture.fixtureConfigPath
+        mergeWith fixture (error "publication recovery ran a driver")
+          `shouldReturn` ExitSuccess
+        destinationMode <- getPortableMode fixture.destinationPath
+        baseMode <- getPortableMode fixture.basePath
+        (destinationMode.writable, baseMode.writable)
+          `shouldBe` (False, False)
+        pendingPublicationCount fixture `shouldReturn` 0
+
     it "retains publication when any replica loses convergence" $
       hedgehog $ do
         changedReplica <- forAll $ Gen.int $ Range.linear 0 2
