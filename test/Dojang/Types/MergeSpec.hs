@@ -161,6 +161,17 @@ spec = do
         observeMergeTextInput BaseInput link
           `shouldReturn` Left (UnsupportedMergeInput BaseInput link)
 
+    it "classifies an unreadable regular input" $
+      if os == "mingw32"
+        then return ()
+        else withMergeFile "contents" $ \path ->
+          bracket_
+            (FileSystem.setPortableMode path 0o000)
+            (FileSystem.setPortableMode path 0o600)
+            ( observeMergeTextInput SourceInput path
+                `shouldReturn` Left (UnreadableMergeInput SourceInput path)
+            )
+
   describe "prepareMergeWorkspace" $ do
     it "copies every input and initializes the result from the destination" $
       withTempDir $ \root _ -> do

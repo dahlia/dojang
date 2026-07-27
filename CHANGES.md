@@ -22,11 +22,13 @@ To be released.
     command is retried.  Failed, unresolved, and canceled workspaces remain
     available for recovery until `dojang forget` removes them.  Partial
     workspace setup is cleaned when possible, and later filesystem failures
-    retain recovery data and use exit status 2.  Unreadable driver results are
-    rejected before replica writes and use exit status 4.  Retried merges find
-    pending publication markers without descending into driver-created
-    workspace subdirectories.  Driver outcome codes are limited to the
-    portable range 1–255.  The command supports source, destination, and
+    retain recovery data and use exit status 2.  Final invocation cleanup
+    failures use the same status and identify the workspace root to inspect.
+    Input read failures are reported as conflicts, while unreadable driver
+    results are rejected before replica writes and use exit status 4.  Retried
+    merges find pending publication markers without descending into
+    driver-created workspace subdirectories.  Driver outcome codes are limited
+    to the portable range 1–255.  The command supports source, destination, and
     directory selectors, `--driver`, `--driver-file`, `--dry-run`, and
     `pre-merge`/`post-merge` hooks.  Version 0.3 supports identity-copy routes
     whose three replicas are regular UTF-8 files.  [[#48], [#75]]

@@ -478,6 +478,60 @@ spec = sequential $ do
           )
           `shouldThrow` (== fileWriteError)
 
+    it "maps unreadable inputs to the conflict exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          expectedReplicas <- readReplicas fixture
+          bracket_
+            (setPortableMode fixture.sourcePath 0o000)
+            (setPortableMode fixture.sourcePath 0o600)
+            ( mergeWith fixture (error "input rejection ran a driver")
+                `shouldThrow` (== conflictError)
+            )
+          readReplicas fixture `shouldReturn` expectedReplicas
+
+    it "maps final invocation cleanup failures to the file-write exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          invocationRootRef <- newIORef Nothing
+          let runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                let Just workspace = request.workingDirectory
+                workspacePath <- encodePath workspace
+                liftApp $
+                  writeIORef invocationRootRef $
+                    Just $
+                      takeDirectory workspacePath
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath "merged"
+                return $ ProcessCompleted ExitSuccess "" ""
+              publisher context machineState managed = do
+                persistMergedTarget context machineState managed
+                invocationRoot <-
+                  liftApp $
+                    readIORef invocationRootRef
+                      >>= maybe (fail "driver did not run") return
+                setPortableMode (takeDirectory invocationRoot) 0o500
+              restore = do
+                Just invocationRoot <- readIORef invocationRootRef
+                setPortableMode (takeDirectory invocationRoot) 0o700
+          bracket_
+            (return ())
+            restore
+            ( ( runAppWithoutLogging fixture.fixtureEnv $
+                  mergeWithDriverRunnerAndPublisher
+                    publisher
+                    runner
+                    Nothing
+                    (Just fixture.fixtureConfigPath)
+                    []
+              )
+                `shouldThrow` (== fileWriteError)
+            )
+          readReplicas fixture `shouldReturn` replicate 3 "merged"
+
     it "does not traverse driver-created retained workspace subtrees" $
       if os == "mingw32"
         then return ()

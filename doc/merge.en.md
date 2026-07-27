@@ -91,12 +91,14 @@ Safety and recovery
 
 Dojang validates every selected input before starting the first driver.  Each
 driver receives private copies in an owner-only workspace and runs without a
-shell.  Before each accepted result is written, Dojang checks that the
-authoritative files still match the bytes, identities, and modes observed
-during validation.  After the driver exits, it also reloads the routing context
-and rejects the result if the selected route or its resolved paths, kind, mode,
-codec, or provenance changed.  A changed repository, machine, or state
-generation identity also rejects the result.
+shell.  If an input disappears or cannot be read while it is being captured,
+Dojang reports a conflict instead of an internal error.  Before each accepted
+result is written, Dojang checks that the authoritative files still match the
+bytes, identities, and modes observed during validation.  After the driver
+exits, it also reloads the routing context and rejects the result if the
+selected route or its resolved paths, kind, mode, codec, or provenance changed.
+A changed repository, machine, or state generation identity also rejects the
+result.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
@@ -112,9 +114,10 @@ replicas.  Lost convergence reports a conflict and keeps the recovery journal.
 Pending-publication recovery scans only the known invocation and conflict
 directory levels; it does not recurse into subdirectories created by a driver.
 Workspace setup removes partial private copies when possible.  Later filesystem
-failures retain the workspace and use exit status 2.  A driver result that
-cannot be read is invalid output instead: it is rejected before any replica
-write and uses exit status 4.
+failures retain the workspace and use exit status 2.  A failure while removing
+a completed invocation workspace uses the same status and identifies the
+workspace root to inspect.  A driver result that cannot be read is invalid
+output instead: it is rejected before any replica write and uses exit status 4.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection and `post-merge` hooks after a successful command.  See [hooks] for

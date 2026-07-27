@@ -116,6 +116,8 @@ data MergeInputError
     MissingMergeInput MergeInputRole OsPath
   | -- | The replica is not a regular file.
     UnsupportedMergeInput MergeInputRole OsPath
+  | -- | The replica cannot be read.
+    UnreadableMergeInput MergeInputRole OsPath
   | -- | The replica changed while it was being observed.
     ChangedMergeInput MergeInputRole OsPath
   | -- | The replica contains a NUL byte and is treated as binary.
@@ -351,27 +353,33 @@ observeMergeTextInput role path = do
       case matchingModeSnapshot snapshot modeBefore of
         Nothing -> return $ Left $ ChangedMergeInput role path
         Just modeSnapshot -> do
-          contents <- readRegularFile path
-          snapshotAfter <- getFileSnapshot path
-          modeAfter <- getFileModeSnapshot path
-          if
-            | contents == Nothing ->
-                return $ Left $ ChangedMergeInput role path
-            | snapshotAfter /= Just snapshot
-                || modeAfter /= Just modeSnapshot ->
-                return $ Left $ ChangedMergeInput role path
-            | otherwise ->
-                return $
-                  validateText
-                    (NulMergeInput role path)
-                    (InvalidUtf8MergeInput role path)
-                    ( MergeTextInput
-                        role
-                        path
-                        snapshot
-                        modeSnapshot
-                    )
-                    (maybe ByteString.empty id contents)
+          contentsResult <-
+            (Right <$> readRegularFile path)
+              `catchError` const
+                (return $ Left $ UnreadableMergeInput role path)
+          case contentsResult of
+            Left err -> return $ Left err
+            Right contents -> do
+              snapshotAfter <- getFileSnapshot path
+              modeAfter <- getFileModeSnapshot path
+              if
+                | contents == Nothing ->
+                    return $ Left $ ChangedMergeInput role path
+                | snapshotAfter /= Just snapshot
+                    || modeAfter /= Just modeSnapshot ->
+                    return $ Left $ ChangedMergeInput role path
+                | otherwise ->
+                    return $
+                      validateText
+                        (NulMergeInput role path)
+                        (InvalidUtf8MergeInput role path)
+                        ( MergeTextInput
+                            role
+                            path
+                            snapshot
+                            modeSnapshot
+                        )
+                        (maybe ByteString.empty id contents)
 
 
 -- | Rechecks an observed input's identity, mode, and exact bytes.

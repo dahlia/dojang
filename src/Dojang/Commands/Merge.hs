@@ -425,6 +425,9 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                 removeDirectoryRecursivelyIfIdentity
                   invocationRoot
                   invocationIdentity
+                  `catchError` reportFinalCleanupError
+                    pathStyle
+                    invocationRoot
               unless cleaned $
                 printStderr' Warning $
                   "The completed merge workspace could not be removed: "
@@ -1368,6 +1371,21 @@ reportPreparationError pathStyle workspace err = do
   abortCommand fileWriteError
 
 
+reportFinalCleanupError
+  :: (AppEffects i)
+  => (OsPath -> Text)
+  -> OsPath
+  -> IOError
+  -> App i a
+reportFinalCleanupError pathStyle invocationRoot err = do
+  printMergeFilesystemError err
+  printStderr' Hint $
+    "Inspect the merge workspace root for retained completed data at "
+      <> pathStyle (takeDirectory invocationRoot)
+      <> "."
+  abortCommand fileWriteError
+
+
 reportMergeFilesystemError
   :: (AppEffects i)
   => IOError
@@ -1415,6 +1433,8 @@ formatInputError pathStyle = \case
     prefix role path <> " does not exist."
   UnsupportedMergeInput role path ->
     prefix role path <> " is not a regular file."
+  UnreadableMergeInput role path ->
+    prefix role path <> " could not be read."
   ChangedMergeInput role path ->
     prefix role path <> " changed while it was being read."
   NulMergeInput role path ->
