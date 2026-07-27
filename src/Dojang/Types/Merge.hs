@@ -15,6 +15,7 @@ module Dojang.Types.Merge
   , MergeTextInput (..)
   , MergeWorkspace (..)
   , commitMergeResultGuarded
+  , commitMergeRecoveryGuarded
   , mergeCommitOrder
   , observeMergeTextInput
   , prepareMergeWorkspace
@@ -133,6 +134,8 @@ data MergeCommitReplica
 data MergeCommitError
   = -- | One or more remaining replicas no longer match their observations.
     MergeInputsChanged (NonEmpty MergeInputRole)
+  | -- | Source and destination did not contain one accepted result.
+    MergeRecoveryInputsDiffer
   deriving (Eq, Show)
 
 
@@ -203,6 +206,72 @@ commitMergeResultGuarded observe declaredMode source base destination result =
           (True, Just bits) -> setPortableMode path bits
           _ -> return ()
         go rest
+
+
+-- | Finishes an interrupted merge after source and destination already agree.
+--
+-- Source and destination contents are never rewritten.  All three inputs are
+-- revalidated before the destination mode is restored, then the destination
+-- is recaptured and checked again before the intermediate content and mode are
+-- repaired.
+commitMergeRecoveryGuarded
+  :: (MonadFileSystem m)
+  => (MergeCommitReplica -> m ())
+  -- ^ Observer invoked immediately before the guarded recovery step.
+  -> RouteMode
+  -- ^ Declared destination metadata.
+  -> MergeTextInput
+  -- ^ Stable source input containing the accepted result.
+  -> MergeTextInput
+  -- ^ Stable intermediate input to repair.
+  -> MergeTextInput
+  -- ^ Stable destination input containing the accepted result.
+  -> m (Either MergeCommitError ())
+commitMergeRecoveryGuarded
+  observe
+  declaredMode
+  source
+  base
+  destination
+    | source.contents /= destination.contents =
+        return $ Left MergeRecoveryInputsDiffer
+    | otherwise =
+        case posixFileModeBits declaredMode of
+          Nothing -> repairBase [source, destination, base] Nothing
+          Just bits -> do
+            observe DestinationCommitReplica
+            changed <- changedInputs [source, destination, base]
+            case changed of
+              Just roles -> return $ Left $ MergeInputsChanged roles
+              Nothing -> do
+                setPortableMode destination.path bits
+                refreshed <- observeMergeTextInput DestinationInput destination.path
+                case refreshed of
+                  Right refreshedDestination
+                    | refreshedDestination.contents == source.contents ->
+                        repairBase
+                          [source, refreshedDestination, base]
+                          (Just bits)
+                  _ ->
+                    return $
+                      Left $
+                        MergeInputsChanged $
+                          NonEmpty.singleton DestinationInput
+   where
+    changedInputs inputs =
+      NonEmpty.nonEmpty . fmap (.role)
+        <$> filterM (fmap not . revalidateMergeTextInput) inputs
+    repairBase remaining declaredBits = do
+      observe IntermediateCommitReplica
+      changed <- changedInputs remaining
+      case changed of
+        Just roles -> return $ Left $ MergeInputsChanged roles
+        Nothing -> do
+          writeFileAtomically base.path "dojang-merge.tmp" source.contents
+          case declaredBits of
+            Just bits -> setPortableMode base.path bits
+            Nothing -> return ()
+          return $ Right ()
 
 
 -- | Captures a stable regular UTF-8 text input without following a special

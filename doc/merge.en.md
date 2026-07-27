@@ -93,15 +93,18 @@ Dojang validates every selected input before starting the first driver.  Each
 driver receives private copies in an owner-only workspace and runs without a
 shell.  Before each accepted result is written, Dojang checks that the
 authoritative files still match the bytes, identities, and modes observed
-during validation.
+during validation.  After the driver exits, it also reloads the routing context
+and rejects the result if the selected route or its resolved paths, kind, mode,
+codec, or provenance changed.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
 both authoritative copies contain the result.  If a later write fails, earlier
-writes remain, and rerunning `dojang merge` or inspecting the reported
-workspace can recover the operation.  Failed, unresolved, and canceled
-workspaces are retained and printed in the error output.  Successful
-workspaces are removed.
+writes remain.  A retry recognizes the case where both authoritative copies
+already contain the result but the destination mode or intermediate content
+or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
+to recover the operation.  Failed, unresolved, and canceled workspaces are
+retained and printed in the error output.  Successful workspaces are removed.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection and `post-merge` hooks after a successful command.  See [hooks] for

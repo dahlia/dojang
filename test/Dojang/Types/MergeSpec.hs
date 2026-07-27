@@ -32,6 +32,7 @@ import Dojang.Types.Merge
   , MergeResultError (..)
   , MergeTextInput (..)
   , MergeWorkspace (..)
+  , commitMergeRecoveryGuarded
   , commitMergeResultGuarded
   , mergeCommitOrder
   , observeMergeTextInput
@@ -316,6 +317,81 @@ spec = do
         committed === Right ()
         satisfiesPortableMode destinationMode expectedMode === True
         satisfiesPortableMode baseMode expectedMode === True
+
+  describe "commitMergeRecoveryGuarded" $ do
+    it "repairs only the baseline for arbitrary accepted results" $ hedgehog $ do
+      result <- forAll utf8Text
+      observed <- liftIO $ withThreeInputs $ \source base destination -> do
+        FileSystem.writeFile source.path result
+        FileSystem.writeFile destination.path result
+        Right refreshedSource <-
+          observeMergeTextInput SourceInput source.path
+        Right refreshedDestination <-
+          observeMergeTextInput DestinationInput destination.path
+        orderRef <- newIORef []
+        committed <-
+          commitMergeRecoveryGuarded
+            (\replica -> modifyIORef' orderRef (<> [replica]))
+            DefaultMode
+            refreshedSource
+            base
+            refreshedDestination
+        order <- readIORef orderRef
+        replicas <-
+          mapM
+            FileSystem.readFile
+            [source.path, destination.path, base.path]
+        return (committed, order, replicas)
+      observed
+        === ( Right ()
+            , [IntermediateCommitReplica]
+            , replicate 3 result
+            )
+
+    it "rejects divergent authoritative inputs without mutation" $
+      withThreeInputs $ \source base destination -> do
+        committed <-
+          commitMergeRecoveryGuarded
+            (const $ return ())
+            DefaultMode
+            source
+            base
+            destination
+        committed `shouldBe` Left MergeRecoveryInputsDiffer
+        FileSystem.readFile source.path `shouldReturn` source.contents
+        FileSystem.readFile destination.path
+          `shouldReturn` destination.contents
+        FileSystem.readFile base.path `shouldReturn` base.contents
+
+    it "restores every declared mode on destination and baseline" $ hedgehog $ do
+      declaredMode <-
+        forAll $
+          Gen.element
+            [Private, Executable, PrivateExecutable, ReadOnly]
+      observed <- liftIO $ withThreeInputs $ \source base destination -> do
+        let result = "merged"
+        FileSystem.writeFile source.path result
+        FileSystem.writeFile destination.path result
+        Right refreshedSource <-
+          observeMergeTextInput SourceInput source.path
+        Right refreshedDestination <-
+          observeMergeTextInput DestinationInput destination.path
+        committed <-
+          commitMergeRecoveryGuarded
+            (const $ return ())
+            declaredMode
+            refreshedSource
+            base
+            refreshedDestination
+        destinationMode <- FileSystem.getPortableMode destination.path
+        baseMode <- FileSystem.getPortableMode base.path
+        return (committed, destinationMode, baseMode)
+      let Just expectedBits = posixFileModeBits declaredMode
+          expectedMode = portableModeFromBits expectedBits
+          (committed, destinationMode, baseMode) = observed
+      committed === Right ()
+      satisfiesPortableMode destinationMode expectedMode === True
+      satisfiesPortableMode baseMode expectedMode === True
 
 
 utf8Text :: Gen ByteString.ByteString

@@ -8,11 +8,20 @@ module Dojang.Commands.MergeSpec (spec) where
 
 import Control.Exception (bracket_)
 import Data.ByteString (ByteString)
+import Data.Char (isLower, isUpper, toLower, toUpper)
 import Data.HashMap.Strict (singleton)
 import Data.Map.Strict qualified as Map
+import Data.Text.Encoding qualified as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
-import System.OsPath (OsPath, encodeFS, (</>))
+import System.Info (os)
+import System.OsPath
+  ( OsPath
+  , encodeFS
+  , takeDirectory
+  , takeFileName
+  , (</>)
+  )
 import Test.Hspec (Spec, describe, it, sequential)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -22,6 +31,7 @@ import Test.Hspec.Expectations.Pretty
 import Prelude hiding (readFile, writeFile)
 
 import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
 import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 
 import Dojang.App (App, AppEnv (..), runAppWithoutLogging)
@@ -34,7 +44,7 @@ import Dojang.Commands.Merge
   , makeMergeDriverProcessRequest
   , mergeWithDriverRunner
   )
-import Dojang.ExitCodes (conflictError)
+import Dojang.ExitCodes (conflictError, fileNotRoutedError)
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
   , dryRunIO
@@ -43,6 +53,11 @@ import Dojang.Syntax.Manifest.Writer (writeManifestFile)
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
+import Dojang.Types.FileRoute
+  ( FileRoute (..)
+  , RouteMode (ReadOnly)
+  , RouteTarget (..)
+  )
 import Dojang.Types.MachineState
   ( MachineState (targetRecords)
   , readMachineId
@@ -52,15 +67,21 @@ import Dojang.Types.ManagedTarget
   ( ManagedTarget (updatedBy)
   , SynchronizationCommand (Merged)
   )
-import Dojang.Types.Manifest (Manifest (repositoryId), manifest)
+import Dojang.Types.Manifest
+  ( Manifest (fileRoutes, repositoryId)
+  , manifest
+  )
 import Dojang.Types.MergeDriver (makeMergeDriverSpec)
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, parseRepositoryId)
+import Dojang.Types.RouteMetadata (PortableMode (writable))
 
 
 data Fixture = Fixture
   { fixtureEnv :: AppEnv
   , fixtureRepositoryId :: RepositoryId
+  , fixtureRetargetedManifest :: Manifest
+  , fixtureReadOnlyManifest :: Manifest
   , fixtureConfigPath :: OsPath
   , sourcePath :: OsPath
   , basePath :: OsPath
@@ -140,6 +161,151 @@ spec = sequential $ do
         mergeWith fixture runner `shouldThrow` (== conflictError)
         readReplicas fixture
           `shouldReturn` ["source", "base", "destination"]
+
+    it "retries a merge whose authoritative replicas were already committed" $
+      hedgehog $ do
+        mergedText <-
+          forAll $ Gen.text (Range.linear 1 80) Gen.alphaNum
+        let merged = Text.encodeUtf8 mergedText
+        replicas <- evalIO $ withFixture $ \fixture -> do
+          writeFile fixture.sourcePath merged
+          writeFile fixture.destinationPath merged
+          mergeWith fixture (error "partial recovery ran a driver")
+            `shouldReturn` ExitSuccess
+          readReplicas fixture
+        replicas === replicate 3 merged
+
+    it "rejects a route retargeted while the driver is running" $
+      withFixture $ \fixture -> do
+        retargetedName <- encodeFS "retargeted-destination"
+        let retargeted =
+              takeDirectory fixture.destinationPath
+                </> retargetedName
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              writeManifestFile
+                fixture.fixtureRetargetedManifest
+                ( fixture.fixtureEnv.sourceDirectory
+                    </> fixture.fixtureEnv.manifestFile
+                )
+              return $ ProcessCompleted ExitSuccess "" ""
+        writeFile retargeted "destination"
+        withEnvVars [("RETARGET", Just retargeted)] $
+          mergeWith fixture runner `shouldThrow` (== conflictError)
+        readReplicas fixture
+          `shouldReturn` ["source", "base", "destination"]
+
+    it "retries a merge whose baseline mode update was interrupted" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            manifestPath =
+              fixture.fixtureEnv.sourceDirectory
+                </> fixture.fixtureEnv.manifestFile
+        writeManifestFile fixture.fixtureReadOnlyManifest manifestPath
+        writeFile fixture.sourcePath merged
+        writeFile fixture.basePath merged
+        writeFile fixture.destinationPath merged
+        setPortableMode fixture.destinationPath 0o444
+        setPortableMode fixture.basePath 0o644
+        mergeWith fixture (error "mode recovery ran a driver")
+          `shouldReturn` ExitSuccess
+        mode <- getPortableMode fixture.basePath
+        mode.writable `shouldBe` False
+
+    it "restores destination mode while recovering stale baseline content" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            manifestPath =
+              fixture.fixtureEnv.sourceDirectory
+                </> fixture.fixtureEnv.manifestFile
+        writeManifestFile fixture.fixtureReadOnlyManifest manifestPath
+        writeFile fixture.sourcePath merged
+        writeFile fixture.destinationPath merged
+        setPortableMode fixture.destinationPath 0o644
+        setPortableMode fixture.basePath 0o644
+        mergeWith fixture (error "mode recovery ran a driver")
+          `shouldReturn` ExitSuccess
+        destinationMode <- getPortableMode fixture.destinationPath
+        baseMode <- getPortableMode fixture.basePath
+        (destinationMode.writable, baseMode.writable)
+          `shouldBe` (False, False)
+
+    it "skips unsupported recovery candidates when merging other conflicts" $
+      withFixture $ \fixture -> do
+        treeName <- encodeFS "tree"
+        childName <- encodeFS "child"
+        treeDestinationName <- encodeFS "tree-destination"
+        intermediateName <- encodeFS ".dojang"
+        let treeDestination =
+              takeDirectory fixture.destinationPath
+                </> treeDestinationName
+            sourceChild =
+              fixture.fixtureEnv.sourceDirectory
+                </> treeName
+                </> childName
+            baseChild =
+              fixture.fixtureEnv.sourceDirectory
+                </> intermediateName
+                </> treeName
+                </> childName
+            destinationChild = treeDestination </> childName
+            Right always = parseMonikerName "always"
+            manifest' =
+              ( manifest
+                  (singleton always Always)
+                  ( Map.singleton
+                      (takeFileName fixture.sourcePath)
+                      [(always, Just $ Substitution "DEST")]
+                  )
+                  (Map.singleton treeName [(always, Just $ Substitution "TREE_DEST")])
+                  mempty
+                  mempty
+              )
+                { repositoryId = Just fixture.fixtureRepositoryId
+                }
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+        createDirectories $ takeDirectory sourceChild
+        createDirectories $ takeDirectory baseChild
+        createDirectories $ takeDirectory destinationChild
+        writeFile sourceChild "same"
+        writeFile baseChild "old"
+        writeFile destinationChild "same"
+        writeManifestFile
+          manifest'
+          ( fixture.fixtureEnv.sourceDirectory
+              </> fixture.fixtureEnv.manifestFile
+          )
+        withEnvVars [("TREE_DEST", Just treeDestination)] $
+          mergeWith fixture runner `shouldReturn` ExitSuccess
+        readReplicas fixture
+          `shouldReturn` replicate 3 "merged"
+        readFile baseChild `shouldReturn` "old"
+
+    it "matches explicit selectors using native path identity" $
+      withFixture $ \fixture -> do
+        rendered <- decodePath fixture.sourcePath
+        selected <- encodeFS $ fmap swapCase rendered
+        let runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+            runSelected =
+              runAppWithoutLogging fixture.fixtureEnv $
+                mergeWithDriverRunner
+                  runner
+                  Nothing
+                  (Just fixture.fixtureConfigPath)
+                  [selected]
+        if os == "mingw32"
+          then runSelected `shouldReturn` ExitSuccess
+          else runSelected `shouldThrow` (== fileNotRoutedError)
 
   describe "makeMergeDriverProcessRequest" $
     it "expands arguments and exposes only the configured environment" $ do
@@ -234,6 +400,31 @@ withFixture action = withTempDir $ \root _ -> do
         )
           { repositoryId = Just repositoryId
           }
+      retargetedManifest =
+        ( manifest
+            (singleton always Always)
+            (Map.singleton routeName [(always, Just $ Substitution "RETARGET")])
+            mempty
+            mempty
+            mempty
+        )
+          { repositoryId = Just repositoryId
+          }
+      readOnlyManifest =
+        manifest'
+          { fileRoutes =
+              Map.adjust
+                ( \route ->
+                    route
+                      { predicates =
+                          fmap
+                            (fmap $ fmap (\target -> target{mode = ReadOnly}))
+                            route.predicates
+                      }
+                )
+                routeName
+                manifest'.fileRoutes
+          }
       appEnv =
         AppEnv
           repository
@@ -245,7 +436,15 @@ withFixture action = withTempDir $ \root _ -> do
           False
           False
       fixture =
-        Fixture appEnv repositoryId configPath source base destination
+        Fixture
+          appEnv
+          repositoryId
+          retargetedManifest
+          readOnlyManifest
+          configPath
+          source
+          base
+          destination
   createDirectories $ repository </> intermediateDirectoryName
   createDirectories home
   writeManifestFile manifest' $ repository </> manifestName
@@ -259,6 +458,13 @@ withFixture action = withTempDir $ \root _ -> do
     , ("USERPROFILE", Just home)
     ]
     $ action fixture
+
+
+swapCase :: Char -> Char
+swapCase character
+  | isLower character = toUpper character
+  | isUpper character = toLower character
+  | otherwise = character
 
 
 readReplicas :: Fixture -> IO [ByteString]
