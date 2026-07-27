@@ -15,7 +15,7 @@ import Control.Concurrent
   , takeMVar
   )
 import Control.Exception qualified as Exception
-import Control.Monad (replicateM, when)
+import Control.Monad (forM_, replicateM, when)
 import Control.Monad.Except
   ( ExceptT
   , MonadError (catchError, throwError)
@@ -117,7 +117,7 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget
   ( ManagedCodecState (ManagedCodecState)
   , ManagedTarget (..)
-  , SynchronizationCommand (Applied)
+  , SynchronizationCommand (..)
   , TargetFingerprint (FileFingerprint, SymlinkFingerprint)
   )
 import Dojang.Types.RepositoryId
@@ -332,10 +332,10 @@ spec = do
     it "upgrades schema-version 3 with empty machine facts" $ do
       current <- fixtureState
       let currentDocument = encodeMachineState current
-      Text.isInfixOf "schema-version = 6" currentDocument `shouldBe` True
+      Text.isInfixOf "schema-version = 7" currentDocument `shouldBe` True
       let legacyDocument =
             Text.replace
-              "schema-version = 6"
+              "schema-version = 7"
               "schema-version = 3"
               currentDocument
       Text.isInfixOf "schema-version = 3" legacyDocument `shouldBe` True
@@ -389,6 +389,30 @@ spec = do
         populated.machineId
         (encodeMachineState populated)
         `shouldBe` Right populated
+
+    it "round-trips every synchronization command" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "command-target"
+      forM_ [Applied, Reflected, Merged] $ \command -> do
+        let updatedTarget = target{updatedBy = command}
+            populated =
+              state
+                { targetRecords =
+                    Map.singleton updatedTarget.targetId updatedTarget
+                }
+            encoded = encodeMachineState populated
+        decodeMachineState
+          populated.repositoryId
+          populated.machineId
+          encoded
+          `shouldBe` Right populated
+      let merged =
+            state
+              { targetRecords =
+                  Map.singleton target.targetId target{updatedBy = Merged}
+              }
+      Text.isInfixOf "updated-by = \"merge\"" (encodeMachineState merged)
+        `shouldBe` True
 
     it "round-trips a deployment-link target record" $ do
       state <- fixtureState
@@ -471,12 +495,25 @@ spec = do
       -- version-4 document:
       let v4Document =
             Text.replace
-              "schema-version = 6"
+              "schema-version = 7"
               "schema-version = 4"
               (encodeMachineState populated)
       Text.isInfixOf "route-kind" v4Document `shouldBe` False
       Text.isInfixOf "declared-mode" v4Document `shouldBe` False
       decodeMachineState populated.repositoryId populated.machineId v4Document
+        `shouldBe` Right populated
+
+    it "reads schema-version 6 target records without migration" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "version-six-target"
+      let populated =
+            state{targetRecords = Map.singleton target.targetId target}
+          versionSix =
+            Text.replace
+              "schema-version = 7"
+              "schema-version = 6"
+              (encodeMachineState populated)
+      decodeMachineState populated.repositoryId populated.machineId versionSix
         `shouldBe` Right populated
 
     it "persists a successful hook execution through the repository lock" $
@@ -776,14 +813,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 6" "schema-version = 7" encoded
+          Text.replace "schema-version = 7" "schema-version = 8" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 7)
+        `shouldBe` Left (UnsupportedSchemaVersion 8)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 7\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 7)
+        "schema-version = 8\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 8)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -3213,7 +3250,7 @@ fixtureState = do
   let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      6
+      7
       repositoryId'
       machineId'
       generationId

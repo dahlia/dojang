@@ -163,7 +163,7 @@ import Dojang.Types.RouteMetadata
 
 -- | The on-disk schema version understood by this release.
 schemaVersion :: Integer
-schemaVersion = 6
+schemaVersion = 7
 
 
 -- | A stable identifier for the local machine-state store.
@@ -1077,10 +1077,11 @@ decodeMachineStateWithTargetRoot expectedTargetRoot expectedRepository expectedM
     1 -> upgradeLegacyDocument expectedTargetRoot source
     2 -> upgradeV2Document source
     3 -> upgradeV3Document source
-    -- Versions 4 and 5 decode with the current decoder.  Newer fields are
+    -- Versions 4 through 6 decode with the current decoder.  Newer fields are
     -- optional, and their absence selects the former defaults.
     4 -> decodeCurrentDocument source
     5 -> decodeCurrentDocument source
+    6 -> decodeCurrentDocument source
     version
       | version == schemaVersion -> decodeCurrentDocument source
       | otherwise -> Left $ UnsupportedSchemaVersion version
@@ -1335,7 +1336,11 @@ targetToDocument target =
     fingerprintSize
     fingerprintDigest
     fingerprintLinkTarget
-    (case target.updatedBy of Applied -> "apply"; Reflected -> "reflect")
+    ( case target.updatedBy of
+        Applied -> "apply"
+        Reflected -> "reflect"
+        Merged -> "merge"
+    )
     (timeText target.updatedTime)
  where
   (fingerprintKind, fingerprintSize, fingerprintDigest, fingerprintLinkTarget) =
@@ -1504,6 +1509,7 @@ targetFromDocument key target = do
   command <- case target.targetDocumentUpdatedBy of
     "apply" -> Right Applied
     "reflect" -> Right Reflected
+    "merge" -> Right Merged
     other -> Left $ MalformedState $ "Unknown target update command: " <> other
   updated <- parseTime "targets.updated-at" target.targetDocumentUpdatedTime
   return $

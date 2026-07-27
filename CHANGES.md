@@ -185,6 +185,12 @@ To be released.
     only when its deterministic key and recorded file fingerprint still match.
     Schema versions 1 through 5 remain readable.  [[#43], [#70]]
 
+ -  Machine-state schema version 7 can record `updated-by = "merge"` for a
+    target whose source, destination, and intermediate snapshot converged
+    through a three-way merge.  Schema versions 1 through 6 remain readable.
+    Earlier Dojang releases cannot read a state document after this version has
+    rewritten it, even when no merge was performed.  [[#48]]
+
  -  Detailed `[files]` and `[dirs]` route branches can declare portable
     destination modes.  The available modes are `private` (files `0600`,
     directories `0700`), `executable` (`0755`),
@@ -352,6 +358,7 @@ To be released.
 [#45]: https://github.com/dahlia/dojang/issues/45
 [#46]: https://github.com/dahlia/dojang/issues/46
 [#47]: https://github.com/dahlia/dojang/issues/47
+[#48]: https://github.com/dahlia/dojang/issues/48
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
