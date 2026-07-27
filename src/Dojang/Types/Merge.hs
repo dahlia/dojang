@@ -19,6 +19,7 @@ module Dojang.Types.Merge
   , commitMergeResultGuarded
   , commitMergeRecoveryGuarded
   , mergeCommitOrder
+  , mergeWorkspaceRepositoryRoot
   , observeMergeTextInput
   , prepareMergeWorkspace
   , readMergeResult
@@ -30,7 +31,8 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.Text.Encoding qualified as Text
+import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
 import System.OsPath (OsPath, (</>))
 import Prelude hiding (writeFile)
 
@@ -41,6 +43,7 @@ import Dojang.MonadFileSystem
   , fileSnapshotIdentity
   , writeFileAtomically
   )
+import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
 import Dojang.Types.RouteMetadata (RouteMode, posixFileModeBits)
 
 
@@ -88,6 +91,22 @@ classifyMergeContents source base destination
       ConvergedMergeContents
   | otherwise =
       OneSidedMergeContents
+
+
+-- | Locates the private merge-workspace root for one repository.
+mergeWorkspaceRepositoryRoot
+  :: (MonadFileSystem m)
+  => OsPath
+  -- ^ Machine-state root.
+  -> RepositoryId
+  -- ^ Stable repository identity.
+  -> m OsPath
+  -- ^ Repository-specific merge-workspace root.
+mergeWorkspaceRepositoryRoot stateRoot repositoryId = do
+  workspaceName <- encodePath "merge-workspaces"
+  repositoryName <-
+    encodePath $ Text.unpack $ repositoryIdText repositoryId
+  return $ stateRoot </> workspaceName </> repositoryName
 
 
 -- | Why an authoritative replica cannot be used as a merge input.
@@ -470,6 +489,6 @@ validateText
   -> Either error value
 validateText nulError utf8Error makeValue contents
   | ByteString.elem 0 contents = Left nulError
-  | otherwise = case Text.decodeUtf8' contents of
+  | otherwise = case TextEncoding.decodeUtf8' contents of
       Left _ -> Left utf8Error
       Right _ -> Right $ makeValue contents

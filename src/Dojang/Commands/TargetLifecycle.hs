@@ -74,7 +74,9 @@ import Dojang.Types.ManagedTarget
   , unreachableSnapshots
   )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
 import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.RepositoryId (RepositoryId)
 import Dojang.Types.TargetTracking (observeOrphanStatus)
 
 
@@ -257,7 +259,7 @@ forget force = do
   machineResult <- readMachineId root
   machine <- stateOrDie machineResult
   case machine of
-    Nothing -> reportAbsent
+    Nothing -> removeMergeWorkspaces root repositoryId >> reportAbsent
     Just machineId -> do
       existingResult <- readRepositoryState root repositoryId machineId
       existing <- stateOrDie existingResult
@@ -267,10 +269,13 @@ forget force = do
           retrying <- stateOrDie progressResult
           if retrying
             then finishForget root checkout repositoryId machineId
-            else reportAbsent
+            else removeMergeWorkspaces root repositoryId >> reportAbsent
         Just _ -> finishForget root checkout repositoryId machineId
  where
   finishForget root checkout repositoryId machineId = do
+    priorProgressResult <- isRepositoryForgetInProgress root repositoryId
+    approvedRetry <- stateOrDie priorProgressResult
+    when approvedRetry $ removeMergeWorkspaces root repositoryId
     forgotten <-
       forgetRepositoryStateWith root repositoryId machineId $ \state -> do
         ownership <- validateRepositoryStateOwnership checkout state
@@ -300,6 +305,7 @@ forget force = do
           _ <- stateOrDie marked
           return ()
         when retrying $ clearLegacyFirstApplyHistory checkout
+        removeMergeWorkspaces root repositoryId
         removeSnapshot state.targetSnapshotRoot
         removeSnapshot state.intermediatePath
         removeEmptySnapshotDirectory $ takeDirectory state.targetSnapshotRoot
@@ -308,8 +314,8 @@ forget force = do
       Nothing -> reportAbsent
       Just () -> do
         printStderr' Note $
-          "Forgot this repository's machine-local targets, snapshots, and "
-            <> "first-apply history."
+          "Forgot this repository's machine-local targets, snapshots, merge "
+            <> "workspaces, and first-apply history."
         return ExitSuccess
 
   reportAbsent = do
@@ -333,6 +339,16 @@ removeSnapshot path = do
   if directory
     then removeDirectoryRecursively path
     else when file $ removeFile path
+
+
+removeMergeWorkspaces
+  :: (MonadFileSystem i, AppEffects i)
+  => OsPath
+  -> RepositoryId
+  -> App i ()
+removeMergeWorkspaces root repositoryId = do
+  workspaceRoot <- mergeWorkspaceRepositoryRoot root repositoryId
+  removeSnapshot workspaceRoot
 
 
 removeEmptySnapshotDirectory

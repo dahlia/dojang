@@ -358,8 +358,9 @@ $ dojang forget
 ~~~~
 
 This removes that repository's target records, intermediate snapshot, managed
-target baselines, and first-apply history.  It preserves the machine identity,
-every other repository's state, the repository source, and all destinations.
+target baselines, retained merge workspaces, and first-apply history.  It
+preserves the machine identity, every other repository's state, the repository
+source, and all destinations.
 Modified destinations require `--force`.  Validation, snapshot removal, and
 state deletion run under one repository lock.  Before deleting the recorded
 intermediate snapshot, Dojang rejects symbolic links in the snapshot or any of

@@ -68,6 +68,7 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.Manifest qualified as Manifest
+import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.Registry
   ( Registry (Registry)
@@ -425,6 +426,78 @@ spec = do
             `shouldReturn` Right []
           exists (takeDirectory state.targetSnapshotRoot) `shouldReturn` False
 
+      it "removes retained merge workspaces" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          invocationName <- encodeFS "retained-invocation"
+          conflictName <- encodeFS "conflict-1"
+          sourceName <- encodeFS "source"
+          let conflict =
+                workspaceRoot </> invocationName </> conflictName
+          createDirectories conflict
+          writeFile (conflict </> sourceName) "sensitive contents"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
+      it "removes retained workspaces after state is already absent" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          retainedName <- encodeFS "retained"
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
+          removeFile $
+            repositoryStatePath
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
+      it "removes retained workspaces without a machine identity" $
+        withTempDir $ \root _ -> do
+          repositoryName <- encodeFS "repository"
+          stateName <- encodeFS "state"
+          manifestName <- encodeFS "dojang.toml"
+          envName <- encodeFS "dojang-env.toml"
+          retainedName <- encodeFS "retained"
+          let repository = root </> repositoryName
+              stateRoot = root </> stateName
+              manifestPath = repository </> manifestName
+              Right repositoryId =
+                parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+              repositoryManifest =
+                (manifest mempty mempty mempty mempty mempty)
+                  { Manifest.repositoryId = Just repositoryId
+                  }
+              appEnv =
+                AppEnv
+                  repository
+                  False
+                  Nothing
+                  stateRoot
+                  manifestName
+                  envName
+                  False
+                  False
+          createDirectories repository
+          writeManifestFile repositoryManifest manifestPath
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              stateRoot
+              repositoryId
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
+          runAppWithoutLogging appEnv (forget False)
+            `shouldReturn` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
       it "removes an interrupted migration journal when forgetting" $
         withManagedTarget $ \fixture -> do
           let marker =
@@ -595,11 +668,18 @@ spec = do
         withManagedTarget $ \fixture -> do
           state <- loadState fixture
           markerName <- encodeFS "forget-in-progress"
+          retainedName <- encodeFS "retained"
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
           let marker =
                 repositoryStateDirectory
                   fixture.appEnv.stateDirectory
                   fixture.repositoryId
                   </> markerName
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
           writeFile marker "approved"
           removeDirectoryRecursively state.targetSnapshotRoot
           removeDirectory $ takeDirectory state.targetSnapshotRoot
@@ -611,6 +691,7 @@ spec = do
           runAppWithoutLogging fixture.appEnv (forget False)
             `shouldReturn` ExitSuccess
           exists marker `shouldReturn` False
+          exists workspaceRoot `shouldReturn` False
           runAppWithoutLogging fixture.appEnv (forget False)
             `shouldReturn` ExitSuccess
 

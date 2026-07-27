@@ -198,7 +198,7 @@ formatDriverError (EmbeddedMergePlaceholder value) =
     <> quote value
     <> " embeds a placeholder; placeholders must occupy a whole argument."
 formatDriverError (InvalidMergeDriverExitCode code) =
-  "exit code " <> Text.pack (show code) <> " must be a positive machine integer."
+  "exit code " <> Text.pack (show code) <> " must be between 1 and 255."
 formatDriverError (DuplicateMergeDriverExitCode code) =
   "exit code " <> Text.pack (show code) <> " is listed more than once."
 formatDriverError (AmbiguousMergeDriverExitCode code) =

@@ -122,6 +122,7 @@ import Dojang.Types.Merge
   , classifyMergeContents
   , commitMergeRecoveryGuarded
   , commitMergeResultGuarded
+  , mergeWorkspaceRepositoryRoot
   , observeMergeTextInput
   , prepareMergeWorkspace
   , readMergeResult
@@ -149,7 +150,6 @@ import Dojang.Types.Reconciliation
   , planReconciliation
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
-import Dojang.Types.RepositoryId (repositoryIdText)
 import Dojang.Types.RouteMetadata
   ( RouteKind (CopyRoute)
   , RouteMode (DefaultMode)
@@ -456,10 +456,16 @@ reconciliationCandidates ctx machineState managed = do
             item.correspondence
       )
       managed
-  pending <-
-    mapM
-      (findPendingPublications ctx machineState)
-      managed
+  markerNames <-
+    forM managed $ \item -> do
+      identifier <- managedTargetId ctx.repository item
+      encodePath $ "pending-" <> Text.unpack identifier
+  pendingIndex <-
+    findPendingPublications machineState $ Set.fromList markerNames
+  let pending =
+        [ Map.findWithDefault [] markerName pendingIndex
+        | markerName <- markerNames
+        ]
   let plan =
         planReconciliation SourceToDestination RefuseConflicts inputs
       pendingFor item =
@@ -1027,36 +1033,38 @@ ensureDriverResolved driver = \case
 
 findPendingPublications
   :: (MonadFileSystem i, AppEffects i)
-  => Context (App i)
-  -> MachineState
-  -> ManagedCorrespondence
-  -> App i [PendingPublication]
-findPendingPublications ctx machineState managed = do
-  repositoryRoot <- mergeWorkspaceRepositoryRoot machineState
+  => MachineState
+  -> Set.Set OsPath
+  -> App i (Map.Map OsPath [PendingPublication])
+findPendingPublications machineState markerNames = do
+  repositoryRoot <- currentMergeWorkspaceRepositoryRoot machineState
   repositoryRootExists <- isDirectory repositoryRoot
   repositoryRootSymlink <- isSymlink repositoryRoot
   if not repositoryRootExists || repositoryRootSymlink
-    then return []
+    then return Map.empty
     else do
-      identifier <- managedTargetId ctx.repository managed
-      markerName <-
-        encodePath $ "pending-" <> Text.unpack identifier
       entries <- listDirectoryRecursively repositoryRoot []
-      catMaybes
-        <$> forM
-          [ repositoryRoot </> entry
-          | (_, entry) <- entries
-          , takeFileName entry == markerName
+      pending <-
+        catMaybes
+          <$> forM
+            [ repositoryRoot </> entry
+            | (_, entry) <- entries
+            , takeFileName entry `Set.member` markerNames
+            ]
+            observePendingPublication
+      return $
+        Map.fromListWith
+          (<>)
+          [ (takeFileName publication.marker, [publication])
+          | publication <- pending
           ]
-          (observePendingPublication markerName)
  where
-  observePendingPublication markerName marker = do
+  observePendingPublication marker = do
     regular <- isRegularFile marker
     let workspace = takeDirectory marker
     workspaceDirectory <- isDirectory workspace
     workspaceSymlink <- isSymlink workspace
     if not regular
-      || takeFileName marker /= markerName
       || not workspaceDirectory
       || workspaceSymlink
       then return Nothing
@@ -1113,16 +1121,13 @@ removePendingMarker marker =
     unless (isDoesNotExistError err) $ throwError err
 
 
-mergeWorkspaceRepositoryRoot
+currentMergeWorkspaceRepositoryRoot
   :: (MonadFileSystem i, AppEffects i)
   => MachineState
   -> App i OsPath
-mergeWorkspaceRepositoryRoot machineState = do
+currentMergeWorkspaceRepositoryRoot machineState = do
   stateRoot <- asks (.stateDirectory)
-  workspaceName <- encodePath "merge-workspaces"
-  repositoryName <-
-    encodePath $ Text.unpack $ repositoryIdText machineState.repositoryId
-  return $ stateRoot </> workspaceName </> repositoryName
+  mergeWorkspaceRepositoryRoot stateRoot machineState.repositoryId
 
 
 createInvocationRoot
@@ -1130,7 +1135,7 @@ createInvocationRoot
   => MachineState
   -> App i (OsPath, FileIdentity)
 createInvocationRoot machineState = do
-  repositoryRoot <- mergeWorkspaceRepositoryRoot machineState
+  repositoryRoot <- currentMergeWorkspaceRepositoryRoot machineState
   createDirectories repositoryRoot
   setPortableMode repositoryRoot 0o700
   identifier <- newUUID

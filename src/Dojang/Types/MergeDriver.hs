@@ -127,7 +127,7 @@ data MergeDriverConfigurationError
     DuplicateMergeResultPlaceholder
   | -- | A placeholder is embedded inside another argument.
     EmbeddedMergePlaceholder Text
-  | -- | An exit code is zero, negative, or does not fit in an 'Int'.
+  | -- | An exit code is outside the portable reportable range 1–255.
     InvalidMergeDriverExitCode Integer
   | -- | An outcome list repeats one exit code.
     DuplicateMergeDriverExitCode Int
@@ -243,7 +243,7 @@ makeMergeDriverSpec command inherited fixed unresolved canceled = do
       Nothing -> Right converted
   validateExitCode value
     | value <= 0 = Left $ InvalidMergeDriverExitCode value
-    | value > fromIntegral (maxBound :: Int) =
+    | value > 255 =
         Left $ InvalidMergeDriverExitCode value
     | otherwise = Right $ fromIntegral value
   repeated values =

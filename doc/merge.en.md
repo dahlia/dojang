@@ -81,9 +81,9 @@ file and returning zero.
 
 The child process receives only variables named by `inherit-environment` plus
 the fixed values in `environment`.  Fixed values override inherited values.
-Positive codes in `unresolved-exit-codes` mean the conflict remains
-unresolved; codes in `canceled-exit-codes` mean the user canceled the merge.
-The two lists must not overlap.
+Codes from 1 through 255 in `unresolved-exit-codes` mean the conflict remains
+unresolved; codes in `canceled-exit-codes` use the same range and mean the user
+canceled the merge.  The two lists must not overlap.
 
 
 Safety and recovery
@@ -105,6 +105,7 @@ already contain the result but the destination mode or intermediate content
 or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
 to recover the operation.  Failed, unresolved, and canceled workspaces are
 retained and printed in the error output.  Successful workspaces are removed.
+`dojang forget` removes every retained merge workspace for the repository.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection and `post-merge` hooks after a successful command.  See [hooks] for

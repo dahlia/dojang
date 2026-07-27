@@ -109,6 +109,11 @@ spec = do
       make [1, 1] [] `shouldBe` Left (DuplicateMergeDriverExitCode 1)
       make [1] [1] `shouldBe` Left (AmbiguousMergeDriverExitCode 1)
 
+    it "rejects arbitrary exit codes outside the portable status range" $
+      hedgehog $ do
+        code <- forAll $ Gen.integral $ Range.linear 256 1000000
+        make [code] [] === Left (InvalidMergeDriverExitCode code)
+
   describe "expandMergeDriverCommandNative" $
     it "preserves arbitrary native paths as complete arguments" $
       hedgehog $ do
