@@ -189,6 +189,7 @@ spec = sequential $ do
     it "covers only the supported command lifecycles" $ do
       commandHookTypes "apply" `shouldBe` Just (PreApply, PostApply)
       commandHookTypes "reflect" `shouldBe` Just (PreReflect, PostReflect)
+      commandHookTypes "merge" `shouldBe` Just (PreMerge, PostMerge)
       commandHookTypes "diff" `shouldBe` Just (PreDiff, PostDiff)
       commandHookTypes "status" `shouldBe` Just (PreStatus, PostStatus)
       commandHookTypes "edit" `shouldBe` Just (PreEdit, PostEdit)

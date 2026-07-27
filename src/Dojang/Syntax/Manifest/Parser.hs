@@ -771,6 +771,8 @@ mapHooks monikers (Just hooks') =
     , (PostApply, mapHookList monikers hooks'.postApply)
     , (PreReflect, mapHookList monikers hooks'.preReflect)
     , (PostReflect, mapHookList monikers hooks'.postReflect)
+    , (PreMerge, mapHookList monikers hooks'.preMerge)
+    , (PostMerge, mapHookList monikers hooks'.postMerge)
     , (PreDiff, mapHookList monikers hooks'.preDiff)
     , (PostDiff, mapHookList monikers hooks'.postDiff)
     , (PreStatus, mapHookList monikers hooks'.preStatus)

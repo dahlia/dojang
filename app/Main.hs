@@ -95,6 +95,7 @@ import Dojang.Commands.Diff qualified (diff)
 import Dojang.Commands.Edit qualified (edit)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
+import Dojang.Commands.Merge qualified (merge)
 import Dojang.Commands.Migrate qualified (migrate)
 import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status (StatusOptions (..))
@@ -503,6 +504,32 @@ cmdP stateRoot defaultRepoPath =
                   & repositoryCommandP
               )
               (progDesc "Let the repository reflect the target file")
+          )
+        <> command
+          "merge"
+          ( info
+              ( Dojang.Commands.Merge.merge
+                  <$> optional
+                    ( pack
+                        <$> strOption
+                          ( long "driver"
+                              <> metavar "NAME"
+                              <> help "Use the configured merge driver NAME"
+                          )
+                    )
+                  <*> optional
+                    ( pathOption
+                        ( long "driver-file"
+                            <> metavar "PATH"
+                            <> action "file"
+                            <> help "Read merge drivers from PATH"
+                        )
+                    )
+                  <*> many (pathArgument $ metavar "PATH" <> action "file")
+                  <**> helper
+                  & repositoryCommandP
+              )
+              (progDesc "Resolve divergent files with a three-way merge")
           )
         <> command
           "apply"

@@ -65,7 +65,7 @@ $ dojang diff
 > program.
 
 Once you've identified the changes to the config file that are causing
-the conflict, it's time to resolve the conflict.  There are three ways to
+the conflict, it's time to resolve the conflict.  There are four ways to
 resolve conflicts.
 
  -  Discard the changes in the destination file and only take the changes in
@@ -75,5 +75,10 @@ resolve conflicts.
  -  Make changes in both the source and destination files: You can directly
     modify the source config file that causes the conflict,
     and run the `dojang apply -f` command.
+ -  Keep compatible changes from both files: Configure a [three-way merge]
+    driver and run `dojang merge`.  Dojang uses the intermediate snapshot as
+    the common ancestor and updates all three copies after the driver resolves
+    the conflict.
 
 [delta]: https://github.com/dandavison/delta
+[three-way merge]: ../merge.en.md

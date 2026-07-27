@@ -279,6 +279,7 @@ commandHookTypes
   -- ^ Pre-hook and post-hook events, or 'Nothing' when hooks are unsupported.
 commandHookTypes "apply" = Just (PreApply, PostApply)
 commandHookTypes "reflect" = Just (PreReflect, PostReflect)
+commandHookTypes "merge" = Just (PreMerge, PostMerge)
 commandHookTypes "diff" = Just (PreDiff, PostDiff)
 commandHookTypes "status" = Just (PreStatus, PostStatus)
 commandHookTypes "edit" = Just (PreEdit, PostEdit)

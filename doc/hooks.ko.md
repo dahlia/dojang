@@ -1,10 +1,10 @@
 훅
 ==
 
-훅은 `apply`, `reflect`, `diff`, `status`, `edit`, `unmanage` 명령의 수명 주기
-전후에 사용자 정의 명령을 실행합니다.  명령 실행 전 도구를 준비하거나, 변경에
-성공한 뒤 서비스를 다시 불러오거나, 머신마다 한 번만 설정할 때 사용할 수
-있습니다.
+훅은 `apply`, `reflect`, `merge`, `diff`, `status`, `edit`, `unmanage` 명령의
+수명 주기 전후에 사용자 정의 명령을 실행합니다.  명령 실행 전 도구를
+준비하거나, 변경에 성공한 뒤 서비스를 다시 불러오거나, 머신마다 한 번만
+설정할 때 사용할 수 있습니다.
 
 
 수명 주기 이벤트
@@ -17,15 +17,16 @@
 | ---------- | -------------- | ------------------- |
 | `apply`    | `pre-apply`    | `post-apply`        |
 | `reflect`  | `pre-reflect`  | `post-reflect`      |
+| `merge`    | `pre-merge`    | `post-merge`        |
 | `diff`     | `pre-diff`     | `post-diff`         |
 | `status`   | `pre-status`   | `post-status`       |
 | `edit`     | `pre-edit`     | `post-edit`         |
 | `unmanage` | `pre-unmanage` | `post-unmanage`     |
 
-`reflect`, `diff`, `status`, `edit`, `unmanage`는 사전 훅을 실행한 뒤 명령
-동작에 사용할 *dojang.toml*과 *dojang-env.toml*을 다시 읽습니다.  성공 시 사후
-훅을 선택하기 전에도 같은 컨텍스트를 다시 읽으므로, 이전 선언 파일이나 머신
-환경을 바탕으로 사후 훅을 실행하지 않습니다.
+`reflect`, `merge`, `diff`, `status`, `edit`, `unmanage`는 사전 훅을 실행한 뒤
+명령 동작에 사용할 *dojang.toml*과 *dojang-env.toml*을 다시 읽습니다.  성공 시
+사후 훅을 선택하기 전에도 같은 컨텍스트를 다시 읽으므로, 이전 선언 파일이나
+머신 환경을 바탕으로 사후 훅을 실행하지 않습니다.
 
 `apply`는 `pre-first-apply`와 `post-first-apply`도 지원합니다.  저장소와 머신의
 최초 적용에서는 다음 순서로 실행됩니다:

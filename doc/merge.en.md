@@ -1,0 +1,129 @@
+Three-way merge
+===============
+
+`dojang merge` resolves files changed in both the repository and their
+destinations.  It uses the intermediate snapshot as the common ancestor, runs
+a configured merge driver, and writes an accepted result to the source,
+destination, and intermediate snapshot.
+
+
+Using the command
+-----------------
+
+Run the command without paths to select every current three-way conflict:
+
+~~~~ console
+$ dojang merge
+~~~~
+
+Pass a source path, destination path, or containing directory to limit the
+selection.  Multiple paths are allowed:
+
+~~~~ console
+$ dojang merge HOME/.bashrc ~/.config/example/
+~~~~
+
+`--driver NAME` selects a named driver instead of the configured default.
+`--driver-file PATH` reads a different configuration file.  `--dry-run`
+validates the selected conflicts and driver configuration, then prints the
+planned merges without creating a workspace, starting the driver, or changing
+files and machine state.
+
+Version 0.3 supports regular UTF-8 text files on `copy` routes that use the
+`identity` codec.  The source, destination, and intermediate snapshot must all
+exist.  Directory routes, deployment links, transformed codecs, binary files,
+invalid UTF-8, and conflicts without a common intermediate snapshot are
+rejected before any merge driver starts.  If an unselected unsupported
+conflict blocks a command without paths, pass the paths of the supported
+conflicts explicitly.
+
+
+Configuring drivers
+-------------------
+
+Merge drivers are machine-local.  The default configuration path is:
+
+| Platform        | Path                                                      |
+| --------------- | --------------------------------------------------------- |
+| Windows         | `%APPDATA%\dojang\merge-drivers.toml`                     |
+| macOS           | `~/Library/Application Support/dojang/merge-drivers.toml` |
+| Other platforms | `$XDG_CONFIG_HOME/dojang/merge-drivers.toml`              |
+
+Windows falls back to `%USERPROFILE%\AppData\Roaming` when `APPDATA` is
+missing or relative.  Other platforms fall back to `~/.config` when
+`XDG_CONFIG_HOME` is missing or relative.
+
+The file names a default driver and defines one or more drivers:
+
+~~~~ toml
+default-driver = "example"
+
+[merge-drivers.example]
+command = [
+  "my-merge-driver",
+  "{result}",
+  "{base}",
+  "{source}",
+]
+inherit-environment = ["PATH"]
+unresolved-exit-codes = [1]
+canceled-exit-codes = [130]
+
+[merge-drivers.example.environment]
+LC_ALL = "C"
+~~~~
+
+`command` is an argument array, not a shell command.  `{source}`, `{base}`, and
+`{result}` must each appear exactly once as whole arguments.
+`{destination}` is optional and may appear once.  The result file starts as a
+copy of the destination.  A driver resolves the conflict by updating that
+file and returning zero.
+
+The child process receives only variables named by `inherit-environment` plus
+the fixed values in `environment`.  Fixed values override inherited values.
+Positive codes in `unresolved-exit-codes` mean the conflict remains
+unresolved; codes in `canceled-exit-codes` mean the user canceled the merge.
+The two lists must not overlap.
+
+
+Safety and recovery
+-------------------
+
+Dojang validates every selected input before starting the first driver.  Each
+driver receives private copies in an owner-only workspace and runs without a
+shell.  Before each accepted result is written, Dojang checks that the
+authoritative files still match the bytes, identities, and modes observed
+during validation.
+
+Results are committed in source, destination, then intermediate order.  This
+order prevents the intermediate snapshot from claiming convergence before
+both authoritative copies contain the result.  If a later write fails, earlier
+writes remain, and rerunning `dojang merge` or inspecting the reported
+workspace can recover the operation.  Failed, unresolved, and canceled
+workspaces are retained and printed in the error output.  Successful
+workspaces are removed.
+
+The command runs `pre-merge` hooks before loading the context used for conflict
+selection and `post-merge` hooks after a successful command.  See [hooks] for
+configuration.
+
+[hooks]: hooks.en.md
+
+
+Exit status
+-----------
+
+The most relevant exit codes are:
+
+ -  `1`: invalid driver configuration or selection.
+ -  `2`: filesystem write failure.
+ -  `4`: the driver failed, could not start, or produced an invalid result.
+ -  `13`: machine state could not be updated.
+ -  `30`: a conflict is unsupported, unresolved, or changed concurrently.
+ -  `32`: a selected path is not routed.
+ -  `36`: the driver reported cancellation.
+ -  `40`: a merge hook failed.
+
+See [exit codes] for the complete list.
+
+[exit codes]: exit-codes.en.md

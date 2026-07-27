@@ -25,6 +25,7 @@ There are also reference docs for various topics:
  -  [Manifest](manifest.en.md) (*dojang.toml*)
  -  [Machine state](machine-state.en.md)
  -  [Hooks](hooks.en.md)
+ -  [Three-way merge](merge.en.md)
  -  [Routing](routing.en.md)
  -  [Route codecs](codecs.en.md)
  -  [Environment](environment.en.md)

@@ -7,12 +7,14 @@
 
 -- | Stable text inputs and isolated files for external three-way merges.
 module Dojang.Types.Merge
-  ( MergeCommitReplica (..)
+  ( MergeCommitError (..)
+  , MergeCommitReplica (..)
   , MergeInputError (..)
   , MergeInputRole (..)
   , MergeResultError (..)
   , MergeTextInput (..)
   , MergeWorkspace (..)
+  , commitMergeResultGuarded
   , mergeCommitOrder
   , observeMergeTextInput
   , prepareMergeWorkspace
@@ -20,8 +22,11 @@ module Dojang.Types.Merge
   , revalidateMergeTextInput
   ) where
 
+import Control.Monad (filterM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty qualified as NonEmpty
 import Data.Text.Encoding qualified as Text
 import System.OsPath (OsPath, (</>))
 import Prelude hiding (writeFile)
@@ -31,7 +36,9 @@ import Dojang.MonadFileSystem
   , FileSnapshot
   , MonadFileSystem (..)
   , fileSnapshotIdentity
+  , writeFileAtomically
   )
+import Dojang.Types.RouteMetadata (RouteMode, posixFileModeBits)
 
 
 -- | Which authoritative replica supplied a merge input.
@@ -121,6 +128,14 @@ data MergeCommitReplica
   deriving (Eq, Ord, Show)
 
 
+-- | A guarded merge result could not continue because authoritative inputs
+-- changed.
+data MergeCommitError
+  = -- | One or more remaining replicas no longer match their observations.
+    MergeInputsChanged (NonEmpty MergeInputRole)
+  deriving (Eq, Show)
+
+
 -- | The fixed source, destination, then intermediate commit order.
 mergeCommitOrder :: [MergeCommitReplica]
 mergeCommitOrder =
@@ -128,6 +143,66 @@ mergeCommitOrder =
   , DestinationCommitReplica
   , IntermediateCommitReplica
   ]
+
+
+-- | Commits one validated result to source, destination, and intermediate in
+-- that order.
+--
+-- Before each step, the callback runs and every authoritative input that has
+-- not already been replaced is revalidated.  This makes concurrent changes
+-- fail closed while leaving a precisely recoverable prefix when a later
+-- filesystem operation fails.  Existing source permissions are preserved.
+-- Destination and intermediate permissions are preserved for the default
+-- route mode or set to the declared file mode otherwise.
+commitMergeResultGuarded
+  :: (MonadFileSystem m)
+  => (MergeCommitReplica -> m ())
+  -- ^ Observer invoked immediately before each guarded step.
+  -> RouteMode
+  -- ^ Declared destination metadata.
+  -> MergeTextInput
+  -- ^ Stable source input.
+  -> MergeTextInput
+  -- ^ Stable intermediate input.
+  -> MergeTextInput
+  -- ^ Stable destination input.
+  -> ByteString
+  -- ^ Validated driver result.
+  -> m (Either MergeCommitError ())
+commitMergeResultGuarded observe declaredMode source base destination result =
+  go
+    [
+      ( SourceCommitReplica
+      , [source, destination, base]
+      , source.path
+      , False
+      )
+    ,
+      ( DestinationCommitReplica
+      , [destination, base]
+      , destination.path
+      , True
+      )
+    ,
+      ( IntermediateCommitReplica
+      , [base]
+      , base.path
+      , True
+      )
+    ]
+ where
+  go [] = return $ Right ()
+  go ((replica, remaining, path, applyDeclaredMode) : rest) = do
+    observe replica
+    changed <- filterM (fmap not . revalidateMergeTextInput) remaining
+    case NonEmpty.nonEmpty $ (.role) <$> changed of
+      Just roles -> return $ Left $ MergeInputsChanged roles
+      Nothing -> do
+        writeFileAtomically path "dojang-merge.tmp" result
+        case (applyDeclaredMode, posixFileModeBits declaredMode) of
+          (True, Just bits) -> setPortableMode path bits
+          _ -> return ()
+        go rest
 
 
 -- | Captures a stable regular UTF-8 text input without following a special

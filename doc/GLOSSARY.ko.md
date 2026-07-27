@@ -67,6 +67,7 @@
 | managed target               | 관리 대상                  |                                                                                              |
 | manifest                     | 선언 파일                  | 짧은 문서 제목이나 링크에서는 “선언”으로 쓸 수 있습니다.                                     |
 | manifest variable            | 선언 변수                  | `vars` 구획에서 정의하는 재사용 가능한 값을 뜻합니다.                                        |
+| merge driver                 | 병합 드라이버              | `dojang merge`가 격리된 입력으로 실행하는 외부 명령을 뜻합니다.                              |
 | marker                       | 마커                       |                                                                                              |
 | match                        | 일치, 일치하다             |                                                                                              |
 | moniker                      | 모니커                     |                                                                                              |
@@ -104,6 +105,7 @@
 | symlink target               | 링크 대상                  | 심볼릭 링크가 가리키는 경로를 뜻합니다. 동기화 대상은 “대상 경로”로 씁니다.                  |
 | target, target file          | 대상, 대상 파일            |                                                                                              |
 | template codec               | 템플릿 코덱                | 순수한 템플릿 부분집합으로 UTF-8 원본을 렌더링합니다.                                        |
+| three-way merge              | 3방향 병합                 | 원본과 대상 경로를 공통 중간 스냅샷에 대조해 병합합니다.                                     |
 | transport                    | 전송 방식                  | 저장소를 임시 디렉터리로 가져오는 기본 제공 또는 외부 명령 방식을 뜻합니다.                  |
 | traversal boundary           | 순회 경계                  | 링크로 배포된 디렉터리 경계를 뜻합니다.                                                      |
 | unchanged, modified, missing | 변경 없음, 수정됨, 사라짐  | 상태 표시에 사용합니다.                                                                      |

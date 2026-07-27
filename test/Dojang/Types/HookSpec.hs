@@ -32,6 +32,8 @@ spec = do
                    , PostApply
                    , PreReflect
                    , PostReflect
+                   , PreMerge
+                   , PostMerge
                    , PreDiff
                    , PostDiff
                    , PreStatus
@@ -56,6 +58,8 @@ spec = do
       show PreFirstApply `shouldBe` "PreFirstApply"
       show PostFirstApply `shouldBe` "PostFirstApply"
       show PostApply `shouldBe` "PostApply"
+      show PreMerge `shouldBe` "PreMerge"
+      show PostMerge `shouldBe` "PostMerge"
 
   describe "HookPolicy" $ do
     it "uses stable manifest spellings" $ do

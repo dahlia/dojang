@@ -4,9 +4,11 @@
 
 module Dojang.Types.MergeSpec (spec) where
 
-import Control.Monad.Except (catchError)
+import Control.Monad.Except (catchError, throwError, tryError)
 import Control.Monad.IO.Class (liftIO)
 import Data.ByteString qualified as ByteString
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List.NonEmpty qualified as NonEmpty
 import Data.Text.Encoding qualified as Text
 import Hedgehog (Gen)
 import Hedgehog.Gen qualified as Gen
@@ -23,19 +25,27 @@ import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Merge
-  ( MergeCommitReplica (..)
+  ( MergeCommitError (..)
+  , MergeCommitReplica (..)
   , MergeInputError (..)
   , MergeInputRole (..)
   , MergeResultError (..)
   , MergeTextInput (..)
   , MergeWorkspace (..)
+  , commitMergeResultGuarded
   , mergeCommitOrder
   , observeMergeTextInput
   , prepareMergeWorkspace
   , readMergeResult
   , revalidateMergeTextInput
   )
-import Dojang.Types.RouteMetadata (PortableMode (..))
+import Dojang.Types.RouteMetadata
+  ( PortableMode (..)
+  , RouteMode (..)
+  , portableModeFromBits
+  , posixFileModeBits
+  , satisfiesPortableMode
+  )
 
 
 spec :: Spec
@@ -210,6 +220,103 @@ spec = do
             , IntermediateCommitReplica
             ]
 
+  describe "commitMergeResultGuarded" $ do
+    it "writes arbitrary UTF-8 results in the documented order" $ hedgehog $ do
+      result <- forAll utf8Text
+      observed <- liftIO $ withThreeInputs $ \source base destination -> do
+        orderRef <- newIORef []
+        committed <-
+          commitMergeResultGuarded
+            (\replica -> modifyIORef' orderRef (<> [replica]))
+            DefaultMode
+            source
+            base
+            destination
+            result
+        order <- readIORef orderRef
+        sourceAfter <- FileSystem.readFile source.path
+        destinationAfter <- FileSystem.readFile destination.path
+        baseAfter <- FileSystem.readFile base.path
+        return
+          ( committed
+          , order
+          , [sourceAfter, destinationAfter, baseAfter]
+          )
+      observed
+        === ( Right ()
+            , mergeCommitOrder
+            , replicate 3 result
+            )
+
+    it "stops after source when the destination changes before its step" $
+      withThreeInputs $ \source base destination -> do
+        let result = "merged"
+            concurrent = "concurrent"
+        committed <-
+          commitMergeResultGuarded
+            ( \replica ->
+                if replica == DestinationCommitReplica
+                  then FileSystem.writeFile destination.path concurrent
+                  else return ()
+            )
+            DefaultMode
+            source
+            base
+            destination
+            result
+        committed
+          `shouldBe` Left
+            (MergeInputsChanged $ NonEmpty.singleton DestinationInput)
+        FileSystem.readFile source.path `shouldReturn` result
+        FileSystem.readFile destination.path `shouldReturn` concurrent
+        FileSystem.readFile base.path `shouldReturn` base.contents
+
+    it "leaves the baseline old when its write step fails" $
+      withThreeInputs $ \source base destination -> do
+        let result = "merged"
+        committed <-
+          tryError $
+            commitMergeResultGuarded
+              ( \replica ->
+                  if replica == IntermediateCommitReplica
+                    then throwError $ userError "injected baseline failure"
+                    else return ()
+              )
+              DefaultMode
+              source
+              base
+              destination
+              result
+        committed `shouldSatisfy` either (const True) (const False)
+        FileSystem.readFile source.path `shouldReturn` result
+        FileSystem.readFile destination.path `shouldReturn` result
+        FileSystem.readFile base.path `shouldReturn` base.contents
+
+    it "applies every declared portable mode to destination and baseline" $
+      hedgehog $ do
+        declaredMode <-
+          forAll $
+            Gen.element
+              [Private, Executable, PrivateExecutable, ReadOnly]
+        observed <- liftIO $ withThreeInputs $ \source base destination -> do
+          committed <-
+            commitMergeResultGuarded
+              (const $ return ())
+              declaredMode
+              source
+              base
+              destination
+              "merged"
+          destinationMode <- FileSystem.getPortableMode destination.path
+          baseMode <- FileSystem.getPortableMode base.path
+          return (committed, destinationMode, baseMode)
+        let Just expectedBits = posixFileModeBits declaredMode
+            expectedMode = portableModeFromBits expectedBits
+            (committed, destinationMode, baseMode) = observed
+        committed === Right ()
+        satisfiesPortableMode destinationMode expectedMode === True
+        satisfiesPortableMode baseMode expectedMode === True
+
 
 utf8Text :: Gen ByteString.ByteString
 utf8Text =
@@ -226,6 +333,27 @@ withMergeFile contents action =
     let path = root </> name
     FileSystem.writeFile path contents
     action path
+
+
+withThreeInputs
+  :: (MergeTextInput -> MergeTextInput -> MergeTextInput -> IO a)
+  -> IO a
+withThreeInputs action =
+  withTempDir $ \root _ -> do
+    sourceName <- encodeFS "source"
+    baseName <- encodeFS "base"
+    destinationName <- encodeFS "destination"
+    let sourcePath = root </> sourceName
+        basePath = root </> baseName
+        destinationPath = root </> destinationName
+    FileSystem.writeFile sourcePath "source"
+    FileSystem.writeFile basePath "base"
+    FileSystem.writeFile destinationPath "destination"
+    Right source <- observeMergeTextInput SourceInput sourcePath
+    Right base <- observeMergeTextInput BaseInput basePath
+    Right destination <-
+      observeMergeTextInput DestinationInput destinationPath
+    action source base destination
 
 
 assertPrivateFile :: OsPath -> IO ()

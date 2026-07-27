@@ -41,6 +41,10 @@ data HookType
     PreReflect
   | -- | Runs after reflecting target files.
     PostReflect
+  | -- | Runs before resolving three-way merge conflicts.
+    PreMerge
+  | -- | Runs after resolving three-way merge conflicts.
+    PostMerge
   | -- | Runs before comparing source and target files.
     PreDiff
   | -- | Runs after comparing source and target files.
@@ -73,6 +77,8 @@ renderHookType PostFirstApply = "post-first-apply"
 renderHookType PostApply = "post-apply"
 renderHookType PreReflect = "pre-reflect"
 renderHookType PostReflect = "post-reflect"
+renderHookType PreMerge = "pre-merge"
+renderHookType PostMerge = "post-merge"
 renderHookType PreDiff = "pre-diff"
 renderHookType PostDiff = "post-diff"
 renderHookType PreStatus = "pre-status"
