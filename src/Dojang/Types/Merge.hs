@@ -9,11 +9,13 @@
 module Dojang.Types.Merge
   ( MergeCommitError (..)
   , MergeCommitReplica (..)
+  , MergeContentsState (..)
   , MergeInputError (..)
   , MergeInputRole (..)
   , MergeResultError (..)
   , MergeTextInput (..)
   , MergeWorkspace (..)
+  , classifyMergeContents
   , commitMergeResultGuarded
   , commitMergeRecoveryGuarded
   , mergeCommitOrder
@@ -51,6 +53,41 @@ data MergeInputRole
   | -- | The deployed destination file.
     DestinationInput
   deriving (Eq, Ord, Show)
+
+
+-- | Reconciliation state derived from exact observed replica contents.
+data MergeContentsState
+  = -- | Both endpoints changed differently from the common ancestor.
+    ConflictingMergeContents
+  | -- | Both endpoints contain one accepted result but the base is stale.
+    RecoverableMergeContents
+  | -- | All three replicas contain the same bytes.
+    ConvergedMergeContents
+  | -- | Only one endpoint differs from the common ancestor.
+    OneSidedMergeContents
+  deriving (Bounded, Enum, Eq, Ord, Show)
+
+
+-- | Classifies exact source, base, and destination bytes for merge handling.
+classifyMergeContents
+  :: ByteString
+  -- ^ Repository source contents.
+  -> ByteString
+  -- ^ Intermediate common-ancestor contents.
+  -> ByteString
+  -- ^ Deployed destination contents.
+  -> MergeContentsState
+classifyMergeContents source base destination
+  | source /= base
+      && destination /= base
+      && source /= destination =
+      ConflictingMergeContents
+  | source == destination && source /= base =
+      RecoverableMergeContents
+  | source == base && base == destination =
+      ConvergedMergeContents
+  | otherwise =
+      OneSidedMergeContents
 
 
 -- | Why an authoritative replica cannot be used as a merge input.

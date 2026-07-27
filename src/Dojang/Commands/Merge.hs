@@ -12,9 +12,10 @@ module Dojang.Commands.Merge
   , makeMergeDriverProcessRequest
   , merge
   , mergeWithDriverRunner
+  , mergeWithDriverRunnerAndPublisher
   ) where
 
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.Reader (asks)
 import Data.List (find, isPrefixOf, nubBy)
@@ -26,7 +27,13 @@ import Data.Text qualified as Text
 import Data.UUID qualified as UUID
 import System.Exit (ExitCode (..))
 import System.IO.Error (ioeGetErrorString, isDoesNotExistError)
-import System.OsPath (OsPath, isAbsolute, (</>))
+import System.OsPath
+  ( OsPath
+  , isAbsolute
+  , takeDirectory
+  , takeFileName
+  , (</>)
+  )
 import Prelude hiding (readFile)
 
 import Dojang.App
@@ -68,7 +75,9 @@ import Dojang.ExitCodes
   )
 import Dojang.MonadFileSystem
   ( FileIdentity
+  , FileModeSnapshot (FileModeSnapshot)
   , MonadFileSystem (..)
+  , writeFileAtomically
   )
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.MergeDriver qualified as MergeDriverSyntax
@@ -104,11 +113,13 @@ import Dojang.Types.ManagedTarget
 import Dojang.Types.Merge
   ( MergeCommitError (MergeInputsChanged, MergeRecoveryInputsDiffer)
   , MergeCommitReplica (..)
+  , MergeContentsState (..)
   , MergeInputError (..)
   , MergeInputRole (..)
   , MergeResultError (..)
-  , MergeTextInput
+  , MergeTextInput (..)
   , MergeWorkspace (..)
+  , classifyMergeContents
   , commitMergeRecoveryGuarded
   , commitMergeResultGuarded
   , observeMergeTextInput
@@ -148,20 +159,50 @@ import Dojang.Types.RouteMetadata
   )
 import Dojang.Types.TargetTracking
   ( discardTargetSnapshot
+  , managedTargetId
   , newTargetSnapshotTransaction
   , observeConvergedManagedTarget
   )
 
 
+data PendingPublication = PendingPublication
+  { marker :: OsPath
+  , workspace :: OsPath
+  , workspaceIdentity :: FileIdentity
+  }
+
+
 data MergeCandidate = MergeCandidate
   { managed :: ManagedCorrespondence
-  , recovery :: Bool
+  , reconciliationCandidate :: Bool
+  , pendingPublications :: [PendingPublication]
+  }
+
+
+data MergeAction
+  = RunMergeDriver
+  | RecoverMergeReplicas
+  | PublishMergedTarget
+  deriving (Eq, Show)
+
+
+data ResolvedMergeDriver = ResolvedMergeDriver
+  { platform :: String
+  , name :: MergeDriverName
+  , specification :: MergeDriverSpec
+  }
+
+
+data MergeDriverExecution = MergeDriverExecution
+  { resolved :: ResolvedMergeDriver
+  , hostEnvironment :: [(String, String)]
   }
 
 
 data PreparedMerge = PreparedMerge
   { managed :: ManagedCorrespondence
-  , recovery :: Bool
+  , action :: MergeAction
+  , pendingPublications :: [PendingPublication]
   , source :: MergeTextInput
   , base :: MergeTextInput
   , destination :: MergeTextInput
@@ -196,7 +237,59 @@ mergeWithDriverRunner
   -> [OsPath]
   -- ^ Source, destination, or containing paths to select.
   -> App i ExitCode
-mergeWithDriverRunner runDriver requestedDriver requestedConfig selectedPaths = do
+mergeWithDriverRunner =
+  mergeWithDriverRunnerAndPublisher persistMergedTarget
+
+
+-- | Runs the merge command with injectable driver and state-publication
+-- boundaries.
+--
+-- This is the most precise testing boundary for failures after authoritative
+-- replicas have converged but before their machine-state record is published.
+mergeWithDriverRunnerAndPublisher
+  :: (MonadFileSystem i, AppEffects i)
+  => ( Context (App i)
+       -> MachineState
+       -> ManagedCorrespondence
+       -> App i ()
+     )
+  -- ^ Publisher for the converged managed-target record.
+  -> (ProcessRequest -> App i ProcessResult)
+  -- ^ Structured process runner.
+  -> Maybe Text
+  -- ^ Optional configured driver name.
+  -> Maybe OsPath
+  -- ^ Optional driver configuration path.
+  -> [OsPath]
+  -- ^ Source, destination, or containing paths to select.
+  -> App i ExitCode
+mergeWithDriverRunnerAndPublisher
+  publishTarget
+  runDriver
+  requestedDriver
+  requestedConfig
+  selectedPaths =
+    runMerge
+      publishTarget
+      runDriver
+      requestedDriver
+      requestedConfig
+      selectedPaths
+
+
+runMerge
+  :: (MonadFileSystem i, AppEffects i)
+  => ( Context (App i)
+       -> MachineState
+       -> ManagedCorrespondence
+       -> App i ()
+     )
+  -> (ProcessRequest -> App i ProcessResult)
+  -> Maybe Text
+  -> Maybe OsPath
+  -> [OsPath]
+  -> App i ExitCode
+runMerge publishTarget runDriver requestedDriver requestedConfig selectedPaths = do
   pathStyle <- pathStyleFor StandardError
   preHookContext <- ensureContext
   preHookState <- prepareMachineState preHookContext.repository.manifest
@@ -211,7 +304,7 @@ mergeWithDriverRunner runDriver requestedDriver requestedConfig selectedPaths = 
   machineState <- prepareMachineState ctx.repository.manifest
   (allManaged, warnings) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
   printWarnings warnings
-  candidates <- reconciliationCandidates ctx allManaged
+  candidates <- reconciliationCandidates ctx machineState allManaged
   selected <- selectCandidates selectedPaths allManaged candidates
   if null selected
     then do
@@ -219,63 +312,72 @@ mergeWithDriverRunner runDriver requestedDriver requestedConfig selectedPaths = 
       runPostMergeHooks selectedPaths
       return ExitSuccess
     else do
-      prepared <- mapM (prepareConflict pathStyle) selected
-      platform <- hostPlatform
-      configPath <-
-        maybe (defaultMergeDriverConfigPath platform) return requestedConfig
-      configResult <-
-        MergeDriverSyntax.readMergeDriverConfigFile configPath
-          `catchError` reportConfigReadError pathStyle configPath
-      config <-
-        either (die' cliError . MergeDriverSyntax.formatError) return configResult
-      (driverName, driver) <-
-        either (reportLookupError requestedDriver) return $
-          lookupMergeDriver requestedDriver config
-      dryRunEnabled <- asks (.dryRun)
-      if dryRunEnabled
+      prepared <- catMaybes <$> mapM (prepareCandidate pathStyle) selected
+      if null prepared
         then do
-          forM_ prepared $ \item ->
-            if item.recovery
-              then
-                printStderr $
-                  "Would finish recording the merged baseline for "
-                    <> pathStyle item.managed.correspondence.source.path
-                    <> "."
-              else
-                printStderr $
-                  "Would merge "
-                    <> pathStyle item.managed.correspondence.source.path
-                    <> " with "
-                    <> pathStyle item.managed.correspondence.destination.path
-                    <> " using driver '"
-                    <> renderMergeDriverName driverName
-                    <> "'."
+          printStderr "No three-way merge conflicts found."
           runPostMergeHooks selectedPaths
           return ExitSuccess
         else do
-          hostEnvironment <- processEnvironment
-          (invocationRoot, invocationIdentity) <-
-            createInvocationRoot machineState
-          processPrepared
-            pathStyle
-            runDriver
-            platform
-            hostEnvironment
-            driverName
-            driver
-            invocationRoot
-            prepared
-          cleaned <-
-            removeDirectoryRecursivelyIfIdentity
-              invocationRoot
-              invocationIdentity
-          unless cleaned $
-            printStderr' Warning $
-              "The completed merge workspace could not be removed: "
-                <> pathStyle invocationRoot
-                <> "."
-          runPostMergeHooks selectedPaths
-          return ExitSuccess
+          resolvedDriver <-
+            if any ((== RunMergeDriver) . (.action)) prepared
+              then Just <$> resolveDriver pathStyle
+              else return Nothing
+          dryRunEnabled <- asks (.dryRun)
+          if dryRunEnabled
+            then do
+              forM_ prepared $ \item -> case item.action of
+                RecoverMergeReplicas ->
+                  printStderr $
+                    "Would finish recording the merged baseline for "
+                      <> pathStyle item.managed.correspondence.source.path
+                      <> "."
+                PublishMergedTarget ->
+                  printStderr $
+                    "Would finish publishing the merged target for "
+                      <> pathStyle item.managed.correspondence.source.path
+                      <> "."
+                RunMergeDriver ->
+                  case resolvedDriver of
+                    Just driver ->
+                      printStderr $
+                        "Would merge "
+                          <> pathStyle item.managed.correspondence.source.path
+                          <> " with "
+                          <> pathStyle
+                            item.managed.correspondence.destination.path
+                          <> " using driver '"
+                          <> renderMergeDriverName driver.name
+                          <> "'."
+                    Nothing ->
+                      die' cliError "No merge driver is available."
+              runPostMergeHooks selectedPaths
+              return ExitSuccess
+            else do
+              driverExecution <-
+                forM resolvedDriver $ \driver -> do
+                  environment <- processEnvironment
+                  return $ MergeDriverExecution driver environment
+              (invocationRoot, invocationIdentity) <-
+                createInvocationRoot machineState
+              processPrepared
+                pathStyle
+                publishTarget
+                runDriver
+                driverExecution
+                invocationRoot
+                prepared
+              cleaned <-
+                removeDirectoryRecursivelyIfIdentity
+                  invocationRoot
+                  invocationIdentity
+              unless cleaned $
+                printStderr' Warning $
+                  "The completed merge workspace could not be removed: "
+                    <> pathStyle invocationRoot
+                    <> "."
+              runPostMergeHooks selectedPaths
+              return ExitSuccess
  where
   reportLookupError requested = \case
     InvalidLookupMergeDriverName err ->
@@ -286,6 +388,22 @@ mergeWithDriverRunner runDriver requestedDriver requestedConfig selectedPaths = 
         "Unknown merge driver '"
           <> maybe name id requested
           <> "'."
+  resolveDriver pathStyle = do
+    platform <- hostPlatform
+    configPath <-
+      maybe (defaultMergeDriverConfigPath platform) return requestedConfig
+    configResult <-
+      MergeDriverSyntax.readMergeDriverConfigFile configPath
+        `catchError` reportConfigReadError pathStyle configPath
+    config <-
+      either
+        (die' cliError . MergeDriverSyntax.formatError)
+        return
+        configResult
+    (driverName, driver) <-
+      either (reportLookupError requestedDriver) return $
+        lookupMergeDriver requestedDriver config
+    return $ ResolvedMergeDriver platform driverName driver
 
 
 runPostMergeHooks
@@ -325,9 +443,10 @@ reportConfigReadError pathStyle path err = do
 reconciliationCandidates
   :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
+  -> MachineState
   -> [ManagedCorrespondence]
   -> App i [MergeCandidate]
-reconciliationCandidates ctx managed = do
+reconciliationCandidates ctx machineState managed = do
   inputs <-
     mapM
       ( \item ->
@@ -337,26 +456,47 @@ reconciliationCandidates ctx managed = do
             item.correspondence
       )
       managed
+  pending <-
+    mapM
+      (findPendingPublications ctx machineState)
+      managed
   let plan =
         planReconciliation SourceToDestination RefuseConflicts inputs
+      pendingFor item =
+        maybe
+          []
+          snd
+          ( find
+              (sameManagedCorrespondence item . fst)
+              (zip managed pending)
+          )
+      candidate item =
+        MergeCandidate item True $ pendingFor item
+      publicationCandidate item pendingForItem =
+        MergeCandidate item False pendingForItem
       conflicts =
         catMaybes $
           ( \conflict ->
-              fmap (`MergeCandidate` False) $
+              fmap candidate $
                 find
                   ((== conflict.correspondence) . (.correspondence))
                   managed
           )
             <$> plan.conflicts
       recoveries =
-        [ MergeCandidate item True
+        [ candidate item
         | (item, input) <- zip managed inputs
         , isSupportedRecoveryCandidate item input
+        ]
+      publicationRetries =
+        [ publicationCandidate item pendingForItem
+        | (item, pendingForItem) <- zip managed pending
+        , not $ null pendingForItem
         ]
   return
     $ nubBy
       (\left right -> sameManagedCorrespondence left.managed right.managed)
-    $ conflicts ++ recoveries
+    $ conflicts ++ recoveries ++ publicationRetries
 
 
 isSupportedRecoveryCandidate
@@ -454,73 +594,129 @@ matchesPath selected managed =
     pathIdentityComponents managed.correspondence.destination.path
 
 
-prepareConflict
+prepareCandidate
   :: (MonadFileSystem i, AppEffects i)
   => (OsPath -> Text)
   -> MergeCandidate
-  -> App i PreparedMerge
-prepareConflict pathStyle candidate = do
-  when
-    ( managed.route.fileType /= FileSystem.File
-        || managed.route.kind /= CopyRoute
-        || managed.route.codec /= identityCodecSpec
-    )
-    $ unsupported "route type, kind, or codec"
-  let correspondence = managed.correspondence
-  unless
-    ( isRegular correspondence.source.stat
-        && isRegular correspondence.intermediate.stat
-        && isRegular correspondence.destination.stat
-    )
-    $ unsupported "missing or non-regular replica"
-  source <-
-    observe SourceInput correspondence.source.path
-  base <-
-    observe BaseInput correspondence.intermediate.path
-  destination <-
-    observe DestinationInput correspondence.destination.path
-  return $
-    PreparedMerge
-      managed
-      candidate.recovery
-      source
-      base
-      destination
+  -> App i (Maybe PreparedMerge)
+prepareCandidate pathStyle candidate
+  | managed.route.fileType /= FileSystem.File
+      || managed.route.kind /= CopyRoute
+      || managed.route.codec /= identityCodecSpec =
+      rejectOrSkip
+        (cannotMerge "unsupported route type, kind, or codec.")
+        "The route type, kind, or codec is no longer supported."
+  | not
+      ( isRegular correspondence.source.stat
+          && isRegular correspondence.intermediate.stat
+          && isRegular correspondence.destination.stat
+      ) =
+      rejectOrSkip
+        (cannotMerge "unsupported missing or non-regular replica.")
+        "A required replica is missing or is not a regular file."
+  | otherwise = do
+      sourceResult <-
+        observeMergeTextInput SourceInput correspondence.source.path
+      baseResult <-
+        observeMergeTextInput BaseInput correspondence.intermediate.path
+      destinationResult <-
+        observeMergeTextInput
+          DestinationInput
+          correspondence.destination.path
+      case (sourceResult, baseResult, destinationResult) of
+        (Right source, Right base, Right destination) ->
+          return $
+            ( \action ->
+                PreparedMerge
+                  managed
+                  action
+                  candidate.pendingPublications
+                  source
+                  base
+                  destination
+            )
+              <$> classifyAction managed candidate source base destination
+        (Left err, _, _) -> rejectInput err
+        (_, Left err, _) -> rejectInput err
+        (_, _, Left err) -> rejectInput err
  where
   managed = candidate.managed
+  correspondence = managed.correspondence
   isRegular (Context.File _) = True
   isRegular _ = False
-  observe role path = do
-    observed <- observeMergeTextInput role path
-    either (die' conflictError . formatInputError pathStyle) return observed
-  unsupported reason =
-    die' conflictError $
-      "Cannot three-way merge "
-        <> pathStyle managed.correspondence.source.path
-        <> ": unsupported "
-        <> reason
-        <> "."
+  cannotMerge reason =
+    "Cannot three-way merge "
+      <> pathStyle managed.correspondence.source.path
+      <> ": "
+      <> reason
+  rejectInput err =
+    let reason = formatInputError pathStyle err
+    in rejectOrSkip reason reason
+  rejectOrSkip mergeReason pendingReason
+    | candidate.reconciliationCandidate =
+        die' conflictError mergeReason
+    | otherwise = do
+        printStderr' Warning $
+          "Cannot retry pending merged-target publication for "
+            <> pathStyle managed.correspondence.source.path
+            <> ": "
+            <> pendingReason
+        return Nothing
+
+
+classifyAction
+  :: ManagedCorrespondence
+  -> MergeCandidate
+  -> MergeTextInput
+  -> MergeTextInput
+  -> MergeTextInput
+  -> Maybe MergeAction
+classifyAction managed candidate source base destination =
+  case classifyMergeContents
+    source.contents
+    base.contents
+    destination.contents of
+    ConflictingMergeContents -> Just RunMergeDriver
+    RecoverableMergeContents -> Just RecoverMergeReplicas
+    ConvergedMergeContents
+      | modeCommitIncomplete -> Just RecoverMergeReplicas
+      | not (null candidate.pendingPublications) ->
+          Just PublishMergedTarget
+      | otherwise -> Nothing
+    OneSidedMergeContents -> Nothing
+ where
+  modeCommitIncomplete =
+    managed.route.mode /= DefaultMode
+      && case posixFileModeBits managed.route.mode of
+        Nothing -> False
+        Just bits ->
+          let declared = portableModeFromBits bits
+              FileModeSnapshot _ baseMode = base.modeSnapshot
+              FileModeSnapshot _ destinationMode =
+                destination.modeSnapshot
+          in satisfiesPortableMode destinationMode declared
+               && not (satisfiesPortableMode baseMode declared)
 
 
 processPrepared
   :: forall i
    . (MonadFileSystem i, AppEffects i)
   => (OsPath -> Text)
+  -> ( Context (App i)
+       -> MachineState
+       -> ManagedCorrespondence
+       -> App i ()
+     )
   -> (ProcessRequest -> App i ProcessResult)
-  -> String
-  -> [(String, String)]
-  -> MergeDriverName
-  -> MergeDriverSpec
+  -> Maybe MergeDriverExecution
   -> OsPath
   -> [PreparedMerge]
   -> App i ()
 processPrepared
   pathStyle
+  publishTarget
   runDriver
-  platform
-  hostEnvironment
-  driverName
-  driver
+  driverExecution
   invocationRoot
   prepared =
     forM_ (zip [(1 :: Int) ..] prepared) $ \(index, item) -> do
@@ -542,60 +738,115 @@ processPrepared
             printRetained pathStyle workspace.root
             abortCommand exitCode
           runWorkspace :: App i ()
-          runWorkspace
-            | item.recovery = do
-                (refreshedCtx, refreshedState, refreshedManaged) <-
-                  refreshMergePolicy pathStyle item.managed
-                printStderr $
-                  "Finishing merged baseline for "
-                    <> pathStyle item.managed.correspondence.source.path
-                    <> "..."
-                committed <-
-                  commitMergeRecoveryGuarded
-                    (printCommitStep pathStyle refreshedManaged)
-                    refreshedManaged.route.mode
-                    item.source
-                    item.base
-                    item.destination
-                reportCommitResult committed
-                persistMergedTarget
+          runWorkspace = case item.action of
+            RecoverMergeReplicas -> do
+              (refreshedCtx, refreshedState, refreshedManaged) <-
+                refreshMergePolicy pathStyle item.managed
+              printStderr $
+                "Finishing merged baseline for "
+                  <> pathStyle item.managed.correspondence.source.path
+                  <> "..."
+              pending <-
+                createPendingPublication
+                  workspace
+                  workspaceIdentity
                   refreshedCtx
-                  refreshedState
                   refreshedManaged
-                cleanWorkspace workspace workspaceIdentity
-            | otherwise = do
-                request <-
-                  workspaceProcessRequest platform hostEnvironment driver workspace
-                printStderr $
-                  "Running merge driver '"
-                    <> renderMergeDriverName driverName
-                    <> "' for "
-                    <> pathStyle item.managed.correspondence.source.path
-                    <> "..."
-                processResult <- runDriver request
-                ensureDriverResolved driver processResult
-                resultRead <- readMergeResult workspace.result
-                result <-
-                  either
-                    (die' externalProgramNonZeroExit . formatResultError pathStyle)
-                    return
-                    resultRead
-                (refreshedCtx, refreshedState, refreshedManaged) <-
-                  refreshMergePolicy pathStyle item.managed
-                committed <-
-                  commitMergeResultGuarded
-                    (printCommitStep pathStyle refreshedManaged)
-                    refreshedManaged.route.mode
-                    item.source
-                    item.base
-                    item.destination
-                    result
-                reportCommitResult committed
-                persistMergedTarget
+              committed <-
+                commitMergeRecoveryGuarded
+                  (printCommitStep pathStyle refreshedManaged)
+                  refreshedManaged.route.mode
+                  item.source
+                  item.base
+                  item.destination
+              whenLeft committed $ removePendingMarker pending.marker
+              reportCommitResult committed
+              publishTarget
+                refreshedCtx
+                refreshedState
+                refreshedManaged
+              completePublication
+                pathStyle
+                pending
+                item.pendingPublications
+              cleanWorkspace workspace workspaceIdentity
+            PublishMergedTarget -> do
+              (refreshedCtx, refreshedState, refreshedManaged) <-
+                refreshMergePolicy pathStyle item.managed
+              printStderr $
+                "Publishing merged target for "
+                  <> pathStyle item.managed.correspondence.source.path
+                  <> "..."
+              pending <-
+                createPendingPublication
+                  workspace
+                  workspaceIdentity
                   refreshedCtx
-                  refreshedState
                   refreshedManaged
-                cleanWorkspace workspace workspaceIdentity
+              publishTarget
+                refreshedCtx
+                refreshedState
+                refreshedManaged
+              completePublication
+                pathStyle
+                pending
+                item.pendingPublications
+              cleanWorkspace workspace workspaceIdentity
+            RunMergeDriver -> do
+              case driverExecution of
+                Nothing ->
+                  die' cliError "No merge driver is available."
+                Just execution -> do
+                  let driver = execution.resolved
+                  request <-
+                    workspaceProcessRequest
+                      driver.platform
+                      execution.hostEnvironment
+                      driver.specification
+                      workspace
+                  printStderr $
+                    "Running merge driver '"
+                      <> renderMergeDriverName driver.name
+                      <> "' for "
+                      <> pathStyle item.managed.correspondence.source.path
+                      <> "..."
+                  processResult <- runDriver request
+                  ensureDriverResolved driver.specification processResult
+                  resultRead <- readMergeResult workspace.result
+                  result <-
+                    either
+                      ( die' externalProgramNonZeroExit
+                          . formatResultError pathStyle
+                      )
+                      return
+                      resultRead
+                  (refreshedCtx, refreshedState, refreshedManaged) <-
+                    refreshMergePolicy pathStyle item.managed
+                  pending <-
+                    createPendingPublication
+                      workspace
+                      workspaceIdentity
+                      refreshedCtx
+                      refreshedManaged
+                  committed <-
+                    commitMergeResultGuarded
+                      (printCommitStep pathStyle refreshedManaged)
+                      refreshedManaged.route.mode
+                      item.source
+                      item.base
+                      item.destination
+                      result
+                  whenLeft committed $ removePendingMarker pending.marker
+                  reportCommitResult committed
+                  publishTarget
+                    refreshedCtx
+                    refreshedState
+                    refreshedManaged
+                  completePublication
+                    pathStyle
+                    pending
+                    item.pendingPublications
+                  cleanWorkspace workspace workspaceIdentity
       catchCommandExit runWorkspace retainAndAbort
         `catchError` retainAndRethrow
    where
@@ -623,6 +874,10 @@ processPrepared
           "The completed merge workspace could not be removed: "
             <> pathStyle workspace.root
             <> "."
+    whenLeft :: Either a b -> App i () -> App i ()
+    whenLeft value action = case value of
+      Left _ -> action
+      Right _ -> return ()
 
 
 refreshMergePolicy
@@ -770,16 +1025,112 @@ ensureDriverResolved driver = \case
         <> "."
 
 
+findPendingPublications
+  :: (MonadFileSystem i, AppEffects i)
+  => Context (App i)
+  -> MachineState
+  -> ManagedCorrespondence
+  -> App i [PendingPublication]
+findPendingPublications ctx machineState managed = do
+  repositoryRoot <- mergeWorkspaceRepositoryRoot machineState
+  repositoryRootExists <- isDirectory repositoryRoot
+  repositoryRootSymlink <- isSymlink repositoryRoot
+  if not repositoryRootExists || repositoryRootSymlink
+    then return []
+    else do
+      identifier <- managedTargetId ctx.repository managed
+      markerName <-
+        encodePath $ "pending-" <> Text.unpack identifier
+      entries <- listDirectoryRecursively repositoryRoot []
+      catMaybes
+        <$> forM
+          [ repositoryRoot </> entry
+          | (_, entry) <- entries
+          , takeFileName entry == markerName
+          ]
+          (observePendingPublication markerName)
+ where
+  observePendingPublication markerName marker = do
+    regular <- isRegularFile marker
+    let workspace = takeDirectory marker
+    workspaceDirectory <- isDirectory workspace
+    workspaceSymlink <- isSymlink workspace
+    if not regular
+      || takeFileName marker /= markerName
+      || not workspaceDirectory
+      || workspaceSymlink
+      then return Nothing
+      else
+        fmap (PendingPublication marker workspace)
+          <$> getFileIdentity workspace
+
+
+createPendingPublication
+  :: (MonadFileSystem i, AppEffects i)
+  => MergeWorkspace
+  -> FileIdentity
+  -> Context (App i)
+  -> ManagedCorrespondence
+  -> App i PendingPublication
+createPendingPublication workspace workspaceIdentity ctx managed = do
+  identifier <- managedTargetId ctx.repository managed
+  markerName <- encodePath $ "pending-" <> Text.unpack identifier
+  let marker = workspace.root </> markerName
+  writeFileAtomically marker "pending.tmp" ""
+  return $ PendingPublication marker workspace.root workspaceIdentity
+
+
+completePublication
+  :: (MonadFileSystem i, AppEffects i)
+  => (OsPath -> Text)
+  -> PendingPublication
+  -> [PendingPublication]
+  -> App i ()
+completePublication pathStyle current previous = do
+  removePendingMarker current.marker
+  forM_ previous $ \pending -> do
+    removePendingMarker pending.marker
+    cleaned <-
+      removeDirectoryRecursivelyIfIdentity
+        pending.workspace
+        pending.workspaceIdentity
+    unless cleaned $
+      printStderr' Warning $
+        "The completed merge workspace could not be removed: "
+          <> pathStyle pending.workspace
+          <> "."
+    when cleaned $
+      removeDirectory (takeDirectory pending.workspace)
+        `catchError` const (return ())
+
+
+removePendingMarker
+  :: (MonadFileSystem i, AppEffects i)
+  => OsPath
+  -> App i ()
+removePendingMarker marker =
+  removeFile marker `catchError` \err ->
+    unless (isDoesNotExistError err) $ throwError err
+
+
+mergeWorkspaceRepositoryRoot
+  :: (MonadFileSystem i, AppEffects i)
+  => MachineState
+  -> App i OsPath
+mergeWorkspaceRepositoryRoot machineState = do
+  stateRoot <- asks (.stateDirectory)
+  workspaceName <- encodePath "merge-workspaces"
+  repositoryName <-
+    encodePath $ Text.unpack $ repositoryIdText machineState.repositoryId
+  return $ stateRoot </> workspaceName </> repositoryName
+
+
 createInvocationRoot
   :: (MonadFileSystem i, AppEffects i)
   => MachineState
   -> App i (OsPath, FileIdentity)
 createInvocationRoot machineState = do
-  stateRoot <- asks (.stateDirectory)
-  workspaceName <- encodePath "merge-workspaces"
-  repositoryName <-
-    encodePath $ Text.unpack $ repositoryIdText machineState.repositoryId
-  let repositoryRoot = stateRoot </> workspaceName </> repositoryName
+  repositoryRoot <- mergeWorkspaceRepositoryRoot machineState
   createDirectories repositoryRoot
   setPortableMode repositoryRoot 0o700
   identifier <- newUUID

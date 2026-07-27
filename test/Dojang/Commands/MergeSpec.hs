@@ -36,15 +36,21 @@ import Test.Hspec.Hedgehog (evalIO, forAll, hedgehog, (===))
 
 import Dojang.App (App, AppEnv (..), runAppWithoutLogging)
 import Dojang.CommandEffect
-  ( ProcessRequest (..)
+  ( MonadCommandEffect (abortCommand)
+  , ProcessRequest (..)
   , ProcessResult (..)
   )
 import Dojang.Commands.Merge
   ( defaultMergeDriverConfigPath
   , makeMergeDriverProcessRequest
   , mergeWithDriverRunner
+  , mergeWithDriverRunnerAndPublisher
   )
-import Dojang.ExitCodes (conflictError, fileNotRoutedError)
+import Dojang.ExitCodes
+  ( conflictError
+  , fileNotRoutedError
+  , machineStateError
+  )
 import Dojang.MonadFileSystem
   ( MonadFileSystem (..)
   , dryRunIO
@@ -55,7 +61,8 @@ import Dojang.Types.EnvironmentPredicate (EnvironmentPredicate (Always))
 import Dojang.Types.FilePathExpression (FilePathExpression (Substitution))
 import Dojang.Types.FileRoute
   ( FileRoute (..)
-  , RouteMode (ReadOnly)
+  , RouteKind (SymlinkRoute)
+  , RouteMode (DefaultMode, ReadOnly)
   , RouteTarget (..)
   )
 import Dojang.Types.MachineState
@@ -286,6 +293,95 @@ spec = sequential $ do
         readReplicas fixture
           `shouldReturn` replicate 3 "merged"
         readFile baseChild `shouldReturn` "old"
+
+    it "retries target publication after replicas have converged" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        readReplicas fixture `shouldReturn` replicate 3 merged
+        removeFile fixture.fixtureConfigPath
+        mergeWith fixture (error "publication retry ran a driver")
+          `shouldReturn` ExitSuccess
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        Right (Just state) <-
+          readRepositoryState
+            fixture.fixtureEnv.stateDirectory
+            fixture.fixtureRepositoryId
+            machineId
+        ((.updatedBy) <$> Map.elems state.targetRecords)
+          `shouldBe` [Merged]
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              (\_ _ _ -> error "cleaned publication retried")
+              (error "cleaned publication ran a driver")
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldReturn` ExitSuccess
+
+    it "skips a stale publication marker after route policy changes" $
+      withFixture $ \fixture -> do
+        let runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+            changedManifest =
+              fixture.fixtureReadOnlyManifest
+                { fileRoutes =
+                    fmap
+                      ( \route ->
+                          route
+                            { predicates =
+                                fmap
+                                  ( fmap $
+                                      fmap
+                                        ( \target ->
+                                            target
+                                              { kind = SymlinkRoute
+                                              , mode = DefaultMode
+                                              }
+                                        )
+                                  )
+                                  route.predicates
+                            }
+                      )
+                      fixture.fixtureReadOnlyManifest.fileRoutes
+                }
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        writeManifestFile
+          changedManifest
+          ( fixture.fixtureEnv.sourceDirectory
+              </> fixture.fixtureEnv.manifestFile
+          )
+        removeFile fixture.fixtureConfigPath
+        mergeWith fixture (error "stale publication ran a driver")
+          `shouldReturn` ExitSuccess
 
     it "matches explicit selectors using native path identity" $
       withFixture $ \fixture -> do

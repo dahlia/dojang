@@ -27,11 +27,13 @@ import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Merge
   ( MergeCommitError (..)
   , MergeCommitReplica (..)
+  , MergeContentsState (..)
   , MergeInputError (..)
   , MergeInputRole (..)
   , MergeResultError (..)
   , MergeTextInput (..)
   , MergeWorkspace (..)
+  , classifyMergeContents
   , commitMergeRecoveryGuarded
   , commitMergeResultGuarded
   , mergeCommitOrder
@@ -62,6 +64,31 @@ spec = do
       )
       `catchError` const (return False)
   let symlinkIt = if symlinkAvailable then it else xit
+
+  describe "classifyMergeContents" $
+    it "classifies arbitrary snapshots from their exact bytes" $
+      hedgehog $ do
+        expected <- forAll Gen.enumBounded
+        base <- forAll utf8Text
+        firstChange <- forAll $ Gen.filter (/= base) utf8Text
+        secondChange <-
+          forAll $
+            Gen.filter
+              (\value -> value /= base && value /= firstChange)
+              utf8Text
+        sourceChanged <- forAll Gen.bool
+        let (source, destination) = case expected of
+              ConflictingMergeContents ->
+                (firstChange, secondChange)
+              RecoverableMergeContents ->
+                (firstChange, firstChange)
+              ConvergedMergeContents ->
+                (base, base)
+              OneSidedMergeContents ->
+                if sourceChanged
+                  then (firstChange, base)
+                  else (base, firstChange)
+        classifyMergeContents source base destination === expected
 
   describe "observeMergeTextInput" $ do
     it "captures arbitrary UTF-8 text without changing its bytes" $ hedgehog $ do
