@@ -21,6 +21,7 @@ module Dojang.App
   , LogStr
   , applyAutomaticRepositorySelection
   , automaticSelectionUsesCheckoutManifest
+  , catchCommandExit
   , currentEnvironment'
   , currentEnvironmentWithFacts
   , clearLegacyFirstApplyHistory
@@ -223,6 +224,24 @@ newtype App i v = App
     )
 
 
+-- | Handles an exit requested by a command while preserving the current
+-- application environment and logger.
+catchCommandExit
+  :: (Monad i)
+  => App i a
+  -- ^ Command action to run.
+  -> (ExitCode -> App i a)
+  -- ^ Handler for an exit requested by the action.
+  -> App i a
+catchCommandExit action handler = App $ ReaderT $ \appEnv ->
+  ExceptT $ do
+    result <- runExceptT $ runReaderT action.unApp appEnv
+    case result of
+      Left exitCode ->
+        runExceptT $ runReaderT (handler exitCode).unApp appEnv
+      Right value -> return $ Right value
+
+
 instance
   (MonadError IOError i)
   => MonadError IOError (App i)
@@ -254,8 +273,21 @@ instance
   isDirectory = App . lift . lift . lift . isDirectory
   isSymlink = App . lift . lift . lift . isSymlink
   readFile = App . lift . lift . lift . readFile
+  readRegularFile = App . lift . lift . lift . readRegularFile
+  readRegularFileBounded limit =
+    App . lift . lift . lift . readRegularFileBounded limit
+  copyRegularFile src = App . lift . lift . lift . copyRegularFile src
+  copyRegularFileWithSnapshot snapshot src =
+    App . lift . lift . lift . copyRegularFileWithSnapshot snapshot src
   writeFile dst = App . lift . lift . lift . writeFile dst
+  createFileAtomicallyWithDefaultPermissions dst template =
+    App
+      . lift
+      . lift
+      . lift
+      . createFileAtomicallyWithDefaultPermissions dst template
   replaceFile src = App . lift . lift . lift . replaceFile src
+  renameDirectory src = App . lift . lift . lift . renameDirectory src
   writeTemporaryFile directory template contents =
     App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
   withFileLock lockPath action = App $ ReaderT $ \appEnv ->
@@ -266,14 +298,25 @@ instance
           logger
   canonicalizePath = App . lift . lift . lift . canonicalizePath
   readSymlinkTarget = App . lift . lift . lift . readSymlinkTarget
+  getSymbolicLinkType = App . lift . lift . lift . getSymbolicLinkType
   copyFile src = App . lift . lift . lift . copyFile src
   copyFileWithMetadata src = App . lift . lift . lift . copyFileWithMetadata src
   copyFilePermissions src = App . lift . lift . lift . copyFilePermissions src
   createDirectory = App . lift . lift . lift . createDirectory
+  createPrivateDirectory = App . lift . lift . lift . createPrivateDirectory
   removeFile = App . lift . lift . lift . removeFile
   removeDirectory = App . lift . lift . lift . removeDirectory
+  removeDirectoryRecursivelyIfIdentity path =
+    App . lift . lift . lift . removeDirectoryRecursivelyIfIdentity path
   listDirectory = App . lift . lift . lift . listDirectory
+  listDirectoryRecursively path =
+    App . lift . lift . lift . listDirectoryRecursively path
+  listDirectoryRecursivelyStrict path =
+    App . lift . lift . lift . listDirectoryRecursivelyStrict path
   getFileSize = App . lift . lift . lift . getFileSize
+  getFileIdentity = App . lift . lift . lift . getFileIdentity
+  getFileSnapshot = App . lift . lift . lift . getFileSnapshot
+  getFileModeSnapshot = App . lift . lift . lift . getFileModeSnapshot
   getPortableMode = App . lift . lift . lift . getPortableMode
   setPortableMode path = App . lift . lift . lift . setPortableMode path
   setPortableWritable path = App . lift . lift . lift . setPortableWritable path

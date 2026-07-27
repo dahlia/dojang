@@ -23,6 +23,7 @@ plugins:
       build: true
       nav_translations:
         Home: 홈
+        Bootstrapping a repository: 저장소 부트스트랩
         References: 참조
         Codecs: 코덱
         Cookbook: 레시피 책
@@ -33,6 +34,7 @@ nav:
 - Home: README.md
 - start.md
 - installation.md
+- Bootstrapping a repository: bootstrap.md
 - References:
   - manifest.md
   - machine-state.md

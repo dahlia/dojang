@@ -89,12 +89,12 @@ import Dojang.Commands
   , printStderr'
   )
 import Dojang.Commands.Apply qualified (apply)
+import Dojang.Commands.Bootstrap qualified (initialize)
 import Dojang.Commands.Diff (DiffMode (..))
 import Dojang.Commands.Diff qualified (diff)
 import Dojang.Commands.Edit qualified (edit)
 import Dojang.Commands.Env qualified (env)
 import Dojang.Commands.Init (InitPreset (..), initPresetName)
-import Dojang.Commands.Init qualified (initWithFacts)
 import Dojang.Commands.Migrate qualified (migrate)
 import Dojang.Commands.Reflect qualified (reflect)
 import Dojang.Commands.Status (StatusOptions (..))
@@ -269,7 +269,24 @@ cmdP stateRoot defaultRepoPath =
         <> command
           "init"
           ( info
-              ( Dojang.Commands.Init.initWithFacts
+              ( ( \presets
+                   noInteractive
+                   factsFile
+                   facts
+                   source
+                   transport
+                   transportFile
+                   acceptApply ->
+                      Dojang.Commands.Bootstrap.initialize
+                        source
+                        transport
+                        transportFile
+                        presets
+                        noInteractive
+                        acceptApply
+                        factsFile
+                        facts
+                )
                   <$> initPresetP
                   <*> switch
                     ( long "no-interactive"
@@ -293,10 +310,42 @@ cmdP stateRoot defaultRepoPath =
                               <> help "Persist a repository-specific machine fact"
                           )
                     )
+                  <*> optional
+                    ( strOption
+                        ( long "from"
+                            <> metavar "SOURCE"
+                            <> help
+                              "Acquire an existing repository from SOURCE"
+                        )
+                    )
+                  <*> optional
+                    ( pack
+                        <$> strOption
+                          ( long "transport"
+                              <> metavar "NAME"
+                              <> help
+                                "Use a configured external transport (requires --from)"
+                          )
+                    )
+                  <*> optional
+                    ( pathOption
+                        ( long "transport-file"
+                            <> metavar "PATH"
+                            <> action "file"
+                            <> help
+                              "Read external transports from PATH (requires --transport)"
+                        )
+                    )
+                  <*> switch
+                    ( long "yes"
+                        <> short 'y'
+                        <> help
+                          "Accept the first mutating apply (requires --from)"
+                    )
                   <**> helper
                   & initializationCommandP
               )
-              (progDesc "Initialize repository")
+              (progDesc "Initialize or bootstrap a repository")
           )
         <> command
           "migrate"

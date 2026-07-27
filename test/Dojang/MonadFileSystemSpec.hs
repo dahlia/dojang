@@ -6,9 +6,26 @@
 
 module Dojang.MonadFileSystemSpec (spec) where
 
+import Control.Concurrent
+  ( forkFinally
+  , forkIO
+  , newEmptyMVar
+  , putMVar
+  , readMVar
+  , takeMVar
+  , threadDelay
+  , tryReadMVar
+  )
+import Control.Exception qualified as Exception
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.List (sort, sortOn)
-import GHC.IO.Exception (IOErrorType (InappropriateType, InvalidArgument))
+import Data.Bits (xor)
+import Data.Foldable (traverse_)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.List (isPrefixOf, sort, sortOn)
+import Data.Time.Clock (addUTCTime)
+import GHC.IO.Exception
+  ( IOErrorType (InappropriateType, InvalidArgument)
+  )
 import System.IO.Error
   ( alreadyExistsErrorType
   , doesNotExistErrorType
@@ -17,12 +34,15 @@ import System.IO.Error
   , ioeGetLocation
   , isAlreadyExistsError
   , isDoesNotExistError
+  , isPermissionError
+  , mkIOError
   )
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
+import Control.Monad (replicateM)
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (readFile, writeFile)
+import Data.ByteString qualified (length, map, readFile, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
@@ -38,12 +58,29 @@ import System.FilePath (combine)
 
 #ifndef mingw32_HOST_OS
 import Data.Bits ((.&.))
+import Data.Char (chr)
+import Data.Either (isRight)
+import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..))
 import System.Posix.Files qualified as Posix
-import System.OsPath (decodeFS)
-import System.Timeout (timeout)
+import System.IO (IOMode (WriteMode), hSetFileSize, withBinaryFile)
+import System.Process
+  ( CreateProcess (env)
+  , proc
+  , readCreateProcessWithExitCode
+  )
 #endif
 
-import System.OsPath (OsPath, dropFileName, encodeFS, normalise, (</>))
+import System.Info (os)
+import System.OsPath
+  ( OsPath
+  , decodeFS
+  , dropFileName
+  , encodeFS
+  , normalise
+  , (</>)
+  )
+import System.Timeout (timeout)
 import Test.Hspec
   ( Spec
   , describe
@@ -65,12 +102,25 @@ import Test.Hspec.Expectations.Pretty
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 
 import Dojang.MonadFileSystem
-  ( FileType (..)
+  ( BoundedFileRead (..)
+  , FileType (..)
   , MonadFileSystem (..)
+  , captureDirectoryPathIdentity
   , dryRunIO
+  , isNoReplaceUnsupportedError
+  , matchesDirectoryPathIdentity
+  , noReplaceUnsupportedError
   , tryDryRunIO
   )
-import Dojang.TestUtils (withTempDir)
+import Dojang.TestUtils
+  ( withTempDir
+  )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.TestUtils (supportsNonUtf8FileNames)
+import Test.Hspec (pendingWith)
+#endif
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
@@ -105,8 +155,24 @@ posixPortableModeSpec :: Spec
 posixPortableModeSpec = pure ()
 
 
+posixPrivateDirectorySpec :: Spec
+posixPrivateDirectorySpec = pure ()
+
+
 posixDryRunPortableModeSpec :: Spec
 posixDryRunPortableModeSpec = pure ()
+
+
+posixCopyInterruptionSpec :: Spec
+posixCopyInterruptionSpec = pure ()
+
+
+posixTraversalRaceSpec :: Spec
+posixTraversalRaceSpec = pure ()
+
+
+posixNativeTraversalSpec :: Spec
+posixNativeTraversalSpec = pure ()
 #else
 posixRegularFileSpec :: Spec
 posixRegularFileSpec =
@@ -175,6 +241,54 @@ posixPortableModeSpec = do
       (mode' .&. 0o777) `shouldBe` 0o444
 
 
+posixPrivateDirectorySpec :: Spec
+posixPrivateDirectorySpec =
+  specify privateDirectoryTestName $ do
+    probe <- lookupEnv privateDirectoryProbeVariable
+    case probe of
+      Just privatePath -> do
+        private <- encodeFS privatePath
+        Exception.bracket
+          (Posix.setFileCreationMask 0o777)
+          Posix.setFileCreationMask
+          $ \_ -> do
+            createPrivateDirectory private :: IO ()
+            getPortableMode private
+              `shouldReturn` portableModeFromBits 0o700
+      Nothing ->
+        withTempDir $ \tmpDir _ -> do
+          privateName <- encodeFS "private"
+          let private = tmpDir </> privateName
+          privatePath <- decodeFS private
+          executable <- getExecutablePath
+          environment <- getEnvironment
+          let childEnvironment =
+                (privateDirectoryProbeVariable, privatePath)
+                  : filter
+                    ((/= privateDirectoryProbeVariable) . fst)
+                    environment
+              child =
+                (proc executable ["--match", privateDirectoryTestName])
+                  { env = Just childEnvironment
+                  }
+          (exitCode, standardOutput, standardError) <-
+            readCreateProcessWithExitCode child ""
+          case exitCode of
+            ExitSuccess -> return ()
+            ExitFailure _ ->
+              expectationFailure $ standardOutput <> standardError
+
+
+privateDirectoryTestName :: String
+privateDirectoryTestName =
+  "createPrivateDirectory overrides a restrictive umask"
+
+
+privateDirectoryProbeVariable :: String
+privateDirectoryProbeVariable =
+  "DOJANG_TEST_PRIVATE_DIRECTORY_UMASK_PROBE"
+
+
 posixDryRunPortableModeSpec :: Spec
 posixDryRunPortableModeSpec = do
   specify "getPortableMode reads exact bits through the overlay" $
@@ -198,7 +312,287 @@ posixDryRunPortableModeSpec = do
       observed `shouldBe` portableModeFromBits 0o600
       mode <- Posix.fileMode <$> Posix.getFileStatus fooFP
       (mode .&. 0o777) `shouldBe` 0o644
+
+
+posixCopyInterruptionSpec :: Spec
+posixCopyInterruptionSpec = do
+  specify
+    "copyRegularFileWithSnapshot rejects an in-place source mutation"
+    $ withTempDir
+    $ \tmpDir tmpDir' -> do
+      sourceName <- encodeFS "source"
+      destinationName <- encodeFS "destination"
+      let source = tmpDir </> sourceName
+          destination = tmpDir </> destinationName
+          sourcePath = tmpDir' `combine` "source"
+          sourceSize = 128 * 1024 * 1024
+      withBinaryFile sourcePath WriteMode $ \handle ->
+        hSetFileSize handle sourceSize
+      Just snapshot <- getFileSnapshot source
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      Posix.setFileSize sourcePath $ fromIntegral $ sourceSize `div` 2
+      _ <-
+        forkFinally
+          ( let mutate size = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      Posix.setFileSize sourcePath $ fromIntegral size
+                      threadDelay 100
+                      mutate $
+                        if size == sourceSize
+                          then sourceSize `div` 2
+                          else sourceSize
+            in mutate sourceSize
+          )
+          (const $ putMVar mutationFinished ())
+      threadDelay 1000
+      result <- newEmptyMVar
+      _ <-
+        forkIO $ do
+          copied <-
+            copyRegularFileWithSnapshot
+              snapshot
+              source
+              destination
+          putMVar result copied
+      copied <- timeout 5000000 $ takeMVar result
+      putMVar stopMutating ()
+      timeout 5000000 (takeMVar mutationFinished)
+        `shouldReturn` Just ()
+      copied `shouldBe` Just False
+      exists destination `shouldReturn` False
+
+
+  specify "readRegularFileBounded rejects an in-place source mutation" $
+    withTempDir $ \tmpDir tmpDir' -> do
+      sourceName <- encodeFS "source"
+      let source = tmpDir </> sourceName
+          sourcePath = tmpDir' `combine` "source"
+          sourceSize :: Int
+          sourceSize = 128 * 1024 * 1024
+      withBinaryFile sourcePath WriteMode $ \handle ->
+        hSetFileSize handle $ fromIntegral sourceSize
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      _ <-
+        forkFinally
+          ( let mutate size = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      Posix.setFileSize sourcePath $ fromIntegral size
+                      threadDelay 100
+                      mutate $
+                        if size == sourceSize
+                          then sourceSize `div` 2
+                          else sourceSize
+            in mutate $ sourceSize `div` 2
+          )
+          (const $ putMVar mutationFinished ())
+      threadDelay 1000
+      result <- newEmptyMVar
+      _ <-
+        forkIO $ do
+          observed <- readRegularFileBounded (sourceSize + 1) source
+          putMVar result observed
+      observed <- timeout 5000000 $ takeMVar result
+      putMVar stopMutating ()
+      timeout 5000000 (takeMVar mutationFinished)
+        `shouldReturn` Just ()
+      observed `shouldBe` Just FileChangedDuringRead
+
+
+posixTraversalRaceSpec :: Spec
+posixTraversalRaceSpec =
+  specify "listDirectoryRecursively never follows a raced directory link" $
+    withTempDir $ \tmpDir _ -> do
+      nestedName <- encodeFS "nested"
+      parkedName <- encodeFS "parked"
+      outsideName <- encodeFS "outside"
+      sentinelName <- encodeFS "outside-sentinel"
+      fillerNames <-
+        traverse (encodeFS . ("filler-" <>) . show) [1 .. 512 :: Int]
+      let nested = tmpDir </> nestedName
+          parked = tmpDir </> parkedName
+          outside = tmpDir </> outsideName
+          escaped = nestedName </> sentinelName
+      createDirectory nested
+      createDirectory outside
+      writeFile (outside </> sentinelName) "outside"
+      mapM_ (\name -> writeFile (tmpDir </> name) "") fillerNames
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      completedMutations <- newIORef (0 :: Int)
+      _ <-
+        forkFinally
+          ( let mutate = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      OsDirectory.renameDirectory nested parked
+                      createDirectoryLink outside nested
+                      removeFile nested
+                      OsDirectory.renameDirectory parked nested
+                      atomicModifyIORef' completedMutations $ \count ->
+                        (count + 1, ())
+                      mutate
+            in mutate
+          )
+          (putMVar mutationFinished)
+      outcomes <-
+        replicateM 100 (tryError $ listDirectoryRecursively tmpDir [])
+          `Exception.finally` putMVar stopMutating ()
+      mutationOutcome <- timeout 5000000 $ takeMVar mutationFinished
+      case mutationOutcome of
+        Nothing -> expectationFailure "the mutation thread did not stop"
+        Just (Left exception) ->
+          expectationFailure $
+            "the mutation thread failed: " <> show exception
+        Just (Right ()) -> return ()
+      readIORef completedMutations >>= (`shouldSatisfy` (> 0))
+      outcomes `shouldSatisfy` any isRight
+      outcomes
+        `shouldSatisfy` all
+          ( \case
+              Left _ -> True
+              Right entries -> (File, escaped) `notElem` entries
+          )
+
+
+posixNativeTraversalSpec :: Spec
+posixNativeTraversalSpec = do
+  supported <-
+    runIO $
+      withTempDir $ \tmpDir _ ->
+        supportsNonUtf8FileNames tmpDir
+  let description =
+        "listDirectoryRecursively preserves arbitrary native name bytes"
+  if supported
+    then
+      specify description $
+        hedgehog $ do
+          byte <- forAll $ Gen.word8 $ constantFrom 0x80 0x80 0xff
+          observed <-
+            liftIO $
+              withTempDir $ \tmpDir _ -> do
+                name <- encodeFS [chr $ 0xdc00 + fromIntegral byte]
+                writeFile (tmpDir </> name) ""
+                entries <- listDirectoryRecursively tmpDir []
+                return (name, entries)
+          case observed of
+            (name, entries) -> entries === [(File, name)]
+    else
+      specify description $
+        pendingWith "The filesystem rejects filenames that are not valid UTF-8."
 #endif
+
+
+vanishedEntryTraversalSpecs :: Spec
+vanishedEntryTraversalSpecs = do
+  specify "tolerant traversal omits entries vanished after enumeration" $ do
+    (outcomes, stableName, _) <-
+      runVanishedEntryTraversalRace $ \path ->
+        listDirectoryRecursively path []
+    outcomes `shouldSatisfy` all isToleratedTraversalOutcome
+    outcomes `shouldSatisfy` all (containsStableEntry stableName)
+
+  specify "strict traversal rejects entries vanished after enumeration" $ do
+    (outcomes, stableName, rootPath) <-
+      runVanishedEntryTraversalRace $ \path ->
+        listDirectoryRecursivelyStrict path []
+    outcomes
+      `shouldSatisfy` any
+        ( \case
+            Left err ->
+              isDoesNotExistError err || isWindowsDeletePendingError err
+            Right _ -> False
+        )
+    outcomes `shouldSatisfy` all (containsStableEntry stableName)
+    [err | Left err <- outcomes, isDoesNotExistError err]
+      `shouldSatisfy` all
+        ( maybe False (rootPath `isPrefixOf`)
+            . ioeGetFileName
+        )
+
+
+runVanishedEntryTraversalRace
+  :: (OsPath -> IO [(FileType, OsPath)])
+  -> IO ([Either IOError [(FileType, OsPath)]], OsPath, FilePath)
+runVanishedEntryTraversalRace listTree =
+  withTempDir $ \tmpDir _ -> do
+    stableName <- encodeFS "stable"
+    racedNames <-
+      mapM (encodeFS . ("raced-" <>) . show) [1 .. 64 :: Int]
+    fillerNames <-
+      mapM (encodeFS . ("filler-" <>) . show) [1 .. 2048 :: Int]
+    writeFile (tmpDir </> stableName) ""
+    mapM_ (\name -> writeFile (tmpDir </> name) "") racedNames
+    mapM_ (\name -> writeFile (tmpDir </> name) "") fillerNames
+    stopMutating <- newEmptyMVar
+    mutationFinished <- newEmptyMVar
+    completedMutations <- newIORef (0 :: Int)
+    _ <-
+      forkFinally
+        ( let mutate (name : remaining) = do
+                stopped <- tryReadMVar stopMutating
+                case stopped of
+                  Just () -> return ()
+                  Nothing -> do
+                    removeFile $ tmpDir </> name
+                    threadDelay 50
+                    recreateRacedFile $ tmpDir </> name
+                    atomicModifyIORef' completedMutations $ \count ->
+                      (count + 1, ())
+                    mutate remaining
+              mutate [] = mutate racedNames
+          in mutate racedNames
+        )
+        (putMVar mutationFinished)
+    outcomes <-
+      replicateM 100 (tryError $ listTree tmpDir)
+        `Exception.finally` putMVar stopMutating ()
+    mutationOutcome <- timeout 5000000 $ takeMVar mutationFinished
+    case mutationOutcome of
+      Nothing -> expectationFailure "the mutation thread did not stop"
+      Just (Left exception) ->
+        expectationFailure $
+          "the mutation thread failed: " <> show exception
+      Just (Right ()) -> return ()
+    readIORef completedMutations >>= (`shouldSatisfy` (> 0))
+    rootPath <- decodeFS tmpDir
+    return (outcomes, stableName, rootPath)
+
+
+containsStableEntry
+  :: OsPath -> Either IOError [(FileType, OsPath)] -> Bool
+containsStableEntry _ (Left _) = True
+containsStableEntry stableName (Right entries) =
+  (File, stableName) `elem` entries
+
+
+isToleratedTraversalOutcome
+  :: Either IOError [(FileType, OsPath)] -> Bool
+isToleratedTraversalOutcome (Left err) =
+  isWindowsDeletePendingError err
+isToleratedTraversalOutcome (Right _) = True
+
+
+recreateRacedFile :: OsPath -> IO ()
+recreateRacedFile path =
+  writeFile path "" `catchError` \err ->
+    if isWindowsDeletePendingError err
+      then threadDelay 50 >> recreateRacedFile path
+      else ioError err
+
+
+isWindowsDeletePendingError :: IOError -> Bool
+isWindowsDeletePendingError err =
+  os == "mingw32" && isPermissionError err
 
 
 isInappropriateTypeError :: Either IOError a -> Bool
@@ -271,11 +665,47 @@ spec = do
       isRegularFile nonExistentP `shouldReturn` False
 
     posixRegularFileSpec
+    posixPrivateDirectorySpec
 
     specify "isDirectory" $ do
       isDirectory packageYamlP `shouldReturn` False
       isDirectory testP `shouldReturn` True
       isDirectory nonExistentP `shouldReturn` False
+
+    specify
+      "directory path identities reject arbitrary replaced ancestors"
+      $ hedgehog
+      $ do
+        depth <- forAll $ Gen.int $ constantFrom 1 1 8
+        suffix <-
+          forAll $
+            Gen.string
+              (constantFrom 1 1 24)
+              (Gen.element $ ['a' .. 'z'] <> ['0' .. '9'])
+        unchanged <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              rootName <- encodeFS $ "root-" <> suffix
+              movedName <- encodeFS $ "moved-" <> suffix
+              childNames <-
+                traverse
+                  (encodeFS . ("child-" <>) . show)
+                  [1 .. depth]
+              let root = tmpDir </> rootName
+                  moved = tmpDir </> movedName
+                  selected = foldl (</>) root childNames
+              createDirectories selected
+              Just identity <- captureDirectoryPathIdentity selected
+              renameDirectory root moved
+              createDirectory root
+              case childNames of
+                [] -> fail "A generated directory path had no child."
+                first : _ ->
+                  renameDirectory
+                    (moved </> first)
+                    (root </> first)
+              matchesDirectoryPathIdentity identity
+        unchanged === False
 
     symSpecify "isSymlink" $ do
       isSymlink packageYamlP `shouldReturn` False
@@ -285,6 +715,19 @@ spec = do
         Prelude.writeFile (tmpDir' `combine` "foo") ""
         createFileLink foo (tmpDir </> bar)
         isSymlink (tmpDir </> bar) `shouldReturn` True
+
+    symSpecify "createDirectories rejects a symbolic-link ancestor" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> foo
+        createDirectoryLink foo $ tmpDir </> bar
+        barPath <- decodePath $ tmpDir </> bar
+        Left failure <-
+          tryError $ createDirectories $ tmpDir </> bar </> baz
+        ioeGetErrorType failure `shouldBe` InappropriateType
+        ioeGetFileName failure `shouldBe` Just barPath
+        ioeGetLocation failure `shouldStartWith` "createDirectories"
+        show failure
+          `shouldContain` "one of its ancestors is a symbolic link"
 
     specify "readFile" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
@@ -363,6 +806,130 @@ spec = do
       original <- Data.ByteString.readFile packageYamlFP
       contents `shouldBe` original
 
+    specify
+      "copyRegularFileWithSnapshot rejects arbitrary replaced sources"
+      $ hedgehog
+      $ do
+        original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        (copied, destinationExists) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              let source = tmpDir </> foo
+                  outside = tmpDir </> bar
+                  destination = tmpDir </> baz
+              writeFile source original
+              writeFile outside replacement
+              Just snapshot <- getFileSnapshot source
+              removeFile source
+              createSymbolicLink outside source File
+              result <-
+                copyRegularFileWithSnapshot
+                  snapshot
+                  source
+                  destination
+              present <- exists destination
+              return (result, present)
+        copied === False
+        destinationExists === False
+
+    specify
+      "copyRegularFileWithSnapshot rejects changes before opening the source"
+      $ hedgehog
+      $ do
+        original <- forAll $ Gen.bytes $ constantFrom 1 1 4096
+        let replacement = Data.ByteString.map (`xor` 0xff) original
+        (copied, destinationExists) <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              let source = tmpDir </> foo
+                  destination = tmpDir </> baz
+              writeFile source original
+              originalTime <- OsDirectory.getModificationTime source
+              Just snapshot <- getFileSnapshot source
+              writeFile source replacement
+              OsDirectory.setModificationTime
+                source
+                (addUTCTime 2 originalTime)
+              result <-
+                copyRegularFileWithSnapshot
+                  snapshot
+                  source
+                  destination
+              present <- exists destination
+              return (result, present)
+        copied === False
+        destinationExists === False
+
+    specify "readRegularFileBounded enforces arbitrary byte limits" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        limit <- forAll $ Gen.int $ constantFrom 0 0 4096
+        observed <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              writeFile (tmpDir </> foo) contents
+              readRegularFileBounded limit $ tmpDir </> foo
+        if Data.ByteString.length contents > limit
+          then observed === FileSizeLimitExceeded
+          else observed === BoundedFileContents contents
+
+    posixCopyInterruptionSpec
+
+    specify "renameDirectory" $ withTempDir $ \tmpDir _ -> do
+      createDirectory $ tmpDir </> foo
+      writeFile (tmpDir </> foo </> bar) "contents"
+      renameDirectory (tmpDir </> foo) (tmpDir </> baz)
+      isDirectory (tmpDir </> foo) `shouldReturn` False
+      readFile (tmpDir </> baz </> bar) `shouldReturn` "contents"
+
+    specify "renameDirectory refuses an existing destination" $
+      withTempDir $ \tmpDir _ -> do
+        createDirectory $ tmpDir </> foo
+        createDirectory $ tmpDir </> baz
+        renameDirectory (tmpDir </> foo) (tmpDir </> baz)
+          `shouldThrow` isAlreadyExistsError
+        isDirectory (tmpDir </> foo) `shouldReturn` True
+        isDirectory (tmpDir </> baz) `shouldReturn` True
+
+    specify "classifies only unsupported no-replace errors" $ do
+      let invalid =
+            mkIOError
+              InvalidArgument
+              "renameDirectory"
+              Nothing
+              Nothing
+      isNoReplaceUnsupportedError
+        (noReplaceUnsupportedError "destination")
+        `shouldBe` True
+      isNoReplaceUnsupportedError invalid `shouldBe` False
+
+    specify "renameDirectory allows only one concurrent publisher" $
+      withTempDir $ \tmpDir _ -> do
+        start <- newEmptyMVar
+        sourceNames <-
+          mapM (encodeFS . ("source-" <>) . show) [1 .. 128 :: Int]
+        mapM_ (createDirectory . (tmpDir </>)) sourceNames
+        results <-
+          mapM
+            ( \sourceName -> do
+                result <- newEmptyMVar
+                _ <-
+                  forkIO $ do
+                    readMVar start
+                    outcome <-
+                      tryError $
+                        renameDirectory
+                          (tmpDir </> sourceName)
+                          (tmpDir </> baz)
+                    putMVar result outcome
+                return result
+            )
+            sourceNames
+        putMVar start ()
+        outcomes <- mapM takeMVar results
+        length [() | Right () <- outcomes] `shouldBe` 1
+
     specify "createDirectory" $ withTempDir $ \tmpDirP _ -> do
       () <- createDirectory (tmpDirP </> nonExistentP)
       doesDirectoryExist (tmpDirP </> nonExistentP)
@@ -388,6 +955,41 @@ spec = do
       doesPathExist tmpDirP `shouldReturn` False
       removeDirectoryRecursively tmpDirP `shouldThrow` \e ->
         isDoesNotExistError e && ioeGetFileName e == Just tmpDirFP
+
+    specify "removeDirectoryRecursivelyIfIdentity removes its directory" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        childName <- encodeFS "child"
+        let owned = tmpDir </> ownedName
+        createDirectory owned
+        writeFile (owned </> childName) "owned"
+        Just identity <- getFileIdentity owned
+        removeDirectoryRecursivelyIfIdentity owned identity
+          `shouldReturn` True
+        exists owned `shouldReturn` False
+
+    specify
+      "removeDirectoryRecursivelyIfIdentity preserves arbitrary replacements"
+      $ hedgehog
+      $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            ownedName <- encodeFS "owned"
+            movedName <- encodeFS "moved"
+            sentinelName <- encodeFS "sentinel"
+            let owned = tmpDir </> ownedName
+                moved = tmpDir </> movedName
+            createDirectory owned
+            Just identity <- getFileIdentity owned
+            renameDirectory owned moved
+            createDirectory owned
+            writeFile (owned </> sentinelName) contents
+            removeDirectoryRecursivelyIfIdentity owned identity
+              `shouldReturn` False
+            readFile (owned </> sentinelName) `shouldReturn` contents
+            sort <$> listDirectory tmpDir
+              `shouldReturn` sort [ownedName, movedName]
 
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir
@@ -430,6 +1032,10 @@ spec = do
                          , (File, foo)
                          ]
 
+      posixTraversalRaceSpec
+      posixNativeTraversalSpec
+      vanishedEntryTraversalSpecs
+
     specify "getFileSize" $ withFixture $ \tmpDir tmpDirFP -> do
       Data.ByteString.writeFile (tmpDirFP `combine` "foo") "asdf"
       getFileSize (tmpDir </> foo) `shouldReturn` 4
@@ -447,6 +1053,23 @@ spec = do
       filePath <- forAll $ Gen.string (constantFrom 0 0 256) Gen.unicode
       filePath' <- liftIO $ dryRunIO (encodePath filePath >>= decodePath)
       filePath' === filePath
+
+    specify "readRegularFileBounded enforces arbitrary copied-file limits" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        limit <- forAll $ Gen.int $ constantFrom 0 0 4096
+        observed <-
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              let source = tmpDir </> foo
+                  copied = tmpDir </> bar
+              writeFile source contents
+              dryRunIO $ do
+                copyFile source copied
+                readRegularFileBounded limit copied
+        if Data.ByteString.length contents > limit
+          then observed === FileSizeLimitExceeded
+          else observed === BoundedFileContents contents
 
     specify "makeAbsolute" $ do
       currentDirectory <- OsDirectory.getCurrentDirectory
@@ -893,6 +1516,35 @@ spec = do
         ioeGetLocation failToCopy' `shouldBe` "copyFile"
         show failToCopy' `shouldContain` "destination is a directory"
 
+    describe "copyRegularFileWithSnapshot" $
+      it "retains arbitrary dry-run copies by reference" $
+        hedgehog $ do
+          sourceContents <-
+            forAll $ Gen.bytes $ constantFrom 0 0 4096
+          let changedContents = sourceContents <> "changed"
+          (copied, observed) <-
+            liftIO $
+              withTempDir $ \tmpDir tmpDir' -> do
+                let source = tmpDir </> foo
+                    destination = tmpDir </> bar
+                    sourcePath = tmpDir' `combine` "foo"
+                Data.ByteString.writeFile sourcePath sourceContents
+                dryRunIO $ do
+                  Just snapshot <- getFileSnapshot source
+                  result <-
+                    copyRegularFileWithSnapshot
+                      snapshot
+                      source
+                      destination
+                  liftIO $
+                    Data.ByteString.writeFile
+                      sourcePath
+                      changedContents
+                  contents <- readFile destination
+                  return (result, contents)
+          copied === True
+          observed === changedContents
+
     describe "createDirectory" $ do
       it "creates an empty directory" $ do
         dryRunIO (createDirectory nonExistentP >> isDirectory nonExistentP)
@@ -1127,6 +1779,64 @@ spec = do
         ioeGetLocation failToCreate `shouldStartWith` "createDirectories"
         show failToCreate
           `shouldContain` "one of its ancestors is a non-directory file"
+
+    describe "renameDirectory" $ do
+      it "moves a virtual tree without touching the real filesystem" $
+        withTempDir $ \tmpDir _ -> do
+          result <- dryRunIO $ do
+            createDirectory $ tmpDir </> foo
+            writeFile (tmpDir </> foo </> bar) "contents"
+            renameDirectory (tmpDir </> foo) (tmpDir </> baz)
+            (,,)
+              <$> isDirectory (tmpDir </> foo)
+              <*> isDirectory (tmpDir </> baz)
+              <*> readFile (tmpDir </> baz </> bar)
+          result `shouldBe` (False, True, "contents")
+          OsDirectory.doesDirectoryExist (tmpDir </> baz)
+            `shouldReturn` False
+
+      it "preserves arbitrary virtual directory modes" $
+        hedgehog $ do
+          modes <-
+            forAll $
+              Gen.list
+                (constantFrom 1 1 6)
+                (Gen.word $ constantFrom 0o000 0o000 0o777)
+          observed <-
+            liftIO $
+              withTempDir $ \tmpDir _ -> do
+                components <-
+                  traverse
+                    (encodeFS . ("nested-" <>) . show)
+                    [1 .. length modes - 1]
+                let source = tmpDir </> foo
+                    destination = tmpDir </> baz
+                    sourceDirectories = scanl (</>) source components
+                    destinationDirectories =
+                      scanl (</>) destination components
+                dryRunIO $ do
+                  traverse_ createDirectory sourceDirectories
+                  sequence_ $
+                    zipWith
+                      setPortableMode
+                      sourceDirectories
+                      modes
+                  renameDirectory source destination
+                  traverse getPortableMode destinationDirectories
+          observed === fmap portableModeFromBits modes
+
+      it "refuses an existing virtual destination" $ do
+        Left err <- tryDryRunIO $ do
+          createDirectory nonExistentP
+          createDirectory nonExistentP'
+          renameDirectory nonExistentP nonExistentP'
+        err `shouldSatisfy` isAlreadyExistsError
+
+      it "does not create a destination for a missing source" $ do
+        result <- dryRunIO $ do
+          _ <- tryError $ renameDirectory nonExistentP nonExistentP'
+          isDirectory nonExistentP'
+        result `shouldBe` False
 
     describe "listDirectory" $ do
       it "lists direct children in a directory" $ do

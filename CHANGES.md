@@ -8,6 +8,113 @@ To be released.
 
 ### Command-line interface
 
+ -  Added `dojang init --from SOURCE` to acquire, validate, enroll, and
+    optionally apply an existing repository in one command.  Local directories
+    and `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives work without
+    configuration.  Machine-local external transports can run Git or another
+    executable without a shell, with whole-argument source and destination
+    placeholders and an explicit environment allowlist.  Acquisition is staged
+    beside the destination in an owner-only directory, rejects unsafe archive
+    entries, including names that are reserved or invalid on Windows, and
+    rejects paths that collide after case folding or Unicode normalization.  It
+    preserves recorded POSIX permissions where the destination filesystem
+    supports them, requires an absent destination, and attempts to clean
+    unpublished work after failure.
+    Archive sources must resolve to regular files, so FIFOs and other special
+    files are rejected without blocking.  Unsupported permission metadata
+    produces a warning without discarding the acquired contents.  Stored
+    permissions are restored while the repository is still private in staging,
+    then an absent destination is published with one atomic no-replace
+    directory rename.  Existing paths, including empty directories and the
+    current working directory, are rejected.  If another process creates the
+    destination first, publication fails without modifying that entry.
+    Filesystems without an atomic no-replace rename are rejected rather than
+    using an entry-by-entry fallback.  External transport source and
+    destination arguments and inherited environment values retain their native
+    byte representation on POSIX.  A dry run does not start an external
+    transport and redacts its source argument, named credential argument
+    values, and environment values, including sources whose native
+    representation is not UTF-8.  For local directory and archive sources,
+    virtual publication preserves staged root and nested directory permissions
+    so enrollment and apply previews match real execution.
+    Directory sources and Unix ZIP archives reject FIFOs, sockets, devices, and
+    other unsupported entry types before reading or extraction.  Directory
+    sources also reject paths that collide after case folding or Unicode
+    normalization before copying begins.  Directory source identities are
+    pinned during validation, retained modes come from the same filesystem
+    observations as their identities, regular files are checked through the
+    same handles used to copy them, and the source tree membership and recorded
+    entries are revalidated after copying.  Concurrent additions, removals,
+    replacements, type changes, and permission changes therefore stop
+    publication.
+    Archives changed while their bounded read is in progress are rejected with
+    a retryable source-change error.  ZIP directories marked with the DOS
+    directory attribute are accepted even when their names omit a trailing
+    slash.  A destination nested inside its local directory source is rejected
+    before staging is created.  Standard tar archives whose first entry is `./`
+    are accepted.  A missing destination inherits the source root's
+    permissions, including the target permissions when the directory source is
+    a symbolic link.
+    Permission restoration is verified after it is applied, so partial
+    filesystem support produces the documented warning.  POSIX reapplies mode
+    `0700` after creating staging, so a restrictive umask cannot leave it
+    unusable.  Bootstrap rereads and parses the manifest under its final stored
+    permissions before publication, rejecting archives that would make the
+    published repository inaccessible.  Explicit zero permission modes from
+    Unix ZIP entries are retained instead of being treated as absent metadata.
+    External transports run beneath an owner-only staging parent.
+    Windows creates that parent with a protected, inheritable owner-only ACL and
+    rejects filesystems that cannot enforce persistent ACLs.  Archive input is
+    limited to 16 MiB, expanded file contents to 64 MiB, entry counts to 10,000,
+    paths to 4,096 characters, and path depth to 256 components, including
+    bounded gzip decoding.  Malformed PAX record lengths are rejected before
+    conversion to a machine-sized integer.  A relative Windows `APPDATA`
+    transport override falls back to the user's roaming application-data
+    directory instead of resolving from the working directory.  Broken Windows
+    directory links retain their intrinsic link type, and interrupted
+    publication widens restrictive staging before cleanup.  Cleanup first moves
+    the staging root to an operating-system-random quarantine path, checks the
+    moved entry's recorded filesystem identity, and never recursively removes
+    a concurrently created replacement.  A failed restoration leaves the
+    quarantine intact and reports its recovery path instead of silently hiding
+    it.
+    Directory traversal pins each opened directory and opens children without
+    following links, so a transient directory-link replacement cannot redirect
+    enumeration outside the source.  An entry that vanishes after its name is
+    enumerated is rejected as a concurrent source change instead of being
+    silently omitted.  Bootstrap also resolves and records the
+    destination parent and its complete physical ancestor identity chain,
+    revalidating the lexical target and that chain across preparation,
+    acquisition, validation, and publication so an observed replacement aborts
+    the operation.  These boundary checks are not atomic with the following
+    path mutation; cleanup and post-publication mismatches therefore warn that
+    staging or a published copy may require manual removal.  Noninteractive
+    bootstrap requires both
+    `--no-interactive` and `--yes`.  The selected bootstrap manifest must use a
+    drive-less relative path inside the acquired repository without parent or
+    symbolic-link components, and it must be a regular file no larger than
+    16 MiB.  Staged validation parses bytes read through the validated handle,
+    so a transport-created special file cannot block or redirect it.  Manifest
+    creation now writes complete bytes to a sibling temporary file before an
+    atomic rename, while retaining ordinary creation permissions, so concurrent
+    initialization and other readers cannot observe a partially written
+    manifest.  The rename never replaces a manifest created concurrently and
+    rejects filesystems without an atomic no-replace primitive.  On an
+    unsupported filesystem, ordinary `dojang init` now reports a file-write
+    error and asks the user to move the repository before retrying.
+    [[#47], [#74]]
+
+ -  Added verified release installers for Linux and macOS on x86-64 and
+    AArch64, and for Windows on x86-64.  Installers download the release's
+    *SHA256SUMS* file and reject an archive before installation when its
+    checksum does not match.  They can also leave the verified archive and
+    checksums in an explicit directory without installing.  Linux container
+    images are built and tested with checksum-pinned official GHCup, GHC, and
+    Stack artifacts for both architectures.  After packaging each executable,
+    the workflow extracts the final archive and checks its executable mode,
+    version output, repository initialization, and status workflow.
+    [[#47], [#74]]
+
  -  Manifests can declare reusable sensitive-codec commands in
     `[codec-backends]`.  Each backend has a shell-free executable path, stable
     version, bounded timeout, and non-secret options.  The new backend protocol
@@ -244,6 +351,7 @@ To be released.
 [#44]: https://github.com/dahlia/dojang/issues/44
 [#45]: https://github.com/dahlia/dojang/issues/45
 [#46]: https://github.com/dahlia/dojang/issues/46
+[#47]: https://github.com/dahlia/dojang/issues/47
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
@@ -257,6 +365,7 @@ To be released.
 [#71]: https://github.com/dahlia/dojang/pull/71
 [#72]: https://github.com/dahlia/dojang/pull/72
 [#73]: https://github.com/dahlia/dojang/pull/73
+[#74]: https://github.com/dahlia/dojang/pull/74
 
 ### Haskell API
 

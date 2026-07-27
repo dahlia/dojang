@@ -24,12 +24,13 @@ and there are no plan to do so in the future.
 Installation
 ------------
 
-Dojang is a program that hasn't been officially released yet,
-so for now you'll have to build it to install it, which can take some time.
-Please refer to the [installation](installation.en.md) docs to install Dojang.
+Install Dojang with a verified release installer, a package manager, or Stack.
+See the [installation] docs for the supported methods.
 
 Once the installation is complete, the `dojang` command will be available.
 You can check how to use the `dojang` command with the `dojang --help` command.
+
+[installation]: installation.en.md
 
 
 Basic ideas
@@ -74,6 +75,11 @@ create a manifest file:
 $ dojang init
 ~~~~
 
+Creating the manifest requires a filesystem with an atomic no-replace rename.
+If the repository filesystem does not provide one, `dojang init` stops with a
+file-write error rather than risk replacing a manifest created concurrently.
+Move the repository to a supported local filesystem and retry.
+
 When asked about the types of devices you use,
 you can select everything you use.
 
@@ -94,7 +100,12 @@ You can now open the manifest file and edit it as you want.
 For a detailed description of the manifest file,
 see the [manifest](manifest.en.md) docs.
 
+If the repository already exists on another machine or in an archive, use
+`dojang init --from` instead.  The
+[bootstrap guide] covers local and configured external transports.
+
 [#4]: https://github.com/dahlia/dojang/issues/4
+[bootstrap guide]: bootstrap.en.md
 
 
 Checking things out

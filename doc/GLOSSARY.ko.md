@@ -24,10 +24,13 @@
 | alias                        | 별칭                       | 파일 시스템 경로의 별칭을 포함합니다.                                                        |
 | application, apply           | 적용, 적용하다             | 명령 이름 `dojang apply`는 그대로 씁니다.                                                    |
 | architecture                 | 프로세서 아키텍처          | `arch` 식별자는 그대로 씁니다.                                                               |
+| archive                      | 아카이브                   | `.zip`, `.tar`, `.tar.gz`, `.tgz` 형식의 저장소 묶음을 뜻합니다.                             |
 | baseline                     | 기준 사본                  | 고아 상태 판정에 쓰는 보존된 사본을 뜻합니다.                                                |
 | backend                      | 백엔드                     | 비밀 값 코덱의 외부 명령 구현을 뜻합니다.                                                    |
 | backend protocol             | 백엔드 프로토콜            | 코덱 백엔드와 주고받는 구조화된 표준 입출력 규약을 뜻합니다.                                 |
+| bootstrap                    | 부트스트랩                 | 기존 저장소를 가져와 현재 머신을 등록하고 최초 적용을 준비하는 절차를 뜻합니다.              |
 | checkout                     | 체크아웃                   |                                                                                              |
+| checksum                     | 체크섬                     | 다운로드한 파일의 무결성을 확인하는 해시 값을 뜻합니다.                                      |
 | codec                        | 코덱                       | 경로 규칙의 원본 바이트를 배치할 바이트로 변환합니다.                                        |
 | codec cache                  | 코덱 캐시                  | 원문이나 렌더링 결과가 아니라 지문과 캐시 키를 상태에 저장합니다.                            |
 | change key                   | 개정 키                    | `change-key` 필드 이름은 그대로 씁니다.                                                      |
@@ -73,9 +76,11 @@
 | overwrite                    | 덮어쓰기, 덮어쓰다         |                                                                                              |
 | portable mode                | 이식 가능한 모드           | `mode` 필드 값(`private` 등)은 그대로 씁니다.                                                |
 | provenance                   | 결정 근거                  | 단순한 출처를 뜻할 때는 “출처”로 쓸 수 있습니다.                                             |
+| quarantine                   | 격리 영역                  | 롤백 중 파일 시스템 항목을 안전하게 검사하는 비공개 임시 영역을 뜻합니다.                    |
 | record                       | 레코드, 기록하다           | 명사와 동사를 구분합니다.                                                                    |
 | reflection, reflect          | 반영, 반영하다             | 명령 이름 `dojang reflect`는 그대로 씁니다.                                                  |
 | reflection policy            | 반영 정책                  | 코덱 구현이 `identity`, `reject`, `re-add` 중 하나로 정합니다.                               |
+| regular file                 | 정규 파일                  | FIFO, 소켓, 장치 같은 특수 파일이 아닌 일반 파일을 뜻합니다.                                 |
 | rendered bytes               | 렌더링된 바이트            | 코덱의 정방향 변환 결과이며 중간 스냅샷과 대상 경로에 배치됩니다.                            |
 | registry                     | 레지스트리                 |                                                                                              |
 | repository                   | 저장소                     |                                                                                              |
@@ -99,6 +104,7 @@
 | symlink target               | 링크 대상                  | 심볼릭 링크가 가리키는 경로를 뜻합니다. 동기화 대상은 “대상 경로”로 씁니다.                  |
 | target, target file          | 대상, 대상 파일            |                                                                                              |
 | template codec               | 템플릿 코덱                | 순수한 템플릿 부분집합으로 UTF-8 원본을 렌더링합니다.                                        |
+| transport                    | 전송 방식                  | 저장소를 임시 디렉터리로 가져오는 기본 제공 또는 외부 명령 방식을 뜻합니다.                  |
 | traversal boundary           | 순회 경계                  | 링크로 배포된 디렉터리 경계를 뜻합니다.                                                      |
 | unchanged, modified, missing | 변경 없음, 수정됨, 사라짐  | 상태 표시에 사용합니다.                                                                      |
 | unmanage                     | 추적을 중단하다, 추적 해제 | 명령 이름 `dojang unmanage`는 그대로 씁니다.                                                 |

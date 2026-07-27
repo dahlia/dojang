@@ -4,17 +4,24 @@ module Dojang.TestUtils
   ( Entry (..)
   , Tree
   , makeFixtureTree
+  , requireNonUtf8FileNames
+  , supportsNonUtf8FileNames
   , withHome
   , withTempDir
   )
 where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket, finally, mask)
 import Control.Monad (forM_, unless, void)
+import Data.Char (chr)
+import GHC.IO.Exception (IOErrorType (InvalidArgument))
 
+import qualified Data.ByteString as ByteString
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.IO.Error (ioeGetErrorType, tryIOError)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (OsPath, decodeFS, encodeFS, (</>))
+import Test.Hspec (pendingWith)
 
 import Data.ByteString (ByteString)
 import Dojang.MonadFileSystem (MonadFileSystem (..))
@@ -25,6 +32,33 @@ withTempDir action = do
   withSystemTempDirectory "dojang-spec-" $ \tmpDir -> do
     tmpDir' <- encodeFS tmpDir
     action tmpDir' tmpDir
+
+
+-- | Marks a test pending when its temporary filesystem rejects filenames that
+-- are not valid UTF-8.
+requireNonUtf8FileNames :: OsPath -> IO ()
+requireNonUtf8FileNames parent =
+  supportsNonUtf8FileNames parent >>= \supported ->
+    unless supported $
+      pendingWith
+        "The filesystem rejects filenames that are not valid UTF-8."
+
+
+-- | Tests whether a directory's filesystem accepts filenames that are not
+-- valid UTF-8.
+supportsNonUtf8FileNames :: OsPath -> IO Bool
+supportsNonUtf8FileNames parent = mask $ \restore -> do
+  probeName <- encodeFS [chr 0xdc80]
+  let probe = parent </> probeName
+  tryIOError
+    (restore $ Dojang.MonadFileSystem.writeFile probe ByteString.empty)
+    >>= \case
+      Left err
+        | ioeGetErrorType err == InvalidArgument -> return False
+        | otherwise -> ioError err
+      Right () ->
+        restore (return True)
+          `finally` Dojang.MonadFileSystem.removeFile probe
 
 
 -- | Runs an action with both home-directory environment variables set to the

@@ -42,7 +42,15 @@ run = "python -m pip install --requirement doc/requirements.txt"
 
 [tasks.check]
 description = "Check code quality and documentation"
-depends = ["fmt:check", "build:fast", "doc:check", "schema:check", "effects:check"]
+depends = [
+  "fmt:check",
+  "build:fast",
+  "doc:check",
+  "schema:check",
+  "effects:check",
+  "test:installers",
+  "test:container-config",
+]
 
 [tasks.fmt]
 description = "Format Haskell and Markdown files"
@@ -69,6 +77,14 @@ run = "stack test"
 [tasks."test:fast"]
 description = "Run the test suite quickly without optimizations"
 run = "stack test --fast"
+
+[tasks."test:installers"]
+description = "Test verified release installers"
+run = "python3 scripts/test-installers.py"
+
+[tasks."test:container-config"]
+description = "Test the pinned container build configuration"
+run = "python3 scripts/test-container-build.py"
 
 [tasks.run]
 description = "Run the Dojang"

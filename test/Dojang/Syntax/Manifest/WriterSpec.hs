@@ -9,6 +9,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text, isInfixOf, unpack)
 import qualified Hedgehog.Gen as Hedgehog
 import qualified Hedgehog.Range as Range
+import qualified System.Info as Info
 import System.OsPath (encodeFS, (</>))
 import Test.Hspec
   ( Spec
@@ -422,6 +423,72 @@ spec = do
           outputPath = tmpDir </> outputName
       writeManifestFile manifest' outputPath `shouldThrow` anyIOException
       FileSystem.exists outputPath `shouldReturn` False
+
+  specify "creates manifests with ordinary file permissions" $
+    withTempDir $ \tmpDir _ -> do
+      controlName <- encodeFS "control.toml"
+      outputName <- encodeFS "dojang.toml"
+      let controlPath = tmpDir </> controlName
+          outputPath = tmpDir </> outputName
+          manifest' =
+            Manifest
+              Nothing
+              HashMap.empty
+              Map.empty
+              Map.empty
+              Map.empty
+              Map.empty
+      FileSystem.writeFile controlPath "control"
+      writeManifestFile manifest' outputPath
+      controlMode <- FileSystem.getPortableMode controlPath
+      outputMode <- FileSystem.getPortableMode outputPath
+      outputMode `shouldBe` controlMode
+      entries <- FileSystem.listDirectory tmpDir
+      length entries `shouldBe` 2
+
+  specify "preserves existing manifest permissions when rewriting" $
+    withTempDir $ \tmpDir _ -> do
+      outputName <- encodeFS "dojang.toml"
+      let outputPath = tmpDir </> outputName
+          manifest' =
+            Manifest
+              Nothing
+              HashMap.empty
+              Map.empty
+              Map.empty
+              Map.empty
+              Map.empty
+      FileSystem.writeFile outputPath "old"
+      FileSystem.setPortableMode outputPath 0o600
+      oldMode <- FileSystem.getPortableMode outputPath
+      writeManifestFile manifest' outputPath
+      newMode <- FileSystem.getPortableMode outputPath
+      newMode `shouldBe` oldMode
+      entries <- FileSystem.listDirectory tmpDir
+      length entries `shouldBe` 1
+
+  specify "writes through an existing manifest symbolic link" $
+    if Info.os == "mingw32"
+      then return ()
+      else withTempDir $ \tmpDir _ -> do
+        targetName <- encodeFS "target.toml"
+        linkName <- encodeFS "dojang.toml"
+        let targetPath = tmpDir </> targetName
+            linkPath = tmpDir </> linkName
+            manifest' =
+              Manifest
+                Nothing
+                HashMap.empty
+                Map.empty
+                Map.empty
+                Map.empty
+                Map.empty
+        FileSystem.writeFile targetPath "old"
+        FileSystem.createSymbolicLink targetPath linkPath File
+        writeManifestFile manifest' linkPath
+        FileSystem.isSymlink linkPath `shouldReturn` True
+        contents <- FileSystem.readFile targetPath
+        contents `shouldSatisfy` (/= "old")
 
   specify "preserves arbitrary manifest route semantics" $ hedgehog $ do
     manifest'@(Manifest repositoryId monikers variables routes ignores hooks) <-

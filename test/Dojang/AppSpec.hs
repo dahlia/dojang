@@ -15,6 +15,9 @@ import Data.Map.Strict qualified as Map
 
 #ifndef mingw32_HOST_OS
 import Control.Exception (bracket_)
+import System.IO.Error (isAlreadyExistsError)
+import System.Posix.Files qualified as Posix
+import System.OsPath (OsPath, decodeFS)
 #endif
 
 import Options.Applicative.Path (hyphen)
@@ -41,6 +44,15 @@ import Dojang.App
   , startAndAwaitAppProcess
   , validateRepositoryCheckout
   )
+
+
+#ifndef mingw32_HOST_OS
+import Dojang.Bootstrap (publishStagedDirectory)
+import Dojang.MonadFileSystem
+  ( createFileAtomicallyWithDefaultPermissions
+  , listDirectory
+  )
+#endif
 import Dojang.CommandEffect
   ( CommandEffect (..)
   , CommandEffectKind (ProcessExecution)
@@ -187,6 +199,8 @@ spec = sequential $ do
         ( Right $ Just "scripted-editor"
         , [EnvironmentLookup "EDITOR"]
         )
+
+  atomicPublicationSpec
 
   it "runs a command entirely through the scripted interpreter" $ do
     path <- encodeFS "."
@@ -1082,6 +1096,70 @@ spec = sequential $ do
       let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       withHome home (runAppWithoutLogging appEnv $ prepareMachineState manifest)
         `shouldThrow` (== machineStateError)
+
+#ifdef mingw32_HOST_OS
+atomicPublicationSpec :: Spec
+atomicPublicationSpec = pure ()
+#else
+atomicPublicationSpec :: Spec
+atomicPublicationSpec =
+  do
+    it "delegates atomic directory publication to the inner filesystem" $
+      withTempDir $ \tmp _ -> do
+        stagingName <- encodeFS "staging"
+        destinationName <- encodeFS "destination"
+        childName <- encodeFS "child"
+        let staging = tmp </> stagingName
+            destination = tmp </> destinationName
+            appEnv = atomicPublicationAppEnv tmp
+        createDirectories staging
+        writeFile (staging </> childName) "contents"
+        stagingPath <- decodeFS staging
+        before <- Posix.fileID <$> Posix.getFileStatus stagingPath
+        runAppResultWithoutLogging
+          appEnv
+          (publishStagedDirectory staging destination)
+          `shouldReturn` Right ()
+        destinationPath <- decodeFS destination
+        after <- Posix.fileID <$> Posix.getFileStatus destinationPath
+        after `shouldBe` before
+
+    it "delegates atomic file creation to the inner filesystem" $
+      withTempDir $ \tmp _ -> do
+        targetName <- encodeFS "target.toml"
+        destinationName <- encodeFS "dojang.toml"
+        let target = tmp </> targetName
+            destination = tmp </> destinationName
+            appEnv = atomicPublicationAppEnv tmp
+        System.Directory.OsPath.createFileLink targetName destination
+        runAppResultWithoutLogging
+          appEnv
+          ( createFileAtomicallyWithDefaultPermissions
+              destination
+              "dojang.toml.tmp"
+              "contents"
+          )
+          `shouldThrow` isAlreadyExistsError
+        System.Directory.OsPath.pathIsSymbolicLink destination
+          `shouldReturn` True
+        exists target `shouldReturn` False
+        entries <- listDirectory tmp
+        length entries `shouldBe` 1
+
+
+atomicPublicationAppEnv :: OsPath -> AppEnv
+atomicPublicationAppEnv path =
+  AppEnv
+    { sourceDirectory = path
+    , repositoryExplicit = True
+    , intermediateDirectory = Nothing
+    , stateDirectory = path
+    , manifestFile = path
+    , envFile = path
+    , dryRun = False
+    , debug = False
+    }
+#endif
 
 #ifdef mingw32_HOST_OS
 posixUnreadableRegistrySpec :: Spec

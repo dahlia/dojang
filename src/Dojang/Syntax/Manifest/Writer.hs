@@ -35,7 +35,12 @@ import qualified Data.List.NonEmpty
 import qualified Data.Map.Strict
 import Dojang.MonadFileSystem
   ( FileType (Directory)
-  , MonadFileSystem (writeFile)
+  , MonadFileSystem
+    ( createFileAtomicallyWithDefaultPermissions
+    , exists
+    , isSymlink
+    , writeFile
+    )
   )
 import Dojang.Syntax.EnvironmentPredicate.Writer (writeEnvironmentPredicate)
 import Dojang.Syntax.FilePathExpression.Parser (parseFilePathExpression)
@@ -297,7 +302,17 @@ writeManifestFile
 writeManifestFile manifest filePath =
   case writeManifest manifest of
     Left err -> throwError $ userError $ Text.unpack $ formatWriteError err
-    Right source -> writeFile filePath $ encodeUtf8 source
+    Right source -> do
+      symbolicLink <- isSymlink filePath
+      destinationExists <- exists filePath
+      let contents = encodeUtf8 source
+      if symbolicLink || destinationExists
+        then writeFile filePath contents
+        else
+          createFileAtomicallyWithDefaultPermissions
+            filePath
+            "dojang.toml.tmp"
+            contents
 
 
 mapManifest' :: Manifest -> Manifest'
