@@ -361,14 +361,14 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
   if null selected
     then do
       printStderr "No three-way merge conflicts found."
-      runPostMergeHooks paths
+      runPostMergeHooks paths ctx machineState
       return ExitSuccess
     else do
       prepared <- catMaybes <$> mapM (prepareCandidate pathStyle) selected
       if null prepared
         then do
           printStderr "No three-way merge conflicts found."
-          runPostMergeHooks paths
+          runPostMergeHooks paths ctx machineState
           return ExitSuccess
         else do
           resolvedDriver <-
@@ -403,7 +403,7 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                           <> "'."
                     Nothing ->
                       die' cliError "No merge driver is available."
-              runPostMergeHooks paths
+              runPostMergeHooks paths ctx machineState
               return ExitSuccess
             else do
               driverExecution <-
@@ -440,7 +440,7 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                   "The completed merge workspace could not be removed: "
                     <> pathStyle invocationRoot
                     <> "."
-              runPostMergeHooks paths
+              runPostMergeHooks paths ctx machineState
               return ExitSuccess
  where
   reportLookupError requested = \case
@@ -471,16 +471,19 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
 
 
 runPostMergeHooks
-  :: (MonadFileSystem i, AppEffects i) => [OsPath] -> App i ()
-runPostMergeHooks selectedPaths = do
-  ctx <- ensureContext
-  machineState <- prepareMachineState ctx.repository.manifest
+  :: (MonadFileSystem i, AppEffects i)
+  => [OsPath]
+  -> Context (App i)
+  -> MachineState
+  -> App i ()
+runPostMergeHooks selectedPaths ctx machineState = do
   hookEnv <-
-    makeHookEnv
-      "merge"
-      (CallerRelativePath <$> selectedPaths)
-      ctx
-      machineState
+    guardMergeFinalization machineState $
+      makeHookEnv
+        "merge"
+        (CallerRelativePath <$> selectedPaths)
+        ctx
+        machineState
   executeHooks hookEnv ctx PostMerge
 
 

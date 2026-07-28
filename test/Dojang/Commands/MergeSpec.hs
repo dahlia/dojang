@@ -176,6 +176,7 @@ spec = sequential $ do
           `shouldReturn` Right Nothing
 
     posixConcurrentForgetSpec
+    posixLinkedWorkspaceCreationSpec
 
     it "selects either authoritative endpoint for arbitrary conflicts" $
       hedgehog $ do
@@ -500,6 +501,60 @@ spec = sequential $ do
             machineId
         state.targetRecords `shouldBe` Map.empty
         pendingPublicationCount fixture `shouldReturn` 1
+
+    it "does not recreate state for post-merge hooks after forget" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            publishThenForget ctx stale managed = do
+              persistMergedTarget ctx stale managed
+              machineResult <-
+                readMachineId fixture.fixtureEnv.stateDirectory
+              machineId <- case machineResult of
+                Right (Just identifier) -> return identifier
+                result ->
+                  throwError $
+                    userError $
+                      "Unexpected machine identity: " <> show result
+              workspaceRoot <-
+                mergeWorkspaceRepositoryRoot
+                  fixture.fixtureEnv.stateDirectory
+                  fixture.fixtureRepositoryId
+              forgotten <-
+                forgetRepositoryStateWith
+                  fixture.fixtureEnv.stateDirectory
+                  fixture.fixtureRepositoryId
+                  machineId
+                  ( const $ do
+                      removeDirectoryRecursively $
+                        takeDirectory fixture.basePath
+                      removeDirectoryRecursively workspaceRoot
+                  )
+              case forgotten of
+                Left err -> throwError $ userError $ show err
+                Right Nothing ->
+                  throwError $ userError "repository state disappeared"
+                Right (Just ()) -> return ()
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              publishThenForget
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        readRepositoryState
+          fixture.fixtureEnv.stateDirectory
+          fixture.fixtureRepositoryId
+          machineId
+          `shouldReturn` Right Nothing
 
     it "repairs destination mode before retrying target publication" $
       withFixture $ \fixture -> do
@@ -1025,6 +1080,10 @@ spec = sequential $ do
 #ifdef mingw32_HOST_OS
 posixConcurrentForgetSpec :: Spec
 posixConcurrentForgetSpec = return ()
+
+
+posixLinkedWorkspaceCreationSpec :: Spec
+posixLinkedWorkspaceCreationSpec = return ()
 #else
 posixConcurrentForgetSpec :: Spec
 posixConcurrentForgetSpec =
@@ -1085,6 +1144,31 @@ posixConcurrentForgetSpec =
           fail $ "Merge unexpectedly returned " <> show result <> "."
         Nothing -> fail "Merge did not finish after concurrent forget."
       exists workspaceRoot `shouldReturn` False
+
+
+posixLinkedWorkspaceCreationSpec :: Spec
+posixLinkedWorkspaceCreationSpec =
+  it "rejects a linked merge-workspace ancestor before creation" $
+    withFixture $ \fixture -> do
+      _ <-
+        runAppWithoutLogging fixture.fixtureEnv $
+          prepareMachineState fixture.fixtureManifest
+      workspaceRoot <-
+        mergeWorkspaceRepositoryRoot
+          fixture.fixtureEnv.stateDirectory
+          fixture.fixtureRepositoryId
+      externalName <- encodeFS "external-merge-workspaces"
+      let workspaceStore = takeDirectory workspaceRoot
+          externalStore =
+            takeDirectory fixture.fixtureEnv.sourceDirectory </> externalName
+      createDirectories externalStore
+      Exception.bracket
+        (OsDirectory.createDirectoryLink externalStore workspaceStore)
+        (const $ OsDirectory.removeDirectoryLink workspaceStore)
+        $ \_ -> do
+          mergeWith fixture (error "linked workspace ran a driver")
+            `shouldThrow` (== fileWriteError)
+          listDirectory externalStore `shouldReturn` []
 #endif
 
 

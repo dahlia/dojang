@@ -19,7 +19,9 @@ To be released.
     final replica writes hold the repository-generation lock, and target
     publication revalidates that generation under the same lock used for its
     state update, so concurrent forgetting or recreation cannot accept stale
-    merge work or leave a workspace after forgetting succeeds.  It commits
+    merge work or leave a workspace after forgetting succeeds.  Post-merge
+    hook setup reuses and validates the captured generation, so it cannot
+    recreate state or launch hooks after forgetting completes.  It commits
     source, destination, then intermediate, and rechecks both content
     convergence and declared destination/intermediate modes before publishing
     machine state.  It records successful targets as updated by `merge` and

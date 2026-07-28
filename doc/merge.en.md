@@ -102,7 +102,10 @@ result.  Invocation-workspace creation and final replica writes hold the
 repository-generation lock, so `dojang forget` cannot approve deletion between
 workspace cleanup and recreation or while a merge commit is in progress.
 Target publication checks the captured generation again under its state-update
-lock and rejects data from a forgotten and recreated generation.
+lock and rejects data from a forgotten and recreated generation.  Post-merge
+hook setup reuses and validates the captured context and generation instead of
+preparing new machine state, so forgetting first prevents hook launch without
+recreating state.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before

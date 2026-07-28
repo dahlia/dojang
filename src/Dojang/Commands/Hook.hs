@@ -496,7 +496,7 @@ executeHook hookEnv variableGetter hookType hook = do
                 identifier
                 hook
                 workingDirectory
-                (startRegisteredHook hookEnv)
+                startCurrentGeneration
             return ()
           _ -> case executionKey of
             Nothing ->
