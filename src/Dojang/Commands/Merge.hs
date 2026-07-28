@@ -108,6 +108,7 @@ import Dojang.Types.MachineState
   ( MachineState (..)
   , formatStateError
   , updateManagedTargetsWith
+  , withRepositoryStateGeneration
   )
 import Dojang.Types.ManagedTarget
   ( ManagedTarget (..)
@@ -412,23 +413,27 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
               (invocationRoot, invocationIdentity) <-
                 createInvocationRoot machineState
                   `catchError` reportMergeFilesystemError
-              processPrepared
-                pathStyle
-                publishTarget
-                prepare
-                runDriver
-                driverExecution
-                machineState
-                invocationRoot
-                prepared
-              cleaned <-
-                removeDirectoryRecursivelyIfIdentity
+              workspacesCleaned <-
+                processPrepared
+                  pathStyle
+                  publishTarget
+                  prepare
+                  runDriver
+                  driverExecution
+                  machineState
                   invocationRoot
-                  invocationIdentity
-                  `catchError` reportFinalCleanupError
-                    pathStyle
-                    invocationRoot
-              unless cleaned $
+                  prepared
+              invocationCleaned <-
+                if workspacesCleaned
+                  then
+                    removeDirectoryRecursivelyIfIdentity
+                      invocationRoot
+                      invocationIdentity
+                      `catchError` reportFinalCleanupError
+                        pathStyle
+                        invocationRoot
+                  else return False
+              unless invocationCleaned $
                 printStderr' Warning $
                   "The completed merge workspace could not be removed: "
                     <> pathStyle invocationRoot
@@ -796,7 +801,7 @@ processPrepared
   -> MachineState
   -> OsPath
   -> [PreparedMerge]
-  -> App i ()
+  -> App i Bool
 processPrepared
   pathStyle
   publishTarget
@@ -806,140 +811,144 @@ processPrepared
   expectedState
   invocationRoot
   prepared =
-    forM_ (zip [(1 :: Int) ..] prepared) $ \(index, item) -> do
-      workspaceName <- encodePath $ "conflict-" <> show index
-      let workspaceRoot = invocationRoot </> workspaceName
-      workspace <-
-        prepareWorkspace
-          workspaceRoot
-          item.source
-          item.base
-          item.destination
-          `catchError` reportPreparationError pathStyle workspaceRoot
-      workspaceIdentity <-
-        requireIdentity workspace.root `catchError` \err -> do
-          printRetained pathStyle workspace.root
-          reportMergeFilesystemError err
-      let retainAndReport :: IOError -> App i ()
-          retainAndReport err = do
-            printRetained pathStyle workspace.root
-            reportMergeFilesystemError err
-          retainAndAbort :: ExitCode -> App i ()
-          retainAndAbort exitCode = do
-            printRetained pathStyle workspace.root
-            abortCommand exitCode
-          runWorkspace :: App i ()
-          runWorkspace = case item.action of
-            RecoverMergeReplicas -> do
-              (refreshedCtx, refreshedState, refreshedManaged) <-
-                refreshMergePolicy pathStyle expectedState item.managed
-              printStderr $
-                "Finishing merged baseline for "
-                  <> pathStyle item.managed.correspondence.source.path
-                  <> "..."
-              pending <-
-                createPendingPublication
-                  workspace
-                  workspaceIdentity
-                  refreshedCtx
-                  refreshedManaged
-              committed <-
-                commitMergeRecoveryGuarded
-                  (printCommitStep pathStyle refreshedManaged)
-                  refreshedManaged.route.mode
-                  item.source
-                  item.base
-                  item.destination
-              whenLeft committed $ removePendingMarker pending.marker
-              reportCommitResult committed
-              publishTarget
-                refreshedCtx
-                refreshedState
-                refreshedManaged
-              completePublication
-                pathStyle
-                pending
-                item.pendingPublications
-              cleanWorkspace workspace workspaceIdentity
-            PublishMergedTarget -> do
-              (refreshedCtx, refreshedState, refreshedManaged) <-
-                refreshMergePolicy pathStyle expectedState item.managed
-              printStderr $
-                "Publishing merged target for "
-                  <> pathStyle item.managed.correspondence.source.path
-                  <> "..."
-              pending <-
-                createPendingPublication
-                  workspace
-                  workspaceIdentity
-                  refreshedCtx
-                  refreshedManaged
-              publishTarget
-                refreshedCtx
-                refreshedState
-                refreshedManaged
-              completePublication
-                pathStyle
-                pending
-                item.pendingPublications
-              cleanWorkspace workspace workspaceIdentity
-            RunMergeDriver -> do
-              case driverExecution of
-                Nothing ->
-                  die' cliError "No merge driver is available."
-                Just execution -> do
-                  let driver = execution.resolved
-                  request <-
-                    workspaceProcessRequest
-                      driver.platform
-                      execution.hostEnvironment
-                      driver.specification
-                      workspace
-                  printStderr $
-                    "Running merge driver '"
-                      <> renderMergeDriverName driver.name
-                      <> "' for "
-                      <> pathStyle item.managed.correspondence.source.path
-                      <> "..."
-                  processResult <- runDriver request
-                  ensureDriverResolved driver.specification processResult
-                  resultRead <- readMergeResult workspace.result
-                  result <-
-                    either
-                      ( die' externalProgramNonZeroExit
-                          . formatResultError pathStyle
-                      )
-                      return
-                      resultRead
-                  (refreshedCtx, refreshedState, refreshedManaged) <-
-                    refreshMergePolicy pathStyle expectedState item.managed
-                  pending <-
-                    createPendingPublication
-                      workspace
-                      workspaceIdentity
+    and
+      <$> forM
+        (zip [(1 :: Int) ..] prepared)
+        ( \(index, item) -> do
+            workspaceName <- encodePath $ "conflict-" <> show index
+            let workspaceRoot = invocationRoot </> workspaceName
+            workspace <-
+              prepareWorkspace
+                workspaceRoot
+                item.source
+                item.base
+                item.destination
+                `catchError` reportPreparationError pathStyle workspaceRoot
+            workspaceIdentity <-
+              requireIdentity workspace.root `catchError` \err -> do
+                printRetained pathStyle workspace.root
+                reportMergeFilesystemError err
+            let retainAndReport :: IOError -> App i Bool
+                retainAndReport err = do
+                  printRetained pathStyle workspace.root
+                  reportMergeFilesystemError err
+                retainAndAbort :: ExitCode -> App i Bool
+                retainAndAbort exitCode = do
+                  printRetained pathStyle workspace.root
+                  abortCommand exitCode
+                runWorkspace :: App i Bool
+                runWorkspace = case item.action of
+                  RecoverMergeReplicas -> do
+                    (refreshedCtx, refreshedState, refreshedManaged) <-
+                      refreshMergePolicy pathStyle expectedState item.managed
+                    printStderr $
+                      "Finishing merged baseline for "
+                        <> pathStyle item.managed.correspondence.source.path
+                        <> "..."
+                    pending <-
+                      createPendingPublication
+                        workspace
+                        workspaceIdentity
+                        refreshedCtx
+                        refreshedManaged
+                    committed <-
+                      guardMergeFinalization refreshedState $
+                        commitMergeRecoveryGuarded
+                          (printCommitStep pathStyle refreshedManaged)
+                          refreshedManaged.route.mode
+                          item.source
+                          item.base
+                          item.destination
+                    reportCommitResult committed
+                    publishTarget
                       refreshedCtx
+                      refreshedState
                       refreshedManaged
-                  committed <-
-                    commitMergeResultGuarded
-                      (printCommitStep pathStyle refreshedManaged)
-                      refreshedManaged.route.mode
-                      item.source
-                      item.base
-                      item.destination
-                      result
-                  whenLeft committed $ removePendingMarker pending.marker
-                  reportCommitResult committed
-                  publishTarget
-                    refreshedCtx
-                    refreshedState
-                    refreshedManaged
-                  completePublication
-                    pathStyle
-                    pending
-                    item.pendingPublications
-                  cleanWorkspace workspace workspaceIdentity
-      catchCommandExit runWorkspace retainAndAbort
-        `catchError` retainAndReport
+                    completePublication
+                      pathStyle
+                      pending
+                      item.pendingPublications
+                    cleanWorkspace workspace workspaceIdentity
+                  PublishMergedTarget -> do
+                    (refreshedCtx, refreshedState, refreshedManaged) <-
+                      refreshMergePolicy pathStyle expectedState item.managed
+                    printStderr $
+                      "Publishing merged target for "
+                        <> pathStyle item.managed.correspondence.source.path
+                        <> "..."
+                    pending <-
+                      createPendingPublication
+                        workspace
+                        workspaceIdentity
+                        refreshedCtx
+                        refreshedManaged
+                    publishTarget
+                      refreshedCtx
+                      refreshedState
+                      refreshedManaged
+                    completePublication
+                      pathStyle
+                      pending
+                      item.pendingPublications
+                    cleanWorkspace workspace workspaceIdentity
+                  RunMergeDriver -> do
+                    case driverExecution of
+                      Nothing ->
+                        die' cliError "No merge driver is available."
+                      Just execution -> do
+                        let driver = execution.resolved
+                        request <-
+                          workspaceProcessRequest
+                            driver.platform
+                            execution.hostEnvironment
+                            driver.specification
+                            workspace
+                        printStderr $
+                          "Running merge driver '"
+                            <> renderMergeDriverName driver.name
+                            <> "' for "
+                            <> pathStyle item.managed.correspondence.source.path
+                            <> "..."
+                        processResult <- runDriver request
+                        ensureDriverResolved driver.specification processResult
+                        resultRead <- readMergeResult workspace.result
+                        result <-
+                          either
+                            ( die' externalProgramNonZeroExit
+                                . formatResultError pathStyle
+                            )
+                            return
+                            resultRead
+                        (refreshedCtx, refreshedState, refreshedManaged) <-
+                          refreshMergePolicy pathStyle expectedState item.managed
+                        pending <-
+                          createPendingPublication
+                            workspace
+                            workspaceIdentity
+                            refreshedCtx
+                            refreshedManaged
+                        committed <-
+                          guardMergeFinalization refreshedState $
+                            commitMergeResultGuarded
+                              (printCommitStep pathStyle refreshedManaged)
+                              refreshedManaged.route.mode
+                              item.source
+                              item.base
+                              item.destination
+                              result
+                        reportCommitResult committed
+                        publishTarget
+                          refreshedCtx
+                          refreshedState
+                          refreshedManaged
+                        completePublication
+                          pathStyle
+                          pending
+                          item.pendingPublications
+                        cleanWorkspace workspace workspaceIdentity
+            catchCommandExit runWorkspace retainAndAbort
+              `catchError` retainAndReport
+        )
    where
     reportCommitResult :: Either MergeCommitError () -> App i ()
     reportCommitResult = \case
@@ -954,7 +963,7 @@ processPrepared
         die' conflictError $
           "Source and destination no longer contain the same merged result."
       Right () -> return ()
-    cleanWorkspace :: MergeWorkspace -> FileIdentity -> App i ()
+    cleanWorkspace :: MergeWorkspace -> FileIdentity -> App i Bool
     cleanWorkspace workspace workspaceIdentity = do
       cleaned <-
         removeDirectoryRecursivelyIfIdentity
@@ -965,12 +974,7 @@ processPrepared
           "The completed merge workspace could not be removed: "
             <> pathStyle workspace.root
             <> "."
-    whenLeft :: Either a b -> App i () -> App i ()
-    whenLeft value action = case value of
-      Left _ -> action
-      Right _ -> return ()
-
-
+      return cleaned
 refreshMergePolicy
   :: (MonadFileSystem i, AppEffects i)
   => (OsPath -> Text)
@@ -1027,6 +1031,19 @@ sameMergePolicy expected refreshed =
  where
   samePath left right =
     pathIdentityComponents left == pathIdentityComponents right
+
+
+guardMergeFinalization
+  :: (MonadFileSystem i, AppEffects i)
+  => MachineState
+  -> App i result
+  -> App i result
+guardMergeFinalization machineState action = do
+  root <- asks (.stateDirectory)
+  guarded <- withRepositoryStateGeneration root machineState action
+  case guarded of
+    Left err -> die' machineStateError $ formatStateError err
+    Right result -> return result
 
 
 workspaceProcessRequest

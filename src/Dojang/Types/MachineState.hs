@@ -3098,6 +3098,8 @@ validateRepositoryStateGeneration expected actual
 -- The generation is checked under the repository lock, and the supplied action
 -- runs before that lock is released.  This gives callers a linearization point
 -- for effects that must not start after a concurrent repository forget.
+-- Filesystem errors raised by the supplied action remain in their original
+-- error channel rather than being reclassified as machine-state failures.
 withRepositoryStateGeneration
   :: (MonadFileSystem m)
   => OsPath
@@ -3108,9 +3110,23 @@ withRepositoryStateGeneration
   -- ^ Effect to start while the repository lock remains held.
   -> m (Either StateError a)
   -- ^ Effect result, or an error when the captured generation is stale.
-withRepositoryStateGeneration root expected action = catchStateIOErrors $ do
-  createDirectories $ repositoryStateDirectory root expected.repositoryId
-  withFileLock (repositoryStateLockPath root expected.repositoryId) $ do
+withRepositoryStateGeneration root expected action = do
+  prepared <-
+    catchStateIOErrors $ do
+      createDirectories $ repositoryStateDirectory root expected.repositoryId
+      return $ Right ()
+  case prepared of
+    Left err -> return $ Left err
+    Right () -> do
+      locked <-
+        withStateFileLock
+          (repositoryStateLockPath root expected.repositoryId)
+          runGuarded
+      case locked of
+        Left err -> return $ Left err
+        Right result -> return result
+ where
+  runGuarded = do
     forgetting <- isRepositoryForgetInProgress root expected.repositoryId
     case forgetting of
       Left err -> return $ Left err
@@ -3156,12 +3172,13 @@ updateManagedTargets root now state update = do
 -- | Changes managed-target records and journals locked post-write cleanup.
 --
 -- The current record is reloaded before the update callback.  Any cleanup left
--- by an earlier update is retried first.  New cleanup paths are published with
--- the changed records, removed while the repository lock remains held, and
--- cleared by a second atomic state write.  If cleanup or that final write
--- fails, the published journal makes the work retryable.  If initial
--- publication fails, the rollback callback removes resources created by the
--- update callback.
+-- by an earlier update is retried first, but only after the caller's captured
+-- repository generation is verified under the lock.  New cleanup paths are
+-- published with the changed records, removed while the repository lock
+-- remains held, and cleared by a second atomic state write.  If cleanup or that
+-- final write fails, the published journal makes the work retryable.  If
+-- initial publication fails, the rollback callback removes resources created
+-- by the update callback.
 updateManagedTargetsWith
   :: (MonadFileSystem m)
   => OsPath
@@ -3186,33 +3203,36 @@ updateManagedTargetsWith root now state update cleanupPaths afterPublish rollbac
           case loaded of
             Left err -> return $ Left err
             Right Nothing -> return $ Left $ MissingRepositoryState state.repositoryId
-            Right (Just current) -> do
-              current' <- retryManagedTargetCleanupUnlocked root current
-              (records, result) <- update current'.targetRecords
-              let updatedWithoutCleanup =
-                    current'
-                      { targetRecords = records
-                      , updatedTime = now
-                      }
-              let pending = nub $ cleanupPaths updatedWithoutCleanup result
-              if any (not . validCleanupPath updatedWithoutCleanup) pending
-                then do
-                  rollback current' result
-                  return $
-                    Left $
-                      MalformedState
-                        "A managed-target update tried to clean outside its snapshot roots."
-                else do
-                  let published =
-                        updatedWithoutCleanup{pendingCleanupPaths = pending}
-                  writeState root published `catchError` \err -> do
-                    rollback current' result
-                    throwError err
-                  afterPublish published result
-                  cleanupManagedTargetPaths published pending
-                  let completed = published{pendingCleanupPaths = []}
-                  unless (null pending) $ writeState root completed
-                  return $ Right (completed, result)
+            Right (Just current) ->
+              case validateRepositoryStateGeneration state current of
+                Left err -> return $ Left err
+                Right () -> do
+                  current' <- retryManagedTargetCleanupUnlocked root current
+                  (records, result) <- update current'.targetRecords
+                  let updatedWithoutCleanup =
+                        current'
+                          { targetRecords = records
+                          , updatedTime = now
+                          }
+                  let pending = nub $ cleanupPaths updatedWithoutCleanup result
+                  if any (not . validCleanupPath updatedWithoutCleanup) pending
+                    then do
+                      rollback current' result
+                      return $
+                        Left $
+                          MalformedState
+                            "A managed-target update tried to clean outside its snapshot roots."
+                    else do
+                      let published =
+                            updatedWithoutCleanup{pendingCleanupPaths = pending}
+                      writeState root published `catchError` \err -> do
+                        rollback current' result
+                        throwError err
+                      afterPublish published result
+                      cleanupManagedTargetPaths published pending
+                      let completed = published{pendingCleanupPaths = []}
+                      unless (null pending) $ writeState root completed
+                      return $ Right (completed, result)
 
 
 -- | Retries cleanup recorded by a previously published managed-target update.

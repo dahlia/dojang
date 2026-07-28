@@ -15,26 +15,31 @@ To be released.
     allowlists, and exit-code classifications.  Dojang validates every
     selected conflict before starting a driver, rechecks authoritative inputs
     before each write, and rejects results if the route or repository-state
-    identity changes while its driver runs.  It commits source, destination,
-    then intermediate, rechecks convergence before publishing machine state,
-    records successful targets as updated by `merge`, and recognizes an
-    interrupted final write or destination/intermediate mode update when the
-    command is retried.  Failed, unresolved, and canceled workspaces remain
-    available for recovery until `dojang forget` removes them.  Workspace
-    cleanup validates the directory and its complete ancestor chain before
-    recursive removal, so a symbolic link cannot redirect deletion outside
-    machine-local state.  Partial workspace setup is cleaned when possible,
-    and later filesystem failures retain recovery data and use exit status 2.
-    Final invocation cleanup failures use the same status and identify the
-    workspace root to inspect.  Input read failures are reported as conflicts,
-    while unreadable driver results are rejected before replica writes and use
-    exit status 4.  Retried merges find pending publication markers without
-    descending into driver-created workspace subdirectories.  Driver outcome
-    codes are limited to the portable range 1–255.  The command supports
-    source, destination, and directory selectors, `--driver`, `--driver-file`,
-    `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version 0.3 supports
-    identity-copy routes whose three replicas are regular UTF-8 files.
-    [[#48], [#75]]
+    identity changes while its driver runs.  Final replica writes hold the
+    repository-generation lock, and target publication revalidates that
+    generation under the same lock used for its state update, so concurrent
+    forgetting or recreation cannot accept stale merge work.  It commits
+    source, destination, then intermediate, rechecks convergence before
+    publishing machine state, records successful targets as updated by
+    `merge`, and recognizes an interrupted final write or
+    destination/intermediate mode update when the command is retried.  Pending
+    publication markers survive guarded commit aborts and are removed only
+    after target publication completes.  Failed, unresolved, and canceled
+    workspaces remain available for recovery until `dojang forget` removes
+    them.  Workspace cleanup validates the directory and its complete ancestor
+    chain before recursive removal, so a symbolic link cannot redirect
+    deletion outside machine-local state.  Partial workspace setup is cleaned
+    when possible, and later filesystem failures retain recovery data and use
+    exit status 2.  Final invocation cleanup failures use the same status and
+    identify the workspace root to inspect.  Input read failures are reported
+    as conflicts, while unreadable driver results are rejected before replica
+    writes and use exit status 4.  Retried merges find pending publication
+    markers without descending into driver-created workspace subdirectories.
+    Driver outcome codes are limited to the portable range 1–255.  The command
+    supports source, destination, and directory selectors, `--driver`,
+    `--driver-file`, `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version
+    0.3 supports identity-copy routes whose three replicas are regular UTF-8
+    files.  [[#48], [#75]]
 
  -  Added `dojang init --from SOURCE` to acquire, validate, enroll, and
     optionally apply an existing repository in one command.  Local directories

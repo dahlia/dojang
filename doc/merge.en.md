@@ -98,7 +98,10 @@ bytes, identities, and modes observed during validation.  After the driver
 exits, it also reloads the routing context and rejects the result if the
 selected route or its resolved paths, kind, mode, codec, or provenance changed.
 A changed repository, machine, or state generation identity also rejects the
-result.
+result.  Final replica writes hold the repository-generation lock, so
+`dojang forget` cannot approve deletion while a merge commit is in progress.
+Target publication checks the captured generation again under its state-update
+lock and rejects data from a forgotten and recreated generation.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
@@ -114,6 +117,9 @@ complete ancestor chain, and refuses cleanup if a symbolic link could redirect
 deletion outside machine-local state.
 Immediately before publishing machine state, Dojang re-observes all three
 replicas.  Lost convergence reports a conflict and keeps the recovery journal.
+The pending-publication marker also remains after a guarded commit abort and is
+removed only after target publication succeeds, so a later converged state can
+still repair its machine-state record.
 Pending-publication recovery scans only the known invocation and conflict
 directory levels; it does not recurse into subdirectories created by a driver.
 Workspace setup removes partial private copies when possible.  Later filesystem

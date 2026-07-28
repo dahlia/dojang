@@ -83,6 +83,8 @@ import Dojang.Types.FileRoute
   )
 import Dojang.Types.MachineState
   ( MachineState (targetRecords)
+  , forgetRepositoryStateWith
+  , markRepositoryForgetInProgress
   , readMachineId
   , readRepositoryState
   )
@@ -251,6 +253,25 @@ spec = sequential $ do
           machineId
           `shouldReturn` Right Nothing
 
+    it "does not commit replicas after forget is approved" $
+      withFixture $ \fixture -> do
+        let runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              marked <-
+                markRepositoryForgetInProgress
+                  fixture.fixtureEnv.stateDirectory
+                  fixture.fixtureRepositoryId
+              case marked of
+                Left err -> throwError $ userError $ show err
+                Right () -> return ()
+              return $ ProcessCompleted ExitSuccess "" ""
+        mergeWith fixture runner `shouldThrow` (== machineStateError)
+        readReplicas fixture
+          `shouldReturn` ["source", "base", "destination"]
+        pendingPublicationCount fixture `shouldReturn` 1
+
     it "retries a merge whose baseline mode update was interrupted" $
       withFixture $ \fixture -> do
         let merged = "merged"
@@ -381,6 +402,84 @@ spec = sequential $ do
               []
           )
           `shouldReturn` ExitSuccess
+
+    it "retains publication after a guarded baseline abort" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              writeFile fixture.basePath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+        mergeWith fixture runner `shouldThrow` (== conflictError)
+        readReplicas fixture
+          `shouldReturn` ["source", merged, "destination"]
+        pendingPublicationCount fixture `shouldReturn` 1
+        writeFile fixture.sourcePath merged
+        writeFile fixture.destinationPath merged
+        removeFile fixture.fixtureConfigPath
+        mergeWith fixture (error "publication retry ran a driver")
+          `shouldReturn` ExitSuccess
+        pendingPublicationCount fixture `shouldReturn` 0
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        Right (Just state) <-
+          readRepositoryState
+            fixture.fixtureEnv.stateDirectory
+            fixture.fixtureRepositoryId
+            machineId
+        ((.updatedBy) <$> Map.elems state.targetRecords)
+          `shouldBe` [Merged]
+
+    it "does not publish a target into a recreated generation" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            publishAfterRecreation ctx stale managed = do
+              machineResult <-
+                readMachineId fixture.fixtureEnv.stateDirectory
+              machineId <- case machineResult of
+                Right (Just identifier) -> return identifier
+                result ->
+                  throwError $
+                    userError $
+                      "Unexpected machine identity: " <> show result
+              forgotten <-
+                forgetRepositoryStateWith
+                  fixture.fixtureEnv.stateDirectory
+                  fixture.fixtureRepositoryId
+                  machineId
+                  (const $ removeDirectoryRecursively $ takeDirectory fixture.basePath)
+              case forgotten of
+                Left err -> throwError $ userError $ show err
+                Right Nothing ->
+                  throwError $ userError "repository state disappeared"
+                Right (Just ()) -> return ()
+              _ <- prepareMachineState fixture.fixtureManifest
+              persistMergedTarget ctx stale managed
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              publishAfterRecreation
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        Right (Just state) <-
+          readRepositoryState
+            fixture.fixtureEnv.stateDirectory
+            fixture.fixtureRepositoryId
+            machineId
+        state.targetRecords `shouldBe` Map.empty
+        pendingPublicationCount fixture `shouldReturn` 1
 
     it "repairs destination mode before retrying target publication" $
       withFixture $ \fixture -> do
@@ -564,6 +663,42 @@ spec = sequential $ do
                 `shouldThrow` (== fileWriteError)
             )
           readReplicas fixture `shouldReturn` replicate 3 "merged"
+
+    it "retains a workspace replaced before cleanup" $
+      withFixture $ \fixture -> do
+        workspaceRef <- newIORef Nothing
+        sentinelName <- encodeFS "replacement"
+        let runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              let Just workspace = request.workingDirectory
+              workspacePath <- encodePath workspace
+              liftApp $ writeIORef workspaceRef $ Just workspacePath
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+            publisher context machineState managed = do
+              persistMergedTarget context machineState managed
+              workspace <-
+                liftApp $
+                  readIORef workspaceRef
+                    >>= maybe (fail "driver did not run") return
+              removeDirectoryRecursively workspace
+              createPrivateDirectory workspace
+              writeFile (workspace </> sentinelName) "replacement"
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              publisher
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldReturn` ExitSuccess
+        workspace <-
+          readIORef workspaceRef
+            >>= maybe (fail "driver did not run") return
+        OsDirectory.doesFileExist (workspace </> sentinelName)
+          `shouldReturn` True
 
     it "does not traverse driver-created retained workspace subtrees" $
       if os == "mingw32"

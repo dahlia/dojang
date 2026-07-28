@@ -2911,6 +2911,47 @@ spec = do
         current <- takeMVar observed
         Map.member target.targetId current `shouldBe` True
 
+    it "rejects target updates from a stale repository generation" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        stale <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        forgetRepositoryStateWith
+          paths.root
+          paths.repositoryId
+          paths.machineId
+          (removeDirectoryRecursively . takeDirectory . (.intermediatePath))
+          >>= (`shouldBe` Right (Just ()))
+        recreatedResult <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        recreated <- case recreatedResult of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show recreatedResult
+        updateManagedTargets paths.root fixtureTime stale id
+          `shouldReturn` Left
+            ( RepositoryStateGenerationMismatch
+                paths.repositoryId
+                stale.generationId
+                recreated.generationId
+            )
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just recreated)
+
     it "holds the repository lock through post-write snapshot cleanup" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp
