@@ -629,6 +629,9 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase
       . createFileAtomicallyWithDefaultPermissions path template
   replaceFile source = liftCommandEffectBase . replaceFile source
+  replaceFileIfSnapshot snapshot modeSnapshot contents source =
+    liftCommandEffectBase
+      . replaceFileIfSnapshot snapshot modeSnapshot contents source
   renameDirectory source =
     liftCommandEffectBase . renameDirectory source
   writeTemporaryFile directory template =
@@ -649,6 +652,7 @@ instance MonadFileSystem CommandEffectTest where
   removeDirectoryRecursivelyIfIdentity path =
     liftCommandEffectBase . removeDirectoryRecursivelyIfIdentity path
   listDirectory = liftCommandEffectBase . listDirectory
+  listDirectoryPinned = liftCommandEffectBase . listDirectoryPinned
   getFileSize = liftCommandEffectBase . getFileSize
   getFileIdentity = liftCommandEffectBase . getFileIdentity
   getFileSnapshot = liftCommandEffectBase . getFileSnapshot

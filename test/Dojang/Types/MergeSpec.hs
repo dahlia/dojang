@@ -15,6 +15,7 @@ import Control.Monad.Except
   , tryError
   )
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Data.ByteString qualified as ByteString
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List.NonEmpty qualified as NonEmpty
@@ -373,6 +374,52 @@ spec = do
         FileSystem.readFile destination.path `shouldReturn` concurrent
         FileSystem.readFile base.path `shouldReturn` base.contents
 
+    it "preserves a source edit made while its result is staged" $
+      withThreeInputs $ \source base destination -> do
+        let result = "merged"
+            concurrent = "concurrent"
+        committed <-
+          runRacingCommitIO
+            (ChangeWhileStaging source.path concurrent)
+            ( commitMergeResultGuarded
+                (const $ return ())
+                DefaultMode
+                source
+                base
+                destination
+                result
+            )
+        committed
+          `shouldBe` Right
+            (Left $ MergeInputsChanged $ NonEmpty.singleton SourceInput)
+        FileSystem.readFile source.path `shouldReturn` concurrent
+        FileSystem.readFile destination.path
+          `shouldReturn` destination.contents
+        FileSystem.readFile base.path `shouldReturn` base.contents
+
+    symlinkIt "does not apply a declared mode through a replacement link" $
+      withThreeInputs $ \source base destination -> do
+        externalName <- encodeFS "external"
+        let external = takeDirectory source.path </> externalName
+        FileSystem.writeFile external "external"
+        FileSystem.setPortableMode external 0o600
+        committed <-
+          runRacingCommitIO
+            (ReplaceBeforeMode destination.path external)
+            ( commitMergeResultGuarded
+                (const $ return ())
+                ReadOnly
+                source
+                base
+                destination
+                "merged"
+            )
+        committed `shouldBe` Right (Right ())
+        FileSystem.isSymlink destination.path `shouldReturn` False
+        FileSystem.readFile external `shouldReturn` "external"
+        externalMode <- FileSystem.getPortableMode external
+        externalMode.posixBits `shouldSatisfy` maybe True (== 0o600)
+
     it "leaves the baseline old when its write step fails" $
       withThreeInputs $ \source base destination -> do
         let result = "merged"
@@ -494,6 +541,35 @@ spec = do
       satisfiesPortableMode destinationMode expectedMode === True
       satisfiesPortableMode baseMode expectedMode === True
 
+    symlinkIt "does not restore a mode through a replacement link" $
+      withThreeInputs $ \source base destination -> do
+        let result = "merged"
+        FileSystem.writeFile source.path result
+        FileSystem.writeFile destination.path result
+        Right refreshedSource <-
+          observeMergeTextInput SourceInput source.path
+        Right refreshedDestination <-
+          observeMergeTextInput DestinationInput destination.path
+        externalName <- encodeFS "recovery-external"
+        let external = takeDirectory source.path </> externalName
+        FileSystem.writeFile external "external"
+        FileSystem.setPortableMode external 0o600
+        committed <-
+          runRacingCommitIO
+            (ReplaceBeforeMode destination.path external)
+            ( commitMergeRecoveryGuarded
+                (const $ return ())
+                ReadOnly
+                refreshedSource
+                base
+                refreshedDestination
+            )
+        committed `shouldBe` Right (Right ())
+        FileSystem.isSymlink destination.path `shouldReturn` False
+        FileSystem.readFile external `shouldReturn` "external"
+        externalMode <- FileSystem.getPortableMode external
+        externalMode.posixBits `shouldSatisfy` maybe True (== 0o600)
+
 
 utf8Text :: Gen ByteString.ByteString
 utf8Text =
@@ -549,6 +625,140 @@ runFailingWorkspaceIO
   :: FailingWorkspaceIO a
   -> IO (Either IOError a)
 runFailingWorkspaceIO (FailingWorkspaceIO action) = runExceptT action
+
+
+data CommitRace
+  = ChangeWhileStaging OsPath ByteString.ByteString
+  | ReplaceBeforeMode OsPath OsPath
+
+
+newtype RacingCommitIO a
+  = RacingCommitIO (ReaderT CommitRace (ExceptT IOError IO) a)
+  deriving (Functor, Applicative, Monad, MonadError IOError)
+
+
+runRacingCommitIO
+  :: CommitRace
+  -> RacingCommitIO a
+  -> IO (Either IOError a)
+runRacingCommitIO race (RacingCommitIO action) =
+  runExceptT $ runReaderT action race
+
+
+instance FileSystem.MonadFileSystem RacingCommitIO where
+  encodePath value =
+    RacingCommitIO $ liftIO (FileSystem.encodePath value :: IO OsPath)
+  decodePath value =
+    RacingCommitIO $ liftIO (FileSystem.decodePath value :: IO FilePath)
+  getCurrentDirectory =
+    RacingCommitIO $
+      liftIO (FileSystem.getCurrentDirectory :: IO OsPath)
+  getHomeDirectory =
+    RacingCommitIO $ liftIO (FileSystem.getHomeDirectory :: IO OsPath)
+  exists value =
+    RacingCommitIO $ liftIO (FileSystem.exists value :: IO Bool)
+  isFile value =
+    RacingCommitIO $ liftIO (FileSystem.isFile value :: IO Bool)
+  isRegularFile value =
+    RacingCommitIO $ liftIO (FileSystem.isRegularFile value :: IO Bool)
+  isDirectory value =
+    RacingCommitIO $ liftIO (FileSystem.isDirectory value :: IO Bool)
+  isSymlink value =
+    RacingCommitIO $ liftIO (FileSystem.isSymlink value :: IO Bool)
+  readFile value =
+    RacingCommitIO $ liftIO (FileSystem.readFile value)
+  readRegularFile value =
+    RacingCommitIO $ liftIO (FileSystem.readRegularFile value)
+  writeFile path contents =
+    RacingCommitIO $ liftIO (FileSystem.writeFile path contents :: IO ())
+  replaceFile source destination =
+    RacingCommitIO $
+      liftIO (FileSystem.replaceFile source destination :: IO ())
+  writeTemporaryFile directory template contents = do
+    temporary <-
+      RacingCommitIO $
+        liftIO $
+          ( FileSystem.writeTemporaryFile directory template contents
+              :: IO OsPath
+          )
+    race <- RacingCommitIO ask
+    case race of
+      ChangeWhileStaging path concurrent ->
+        RacingCommitIO $
+          liftIO (FileSystem.writeFile path concurrent :: IO ())
+      ReplaceBeforeMode _ _ -> return ()
+    return temporary
+  withFileLock _ action = action
+  canonicalizePath value =
+    RacingCommitIO $
+      liftIO (FileSystem.canonicalizePath value :: IO OsPath)
+  readSymlinkTarget value =
+    RacingCommitIO $
+      liftIO (FileSystem.readSymlinkTarget value :: IO OsPath)
+  copyFile source destination =
+    RacingCommitIO $
+      liftIO (FileSystem.copyFile source destination :: IO ())
+  copyFileWithMetadata source destination =
+    RacingCommitIO $
+      liftIO (FileSystem.copyFileWithMetadata source destination :: IO ())
+  copyFilePermissions source destination =
+    RacingCommitIO $
+      liftIO (FileSystem.copyFilePermissions source destination :: IO ())
+  createDirectory value =
+    RacingCommitIO $
+      liftIO (FileSystem.createDirectory value :: IO ())
+  removeFile value =
+    RacingCommitIO $ liftIO (FileSystem.removeFile value :: IO ())
+  removeDirectory value =
+    RacingCommitIO $
+      liftIO (FileSystem.removeDirectory value :: IO ())
+  removeDirectoryRecursivelyIfIdentity value identity =
+    RacingCommitIO $
+      liftIO $
+        ( FileSystem.removeDirectoryRecursivelyIfIdentity value identity
+            :: IO Bool
+        )
+  listDirectory value =
+    RacingCommitIO $
+      liftIO (FileSystem.listDirectory value :: IO [OsPath])
+  getFileSize value =
+    RacingCommitIO $ liftIO (FileSystem.getFileSize value :: IO Integer)
+  getFileIdentity value =
+    RacingCommitIO $
+      liftIO (FileSystem.getFileIdentity value :: IO (Maybe FileSystem.FileIdentity))
+  getFileSnapshot value =
+    RacingCommitIO $
+      liftIO (FileSystem.getFileSnapshot value :: IO (Maybe FileSystem.FileSnapshot))
+  getFileModeSnapshot value =
+    RacingCommitIO $
+      liftIO $
+        ( FileSystem.getFileModeSnapshot value
+            :: IO (Maybe FileSystem.FileModeSnapshot)
+        )
+  getPortableMode value =
+    RacingCommitIO $ liftIO (FileSystem.getPortableMode value)
+  setPortableMode path bits = do
+    race <- RacingCommitIO ask
+    case race of
+      ReplaceBeforeMode watched external
+        | path == watched ->
+            RacingCommitIO $ liftIO $ do
+              FileSystem.removeFile watched
+              FileSystem.createSymbolicLink
+                external
+                watched
+                FileSystem.File
+              FileSystem.setPortableMode watched bits
+      _ ->
+        RacingCommitIO $
+          liftIO (FileSystem.setPortableMode path bits :: IO ())
+  setPortableWritable path writable =
+    RacingCommitIO $
+      liftIO (FileSystem.setPortableWritable path writable :: IO ())
+  createSymbolicLink target link fileType =
+    RacingCommitIO $
+      liftIO $
+        (FileSystem.createSymbolicLink target link fileType :: IO ())
 
 
 instance FileSystem.MonadFileSystem FailingWorkspaceIO where

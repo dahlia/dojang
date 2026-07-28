@@ -8,8 +8,8 @@
 module Dojang.Commands.MergeSpec (spec) where
 
 import Control.Exception (bracket_)
-import Control.Monad (forM_)
-import Control.Monad.Except (throwError)
+import Control.Monad (filterM, forM_, when)
+import Control.Monad.Except (catchError, throwError)
 import Data.ByteString (ByteString)
 import Data.Char (isLower, isUpper, toLower, toUpper)
 import Data.HashMap.Strict (singleton)
@@ -30,7 +30,7 @@ import System.OsPath
   , takeFileName
   , (</>)
   )
-import Test.Hspec (Spec, describe, it, sequential)
+import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldReturn
@@ -70,7 +70,8 @@ import Dojang.ExitCodes
   , machineStateError
   )
 import Dojang.MonadFileSystem
-  ( MonadFileSystem (..)
+  ( FileType (Directory)
+  , MonadFileSystem (..)
   , dryRunIO
   )
 import Dojang.Syntax.Manifest.Writer (writeManifestFile)
@@ -108,7 +109,6 @@ import Dojang.Types.RouteMetadata (PortableMode (writable))
 #ifndef mingw32_HOST_OS
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception qualified as Exception
-import Control.Monad (when)
 import Data.ByteString qualified as ByteString
 import System.IO
   ( IOMode (ReadWriteMode)
@@ -136,6 +136,18 @@ data Fixture = Fixture
 
 spec :: Spec
 spec = sequential $ do
+  symlinkAvailable <- runIO $ withTempDir $ \root _ -> do
+    targetName <- encodeFS "symlink-target"
+    linkName <- encodeFS "symlink"
+    let target = root </> targetName
+        link = root </> linkName
+    ( createDirectory target
+        >> createSymbolicLink target link Directory
+        >> return True
+      )
+      `catchError` const (return False)
+  let symlinkIt = if symlinkAvailable then it else xit
+
   describe "mergeWithDriverRunner" $ do
     it "commits a resolved result and records a merged target" $
       withFixture $ \fixture -> do
@@ -423,6 +435,62 @@ spec = sequential $ do
               []
           )
           `shouldReturn` ExitSuccess
+
+    symlinkIt "preserves pending markers beneath a replaced invocation ancestor" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        [pendingMarker] <- pendingPublicationPaths fixture
+        parkedName <- encodeFS "parked-invocation"
+        externalName <- encodeFS "external-invocation"
+        let workspace = takeDirectory pendingMarker
+            invocation = takeDirectory workspace
+            repositoryRoot = takeDirectory invocation
+            parked = repositoryRoot </> parkedName
+            external = repositoryRoot </> externalName
+            externalWorkspace = external </> takeFileName workspace
+            externalMarker = externalWorkspace </> takeFileName pendingMarker
+            publisher context machineState managed = do
+              persistMergedTarget context machineState managed
+              liftApp $ do
+                createDirectories externalWorkspace
+                writeFile externalMarker "external"
+                renameDirectory invocation parked
+                createSymbolicLink external invocation Directory
+            restore = do
+              linked <- isSymlink invocation
+              when linked $ removeFile invocation
+              parkedExists <- isDirectory parked
+              when parkedExists $ renameDirectory parked invocation
+        bracket_
+          (return ())
+          restore
+          ( do
+              ( runAppWithoutLogging fixture.fixtureEnv $
+                  mergeWithDriverRunnerAndPublisher
+                    publisher
+                    (error "publication retry ran a driver")
+                    Nothing
+                    (Just fixture.fixtureConfigPath)
+                    []
+                )
+                `shouldReturn` ExitSuccess
+              readFile externalMarker `shouldReturn` "external"
+          )
 
     it "retains publication after a guarded baseline abort" $
       withFixture $ \fixture -> do
@@ -1307,17 +1375,26 @@ readReplicas fixture =
 
 pendingPublicationCount :: Fixture -> IO Int
 pendingPublicationCount fixture = do
+  length <$> pendingPublicationPaths fixture
+
+
+pendingPublicationPaths :: Fixture -> IO [OsPath]
+pendingPublicationPaths fixture = do
   root <-
     mergeWorkspaceRepositoryRoot
       fixture.fixtureEnv.stateDirectory
       fixture.fixtureRepositoryId
   rootExists <- isDirectory root
   if not rootExists
-    then return 0
+    then return []
     else do
       entries <- listDirectoryRecursively root []
-      names <- mapM (decodeFS . takeFileName . snd) entries
-      return $ length $ filter ("pending-" `isPrefixOf`) names
+      filterM
+        ( \entry -> do
+            name <- decodeFS $ takeFileName entry
+            return $ "pending-" `isPrefixOf` name
+        )
+        [root </> relative | (_, relative) <- entries]
 
 
 mergeDriverConfig :: ByteString

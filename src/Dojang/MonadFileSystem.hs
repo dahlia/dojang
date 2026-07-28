@@ -24,6 +24,7 @@ module Dojang.MonadFileSystem
   , noReplaceUnsupportedError
   , tryDryRunIO
   , writeFileAtomically
+  , writeFileAtomicallyIfSnapshot
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -35,6 +36,7 @@ import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
+import Data.Word (Word8)
 import GHC.IO.Exception
   ( IOErrorType
       ( InappropriateType
@@ -488,6 +490,41 @@ class (MonadError IOError m) => MonadFileSystem m where
   replaceFile :: (HasCallStack) => OsPath -> OsPath -> m ()
 
 
+  -- | Replaces a file only while the destination retains an expected snapshot.
+  --
+  -- Returns 'False' without consuming the source when the destination changed.
+  -- Filesystem-backed implementations must bind validation to the entry that
+  -- is displaced rather than perform a pathname check followed by an
+  -- unconditional replacement.
+  replaceFileIfSnapshot
+    :: (HasCallStack)
+    => FileSnapshot
+    -- ^ Expected destination snapshot.
+    -> FileModeSnapshot
+    -- ^ Expected destination identity and mode.
+    -> ByteString
+    -- ^ Expected destination contents.
+    -> OsPath
+    -- ^ Staged source file on the same filesystem.
+    -> OsPath
+    -- ^ Destination file.
+    -> m Bool
+  replaceFileIfSnapshot
+    expected
+    expectedMode
+    expectedContents
+    source
+    destination = do
+      actual <- getFileSnapshot destination
+      actualMode <- getFileModeSnapshot destination
+      actualContents <- readRegularFile destination
+      if actual == Just expected
+        && actualMode == Just expectedMode
+        && actualContents == Just expectedContents
+        then replaceFile source destination >> return True
+        else return False
+
+
   -- | Renames a directory without replacing an existing destination.
   --
   -- Filesystem-backed implementations should use an atomic same-filesystem
@@ -721,6 +758,15 @@ class (MonadError IOError m) => MonadFileSystem m where
   listDirectory :: (HasCallStack) => OsPath -> m [OsPath]
 
 
+  -- | Lists one directory while pinning the opened directory entry.
+  --
+  -- Filesystem-backed implementations must reject a symbolic link and prevent
+  -- a concurrent pathname replacement from redirecting enumeration.  Virtual
+  -- interpreters may delegate to 'listDirectory'.
+  listDirectoryPinned :: (HasCallStack) => OsPath -> m [OsPath]
+  listDirectoryPinned = listDirectory
+
+
   -- | Lists all files and directories in a directory recursively.  It doesn't
   -- include @.@ and @..@.  Paths are relative to the given directory,
   -- and directories always go before their contents.
@@ -880,6 +926,66 @@ writeFileAtomically destination template contents = do
       throwError err
 
 
+-- | Stages complete contents and their final mode, then conditionally replaces
+-- an observed regular file.
+--
+-- Returns 'False' without changing the destination when its snapshot no
+-- longer matches.  The temporary file is removed on rejection or failure.
+writeFileAtomicallyIfSnapshot
+  :: (HasCallStack, MonadFileSystem m)
+  => FileSnapshot
+  -- ^ Expected destination snapshot.
+  -> FileModeSnapshot
+  -- ^ Expected destination identity and mode.
+  -> ByteString
+  -- ^ Expected destination contents.
+  -> OsPath
+  -- ^ Destination file.
+  -> FilePath
+  -- ^ Temporary filename template.
+  -> ByteString
+  -- ^ Complete replacement contents.
+  -> PortableMode
+  -- ^ Mode to apply before publication.
+  -> m Bool
+writeFileAtomicallyIfSnapshot
+  expected
+  expectedMode
+  expectedContents
+  destination
+  template
+  contents
+  mode = do
+    let directory = takeDirectory destination
+    temporary <- writeTemporaryFile directory template contents
+    ( do
+        applyPortableMode temporary mode
+        replaced <-
+          replaceFileIfSnapshot
+            expected
+            expectedMode
+            expectedContents
+            temporary
+            destination
+        unless replaced $ removeFileAfterWidening temporary
+        return replaced
+      )
+      `catchError` \err -> do
+        temporaryExists <- exists temporary
+        when temporaryExists $ removeFileAfterWidening temporary
+        throwError err
+   where
+    applyPortableMode path portableMode =
+      case portableMode.posixBits of
+        Just bits -> setPortableMode path bits
+        Nothing -> setPortableWritable path portableMode.writable
+    removeFileAfterWidening path =
+      removeFile path `catchError` \err ->
+        if isPermissionError err
+          then setPortableWritable path True >> removeFile path
+          else throwError err
+
+
 createFileAtomicallyWithDefaultPermissionsIO
   :: OsPath -> FilePath -> ByteString -> IO ()
 createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
@@ -1027,6 +1133,11 @@ listDirectoryRecursivelyIO mode path ignorePatterns = do
               entryType -> return [(entryType, entry)]
 
 
+listDirectoryPinnedIO :: OsPath -> IO [OsPath]
+listDirectoryPinnedIO path =
+  withPinnedDirectory path $ OsDirectory.listDirectory path
+
+
 withPinnedDirectory :: OsPath -> IO a -> IO a
 withPinnedDirectory path action =
   withPinnedEntry path $ \fileType ->
@@ -1167,6 +1278,12 @@ listDirectoryRecursivelyIO mode path ignorePatterns = do
                       (Directory, entry)
                         : fmap (fmap (entry </>)) descendants
               File -> return [(File, entry)]
+
+
+listDirectoryPinnedIO :: OsPath -> IO [OsPath]
+listDirectoryPinnedIO path = do
+  path' <- decodeFS path
+  withPinnedDirectoryFd Nothing path' listDirectoryFd
 
 
 withPinnedDirectoryFd
@@ -1809,6 +1926,116 @@ throwNoReplaceUnsupported location destination =
 #endif
 
 
+replaceFileIfSnapshotIO
+  :: FileSnapshot
+  -> FileModeSnapshot
+  -> ByteString
+  -> OsPath
+  -> OsPath
+  -> IO Bool
+replaceFileIfSnapshotIO
+  expectedSnapshot
+  expectedModeSnapshot
+  expectedContents
+  source
+  destination =
+    Exception.mask $ \restore -> do
+      initialSnapshot <- getFileSnapshotIO destination
+      initialModeSnapshot <- getFileModeSnapshotIO destination
+      if initialSnapshot /= Just expectedSnapshot
+        || initialModeSnapshot /= Just expectedModeSnapshot
+        then return False
+        else do
+          displaced <- quarantineFile (128 :: Int) destination
+          case displaced of
+            Nothing -> return False
+            Just quarantine -> do
+              actualSnapshot <- getFileSnapshotIO quarantine
+              actualModeSnapshot <- getFileModeSnapshotIO quarantine
+              actualContents <- readRegularFileIO quarantine
+              let matchesExpected =
+                    maybe
+                      False
+                      (sameFileVersionAfterRename expectedSnapshot)
+                      actualSnapshot
+                      && actualModeSnapshot == Just expectedModeSnapshot
+                      && actualContents == Just expectedContents
+              if not matchesExpected
+                then restoreOriginal quarantine >> return False
+                else do
+                  renameNoReplaceIO "replaceFileIfSnapshot" source destination
+                    `catchError` \err -> do
+                      restoreOriginal quarantine
+                      throwError err
+                  unchanged <- getFileSnapshotIO quarantine
+                  unchangedMode <- getFileModeSnapshotIO quarantine
+                  unchangedContents <- readRegularFileIO quarantine
+                  let remainedUnchanged =
+                        maybe
+                          False
+                          (sameFileVersionAfterRename expectedSnapshot)
+                          unchanged
+                          && unchangedMode == Just expectedModeSnapshot
+                          && unchangedContents == Just expectedContents
+                  if remainedUnchanged
+                    then
+                      restore (removeFileAfterWideningIO quarantine)
+                        >> return True
+                    else do
+                      quarantine' <- decodeFS quarantine
+                      throwError $
+                        userError $
+                          "the displaced file changed during replacement; "
+                            <> "its contents are preserved at "
+                            <> quarantine'
+   where
+    quarantineFile attempts path
+      | attempts < 1 =
+          throwError $
+            userError "could not allocate a unique file-replacement path"
+      | otherwise = do
+          randomBytes <- getEntropy 16
+          name <-
+            encodeFS $
+              ".dojang-replaced-"
+                <> encodeRandomHex (Data.ByteString.unpack randomBytes)
+          let quarantine = takeDirectory path </> name
+          ( renameNoReplaceIO "replaceFileIfSnapshot" path quarantine
+              >> return (Just quarantine)
+            )
+            `catchError` \err ->
+              if isDoesNotExistError err
+                then return Nothing
+                else
+                  if isAlreadyExistsError err
+                    then quarantineFile (attempts - 1) path
+                    else throwError err
+    restoreOriginal quarantine =
+      renameNoReplaceIO "replaceFileIfSnapshot" quarantine destination
+        `catchError` \err -> do
+          quarantine' <- decodeFS quarantine
+          throwError $
+            ioeSetErrorString err $
+              "the original file is preserved at " <> quarantine'
+
+
+removeFileAfterWideningIO :: OsPath -> IO ()
+removeFileAfterWideningIO path =
+  OsDirectory.removeFile path `catchError` \err ->
+    if isPermissionError err
+      then setPortableWritableIO path True >> OsDirectory.removeFile path
+      else throwError err
+
+
+sameFileVersionAfterRename :: FileSnapshot -> FileSnapshot -> Bool
+sameFileVersionAfterRename
+  (FileSnapshot expectedIdentity expectedSize expectedModified _)
+  (FileSnapshot actualIdentity actualSize actualModified _) =
+    expectedIdentity == actualIdentity
+      && expectedSize == actualSize
+      && expectedModified == actualModified
+
+
 removeDirectoryRecursivelyIfIdentityIO
   :: OsPath -> FileIdentity -> IO Bool
 removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
@@ -1836,7 +2063,8 @@ removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
         randomBytes <- getEntropy 16
         name <-
           encodeFS $
-            ".dojang-cleanup-" <> encodeHex (Data.ByteString.unpack randomBytes)
+            ".dojang-cleanup-"
+              <> encodeRandomHex (Data.ByteString.unpack randomBytes)
         let quarantine = takeDirectory source </> name
         ( ( retryOnPermissionErrorsOnWindows 10 $
               renameNoReplaceIO "renameDirectory" source quarantine
@@ -1867,14 +2095,16 @@ removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
   maximumQuarantineAttempts :: Int
   maximumQuarantineAttempts = 128
 
-  encodeHex = concatMap $ \byte ->
-    let encoded = showHex byte ""
-    in if length encoded < 2 then '0' : encoded else encoded
-
 
 removeDirectoryRecursivelyIO :: OsPath -> IO ()
 removeDirectoryRecursivelyIO =
   retryOnPermissionErrorsOnWindows 10 . removeDirectoryRecursive
+
+
+encodeRandomHex :: [Word8] -> String
+encodeRandomHex = concatMap $ \byte ->
+  let encoded = showHex byte ""
+  in if length encoded < 2 then '0' : encoded else encoded
 
 
 retryOnPermissionErrorsOnWindows :: Int -> IO () -> IO ()
@@ -2049,6 +2279,9 @@ instance MonadFileSystem IO where
   replaceFile = replaceFileIO
 
 
+  replaceFileIfSnapshot = replaceFileIfSnapshotIO
+
+
   renameDirectory = renameNoReplaceIO "renameDirectory"
 
 
@@ -2111,6 +2344,9 @@ instance MonadFileSystem IO where
 
 
   listDirectory = OsDirectory.listDirectory
+
+
+  listDirectoryPinned = listDirectoryPinnedIO
 
 
   listDirectoryRecursively =

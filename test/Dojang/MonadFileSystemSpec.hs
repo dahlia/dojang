@@ -14,6 +14,7 @@ import Control.Concurrent
   , readMVar
   , takeMVar
   , threadDelay
+  , tryPutMVar
   , tryReadMVar
   )
 import Control.Exception qualified as Exception
@@ -111,6 +112,7 @@ import Dojang.MonadFileSystem
   , matchesDirectoryPathIdentity
   , noReplaceUnsupportedError
   , tryDryRunIO
+  , writeFileAtomicallyIfSnapshot
   )
 import Dojang.TestUtils
   ( withTempDir
@@ -407,7 +409,60 @@ posixCopyInterruptionSpec = do
 
 
 posixTraversalRaceSpec :: Spec
-posixTraversalRaceSpec =
+posixTraversalRaceSpec = do
+  specify "listDirectoryPinned never follows a raced directory link" $
+    withTempDir $ \tmpDir _ -> do
+      nestedName <- encodeFS "nested-pinned"
+      parkedName <- encodeFS "parked-pinned"
+      outsideName <- encodeFS "outside-pinned"
+      sentinelName <- encodeFS "outside-sentinel"
+      let nested = tmpDir </> nestedName
+          parked = tmpDir </> parkedName
+          outside = tmpDir </> outsideName
+      createDirectory nested
+      createDirectory outside
+      writeFile (outside </> sentinelName) "outside"
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      firstMutation <- newEmptyMVar
+      completedMutations <- newIORef (0 :: Int)
+      _ <-
+        forkFinally
+          ( let mutate = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      OsDirectory.renameDirectory nested parked
+                      createDirectoryLink outside nested
+                      removeFile nested
+                      OsDirectory.renameDirectory parked nested
+                      atomicModifyIORef' completedMutations $ \count ->
+                        (count + 1, ())
+                      _ <- tryPutMVar firstMutation ()
+                      mutate
+            in mutate
+          )
+          (putMVar mutationFinished)
+      takeMVar firstMutation
+      outcomes <-
+        replicateM 100 (tryError $ listDirectoryPinned nested)
+          `Exception.finally` putMVar stopMutating ()
+      mutationOutcome <- timeout 5000000 $ takeMVar mutationFinished
+      case mutationOutcome of
+        Nothing -> expectationFailure "the mutation thread did not stop"
+        Just (Left exception) ->
+          expectationFailure $
+            "the mutation thread failed: " <> show exception
+        Just (Right ()) -> return ()
+      readIORef completedMutations >>= (`shouldSatisfy` (> 0))
+      outcomes
+        `shouldSatisfy` all
+          ( \case
+              Left _ -> True
+              Right entries -> sentinelName `notElem` entries
+          )
+
   specify "listDirectoryRecursively never follows a raced directory link" $
     withTempDir $ \tmpDir _ -> do
       nestedName <- encodeFS "nested"
@@ -748,6 +803,120 @@ spec = do
       replaceFile (tmpDirP </> foo) (tmpDirP </> bar)
       readFile (tmpDirP </> bar) `shouldReturn` "new"
       exists (tmpDirP </> foo) `shouldReturn` False
+
+    it "conditionally replaces arbitrary matching snapshots" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination original
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source replacement
+        replaced <-
+          replaceFileIfSnapshot
+            snapshot
+            modeSnapshot
+            original
+            source
+            destination
+        contents <- readFile destination
+        sourceExists <- exists source
+        return (replaced, contents, sourceExists)
+      observed === (True, replacement, False)
+
+    it "rejects arbitrary changes before conditional replacement" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      concurrent <-
+        forAll $
+          Gen.filter (/= original) $
+            Gen.bytes $
+              constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination original
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source replacement
+        writeFile destination concurrent
+        replaced <-
+          replaceFileIfSnapshot
+            snapshot
+            modeSnapshot
+            original
+            source
+            destination
+        contents <- readFile destination
+        sourceExists <- exists source
+        return (replaced, contents, sourceExists)
+      observed === (False, concurrent, True)
+
+    it "rejects mode changes before conditional replacement" $
+      withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination "original"
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        originalMode <- getPortableMode destination
+        writeFile source "replacement"
+        setPortableWritable destination $ not originalMode.writable
+        replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          source
+          destination
+          `shouldReturn` False
+        readFile destination `shouldReturn` "original"
+        exists source `shouldReturn` True
+
+    it "conditionally replaces a matching read-only snapshot" $
+      withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination "original"
+        setPortableWritable destination False
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source "replacement"
+        setPortableWritable source False
+        replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          source
+          destination
+          `shouldReturn` True
+        readFile destination `shouldReturn` "replacement"
+        mode <- getPortableMode destination
+        mode.writable `shouldBe` False
+        names <- mapM decodeFS =<< listDirectory tmpDir
+        names
+          `shouldSatisfy` all (not . isPrefixOf ".dojang-replaced-")
+
+    it "removes a read-only staged file after conditional rejection" $
+      withTempDir $ \tmpDir _ -> do
+        let destination = tmpDir </> bar
+        writeFile destination "original"
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile destination "concurrent-change"
+        writeFileAtomicallyIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          destination
+          "dojang-merge.tmp"
+          "replacement"
+          (portableModeFromBits 0o444)
+          `shouldReturn` False
+        readFile destination `shouldReturn` "concurrent-change"
+        names <- mapM decodeFS =<< listDirectory tmpDir
+        names `shouldSatisfy` all (not . isPrefixOf "dojang-merge.tmp")
 
     describe "withFileLock" $ do
       it "creates a missing regular lock file" $

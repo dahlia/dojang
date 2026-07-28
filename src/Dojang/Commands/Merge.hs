@@ -80,9 +80,12 @@ import Dojang.ExitCodes
   , userCancelledError
   )
 import Dojang.MonadFileSystem
-  ( FileIdentity
+  ( DirectoryPathIdentity
+  , FileIdentity
   , FileModeSnapshot (FileModeSnapshot)
   , MonadFileSystem (..)
+  , captureDirectoryPathIdentity
+  , matchesDirectoryPathIdentity
   , writeFileAtomically
   )
 import Dojang.MonadFileSystem qualified as FileSystem
@@ -177,6 +180,7 @@ data PendingPublication = PendingPublication
   { marker :: OsPath
   , workspace :: OsPath
   , workspaceIdentity :: FileIdentity
+  , workspacePathIdentity :: DirectoryPathIdentity
   }
 
 
@@ -1179,32 +1183,35 @@ findPendingPublications
   -> App i (Map.Map OsPath [PendingPublication])
 findPendingPublications machineState markerNames = do
   repositoryRoot <- currentMergeWorkspaceRepositoryRoot machineState
-  repositoryRootExists <- isDirectory repositoryRoot
-  repositoryRootSymlink <- isSymlink repositoryRoot
-  if not repositoryRootExists || repositoryRootSymlink
-    then return Map.empty
-    else do
-      invocationNames <- listDirectory repositoryRoot
+  repositoryEntries <- safeDirectoryEntries repositoryRoot
+  case repositoryEntries of
+    Nothing -> return Map.empty
+    Just (_, invocationNames) -> do
       workspaces <-
         concat
           <$> forM
             invocationNames
             ( \name -> do
                 let invocation = repositoryRoot </> name
-                workspaceNames <- safeDirectoryEntries invocation
-                return $ (invocation </>) <$> workspaceNames
+                workspaceEntries <- safeDirectoryEntries invocation
+                return $ case workspaceEntries of
+                  Nothing -> []
+                  Just (_, workspaceNames) ->
+                    (invocation </>) <$> workspaceNames
             )
       markers <-
         concat
           <$> forM
             workspaces
             ( \workspace -> do
-                entries <- safeDirectoryEntries workspace
-                return
-                  [ workspace </> entry
-                  | entry <- entries
-                  , entry `Set.member` markerNames
-                  ]
+                workspaceEntries <- safeDirectoryEntries workspace
+                return $ case workspaceEntries of
+                  Nothing -> []
+                  Just (pathIdentity, entries) ->
+                    [ (workspace </> entry, pathIdentity)
+                    | entry <- entries
+                    , entry `Set.member` markerNames
+                    ]
             )
       pending <-
         catMaybes
@@ -1218,25 +1225,45 @@ findPendingPublications machineState markerNames = do
  where
   safeDirectoryEntries path =
     ( do
-        directory <- isDirectory path
-        symbolicLink <- isSymlink path
-        if directory && not symbolicLink
-          then listDirectory path
-          else return []
+        pathIdentity <- captureDirectoryPathIdentity path
+        case pathIdentity of
+          Nothing -> return Nothing
+          Just identity -> do
+            entries <- listDirectoryPinned path
+            unchanged <- matchesDirectoryPathIdentity identity
+            return $
+              if unchanged
+                then Just (identity, entries)
+                else Nothing
     )
-      `catchError` const (return [])
-  observePendingPublication marker = do
+      `catchError` const (return Nothing)
+  observePendingPublication (marker, pathIdentity) = do
     regular <- isRegularFile marker
     let workspace = takeDirectory marker
     workspaceDirectory <- isDirectory workspace
     workspaceSymlink <- isSymlink workspace
+    pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
     if not regular
       || not workspaceDirectory
       || workspaceSymlink
+      || not pathUnchanged
       then return Nothing
-      else
-        fmap (PendingPublication marker workspace)
-          <$> getFileIdentity workspace
+      else do
+        identity <- getFileIdentity workspace
+        stillUnchanged <- matchesDirectoryPathIdentity pathIdentity
+        return $
+          if stillUnchanged
+            then
+              fmap
+                ( \workspaceIdentity ->
+                    PendingPublication
+                      marker
+                      workspace
+                      workspaceIdentity
+                      pathIdentity
+                )
+                identity
+            else Nothing
 
 
 createPendingPublication
@@ -1251,7 +1278,18 @@ createPendingPublication workspace workspaceIdentity ctx managed = do
   markerName <- encodePath $ "pending-" <> Text.unpack identifier
   let marker = workspace.root </> markerName
   writeFileAtomically marker "pending.tmp" ""
-  return $ PendingPublication marker workspace.root workspaceIdentity
+  workspacePathIdentity <-
+    captureDirectoryPathIdentity workspace.root >>= \case
+      Just identity -> return identity
+      Nothing ->
+        throwError $
+          userError "merge workspace path changed while publishing its marker"
+  return $
+    PendingPublication
+      marker
+      workspace.root
+      workspaceIdentity
+      workspacePathIdentity
 
 
 completePublication
@@ -1261,21 +1299,50 @@ completePublication
   -> [PendingPublication]
   -> App i ()
 completePublication pathStyle current previous = do
-  removePendingMarker current.marker
+  currentPathUnchanged <- pathStillMatches current
+  if currentPathUnchanged
+    then removePendingMarker current.marker
+    else warnMarkerRetained current
   forM_ previous $ \pending -> do
-    removePendingMarker pending.marker
-    cleaned <-
-      removeDirectoryRecursivelyIfIdentity
-        pending.workspace
-        pending.workspaceIdentity
-    unless cleaned $
-      printStderr' Warning $
-        "The completed merge workspace could not be removed: "
-          <> pathStyle pending.workspace
-          <> "."
-    when cleaned $
-      removeDirectory (takeDirectory pending.workspace)
-        `catchError` const (return ())
+    markerPathUnchanged <- pathStillMatches pending
+    if not markerPathUnchanged
+      then warnRetained pending
+      else do
+        removePendingMarker pending.marker
+        cleanupPathUnchanged <- pathStillMatches pending
+        if not cleanupPathUnchanged
+          then warnRetained pending
+          else do
+            cleaned <-
+              removeDirectoryRecursivelyIfIdentity
+                pending.workspace
+                pending.workspaceIdentity
+            unless cleaned $ warnRetained pending
+            when cleaned $
+              removeDirectory (takeDirectory pending.workspace)
+                `catchError` const (return ())
+ where
+  pathStillMatches
+    :: (MonadFileSystem i, AppEffects i)
+    => PendingPublication
+    -> App i Bool
+  pathStillMatches pending =
+    matchesDirectoryPathIdentity pending.workspacePathIdentity
+      `catchError` const (return False)
+  warnMarkerRetained
+    :: (AppEffects i) => PendingPublication -> App i ()
+  warnMarkerRetained pending =
+    printStderr' Warning $
+      "The pending-publication marker could not be removed safely and "
+        <> "will be retried: "
+        <> pathStyle pending.marker
+        <> "."
+  warnRetained :: (AppEffects i) => PendingPublication -> App i ()
+  warnRetained pending =
+    printStderr' Warning $
+      "The completed merge workspace could not be removed: "
+        <> pathStyle pending.workspace
+        <> "."
 
 
 removePendingMarker

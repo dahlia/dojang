@@ -95,9 +95,14 @@ shell.  If an input disappears or cannot be read during preliminary conflict
 detection or while it is being captured, Dojang reports a conflict instead of
 an internal error.  Before each accepted result is written, Dojang checks that
 the authoritative files still match the bytes, identities, and modes observed
-during validation.  After the driver exits, it also reloads the routing context
-and rejects the result if the selected route or its resolved paths, kind, mode,
-codec, or provenance changed.
+during validation.  It stages each result with its final mode, then replaces
+the replica only if its exact observed contents, identity, and mode still
+match.  An edit made while staging therefore remains in place and reports a
+conflict.
+Because declared modes are applied before publication, a replacement symbolic
+link cannot redirect a later permission change.  After the driver exits,
+Dojang also reloads the routing context and rejects the result if the selected
+route or its resolved paths, kind, mode, codec, or provenance changed.
 A changed repository, machine, or state generation identity also rejects the
 result.  Invocation-workspace creation and final replica writes hold the
 repository-generation lock, so `dojang forget` cannot approve deletion between
@@ -114,8 +119,13 @@ both authoritative copies contain the result.  If a later write fails, earlier
 writes remain.  A retry recognizes the case where both authoritative copies
 already contain the result but the destination mode or intermediate content
 or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
-to recover the operation.  Failed, unresolved, and canceled workspaces are
-retained and printed in the error output.  Successful workspaces are removed.
+to recover the operation.  Conditional replacement briefly moves the old
+replica to a hidden `.dojang-replaced-*` sibling in the same directory.
+Ordinary failures restore it or report the retained path.  If the process or
+machine stops after that move but before the staged result is published, move
+the sibling back to the missing replica path before retrying.  Failed,
+unresolved, and canceled workspaces are retained and printed in the error
+output.  Successful workspaces are removed.
 `dojang forget` removes every retained merge workspace for the repository.
 Before recursively removing one, it verifies the workspace directory and its
 complete ancestor chain, and refuses cleanup if a symbolic link could redirect
@@ -127,12 +137,15 @@ The pending-publication marker also remains after a guarded commit abort and is
 removed only after target publication succeeds, so a later converged state can
 still repair its machine-state record.
 Pending-publication recovery scans only the known invocation and conflict
-directory levels; it does not recurse into subdirectories created by a driver.
-Workspace setup removes partial private copies when possible.  Later filesystem
-failures retain the workspace and use exit status 2.  A failure while removing
-a completed invocation workspace uses the same status and identifies the
-workspace root to inspect.  A driver result that cannot be read is invalid
-output instead: it is rejected before any replica write and uses exit status 4.
+directory levels.  Each level is enumerated through a pinned directory entry,
+and the complete workspace path identity is checked again before a marker or
+workspace is removed.  It does not recurse into subdirectories created by a
+driver.  Workspace setup removes partial private copies when possible.  Later
+filesystem failures retain the workspace and use exit status 2.  A failure
+while removing a completed invocation workspace uses the same status and
+identifies the workspace root to inspect.  A driver result that cannot be read
+is invalid output instead: it is rejected before any replica write and uses
+exit status 4.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection and `post-merge` hooks after a successful command.  See [hooks] for

@@ -24,23 +24,32 @@ To be released.
     recreate state or launch hooks after forgetting completes.  It commits
     source, destination, then intermediate, and rechecks both content
     convergence and declared destination/intermediate modes before publishing
-    machine state.  It records successful targets as updated by `merge` and
-    recognizes an interrupted final write or mode update when the command is
-    retried.  Pending publication markers survive guarded commit aborts and
-    are removed only after target publication completes.  Failed, unresolved,
-    and canceled workspaces remain available for recovery until `dojang forget`
-    removes them.  Workspace cleanup validates the directory and its complete
-    ancestor chain before recursive removal, so a symbolic link cannot redirect
-    deletion outside machine-local state.  Partial workspace setup is cleaned
-    when possible, and later filesystem failures retain recovery data and use
-    exit status 2.  Final invocation cleanup failures use the same status and
-    identify the workspace root to inspect.  Input read failures, including
-    preliminary conflict-detection reads, are reported as conflicts, while
-    unreadable driver results are rejected before replica writes and use exit
-    status 4.  Cleanup of retained workspaces for an absent machine or
-    repository record is serialized with concurrent state creation, so it
-    cannot remove a newly created live workspace.  Retried merges find pending
-    publication markers without descending into driver-created workspace
+    machine state.  Replica contents and their final modes are staged together,
+    and publication succeeds only while the destination still has its exact
+    observed contents, identity, and mode.  Concurrent edits are preserved as
+    conflicts, and a replacement link cannot redirect a later mode update.
+    Conditional replacement briefly parks the previous replica in a hidden
+    `.dojang-replaced-*` sibling; ordinary failures restore it, while that
+    sibling can be moved back to a missing replica path after an abrupt process
+    or machine stop.  It records
+    successful targets as updated by `merge` and recognizes an interrupted
+    final write or mode update when the command is retried.  Pending publication
+    markers survive guarded commit aborts and are removed only after target
+    publication completes.  Failed, unresolved, and canceled workspaces remain
+    available for recovery until `dojang forget` removes them.  Workspace
+    cleanup validates the directory and its complete ancestor chain before
+    recursive removal, so a symbolic link cannot redirect deletion outside
+    machine-local state.  Partial workspace setup is cleaned when possible, and
+    later filesystem failures retain recovery data and use exit status 2.
+    Final invocation cleanup failures use the same status and identify the
+    workspace root to inspect.  Input read failures, including preliminary
+    conflict-detection reads, are reported as conflicts, while unreadable driver
+    results are rejected before replica writes and use exit status 4.  Cleanup
+    of retained workspaces for an absent machine or repository record is
+    serialized with concurrent state creation, so it cannot remove a newly
+    created live workspace.  Retried merges scan each known workspace directory
+    through a pinned entry and revalidate its complete path identity before
+    removing markers or recovery data, without descending into driver-created
     subdirectories.
     Driver outcome codes are limited to the portable range 1–255.  The command
     supports source, destination, and directory selectors, `--driver`,
@@ -416,6 +425,14 @@ To be released.
 [#75]: https://github.com/dahlia/dojang/pull/75
 
 ### Haskell API
+
+ -  Added `MonadFileSystem.replaceFileIfSnapshot`,
+    `MonadFileSystem.listDirectoryPinned`, and
+    `writeFileAtomicallyIfSnapshot` for content-, identity-, and mode-bound
+    replacement, mode staging, and non-recursive directory enumeration that
+    cannot be redirected through a concurrent final-entry replacement.
+    Filesystem-backed interpreters should override the new methods to provide
+    their documented atomicity and pinning guarantees.  [[#48], [#75]]
 
  -  Added `withMachineStateLock` and `withRepositoryStateLock` to serialize
     lifecycle work that observes absent state with concurrent machine-identity

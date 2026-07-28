@@ -42,10 +42,15 @@ import Dojang.MonadFileSystem
   , FileSnapshot
   , MonadFileSystem (..)
   , fileSnapshotIdentity
-  , writeFileAtomically
+  , writeFileAtomicallyIfSnapshot
   )
 import Dojang.Types.RepositoryId (RepositoryId, repositoryIdText)
-import Dojang.Types.RouteMetadata (RouteMode, posixFileModeBits)
+import Dojang.Types.RouteMetadata
+  ( PortableMode
+  , RouteMode
+  , portableModeFromBits
+  , posixFileModeBits
+  )
 
 
 -- | Which authoritative replica supplied a merge input.
@@ -238,35 +243,43 @@ commitMergeResultGuarded observe declaredMode source base destination result =
     [
       ( SourceCommitReplica
       , [source, destination, base]
-      , source.path
+      , source
       , False
       )
     ,
       ( DestinationCommitReplica
       , [destination, base]
-      , destination.path
+      , destination
       , True
       )
     ,
       ( IntermediateCommitReplica
       , [base]
-      , base.path
+      , base
       , True
       )
     ]
  where
   go [] = return $ Right ()
-  go ((replica, remaining, path, applyDeclaredMode) : rest) = do
+  go ((replica, remaining, input, applyDeclaredMode) : rest) = do
     observe replica
     changed <- filterM (fmap not . revalidateMergeTextInput) remaining
     case NonEmpty.nonEmpty $ (.role) <$> changed of
       Just roles -> return $ Left $ MergeInputsChanged roles
       Nothing -> do
-        writeFileAtomically path "dojang-merge.tmp" result
-        case (applyDeclaredMode, posixFileModeBits declaredMode) of
-          (True, Just bits) -> setPortableMode path bits
-          _ -> return ()
-        go rest
+        replaced <-
+          replaceMergeInput
+            declaredMode
+            applyDeclaredMode
+            input
+            result
+        if replaced
+          then go rest
+          else
+            return $
+              Left $
+                MergeInputsChanged $
+                  NonEmpty.singleton input.role
 
 
 -- | Finishes an interrupted merge after source and destination already agree.
@@ -305,19 +318,32 @@ commitMergeRecoveryGuarded
             case changed of
               Just roles -> return $ Left $ MergeInputsChanged roles
               Nothing -> do
-                setPortableMode destination.path bits
-                refreshed <- observeMergeTextInput DestinationInput destination.path
-                case refreshed of
-                  Right refreshedDestination
-                    | refreshedDestination.contents == source.contents ->
-                        repairBase
-                          [source, refreshedDestination, base]
-                          (Just bits)
-                  _ ->
+                replaced <-
+                  replaceMergeInput
+                    declaredMode
+                    True
+                    destination
+                    destination.contents
+                if not replaced
+                  then
                     return $
                       Left $
                         MergeInputsChanged $
                           NonEmpty.singleton DestinationInput
+                  else do
+                    refreshed <-
+                      observeMergeTextInput DestinationInput destination.path
+                    case refreshed of
+                      Right refreshedDestination
+                        | refreshedDestination.contents == source.contents ->
+                            repairBase
+                              [source, refreshedDestination, base]
+                              (Just bits)
+                      _ ->
+                        return $
+                          Left $
+                            MergeInputsChanged $
+                              NonEmpty.singleton DestinationInput
    where
     changedInputs inputs =
       NonEmpty.nonEmpty . fmap (.role)
@@ -328,11 +354,47 @@ commitMergeRecoveryGuarded
       case changed of
         Just roles -> return $ Left $ MergeInputsChanged roles
         Nothing -> do
-          writeFileAtomically base.path "dojang-merge.tmp" source.contents
-          case declaredBits of
-            Just bits -> setPortableMode base.path bits
-            Nothing -> return ()
-          return $ Right ()
+          replaced <-
+            replaceMergeInput
+              declaredMode
+              (maybe False (const True) declaredBits)
+              base
+              source.contents
+          if replaced
+            then return $ Right ()
+            else
+              return $
+                Left $
+                  MergeInputsChanged $
+                    NonEmpty.singleton BaseInput
+
+
+replaceMergeInput
+  :: (MonadFileSystem m)
+  => RouteMode
+  -> Bool
+  -> MergeTextInput
+  -> ByteString
+  -> m Bool
+replaceMergeInput declaredMode applyDeclaredMode input contents =
+  writeFileAtomicallyIfSnapshot
+    input.snapshot
+    input.modeSnapshot
+    input.contents
+    input.path
+    "dojang-merge.tmp"
+    contents
+    finalMode
+ where
+  finalMode
+    | applyDeclaredMode =
+        maybe capturedMode portableModeFromBits $
+          posixFileModeBits declaredMode
+    | otherwise = capturedMode
+  capturedMode :: PortableMode
+  capturedMode =
+    case input.modeSnapshot of
+      FileModeSnapshot _ mode -> mode
 
 
 -- | Captures a stable regular UTF-8 text input without following a special
