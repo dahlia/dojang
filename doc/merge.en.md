@@ -109,6 +109,9 @@ or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
 to recover the operation.  Failed, unresolved, and canceled workspaces are
 retained and printed in the error output.  Successful workspaces are removed.
 `dojang forget` removes every retained merge workspace for the repository.
+Before recursively removing one, it verifies the workspace directory and its
+complete ancestor chain, and refuses cleanup if a symbolic link could redirect
+deletion outside machine-local state.
 Immediately before publishing machine state, Dojang re-observes all three
 replicas.  Lost convergence reports a conflict and keeps the recovery journal.
 Pending-publication recovery scans only the known invocation and conflict

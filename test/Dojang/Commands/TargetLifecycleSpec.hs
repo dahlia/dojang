@@ -443,6 +443,77 @@ spec = do
             `shouldReturn` ExitSuccess
           exists workspaceRoot `shouldReturn` False
 
+      symlinkIt "rejects a symlinked merge-workspace ancestor" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          externalName <- encodeFS "external-merge-workspaces"
+          sentinelName <- encodeFS "preserve-me"
+          let workspaceStore = takeDirectory workspaceRoot
+          let root = takeDirectory fixture.appEnv.sourceDirectory
+          let externalStore = root </> externalName
+          let externalWorkspace =
+                externalStore </> takeFileName workspaceRoot
+          let sentinel = externalWorkspace </> sentinelName
+          createDirectories externalWorkspace
+          writeFile sentinel "unrelated data"
+          bracket_
+            ( System.Directory.OsPath.createDirectoryLink
+                externalStore
+                workspaceStore
+            )
+            (System.Directory.OsPath.removeDirectoryLink workspaceStore)
+            $ do
+              runAppWithoutLogging fixture.appEnv (forget False)
+                `shouldThrow` (== machineStateError)
+              readFile sentinel `shouldReturn` "unrelated data"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+
+      symlinkIt "rejects a symbolic-link merge-workspace root" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          externalName <- encodeFS "external-workspace"
+          sentinelName <- encodeFS "preserve-me"
+          let root = takeDirectory fixture.appEnv.sourceDirectory
+          let externalWorkspace = root </> externalName
+          let sentinel = externalWorkspace </> sentinelName
+          createDirectories $ takeDirectory workspaceRoot
+          createDirectories externalWorkspace
+          writeFile sentinel "unrelated data"
+          bracket_
+            ( System.Directory.OsPath.createDirectoryLink
+                externalWorkspace
+                workspaceRoot
+            )
+            (System.Directory.OsPath.removeDirectoryLink workspaceRoot)
+            $ do
+              runAppWithoutLogging fixture.appEnv (forget False)
+                `shouldThrow` (== machineStateError)
+              readFile sentinel `shouldReturn` "unrelated data"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+
+      it "preserves a non-directory merge workspace for manual recovery" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          createDirectories $ takeDirectory workspaceRoot
+          writeFile workspaceRoot "unexpected file"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldThrow` (== machineStateError)
+          readFile workspaceRoot `shouldReturn` "unexpected file"
+          removeFile workspaceRoot
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+
       it "removes retained workspaces after state is already absent" $
         withManagedTarget $ \fixture -> do
           workspaceRoot <-

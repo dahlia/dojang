@@ -43,7 +43,11 @@ import Dojang.ExitCodes
   , lifecycleSelectionError
   , machineStateError
   )
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem
+  ( MonadFileSystem (..)
+  , captureDirectoryPathIdentity
+  , matchesDirectoryPathIdentity
+  )
 import Dojang.Types.Context
   ( Context (..)
   , makeManagedCorrespond
@@ -348,7 +352,40 @@ removeMergeWorkspaces
   -> App i ()
 removeMergeWorkspaces root repositoryId = do
   workspaceRoot <- mergeWorkspaceRepositoryRoot root repositoryId
-  removeSnapshot workspaceRoot
+  absoluteWorkspaceRoot <- makeAbsolute workspaceRoot
+  symbolicLink <- isSymlink absoluteWorkspaceRoot
+  when symbolicLink $
+    die' machineStateError "Refusing to remove a symbolic-link merge workspace."
+  directory <- isDirectory absoluteWorkspaceRoot
+  file <- isFile absoluteWorkspaceRoot
+  when file $ do
+    pathStyle <- pathStyleFor StandardError
+    die' machineStateError $
+      "Refusing to remove the non-directory merge workspace "
+        <> pathStyle absoluteWorkspaceRoot
+        <> ".  Remove it manually, then retry."
+  when directory $ do
+    pathIdentity <- captureDirectoryPathIdentity absoluteWorkspaceRoot
+    expectedIdentity <- getFileIdentity absoluteWorkspaceRoot
+    case (pathIdentity, expectedIdentity) of
+      (Just expectedPath, Just expectedEntry) -> do
+        unchanged <- matchesDirectoryPathIdentity expectedPath
+        unless unchanged $
+          die'
+            machineStateError
+            "The merge-workspace path changed while it was being removed."
+        removed <-
+          removeDirectoryRecursivelyIfIdentity
+            absoluteWorkspaceRoot
+            expectedEntry
+        unless removed $
+          die'
+            machineStateError
+            "The merge workspace changed while it was being removed."
+      _ ->
+        die'
+          machineStateError
+          "Refusing to remove a merge workspace through an unsafe directory path."
 
 
 removeEmptySnapshotDirectory
