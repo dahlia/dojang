@@ -945,7 +945,7 @@ processPrepared
     reportCommitResult = \case
       Left (MergeInputsChanged roles) ->
         die' conflictError $
-          "Merge inputs changed before commit: "
+          "Merge inputs changed or could no longer be verified before commit: "
             <> Text.intercalate
               ", "
               (formatInputRole <$> toList roles)

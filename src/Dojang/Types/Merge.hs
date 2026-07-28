@@ -344,62 +344,64 @@ observeMergeTextInput
   -> OsPath
   -- ^ Authoritative replica path.
   -> m (Either MergeInputError MergeTextInput)
-observeMergeTextInput role path = do
-  snapshotBefore <- getFileSnapshot path
-  case snapshotBefore of
-    Nothing -> classifyAbsentOrUnsupported role path
-    Just snapshot -> do
-      modeBefore <- getFileModeSnapshot path
-      case matchingModeSnapshot snapshot modeBefore of
-        Nothing -> return $ Left $ ChangedMergeInput role path
-        Just modeSnapshot -> do
-          contentsResult <-
-            (Right <$> readRegularFile path)
-              `catchError` const
-                (return $ Left $ UnreadableMergeInput role path)
-          case contentsResult of
-            Left err -> return $ Left err
-            Right contents -> do
-              snapshotAfter <- getFileSnapshot path
-              modeAfter <- getFileModeSnapshot path
-              if
-                | contents == Nothing ->
-                    return $ Left $ ChangedMergeInput role path
-                | snapshotAfter /= Just snapshot
-                    || modeAfter /= Just modeSnapshot ->
-                    return $ Left $ ChangedMergeInput role path
-                | otherwise ->
-                    return $
-                      validateText
-                        (NulMergeInput role path)
-                        (InvalidUtf8MergeInput role path)
-                        ( MergeTextInput
-                            role
-                            path
-                            snapshot
-                            modeSnapshot
-                        )
-                        (maybe ByteString.empty id contents)
+observeMergeTextInput role path =
+  observe
+    `catchError` const (return $ Left $ UnreadableMergeInput role path)
+ where
+  observe = do
+    snapshotBefore <- getFileSnapshot path
+    case snapshotBefore of
+      Nothing -> classifyAbsentOrUnsupported role path
+      Just snapshot -> do
+        modeBefore <- getFileModeSnapshot path
+        case matchingModeSnapshot snapshot modeBefore of
+          Nothing -> return $ Left $ ChangedMergeInput role path
+          Just modeSnapshot -> do
+            contents <- readRegularFile path
+            snapshotAfter <- getFileSnapshot path
+            modeAfter <- getFileModeSnapshot path
+            if
+              | contents == Nothing ->
+                  return $ Left $ ChangedMergeInput role path
+              | snapshotAfter /= Just snapshot
+                  || modeAfter /= Just modeSnapshot ->
+                  return $ Left $ ChangedMergeInput role path
+              | otherwise ->
+                  return $
+                    validateText
+                      (NulMergeInput role path)
+                      (InvalidUtf8MergeInput role path)
+                      ( MergeTextInput
+                          role
+                          path
+                          snapshot
+                          modeSnapshot
+                      )
+                      (maybe ByteString.empty id contents)
 
 
--- | Rechecks an observed input's identity, mode, and exact bytes.
+-- | Rechecks an observed input's identity, mode, and exact bytes.  Returns
+-- 'False' when the input changed or could not be safely re-observed.
 revalidateMergeTextInput
   :: (MonadFileSystem m) => MergeTextInput -> m Bool
-revalidateMergeTextInput input = do
-  snapshotBefore <- getFileSnapshot input.path
-  modeBefore <- getFileModeSnapshot input.path
-  if
-    | snapshotBefore /= Just input.snapshot
-        || modeBefore /= Just input.modeSnapshot ->
-        return False
-    | otherwise -> do
-        contents <- readRegularFile input.path
-        snapshotAfter <- getFileSnapshot input.path
-        modeAfter <- getFileModeSnapshot input.path
-        return $
-          contents == Just input.contents
-            && snapshotAfter == Just input.snapshot
-            && modeAfter == Just input.modeSnapshot
+revalidateMergeTextInput input =
+  revalidate `catchError` const (return False)
+ where
+  revalidate = do
+    snapshotBefore <- getFileSnapshot input.path
+    modeBefore <- getFileModeSnapshot input.path
+    if
+      | snapshotBefore /= Just input.snapshot
+          || modeBefore /= Just input.modeSnapshot ->
+          return False
+      | otherwise -> do
+          contents <- readRegularFile input.path
+          snapshotAfter <- getFileSnapshot input.path
+          modeAfter <- getFileModeSnapshot input.path
+          return $
+            contents == Just input.contents
+              && snapshotAfter == Just input.snapshot
+              && modeAfter == Just input.modeSnapshot
 
 
 -- | Creates an owner-only workspace and writes its four owner-only regular
@@ -459,33 +461,32 @@ readMergeResult
   => OsPath
   -- ^ Result path supplied to the driver.
   -> m (Either MergeResultError ByteString)
-readMergeResult path = do
-  snapshotBefore <- getFileSnapshot path
-  case snapshotBefore of
-    Nothing -> do
-      symbolicLink <- isSymlink path
-      present <- exists path
-      if symbolicLink || present
-        then return $ Left $ UnsupportedMergeResult path
-        else return $ Left $ MissingMergeResult path
-    Just snapshot -> do
-      contentsResult <-
-        (Right <$> readRegularFile path)
-          `catchError` const (return $ Left $ UnreadableMergeResult path)
-      case contentsResult of
-        Left err -> return $ Left err
-        Right contents -> do
-          snapshotAfter <- getFileSnapshot path
-          if
-            | contents == Nothing || snapshotAfter /= Just snapshot ->
-                return $ Left $ ChangedMergeResult path
-            | otherwise ->
-                return $
-                  validateText
-                    (NulMergeResult path)
-                    (InvalidUtf8MergeResult path)
-                    id
-                    (maybe ByteString.empty id contents)
+readMergeResult path =
+  observe
+    `catchError` const (return $ Left $ UnreadableMergeResult path)
+ where
+  observe = do
+    snapshotBefore <- getFileSnapshot path
+    case snapshotBefore of
+      Nothing -> do
+        symbolicLink <- isSymlink path
+        present <- exists path
+        if symbolicLink || present
+          then return $ Left $ UnsupportedMergeResult path
+          else return $ Left $ MissingMergeResult path
+      Just snapshot -> do
+        contents <- readRegularFile path
+        snapshotAfter <- getFileSnapshot path
+        if
+          | contents == Nothing || snapshotAfter /= Just snapshot ->
+              return $ Left $ ChangedMergeResult path
+          | otherwise ->
+              return $
+                validateText
+                  (NulMergeResult path)
+                  (InvalidUtf8MergeResult path)
+                  id
+                  (maybe ByteString.empty id contents)
 
 
 classifyAbsentOrUnsupported

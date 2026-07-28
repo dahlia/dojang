@@ -609,6 +609,32 @@ spec = sequential $ do
           readReplicas fixture
             `shouldReturn` ["source", "base", "destination"]
 
+    it "maps inaccessible result metadata to the driver exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          workspaceRef <- newIORef Nothing
+          let runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                let Just workspace = request.workingDirectory
+                workspacePath <- encodePath workspace
+                liftApp $ writeIORef workspaceRef $ Just workspacePath
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath "merged"
+                setPortableMode workspacePath 0o000
+                return $ ProcessCompleted ExitSuccess "" ""
+              restore = do
+                Just workspace <- readIORef workspaceRef
+                setPortableMode workspace 0o700
+          bracket_
+            (return ())
+            restore
+            ( mergeWith fixture runner
+                `shouldThrow` (== externalProgramNonZeroExit)
+            )
+          readReplicas fixture
+            `shouldReturn` ["source", "base", "destination"]
+
     it "skips a stale publication marker after route policy changes" $
       withFixture $ \fixture -> do
         let runner :: ProcessRequest -> App IO ProcessResult

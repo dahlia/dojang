@@ -172,6 +172,27 @@ spec = do
                 `shouldReturn` Left (UnreadableMergeInput SourceInput path)
             )
 
+    it "classifies an input beneath an inaccessible ancestor" $
+      if os == "mingw32"
+        then return ()
+        else withMergeFile "contents" $ \path ->
+          bracket_
+            (FileSystem.setPortableMode (takeDirectory path) 0o000)
+            (FileSystem.setPortableMode (takeDirectory path) 0o700)
+            ( observeMergeTextInput SourceInput path
+                `shouldReturn` Left (UnreadableMergeInput SourceInput path)
+            )
+
+    it "invalidates an observed input beneath an inaccessible ancestor" $
+      if os == "mingw32"
+        then return ()
+        else withMergeFile "contents" $ \path -> do
+          Right input <- observeMergeTextInput SourceInput path
+          bracket_
+            (FileSystem.setPortableMode (takeDirectory path) 0o000)
+            (FileSystem.setPortableMode (takeDirectory path) 0o700)
+            (revalidateMergeTextInput input `shouldReturn` False)
+
   describe "prepareMergeWorkspace" $ do
     it "copies every input and initializes the result from the destination" $
       withTempDir $ \root _ -> do
@@ -267,6 +288,17 @@ spec = do
           bracket_
             (FileSystem.setPortableMode path 0o000)
             (FileSystem.setPortableMode path 0o600)
+            ( readMergeResult path
+                `shouldReturn` Left (UnreadableMergeResult path)
+            )
+
+    it "classifies a result beneath an inaccessible ancestor" $
+      if os == "mingw32"
+        then return ()
+        else withMergeFile "merged" $ \path ->
+          bracket_
+            (FileSystem.setPortableMode (takeDirectory path) 0o000)
+            (FileSystem.setPortableMode (takeDirectory path) 0o700)
             ( readMergeResult path
                 `shouldReturn` Left (UnreadableMergeResult path)
             )
