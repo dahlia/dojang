@@ -116,7 +116,8 @@ Before recursively removing one, it verifies the workspace directory and its
 complete ancestor chain, and refuses cleanup if a symbolic link could redirect
 deletion outside machine-local state.
 Immediately before publishing machine state, Dojang re-observes all three
-replicas.  Lost convergence reports a conflict and keeps the recovery journal.
+replicas and rechecks the declared destination and intermediate modes.  Lost
+content or mode convergence reports a conflict and keeps the recovery journal.
 The pending-publication marker also remains after a guarded commit abort and is
 removed only after target publication succeeds, so a later converged state can
 still repair its machine-state record.

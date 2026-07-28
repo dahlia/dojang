@@ -1309,8 +1309,10 @@ requireIdentity path = do
 
 
 -- | Publishes a managed-target record only while all three replicas still
--- converge.  Lost convergence aborts publication so the caller can retain its
--- recovery journal.
+-- converge and the destination and intermediate replicas still satisfy the
+-- route's declared mode.  Lost content or mode convergence aborts publication
+-- so the caller can retain its recovery journal.  A converged deletion has no
+-- mode to validate.
 persistMergedTarget
   :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
@@ -1329,12 +1331,24 @@ persistMergedTarget ctx machineState managed = do
           transaction <-
             newTargetSnapshotTransaction machineState.targetSnapshotRoot
           observation <-
-            observeConvergedManagedTarget
-              ctx.repository
-              transaction
-              Merged
-              now
-              managed
+            ( do
+                contentObservation <-
+                  observeConvergedManagedTarget
+                    ctx.repository
+                    transaction
+                    Merged
+                    now
+                    managed
+                case contentObservation of
+                  Just (_, Just _) -> do
+                    modesConverged <-
+                      declaredMergeModesConverged managed
+                    return $
+                      if modesConverged
+                        then contentObservation
+                        else Nothing
+                  _ -> return contentObservation
+            )
               `catchError` \err -> do
                 discardTargetSnapshot transaction
                   `catchError` const (return ())
@@ -1344,7 +1358,8 @@ persistMergedTarget ctx machineState managed = do
               discardTargetSnapshot transaction
                 `catchError` const (return ())
               die' conflictError $
-                "Merge replicas changed before target publication."
+                "Merge replicas or declared modes changed before target "
+                  <> "publication."
             Just converged -> do
               let (updated, superseded) =
                     mergeConvergedTargets existing [converged]
@@ -1371,6 +1386,24 @@ persistMergedTarget ctx machineState managed = do
   case result of
     Left err -> die' machineStateError $ formatStateError err
     Right _ -> return ()
+
+
+declaredMergeModesConverged
+  :: (MonadFileSystem i)
+  => ManagedCorrespondence
+  -> i Bool
+declaredMergeModesConverged managed =
+  case posixFileModeBits managed.route.mode of
+    Nothing -> return True
+    Just bits -> do
+      destinationMode <-
+        getPortableMode managed.correspondence.destination.path
+      intermediateMode <-
+        getPortableMode managed.correspondence.intermediate.path
+      let declared = portableModeFromBits bits
+      return $
+        satisfiesPortableMode destinationMode declared
+          && satisfiesPortableMode intermediateMode declared
 
 
 reportPreparationError

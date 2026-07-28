@@ -7,6 +7,7 @@
 module Dojang.Commands.MergeSpec (spec) where
 
 import Control.Exception (bracket_)
+import Control.Monad (forM_)
 import Control.Monad.Except (throwError)
 import Data.ByteString (ByteString)
 import Data.Char (isLower, isUpper, toLower, toUpper)
@@ -554,6 +555,92 @@ spec = sequential $ do
             `shouldThrow` (== conflictError)
           readReplicas fixture `shouldReturn` expectedReplicas
           pendingPublicationCount fixture `shouldReturn` 1
+
+    it "retains publication when a declared mode drifts" $
+      hedgehog $ do
+        driftDestination <- forAll Gen.bool
+        driftMode <-
+          forAll $ Gen.element ([0o600, 0o644, 0o700, 0o755] :: [Word])
+        evalIO $ withFixture $ \fixture -> do
+          let merged = "merged"
+              manifestPath =
+                fixture.fixtureEnv.sourceDirectory
+                  </> fixture.fixtureEnv.manifestFile
+              changedPath =
+                if driftDestination
+                  then fixture.destinationPath
+                  else fixture.basePath
+              runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath merged
+                return $ ProcessCompleted ExitSuccess "" ""
+              publishAfterModeDrift ctx machineState managed = do
+                setPortableMode changedPath driftMode
+                persistMergedTarget ctx machineState managed
+          writeManifestFile fixture.fixtureReadOnlyManifest manifestPath
+          ( runAppWithoutLogging fixture.fixtureEnv $
+              mergeWithDriverRunnerAndPublisher
+                publishAfterModeDrift
+                runner
+                Nothing
+                (Just fixture.fixtureConfigPath)
+                []
+            )
+            `shouldThrow` (== conflictError)
+          pendingPublicationCount fixture `shouldReturn` 1
+          Right (Just machineId) <-
+            readMachineId fixture.fixtureEnv.stateDirectory
+          Right (Just state) <-
+            readRepositoryState
+              fixture.fixtureEnv.stateDirectory
+              fixture.fixtureRepositoryId
+              machineId
+          state.targetRecords `shouldBe` Map.empty
+
+    it "publishes a converged deletion without checking modes" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            manifestPath =
+              fixture.fixtureEnv.sourceDirectory
+                </> fixture.fixtureEnv.manifestFile
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            publishAfterDeletion ctx machineState managed = do
+              forM_
+                ( [ fixture.sourcePath
+                  , fixture.basePath
+                  , fixture.destinationPath
+                  ]
+                    :: [OsPath]
+                )
+                ( \path -> do
+                    setPortableMode path 0o644
+                    removeFile path
+                )
+              persistMergedTarget ctx machineState managed
+        writeManifestFile fixture.fixtureReadOnlyManifest manifestPath
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              publishAfterDeletion
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldReturn` ExitSuccess
+        pendingPublicationCount fixture `shouldReturn` 0
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        Right (Just state) <-
+          readRepositoryState
+            fixture.fixtureEnv.stateDirectory
+            fixture.fixtureRepositoryId
+            machineId
+        state.targetRecords `shouldBe` Map.empty
 
     it "maps replica write failures to the file-write exit code" $
       if os == "mingw32"
