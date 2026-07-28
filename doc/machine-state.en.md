@@ -373,9 +373,12 @@ destination.  While approved cleanup is pending, other stateful commands stop
 and ask the user to retry `dojang forget`;
 they cannot publish newer records that the earlier approval would discard.
 Forgetting an already absent record succeeds without creating machine state or
-migrating a legacy snapshot.  If cleanup deleted *state.toml* but left its
-approval marker, retrying `dojang forget` clears that marker under the
-repository lock without recreating state.
+migrating a legacy snapshot.  If retained merge workspaces still require
+cleanup, Dojang rechecks the absent machine identity or repository record under
+its creation lock before removal.  Concurrent state creation therefore starts
+after cleanup instead of losing a newly created live workspace.  If cleanup
+deleted *state.toml* but left its approval marker, retrying `dojang forget`
+clears that marker under the repository lock without recreating state.
 A distinct live checkout with the same `repository-id` cannot forget the
 recorded checkout's state.  Successful cleanup removes the empty private
 snapshot parent, so automatic repository discovery treats the repository as

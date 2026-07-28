@@ -60,6 +60,8 @@ module Dojang.Types.MachineState
   , updateManagedTargets
   , updateManagedTargetsWith
   , updateMachineFacts
+  , withMachineStateLock
+  , withRepositoryStateLock
   , withRepositoryStateGeneration
   , withStateFileLock
   ) where
@@ -676,6 +678,45 @@ withStateFileLock lockPath action = do
     Left err -> return $ Left err
     Right (Left err) -> throwError err
     Right (Right value) -> return $ Right value
+
+
+-- | Runs an action while holding the machine-identity lock.
+--
+-- This serializes an absent-machine observation with concurrent identity
+-- creation.  Ordinary filesystem failures, including failures raised by the
+-- action, are returned through the machine-state error channel.
+withMachineStateLock
+  :: (MonadFileSystem m)
+  => OsPath
+  -- ^ Platform-native machine-state root.
+  -> m a
+  -- ^ Action to run while identity creation is excluded.
+  -> m (Either StateError a)
+  -- ^ Action result, or a machine-state filesystem error.
+withMachineStateLock root action = catchStateIOErrors $ do
+  createDirectories root
+  Right <$> withFileLock (root </> path "machine.lock") action
+
+
+-- | Runs an action while holding one repository's state lock.
+--
+-- This serializes absent-state cleanup with concurrent repository-state
+-- creation.  The machine identity must already exist before calling this
+-- function because creating the repository lock directory itself counts as
+-- repository data.
+withRepositoryStateLock
+  :: (MonadFileSystem m)
+  => OsPath
+  -- ^ Platform-native machine-state root.
+  -> RepositoryId
+  -- ^ Repository whose state creation or cleanup is being serialized.
+  -> m a
+  -- ^ Action to run while repository-state updates are excluded.
+  -> m (Either StateError a)
+  -- ^ Action result, or a machine-state filesystem error.
+withRepositoryStateLock root repositoryId' action = catchStateIOErrors $ do
+  createDirectories $ repositoryStateDirectory root repositoryId'
+  Right <$> withFileLock (repositoryStateLockPath root repositoryId') action
 
 
 data StateDocument = StateDocument

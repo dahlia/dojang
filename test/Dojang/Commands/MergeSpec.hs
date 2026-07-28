@@ -771,10 +771,25 @@ spec = sequential $ do
           )
           `shouldThrow` (== fileWriteError)
 
-    it "maps unreadable inputs to the conflict exit code" $
+    it "maps unreadable correspondence reads to the conflict exit code" $
       if os == "mingw32"
         then return ()
         else withFixture $ \fixture -> do
+          writeFile fixture.basePath "parent"
+          expectedReplicas <- readReplicas fixture
+          bracket_
+            (setPortableMode fixture.sourcePath 0o000)
+            (setPortableMode fixture.sourcePath 0o600)
+            ( mergeWith fixture (error "input rejection ran a driver")
+                `shouldThrow` (== conflictError)
+            )
+          readReplicas fixture `shouldReturn` expectedReplicas
+
+    it "maps unreadable reconciliation reads to the conflict exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          writeFile fixture.destinationPath "target"
           expectedReplicas <- readReplicas fixture
           bracket_
             (setPortableMode fixture.sourcePath 0o000)

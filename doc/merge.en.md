@@ -91,12 +91,13 @@ Safety and recovery
 
 Dojang validates every selected input before starting the first driver.  Each
 driver receives private copies in an owner-only workspace and runs without a
-shell.  If an input disappears or cannot be read while it is being captured,
-Dojang reports a conflict instead of an internal error.  Before each accepted
-result is written, Dojang checks that the authoritative files still match the
-bytes, identities, and modes observed during validation.  After the driver
-exits, it also reloads the routing context and rejects the result if the
-selected route or its resolved paths, kind, mode, codec, or provenance changed.
+shell.  If an input disappears or cannot be read during preliminary conflict
+detection or while it is being captured, Dojang reports a conflict instead of
+an internal error.  Before each accepted result is written, Dojang checks that
+the authoritative files still match the bytes, identities, and modes observed
+during validation.  After the driver exits, it also reloads the routing context
+and rejects the result if the selected route or its resolved paths, kind, mode,
+codec, or provenance changed.
 A changed repository, machine, or state generation identity also rejects the
 result.  Invocation-workspace creation and final replica writes hold the
 repository-generation lock, so `dojang forget` cannot approve deletion between

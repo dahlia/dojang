@@ -7,6 +7,7 @@
 
 module Dojang.Commands.TargetLifecycleSpec (spec) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket_)
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except (MonadError, catchError)
@@ -20,6 +21,7 @@ import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, takeDirectory, takeFileName, (</>))
+import System.Timeout (timeout)
 import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
@@ -531,6 +533,42 @@ spec = do
             `shouldReturn` ExitSuccess
           exists workspaceRoot `shouldReturn` False
 
+      it "serializes absent-state workspace cleanup" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          retainedName <- encodeFS "retained"
+          lockName <- encodeFS "state.lock"
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
+          removeFile $
+            repositoryStatePath
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          let lockPath =
+                repositoryStateDirectory
+                  fixture.appEnv.stateDirectory
+                  fixture.repositoryId
+                  </> lockName
+          started <- newEmptyMVar
+          outcome <- newEmptyMVar
+          withFileLock lockPath $ do
+            _ <-
+              forkIO $ do
+                putMVar started ()
+                result <-
+                  runAppWithoutLogging fixture.appEnv $ forget False
+                putMVar outcome result
+            takeMVar started
+            early <- timeout 250000 $ takeMVar outcome
+            early `shouldBe` Nothing
+            exists workspaceRoot `shouldReturn` True
+          completed <- timeout 5000000 $ takeMVar outcome
+          completed `shouldBe` Just ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
       it "removes retained workspaces without a machine identity" $
         withTempDir $ \root _ -> do
           repositoryName <- encodeFS "repository"
@@ -538,6 +576,7 @@ spec = do
           manifestName <- encodeFS "dojang.toml"
           envName <- encodeFS "dojang-env.toml"
           retainedName <- encodeFS "retained"
+          machineLockName <- encodeFS "machine.lock"
           let repository = root </> repositoryName
               stateRoot = root </> stateName
               manifestPath = repository </> manifestName
@@ -565,8 +604,20 @@ spec = do
               repositoryId
           createDirectories workspaceRoot
           writeFile (workspaceRoot </> retainedName) "sensitive contents"
-          runAppWithoutLogging appEnv (forget False)
-            `shouldReturn` ExitSuccess
+          started <- newEmptyMVar
+          outcome <- newEmptyMVar
+          withFileLock (stateRoot </> machineLockName) $ do
+            _ <-
+              forkIO $ do
+                putMVar started ()
+                result <- runAppWithoutLogging appEnv $ forget False
+                putMVar outcome result
+            takeMVar started
+            early <- timeout 250000 $ takeMVar outcome
+            early `shouldBe` Nothing
+            exists workspaceRoot `shouldReturn` True
+          completed <- timeout 5000000 $ takeMVar outcome
+          completed `shouldBe` Just ExitSuccess
           exists workspaceRoot `shouldReturn` False
 
       it "removes an interrupted migration journal when forgetting" $

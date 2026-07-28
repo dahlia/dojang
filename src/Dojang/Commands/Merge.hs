@@ -354,7 +354,9 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
   executeHooks preHookEnv preHookContext PreMerge
   ctx <- ensureContext
   machineState <- prepareMachineState ctx.repository.manifest
-  (allManaged, warnings) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  (allManaged, warnings) <-
+    (makeManagedCorrespond ctx >>= ensureRouteOwnership)
+      `catchError` reportMergeInputObservationError
   printWarnings warnings
   candidates <- reconciliationCandidates ctx machineState allManaged
   selected <- selectCandidates paths allManaged candidates
@@ -468,8 +470,6 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
       either (reportLookupError driverChoice) return $
         lookupMergeDriver driverChoice config
     return $ ResolvedMergeDriver platform driverName driver
-
-
 runPostMergeHooks
   :: (MonadFileSystem i, AppEffects i)
   => [OsPath]
@@ -507,6 +507,18 @@ reportConfigReadError pathStyle path err = do
   abortCommand cliError
 
 
+reportMergeInputObservationError
+  :: (AppEffects i)
+  => IOError
+  -> App i a
+reportMergeInputObservationError err = do
+  printStderr' Error $
+    "Could not read merge inputs while detecting conflicts: "
+      <> Text.pack (ioeGetErrorString err)
+      <> "."
+  abortCommand conflictError
+
+
 reconciliationCandidates
   :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
@@ -515,14 +527,16 @@ reconciliationCandidates
   -> App i [MergeCandidate]
 reconciliationCandidates ctx machineState managed = do
   inputs <-
-    mapM
-      ( \item ->
-          observeReconciliationInput
-            ctx
-            item.route.mode
-            item.correspondence
-      )
-      managed
+    ( mapM
+        ( \item ->
+            observeReconciliationInput
+              ctx
+              item.route.mode
+              item.correspondence
+        )
+        managed
+    )
+      `catchError` reportMergeInputObservationError
   markerNames <-
     forM managed $ \item -> do
       identifier <- managedTargetId ctx.repository item

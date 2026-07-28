@@ -34,10 +34,14 @@ To be released.
     deletion outside machine-local state.  Partial workspace setup is cleaned
     when possible, and later filesystem failures retain recovery data and use
     exit status 2.  Final invocation cleanup failures use the same status and
-    identify the workspace root to inspect.  Input read failures are reported
-    as conflicts, while unreadable driver results are rejected before replica
-    writes and use exit status 4.  Retried merges find pending publication
-    markers without descending into driver-created workspace subdirectories.
+    identify the workspace root to inspect.  Input read failures, including
+    preliminary conflict-detection reads, are reported as conflicts, while
+    unreadable driver results are rejected before replica writes and use exit
+    status 4.  Cleanup of retained workspaces for an absent machine or
+    repository record is serialized with concurrent state creation, so it
+    cannot remove a newly created live workspace.  Retried merges find pending
+    publication markers without descending into driver-created workspace
+    subdirectories.
     Driver outcome codes are limited to the portable range 1–255.  The command
     supports source, destination, and directory selectors, `--driver`,
     `--driver-file`, `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version
@@ -412,6 +416,10 @@ To be released.
 [#75]: https://github.com/dahlia/dojang/pull/75
 
 ### Haskell API
+
+ -  Added `withMachineStateLock` and `withRepositoryStateLock` to serialize
+    lifecycle work that observes absent state with concurrent machine-identity
+    or repository-state creation.  [[#48], [#75]]
 
  -  Added `CodecBackend`, binary backend protocol framing, redacted binary
     process requests and results, and a timeout-aware command-effect boundary.

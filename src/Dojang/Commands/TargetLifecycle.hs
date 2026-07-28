@@ -64,6 +64,8 @@ import Dojang.Types.MachineState
   , readRepositoryState
   , updateManagedTargetsWith
   , validateSelectedSnapshotLocation
+  , withMachineStateLock
+  , withRepositoryStateLock
   )
 import Dojang.Types.ManagedTarget
   ( CurrentEntry (..)
@@ -260,21 +262,43 @@ forget force = do
   repositoryId <- case manifest.repositoryId of
     Nothing -> die' machineStateError "This repository has no stable identity."
     Just identifier -> return identifier
-  machineResult <- readMachineId root
-  machine <- stateOrDie machineResult
+  initialMachineResult <- readMachineId root
+  initialMachine <- stateOrDie initialMachineResult
+  machine <- case initialMachine of
+    Just machineId -> return $ Just machineId
+    Nothing -> do
+      stateRootExists <- isDirectory root
+      if not stateRootExists
+        then return Nothing
+        else do
+          machineResult <-
+            withMachineStateLock root $ do
+              currentResult <- readMachineId root
+              current <- stateOrDie currentResult
+              case current of
+                Nothing ->
+                  removeMergeWorkspaces root repositoryId >> return Nothing
+                Just machineId -> return $ Just machineId
+          stateOrDie machineResult
   case machine of
-    Nothing -> removeMergeWorkspaces root repositoryId >> reportAbsent
+    Nothing -> reportAbsent
     Just machineId -> do
-      existingResult <- readRepositoryState root repositoryId machineId
-      existing <- stateOrDie existingResult
-      case existing of
-        Nothing -> do
-          progressResult <- isRepositoryForgetInProgress root repositoryId
-          retrying <- stateOrDie progressResult
-          if retrying
-            then finishForget root checkout repositoryId machineId
-            else removeMergeWorkspaces root repositoryId >> reportAbsent
-        Just _ -> finishForget root checkout repositoryId machineId
+      finish <-
+        withRepositoryStateLock root repositoryId $ do
+          existingResult <- readRepositoryState root repositoryId machineId
+          existing <- stateOrDie existingResult
+          case existing of
+            Nothing -> do
+              progressResult <- isRepositoryForgetInProgress root repositoryId
+              retrying <- stateOrDie progressResult
+              if retrying
+                then return True
+                else removeMergeWorkspaces root repositoryId >> return False
+            Just _ -> return True
+      shouldFinish <- stateOrDie finish
+      if shouldFinish
+        then finishForget root checkout repositoryId machineId
+        else reportAbsent
  where
   finishForget root checkout repositoryId machineId = do
     priorProgressResult <- isRepositoryForgetInProgress root repositoryId
