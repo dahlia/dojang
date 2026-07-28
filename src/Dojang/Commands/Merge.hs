@@ -411,7 +411,9 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                   environment <- processEnvironment
                   return $ MergeDriverExecution driver environment
               (invocationRoot, invocationIdentity) <-
-                createInvocationRoot machineState
+                guardMergeFinalization
+                  machineState
+                  (createInvocationRoot machineState)
                   `catchError` reportMergeFilesystemError
               workspacesCleaned <-
                 processPrepared

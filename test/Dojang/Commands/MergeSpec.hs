@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedLists #-}
@@ -104,6 +105,22 @@ import Dojang.Types.RepositoryId (RepositoryId, parseRepositoryId)
 import Dojang.Types.RouteMetadata (PortableMode (writable))
 
 
+#ifndef mingw32_HOST_OS
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception qualified as Exception
+import Control.Monad (when)
+import Data.ByteString qualified as ByteString
+import System.IO
+  ( IOMode (ReadWriteMode)
+  , hClose
+  , hFlush
+  , openBinaryFile
+  )
+import System.Posix.Files qualified as Posix
+import System.Timeout (timeout)
+#endif
+
+
 data Fixture = Fixture
   { fixtureEnv :: AppEnv
   , fixtureRepositoryId :: RepositoryId
@@ -157,6 +174,8 @@ spec = sequential $ do
           `shouldReturn` ["source", "base", "destination"]
         readMachineId fixture.fixtureEnv.stateDirectory
           `shouldReturn` Right Nothing
+
+    posixConcurrentForgetSpec
 
     it "selects either authoritative endpoint for arbitrary conflicts" $
       hedgehog $ do
@@ -1002,6 +1021,71 @@ spec = sequential $ do
               defaultMergeDriverConfigPath "linux"
           )
             `shouldReturn` configRoot </> dojangName </> fileName
+
+#ifdef mingw32_HOST_OS
+posixConcurrentForgetSpec :: Spec
+posixConcurrentForgetSpec = return ()
+#else
+posixConcurrentForgetSpec :: Spec
+posixConcurrentForgetSpec =
+  it "does not recreate a workspace after concurrent forget" $
+    withFixture $ \fixture -> do
+      _ <-
+        runAppWithoutLogging fixture.fixtureEnv $
+          prepareMachineState fixture.fixtureManifest
+      Right (Just machineId) <-
+        readMachineId fixture.fixtureEnv.stateDirectory
+      configContents <- readFile fixture.fixtureConfigPath
+      removeFile fixture.fixtureConfigPath
+      configPath <- decodeFS fixture.fixtureConfigPath
+      Posix.createNamedPipe configPath 0o600
+      workspaceRoot <-
+        mergeWorkspaceRepositoryRoot
+          fixture.fixtureEnv.stateDirectory
+          fixture.fixtureRepositoryId
+      outcome <- newEmptyMVar
+      let runner :: ProcessRequest -> App IO ProcessResult
+          runner request = do
+            resultPath <- encodePath $ last request.arguments
+            writeFile resultPath "merged"
+            return $ ProcessCompleted ExitSuccess "" ""
+      handle <- openBinaryFile configPath ReadWriteMode
+      Exception.bracket (return handle) hClose $ \pipe -> do
+        _ <-
+          forkIO $ do
+            result <-
+              ( Exception.try $
+                  mergeWith fixture runner
+              )
+                :: IO (Either Exception.SomeException ExitCode)
+            putMVar outcome result
+        written <-
+          timeout 5000000 $ do
+            ByteString.hPut pipe $
+              ByteString.replicate (4 * 1024 * 1024) 35
+                <> "\n"
+                <> configContents
+            hFlush pipe
+        written `shouldBe` Just ()
+        let removeTree path = do
+              present <- exists path
+              when present $ removeDirectoryRecursively path
+        forgotten <-
+          forgetRepositoryStateWith
+            fixture.fixtureEnv.stateDirectory
+            fixture.fixtureRepositoryId
+            machineId
+            (const $ removeTree workspaceRoot)
+        forgotten `shouldBe` Right (Just ())
+      completed <- timeout 5000000 $ takeMVar outcome
+      case completed of
+        Just (Left err) ->
+          Exception.fromException err `shouldBe` Just machineStateError
+        Just (Right result) ->
+          fail $ "Merge unexpectedly returned " <> show result <> "."
+        Nothing -> fail "Merge did not finish after concurrent forget."
+      exists workspaceRoot `shouldReturn` False
+#endif
 
 
 mergeWith

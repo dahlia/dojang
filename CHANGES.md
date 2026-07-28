@@ -15,10 +15,11 @@ To be released.
     allowlists, and exit-code classifications.  Dojang validates every
     selected conflict before starting a driver, rechecks authoritative inputs
     before each write, and rejects results if the route or repository-state
-    identity changes while its driver runs.  Final replica writes hold the
-    repository-generation lock, and target publication revalidates that
-    generation under the same lock used for its state update, so concurrent
-    forgetting or recreation cannot accept stale merge work.  It commits
+    identity changes while its driver runs.  Invocation-workspace creation and
+    final replica writes hold the repository-generation lock, and target
+    publication revalidates that generation under the same lock used for its
+    state update, so concurrent forgetting or recreation cannot accept stale
+    merge work or leave a workspace after forgetting succeeds.  It commits
     source, destination, then intermediate, and rechecks both content
     convergence and declared destination/intermediate modes before publishing
     machine state.  It records successful targets as updated by `merge` and

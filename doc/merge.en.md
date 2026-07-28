@@ -98,8 +98,9 @@ bytes, identities, and modes observed during validation.  After the driver
 exits, it also reloads the routing context and rejects the result if the
 selected route or its resolved paths, kind, mode, codec, or provenance changed.
 A changed repository, machine, or state generation identity also rejects the
-result.  Final replica writes hold the repository-generation lock, so
-`dojang forget` cannot approve deletion while a merge commit is in progress.
+result.  Invocation-workspace creation and final replica writes hold the
+repository-generation lock, so `dojang forget` cannot approve deletion between
+workspace cleanup and recreation or while a merge commit is in progress.
 Target publication checks the captured generation again under its state-update
 lock and rejects data from a forgotten and recreated generation.
 
