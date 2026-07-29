@@ -133,6 +133,11 @@ deletion outside machine-local state.
 Immediately before publishing machine state, Dojang re-observes all three
 replicas and rechecks the declared destination and intermediate modes.  Lost
 content or mode convergence reports a conflict and keeps the recovery journal.
+For regular files, it captures exact contents, identities, and modes around
+fingerprinting and immutable-baseline materialization, verifies that the
+fingerprint and baseline describe those same contents, then revalidates every
+replica.  A change during any of those steps therefore aborts publication
+instead of combining observations from different versions.
 The pending-publication marker also remains after a guarded commit abort and is
 removed only after target publication succeeds, so a later converged state can
 still repair its machine-state record.

@@ -35,8 +35,12 @@ To be released.
     successful targets as updated by `merge` and recognizes an interrupted
     final write or mode update when the command is retried.  Pending publication
     markers survive guarded commit aborts and are removed only after target
-    publication completes.  Failed, unresolved, and canceled workspaces remain
-    available for recovery until `dojang forget` removes them.  Workspace
+    publication completes.  Target fingerprints and immutable baselines are
+    built from one stable set of replica contents, identities, and modes, then
+    revalidated before publication, so a concurrent edit cannot combine
+    different replica versions in machine state.  Failed, unresolved, and
+    canceled workspaces remain available for recovery until `dojang forget`
+    removes them.  Workspace
     cleanup validates the directory and its complete ancestor chain before
     recursive removal, so a symbolic link cannot redirect deletion outside
     machine-local state.  Partial workspace setup is cleaned when possible, and

@@ -16,7 +16,7 @@ module Dojang.Types.TargetTracking
   , observeManagedTarget
   ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (unless, when, zipWithM)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as ByteString
@@ -47,7 +47,13 @@ import System.OsPath
   )
 import Prelude hiding (readFile)
 
-import Dojang.MonadFileSystem (FileType, MonadFileSystem (..))
+import Dojang.MonadFileSystem
+  ( FileModeSnapshot (FileModeSnapshot)
+  , FileSnapshot
+  , FileType
+  , MonadFileSystem (..)
+  , fileSnapshotIdentity
+  )
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Types.Codec.Evaluate (OpaqueBytes, revealBytes)
 import Dojang.Types.Context
@@ -70,8 +76,10 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Repository (Repository (..), RouteResult (..))
 import Dojang.Types.RouteMetadata
-  ( RouteKind (SymlinkRoute)
+  ( PortableMode (..)
+  , RouteKind (SymlinkRoute)
   , RouteMode (Private, PrivateExecutable)
+  , posixFileModeBits
   )
 
 
@@ -342,10 +350,150 @@ observeConvergedManagedTargetWithRenderedSource
                  identifier <- managedTargetId repository converged
                  return $ Just (identifier, Nothing)
                Symlink _ -> return Nothing
-               _ -> do
+               Directory -> do
                  target <-
                    observeManagedTarget repository snapshotRoot command now converged
                  return $ (\value -> (value.targetId, Just value)) <$> target
+               File _ ->
+                 observeStableConvergedFileTarget
+                   repository
+                   snapshotRoot
+                   command
+                   now
+                   renderedSource
+                   rawSourceDigest
+                   converged
+
+
+data StableRegularFile = StableRegularFile
+  { stableSnapshot :: FileSnapshot
+  , stableModeSnapshot :: FileModeSnapshot
+  , stableContents :: ByteString.ByteString
+  }
+  deriving (Eq, Show)
+
+
+observeStableConvergedFileTarget
+  :: (MonadFileSystem m)
+  => Repository
+  -> OsPath
+  -> SynchronizationCommand
+  -> UTCTime
+  -> Maybe OpaqueBytes
+  -> Maybe ByteString.ByteString
+  -> ManagedCorrespondence
+  -> m (Maybe (Text, Maybe ManagedTarget))
+observeStableConvergedFileTarget
+  repository
+  snapshotRoot
+  command
+  now
+  renderedSource
+  rawSourceDigest
+  managed = do
+    let correspondence = managed.correspondence
+        paths =
+          [ correspondence.source.path
+          , correspondence.intermediate.path
+          , correspondence.destination.path
+          ]
+    observations <- traverse observeStableRegularFile paths
+    case observations of
+      [Just source, Just intermediate, Just destination]
+        | sourceMatches source intermediate
+            && intermediate.stableContents == destination.stableContents -> do
+            let contents = intermediate.stableContents
+                fileEntry path =
+                  FileEntry
+                    path
+                    (File $ fromIntegral $ ByteString.length contents)
+                stableCorrespondence =
+                  FileCorrespondence
+                    { source = fileEntry correspondence.source.path
+                    , sourceDelta = Unchanged
+                    , intermediate = fileEntry correspondence.intermediate.path
+                    , destination = fileEntry correspondence.destination.path
+                    , destinationDelta = Unchanged
+                    }
+                stableManaged =
+                  managed{correspondence = stableCorrespondence}
+                expectedFingerprint =
+                  FileFingerprint
+                    (fromIntegral $ ByteString.length contents)
+                    (digestHex $ SHA256.hash contents)
+                capturedMode =
+                  case intermediate.stableModeSnapshot of
+                    FileModeSnapshot _ mode -> mode
+            value <-
+              makeManagedTarget
+                repository
+                snapshotRoot
+                command
+                now
+                stableManaged
+                expectedFingerprint
+                ( \snapshot ->
+                    materializeStableFileSnapshot
+                      snapshot
+                      managed.route.mode
+                      capturedMode
+                      contents
+                )
+            replicasStable <-
+              and
+                <$> zipWithM
+                  revalidateStableRegularFile
+                  paths
+                  [source, intermediate, destination]
+            snapshot <-
+              observeStableRegularFile value.snapshotPath
+            return $
+              if replicasStable
+                && value.fingerprint == expectedFingerprint
+                && fmap (.stableContents) snapshot == Just contents
+                then Just (value.targetId, Just value)
+                else Nothing
+      _ -> return Nothing
+   where
+    sourceMatches :: StableRegularFile -> StableRegularFile -> Bool
+    sourceMatches source intermediate =
+      rawSourceMatches source
+        && case renderedSource of
+          Nothing -> source.stableContents == intermediate.stableContents
+          Just rendered ->
+            revealBytes rendered == intermediate.stableContents
+    rawSourceMatches :: StableRegularFile -> Bool
+    rawSourceMatches source = case rawSourceDigest of
+      Nothing -> True
+      Just expected -> SHA256.hash source.stableContents == expected
+
+
+observeStableRegularFile
+  :: (MonadFileSystem m) => OsPath -> m (Maybe StableRegularFile)
+observeStableRegularFile path = do
+  snapshotBefore <- getFileSnapshot path
+  modeBefore <- getFileModeSnapshot path
+  contents <- readRegularFile path
+  snapshotAfter <- getFileSnapshot path
+  modeAfter <- getFileModeSnapshot path
+  return $ do
+    snapshot <- snapshotBefore
+    modeSnapshot@(FileModeSnapshot identity _) <- modeBefore
+    bytes <- contents
+    if snapshotAfter == Just snapshot
+      && modeAfter == Just modeSnapshot
+      && fileSnapshotIdentity snapshot == identity
+      then Just $ StableRegularFile snapshot modeSnapshot bytes
+      else Nothing
+
+
+revalidateStableRegularFile
+  :: (MonadFileSystem m)
+  => OsPath
+  -> StableRegularFile
+  -> m Bool
+revalidateStableRegularFile path expected =
+  (== Just expected) <$> observeStableRegularFile path
 
 
 -- | Builds a record only when source, snapshot, and destination converged.
@@ -389,16 +537,46 @@ observeManagedTarget repository snapshotRoot command now managed
           >>= return . Just
  where
   correspondence = managed.correspondence
-  makeTarget fingerprint = do
+  makeTarget fingerprint =
+    makeManagedTarget
+      repository
+      snapshotRoot
+      command
+      now
+      managed
+      fingerprint
+      ( \snapshot ->
+          materializeSnapshot
+            correspondence.intermediate.path
+            snapshot
+            managed.route.mode
+            fingerprint
+      )
+
+
+makeManagedTarget
+  :: (MonadFileSystem m)
+  => Repository
+  -> OsPath
+  -> SynchronizationCommand
+  -> UTCTime
+  -> ManagedCorrespondence
+  -> TargetFingerprint
+  -> (OsPath -> m ())
+  -> m ManagedTarget
+makeManagedTarget
+  repository
+  snapshotRoot
+  command
+  now
+  managed
+  fingerprint
+  materialize = do
     source <- sourceRelative repository managed
     identifier <- managedTargetId repository managed
-    destination <- makeAbsolute correspondence.destination.path
+    destination <- makeAbsolute managed.correspondence.destination.path
     snapshot <- targetSnapshotPath snapshotRoot managed
-    materializeSnapshot
-      correspondence.intermediate.path
-      snapshot
-      managed.route.mode
-      fingerprint
+    materialize snapshot
     return $
       ManagedTarget
         identifier
@@ -509,6 +687,45 @@ targetSnapshotPath root managed = do
           ]
   generationPath <- encodePath $ Text.unpack generation
   return $ normalise $ root </> generationPath </> managed.relativePath
+
+
+materializeStableFileSnapshot
+  :: (MonadFileSystem m)
+  => OsPath
+  -> RouteMode
+  -> PortableMode
+  -> ByteString.ByteString
+  -> m ()
+materializeStableFileSnapshot destination mode capturedMode contents = do
+  createDirectories directory
+  case mode of
+    Private -> setPortableMode directory 0o700
+    PrivateExecutable -> setPortableMode directory 0o700
+    _ -> return ()
+  temporary <-
+    writeTemporaryFile
+      directory
+      "dojang-stable-snapshot.tmp"
+      contents
+  ( do
+      applyFinalMode temporary
+      replaceFile temporary destination
+    )
+    `catchError` \err -> do
+      temporaryExists <- exists temporary
+      when temporaryExists $ do
+        setPortableWritable temporary True
+          `catchError` const (return ())
+        removeFile temporary
+          `catchError` const (return ())
+      throwError err
+ where
+  directory = takeDirectory destination
+  applyFinalMode path = case posixFileModeBits mode of
+    Just bits -> setPortableMode path bits
+    Nothing -> case capturedMode.posixBits of
+      Just bits -> setPortableMode path bits
+      Nothing -> setPortableWritable path capturedMode.writable
 
 
 materializeSnapshot
