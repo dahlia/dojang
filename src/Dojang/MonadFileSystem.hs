@@ -81,7 +81,6 @@ import Data.ByteString qualified
   , null
   , readFile
   , unpack
-  , useAsCStringLen
   , writeFile
   )
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
@@ -126,6 +125,7 @@ import System.Win32.String qualified as Win32String
 import System.Win32.Time qualified as Win32Time
 import System.Win32.Types qualified as Win32
 #else
+import Data.ByteString qualified (useAsCStringLen)
 import Foreign.C.Error qualified as CError
 import Foreign.C.String (CString)
 import Foreign.C.Types (CInt (CInt), CSize (CSize))
