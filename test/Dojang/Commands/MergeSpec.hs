@@ -565,7 +565,7 @@ spec = sequential $ do
                 createSymbolicLink external invocation Directory
             restore = do
               linked <- isSymlink invocation
-              when linked $ removeFile invocation
+              when linked $ OsDirectory.removeDirectoryLink invocation
               parkedExists <- isDirectory parked
               when parkedExists $ renameDirectory parked invocation
         bracket_

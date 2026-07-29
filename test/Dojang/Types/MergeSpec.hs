@@ -112,7 +112,7 @@ spec = do
       withTempDir $ \root _ -> do
         missingName <- encodeFS "missing"
         directoryName <- encodeFS "directory"
-        nulName <- encodeFS "nul"
+        nulName <- encodeFS "nul-containing"
         binaryName <- encodeFS "binary"
         let missing = root </> missingName
             directory = root </> directoryName
@@ -280,7 +280,7 @@ spec = do
       withTempDir $ \root _ -> do
         missingName <- encodeFS "missing"
         directoryName <- encodeFS "directory"
-        nulName <- encodeFS "nul"
+        nulName <- encodeFS "nul-containing"
         binaryName <- encodeFS "binary"
         let missing = root </> missingName
             directory = root </> directoryName
