@@ -109,9 +109,10 @@ repository-generation lock, so `dojang forget` cannot approve deletion between
 workspace cleanup and recreation or while a merge commit is in progress.
 Target publication checks the captured generation again under its state-update
 lock and rejects data from a forgotten and recreated generation.  Post-merge
-hook setup reuses and validates the captured context and generation instead of
-preparing new machine state, so forgetting first prevents hook launch without
-recreating state.
+hook setup reloads the current manifest, environment, and machine facts while
+reusing and validating the captured generation instead of preparing new
+machine state.  Removed hooks therefore stay removed, and forgetting first
+prevents hook launch without recreating state.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
@@ -132,7 +133,10 @@ complete ancestor chain, and refuses cleanup if a symbolic link could redirect
 deletion outside machine-local state.
 Immediately before publishing machine state, Dojang re-observes all three
 replicas and rechecks the declared destination and intermediate modes.  Lost
-content or mode convergence reports a conflict and keeps the recovery journal.
+content or mode convergence, or an input that can no longer be observed,
+reports a conflict and keeps the recovery journal.  The same conflict status
+applies when authoritative inputs cannot be re-observed during the post-driver
+route-policy refresh.
 For regular files, it captures exact contents, identities, and modes around
 fingerprinting and immutable-baseline materialization, verifies that the
 fingerprint and baseline describe those same contents, then revalidates every
@@ -157,7 +161,8 @@ cannot be read is invalid output instead: it is rejected before any replica
 write and uses exit status 4.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
-selection and `post-merge` hooks after a successful command.  See [hooks] for
+selection.  Before selecting `post-merge` hooks after a successful command, it
+reloads the manifest, environment, and machine facts.  See [hooks] for
 configuration.
 
 [hooks]: hooks.en.md

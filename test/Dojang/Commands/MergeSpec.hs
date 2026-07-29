@@ -16,9 +16,15 @@ import Data.HashMap.Strict (singleton)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
+import Data.Text (pack)
 import Data.Text.Encoding qualified as Text
 import System.Directory.OsPath qualified as OsDirectory
-import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Environment
+  ( getExecutablePath
+  , lookupEnv
+  , setEnv
+  , unsetEnv
+  )
 import System.Exit (ExitCode (ExitFailure, ExitSuccess))
 import System.Info (os)
 import System.OsPath
@@ -84,6 +90,11 @@ import Dojang.Types.FileRoute
   , RouteMode (DefaultMode, ReadOnly)
   , RouteTarget (..)
   )
+import Dojang.Types.Hook
+  ( Hook (..)
+  , HookPolicy (HookAlways)
+  , HookType (PostMerge)
+  )
 import Dojang.Types.MachineState
   ( MachineState (targetRecords)
   , forgetRepositoryStateWith
@@ -96,7 +107,7 @@ import Dojang.Types.ManagedTarget
   , SynchronizationCommand (Merged)
   )
 import Dojang.Types.Manifest
-  ( Manifest (fileRoutes, repositoryId)
+  ( Manifest (fileRoutes, hooks, repositoryId)
   , manifest
   )
 import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
@@ -256,6 +267,50 @@ spec = sequential $ do
           mergeWith fixture runner `shouldThrow` (== conflictError)
         readReplicas fixture
           `shouldReturn` ["source", "base", "destination"]
+
+    it "maps unreadable policy refresh inputs to the conflict exit code" $
+      if os == "mingw32"
+        then return ()
+        else hedgehog $ do
+          width <- forAll $ Gen.int $ Range.linear 1 40
+          sourceText <-
+            forAll $ Gen.text (Range.singleton width) Gen.alphaNum
+          baseText <-
+            forAll $
+              Gen.filter
+                (/= sourceText)
+                (Gen.text (Range.singleton width) Gen.alphaNum)
+          destinationText <-
+            forAll $
+              Gen.filter
+                ( \value ->
+                    value /= sourceText
+                      && value /= baseText
+                )
+                (Gen.text (Range.singleton width) Gen.alphaNum)
+          let inputs =
+                Text.encodeUtf8
+                  <$> [sourceText, baseText, destinationText]
+          evalIO $ withFixture $ \fixture -> do
+            sequence_ $
+              zipWith
+                writeFile
+                [ fixture.sourcePath
+                , fixture.basePath
+                , fixture.destinationPath
+                ]
+                inputs
+            let runner :: ProcessRequest -> App IO ProcessResult
+                runner request = do
+                  resultPath <- encodePath $ last request.arguments
+                  writeFile resultPath "merged"
+                  setPortableMode fixture.sourcePath 0o000
+                  return $ ProcessCompleted ExitSuccess "" ""
+            bracket_
+              (return ())
+              (setPortableMode fixture.sourcePath 0o600)
+              (mergeWith fixture runner `shouldThrow` (== conflictError))
+            readReplicas fixture `shouldReturn` inputs
 
     it "rejects a repository identity changed while the driver is running" $
       withFixture $ \fixture -> do
@@ -624,6 +679,48 @@ spec = sequential $ do
           machineId
           `shouldReturn` Right Nothing
 
+    it "reloads removed post-merge hooks after the driver exits" $
+      withFixture $ \fixture -> do
+        command <- getExecutablePath >>= encodeFS
+        markerName <- encodeFS "stale-post-merge-hook-ran"
+        let marker = fixture.fixtureEnv.sourceDirectory </> markerName
+            manifestPath =
+              fixture.fixtureEnv.sourceDirectory
+                </> fixture.fixtureEnv.manifestFile
+            hook =
+              Hook
+                { hookId = Nothing
+                , policy = HookAlways
+                , changeKey = Nothing
+                , command = command
+                , args =
+                    [ "--match"
+                    , pack postMergeHookProbePattern
+                    , "--seed"
+                    , pack postMergeHookProbeSeed
+                    ]
+                , condition = Always
+                , workingDirectory = Nothing
+                , ignoreFailure = False
+                }
+            initialManifest =
+              fixture.fixtureManifest
+                { hooks = Map.singleton PostMerge [hook]
+                }
+            replacementManifest =
+              fixture.fixtureManifest
+                { hooks = Map.empty
+                }
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              writeManifestFile replacementManifest manifestPath
+              return $ ProcessCompleted ExitSuccess "" ""
+        writeManifestFile initialManifest manifestPath
+        mergeWith fixture runner `shouldReturn` ExitSuccess
+        isFile marker `shouldReturn` False
+
     it "repairs destination mode before retrying target publication" $
       withFixture $ \fixture -> do
         let merged = "base"
@@ -696,6 +793,35 @@ spec = sequential $ do
             )
             `shouldThrow` (== conflictError)
           readReplicas fixture `shouldReturn` expectedReplicas
+          pendingPublicationCount fixture `shouldReturn` 1
+
+    it "maps final replica read failures to the conflict exit code" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          let merged = "merged"
+              runner :: ProcessRequest -> App IO ProcessResult
+              runner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath merged
+                return $ ProcessCompleted ExitSuccess "" ""
+              publishWithUnreadableReplica ctx machineState managed = do
+                setPortableMode fixture.sourcePath 0o000
+                persistMergedTarget ctx machineState managed
+          bracket_
+            (return ())
+            (setPortableMode fixture.sourcePath 0o600)
+            ( ( runAppWithoutLogging fixture.fixtureEnv $
+                  mergeWithDriverRunnerAndPublisher
+                    publishWithUnreadableReplica
+                    runner
+                    Nothing
+                    (Just fixture.fixtureConfigPath)
+                    []
+              )
+                `shouldThrow` (== conflictError)
+            )
+          readReplicas fixture `shouldReturn` replicate 3 merged
           pendingPublicationCount fixture `shouldReturn` 1
 
     it "retains publication when a declared mode drifts" $
@@ -1111,6 +1237,17 @@ spec = sequential $ do
           return (result, replicas)
         outcome === (ExitSuccess, replicate 3 "merged")
 
+    it "removed post-merge hook probe" $ do
+      event <- lookupEnv "DOJANG_HOOK_EVENT"
+      when (event == Just "post-merge") $ do
+        repository <- lookupEnv "DOJANG_REPOSITORY"
+        case repository of
+          Nothing -> fail "DOJANG_REPOSITORY is missing"
+          Just path -> do
+            repositoryPath <- encodeFS path
+            markerName <- encodeFS "stale-post-merge-hook-ran"
+            writeFile (repositoryPath </> markerName) ""
+
   describe "makeMergeDriverProcessRequest" $
     it "expands arguments and exposes only the configured environment" $ do
       let Right driver =
@@ -1406,6 +1543,15 @@ mergeDriverConfig =
     <> "\"{destination}\", \"{result}\"]\n"
     <> "unresolved-exit-codes = [1]\n"
     <> "canceled-exit-codes = [2]\n"
+
+
+postMergeHookProbePattern :: String
+postMergeHookProbePattern =
+  "/Dojang.Commands.Merge/mergeWithDriverRunner/removed post-merge hook probe/"
+
+
+postMergeHookProbeSeed :: String
+postMergeHookProbeSeed = "250027"
 
 
 withEnvVars :: [(String, Maybe OsPath)] -> IO a -> IO a

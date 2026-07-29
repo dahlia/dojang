@@ -366,14 +366,14 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
   if null selected
     then do
       printStderr "No three-way merge conflicts found."
-      runPostMergeHooks paths ctx machineState
+      runPostMergeHooks paths machineState
       return ExitSuccess
     else do
       prepared <- catMaybes <$> mapM (prepareCandidate pathStyle) selected
       if null prepared
         then do
           printStderr "No three-way merge conflicts found."
-          runPostMergeHooks paths ctx machineState
+          runPostMergeHooks paths machineState
           return ExitSuccess
         else do
           resolvedDriver <-
@@ -408,7 +408,7 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                           <> "'."
                     Nothing ->
                       die' cliError "No merge driver is available."
-              runPostMergeHooks paths ctx machineState
+              runPostMergeHooks paths machineState
               return ExitSuccess
             else do
               driverExecution <-
@@ -445,7 +445,7 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                   "The completed merge workspace could not be removed: "
                     <> pathStyle invocationRoot
                     <> "."
-              runPostMergeHooks paths ctx machineState
+              runPostMergeHooks paths machineState
               return ExitSuccess
  where
   reportLookupError requested = \case
@@ -476,17 +476,30 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
 runPostMergeHooks
   :: (MonadFileSystem i, AppEffects i)
   => [OsPath]
-  -> Context (App i)
   -> MachineState
   -> App i ()
-runPostMergeHooks selectedPaths ctx machineState = do
+runPostMergeHooks selectedPaths machineState = do
+  manifest <- ensureManifest
+  refreshedState <-
+    if manifest.repositoryId == Just machineState.repositoryId
+      then readExistingMachineState manifest
+      else return Nothing
+  (ctx, currentState) <- case refreshedState of
+    Just state
+      | sameMergeStateIdentity machineState state -> do
+          refreshedContext <- contextFromExistingMachineState manifest state
+          return (refreshedContext, state)
+    _ ->
+      die'
+        machineStateError
+        "Repository or machine-state identity changed before post-merge hooks."
   hookEnv <-
     guardMergeFinalization machineState $
       makeHookEnv
         "merge"
         (CallerRelativePath <$> selectedPaths)
         ctx
-        machineState
+        currentState
   executeHooks hookEnv ctx PostMerge
 
 
@@ -517,6 +530,22 @@ reportMergeInputObservationError
 reportMergeInputObservationError err = do
   printStderr' Error $
     "Could not read merge inputs while detecting conflicts: "
+      <> Text.pack (ioeGetErrorString err)
+      <> "."
+  abortCommand conflictError
+
+
+reportMergeInputRefreshError
+  :: (AppEffects i)
+  => (OsPath -> Text)
+  -> OsPath
+  -> IOError
+  -> App i a
+reportMergeInputRefreshError pathStyle source err = do
+  printStderr' Error $
+    "Could not revalidate merge inputs for "
+      <> pathStyle source
+      <> ": "
       <> Text.pack (ioeGetErrorString err)
       <> "."
   abortCommand conflictError
@@ -1018,7 +1047,11 @@ refreshMergePolicy pathStyle expectedState expected = do
           <> pathStyle expected.correspondence.source.path
           <> "."
   ctx <- contextFromExistingMachineState manifest machineState
-  (managed, warnings) <- makeManagedCorrespond ctx >>= ensureRouteOwnership
+  (managed, warnings) <-
+    (makeManagedCorrespond ctx >>= ensureRouteOwnership)
+      `catchError` reportMergeInputRefreshError
+        pathStyle
+        expected.correspondence.source.path
   printWarnings warnings
   case find (sameMergePolicy expected) managed of
     Just refreshed -> return (ctx, machineState, refreshed)
@@ -1451,7 +1484,10 @@ persistMergedTarget ctx machineState managed = do
               `catchError` \err -> do
                 discardTargetSnapshot transaction
                   `catchError` const (return ())
-                throwError err
+                die' conflictError $
+                  "Could not verify merge replicas before target publication: "
+                    <> Text.pack (ioeGetErrorString err)
+                    <> "."
           case observation of
             Nothing -> do
               discardTargetSnapshot transaction

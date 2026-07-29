@@ -20,9 +20,10 @@ To be released.
     publication revalidates that generation under the same lock used for its
     state update, so concurrent forgetting or recreation cannot accept stale
     merge work or leave a workspace after forgetting succeeds.  Post-merge
-    hook setup reuses and validates the captured generation, so it cannot
-    recreate state or launch hooks after forgetting completes.  It commits
-    source, destination, then intermediate, and rechecks both content
+    hook setup reloads the current manifest and environment while reusing and
+    validating the captured generation, so removed hooks stay removed and it
+    cannot recreate state or launch hooks after forgetting completes.  It
+    commits source, destination, then intermediate, and rechecks both content
     convergence and declared destination/intermediate modes before publishing
     machine state.  Replica contents and their final modes are staged together,
     and publication succeeds only while the destination still has its exact
@@ -49,13 +50,14 @@ To be released.
     later filesystem failures retain recovery data and use exit status 2.
     Final invocation cleanup failures use the same status and identify the
     workspace root to inspect.  Input read failures, including preliminary
-    conflict-detection reads, are reported as conflicts, while unreadable driver
-    results are rejected before replica writes and use exit status 4.  Cleanup
-    of retained workspaces for an absent machine or repository record is
-    serialized with concurrent state creation, so it cannot remove a newly
-    created live workspace.  Retried merges scan each known workspace directory
-    through a pinned entry and revalidate its complete path identity before
-    removing markers or recovery data, without descending into driver-created
+    conflict detection, post-driver policy refresh, and final publication
+    observation, are reported as conflicts.  Unreadable driver results are
+    rejected before replica writes and use exit status 4.  Cleanup of retained
+    workspaces for an absent machine or repository record is serialized with
+    concurrent state creation, so it cannot remove a newly created live
+    workspace.  Retried merges scan each known workspace directory through a
+    pinned entry and revalidate its complete path identity before removing
+    markers or recovery data, without descending into driver-created
     subdirectories.  Pending-publication marker creation and removal stay
     bound to the captured workspace and ancestor identities, so a concurrent
     directory replacement is retained instead of being modified.
