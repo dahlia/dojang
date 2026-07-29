@@ -960,9 +960,11 @@ spec = sequential $ do
       if os == "mingw32"
         then return ()
         else withFixture $ \fixture -> do
-          workspaceName <- encodeFS "merge-workspaces"
-          let workspaceRoot =
-                fixture.fixtureEnv.stateDirectory </> workspaceName
+          repositoryWorkspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.fixtureEnv.stateDirectory
+              fixture.fixtureRepositoryId
+          let workspaceRoot = takeDirectory repositoryWorkspaceRoot
               restore = setPortableMode workspaceRoot 0o700
           _ <-
             runAppWithoutLogging fixture.fixtureEnv $
@@ -1094,8 +1096,7 @@ spec = sequential $ do
         workspace <-
           readIORef workspaceRef
             >>= maybe (fail "driver did not run") return
-        OsDirectory.doesFileExist (workspace </> sentinelName)
-          `shouldReturn` True
+        isFile (workspace </> sentinelName) `shouldReturn` True
 
     it "does not traverse driver-created retained workspace subtrees" $
       if os == "mingw32"

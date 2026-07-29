@@ -7,8 +7,9 @@
 
 module Dojang.Commands.TargetLifecycleSpec (spec) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (forkFinally, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket_)
+import Control.Exception qualified as Exception
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except (MonadError, catchError)
 import Control.Monad.IO.Class (MonadIO (liftIO))
@@ -16,13 +17,23 @@ import Control.Monad.Reader (ReaderT (ReaderT), ask, runReaderT)
 import Data.HashMap.Strict (singleton)
 import Data.List (find)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isNothing)
 import Data.Text.Encoding (encodeUtf8)
 import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, takeDirectory, takeFileName, (</>))
 import System.Timeout (timeout)
-import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
+import Test.Hspec
+  ( Spec
+  , describe
+  , expectationFailure
+  , it
+  , runIO
+  , sequential
+  , shouldSatisfy
+  , xit
+  )
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldContain
@@ -556,17 +567,21 @@ spec = do
           outcome <- newEmptyMVar
           withFileLock lockPath $ do
             _ <-
-              forkIO $ do
-                putMVar started ()
-                result <-
-                  runAppWithoutLogging fixture.appEnv $ forget False
-                putMVar outcome result
+              forkFinally
+                ( do
+                    putMVar started ()
+                    runAppWithoutLogging fixture.appEnv $ forget False
+                )
+                (putMVar outcome)
             takeMVar started
             early <- timeout 250000 $ takeMVar outcome
-            early `shouldBe` Nothing
+            early `shouldSatisfy` isNothing
             exists workspaceRoot `shouldReturn` True
           completed <- timeout 5000000 $ takeMVar outcome
-          completed `shouldBe` Just ExitSuccess
+          case completed of
+            Nothing -> expectationFailure "forget did not finish"
+            Just (Left err) -> Exception.throwIO err
+            Just (Right result) -> result `shouldBe` ExitSuccess
           exists workspaceRoot `shouldReturn` False
 
       it "removes retained workspaces without a machine identity" $
@@ -608,16 +623,21 @@ spec = do
           outcome <- newEmptyMVar
           withFileLock (stateRoot </> machineLockName) $ do
             _ <-
-              forkIO $ do
-                putMVar started ()
-                result <- runAppWithoutLogging appEnv $ forget False
-                putMVar outcome result
+              forkFinally
+                ( do
+                    putMVar started ()
+                    runAppWithoutLogging appEnv $ forget False
+                )
+                (putMVar outcome)
             takeMVar started
             early <- timeout 250000 $ takeMVar outcome
-            early `shouldBe` Nothing
+            early `shouldSatisfy` isNothing
             exists workspaceRoot `shouldReturn` True
           completed <- timeout 5000000 $ takeMVar outcome
-          completed `shouldBe` Just ExitSuccess
+          case completed of
+            Nothing -> expectationFailure "forget did not finish"
+            Just (Left err) -> Exception.throwIO err
+            Just (Right result) -> result `shouldBe` ExitSuccess
           exists workspaceRoot `shouldReturn` False
 
       it "removes an interrupted migration journal when forgetting" $

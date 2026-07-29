@@ -503,16 +503,38 @@ spec = do
       decodeMachineState populated.repositoryId populated.machineId v4Document
         `shouldBe` Right populated
 
+    it "reads schema-version 5 target records without migration" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "version-five-target"
+      let populated = state{targetRecords = Map.singleton target.targetId target}
+          versionFive =
+            Text.replace
+              "schema-version = 7"
+              "schema-version = 5"
+              (encodeMachineState populated)
+      Text.isInfixOf "codec-name" versionFive `shouldBe` False
+      decodeMachineState populated.repositoryId populated.machineId versionFive
+        `shouldBe` Right populated
+
     it "reads schema-version 6 target records without migration" $ do
       state <- fixtureState
       target <- fixtureManagedTarget state "version-six-target"
-      let populated =
-            state{targetRecords = Map.singleton target.targetId target}
+      let codecState' =
+            ManagedCodecState
+              "test-codec"
+              "2"
+              "configuration-digest"
+              "cache-key"
+              (Map.fromList [("fact:class", "fact-digest")])
+          target' = target{codecState = Just codecState'}
+          populated =
+            state{targetRecords = Map.singleton target'.targetId target'}
           versionSix =
             Text.replace
               "schema-version = 7"
               "schema-version = 6"
               (encodeMachineState populated)
+      Text.isInfixOf "codec-name = \"test-codec\"" versionSix `shouldBe` True
       decodeMachineState populated.repositoryId populated.machineId versionSix
         `shouldBe` Right populated
 

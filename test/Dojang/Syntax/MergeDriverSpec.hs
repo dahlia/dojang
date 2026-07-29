@@ -11,10 +11,10 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
-import System.FilePath qualified as FilePath
-import System.OsPath (encodeFS)
+import System.OsPath (encodeFS, (</>))
 import Test.Hspec (Spec, describe, it, shouldBe, shouldSatisfy)
 
+import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.MergeDriver
   ( Error (..)
   , formatError
@@ -114,20 +114,20 @@ spec = do
 
   describe "readMergeDriverConfigFile" $ do
     it "reads a valid UTF-8 configuration" $
-      withTempDir $ \_ tmpDirString -> do
-        let nativePath = tmpDirString FilePath.</> "merge-drivers.toml"
-        path <- encodeFS nativePath
-        ByteString.writeFile nativePath validDocumentBytes
+      withTempDir $ \tmpDir _ -> do
+        name <- encodeFS "merge-drivers.toml"
+        let path = tmpDir </> name
+        FileSystem.writeFile path validDocumentBytes
         result <- readMergeDriverConfigFile path
         result `shouldSatisfy` \case
           Right _ -> True
           Left _ -> False
 
     it "rejects invalid UTF-8" $
-      withTempDir $ \_ tmpDirString -> do
-        let nativePath = tmpDirString FilePath.</> "merge-drivers.toml"
-        path <- encodeFS nativePath
-        ByteString.writeFile nativePath "\x80"
+      withTempDir $ \tmpDir _ -> do
+        name <- encodeFS "merge-drivers.toml"
+        let path = tmpDir </> name
+        FileSystem.writeFile path "\x80"
         result <- readMergeDriverConfigFile path
         result `shouldSatisfy` \case
           Left (InvalidUtf8 _) -> True
