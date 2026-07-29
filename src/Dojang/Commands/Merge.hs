@@ -12,6 +12,7 @@ module Dojang.Commands.Merge
   , makeMergeDriverProcessRequest
   , merge
   , mergeWithDriverRunner
+  , mergeWithDriverRunnerAndInvocationBarrier
   , mergeWithDriverRunnerAndPublisher
   , mergeWithDriverRunnerAndPublisherAndPreparer
   , persistMergedTarget
@@ -249,7 +250,33 @@ mergeWithDriverRunner
   -- ^ Source, destination, or containing paths to select.
   -> App i ExitCode
 mergeWithDriverRunner =
-  mergeWithDriverRunnerAndPublisher persistMergedTarget
+  mergeWithDriverRunnerAndInvocationBarrier (return ())
+
+
+-- | Runs the merge command with a barrier immediately before guarded
+-- invocation-workspace creation.
+--
+-- The injected barrier lets tests coordinate repository lifecycle changes
+-- after merge preparation without weakening the generation guard used by
+-- production, which passes a no-op barrier.
+mergeWithDriverRunnerAndInvocationBarrier
+  :: (MonadFileSystem i, AppEffects i)
+  => App i ()
+  -- ^ Barrier before guarded invocation-workspace creation.
+  -> (ProcessRequest -> App i ProcessResult)
+  -- ^ Structured process runner.
+  -> Maybe Text
+  -- ^ Optional configured driver name.
+  -> Maybe OsPath
+  -- ^ Optional driver configuration path.
+  -> [OsPath]
+  -- ^ Source, destination, or containing paths to select.
+  -> App i ExitCode
+mergeWithDriverRunnerAndInvocationBarrier beforeInvocation =
+  runMerge
+    persistMergedTarget
+    prepareMergeWorkspace
+    beforeInvocation
 
 
 -- | Runs the merge command with injectable driver and state-publication
@@ -320,6 +347,7 @@ mergeWithDriverRunnerAndPublisherAndPreparer
     runMerge
       publishTarget
       prepareWorkspace
+      (return ())
       runDriver
       requestedDriver
       requestedConfig
@@ -339,12 +367,13 @@ runMerge
        -> MergeTextInput
        -> App i MergeWorkspace
      )
+  -> App i ()
   -> (ProcessRequest -> App i ProcessResult)
   -> Maybe Text
   -> Maybe OsPath
   -> [OsPath]
   -> App i ExitCode
-runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
+runMerge publish prepare barrier runDriver choice configChoice paths = do
   pathStyle <- pathStyleFor StandardError
   preHookContext <- ensureContext
   preHookState <- prepareMachineState preHookContext.repository.manifest
@@ -415,6 +444,7 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
                 forM resolvedDriver $ \driver -> do
                   environment <- processEnvironment
                   return $ MergeDriverExecution driver environment
+              barrier
               (invocationRoot, invocationIdentity) <-
                 guardMergeFinalization
                   machineState
@@ -423,7 +453,7 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
               workspacesCleaned <-
                 processPrepared
                   pathStyle
-                  publishTarget
+                  publish
                   prepare
                   runDriver
                   driverExecution
@@ -470,8 +500,8 @@ runMerge publishTarget prepare runDriver driverChoice configChoice paths = do
         return
         configResult
     (driverName, driver) <-
-      either (reportLookupError driverChoice) return $
-        lookupMergeDriver driverChoice config
+      either (reportLookupError choice) return $
+        lookupMergeDriver choice config
     return $ ResolvedMergeDriver platform driverName driver
 runPostMergeHooks
   :: (MonadFileSystem i, AppEffects i)

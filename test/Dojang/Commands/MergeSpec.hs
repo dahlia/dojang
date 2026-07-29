@@ -7,7 +7,9 @@
 
 module Dojang.Commands.MergeSpec (spec) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket_)
+import Control.Exception qualified as Exception
 import Control.Monad (filterM, forM_, when)
 import Control.Monad.Except (catchError, throwError)
 import Data.ByteString (ByteString)
@@ -64,6 +66,7 @@ import Dojang.Commands.Merge
   ( defaultMergeDriverConfigPath
   , makeMergeDriverProcessRequest
   , mergeWithDriverRunner
+  , mergeWithDriverRunnerAndInvocationBarrier
   , mergeWithDriverRunnerAndPublisher
   , mergeWithDriverRunnerAndPublisherAndPreparer
   , persistMergedTarget
@@ -116,20 +119,7 @@ import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, parseRepositoryId)
 import Dojang.Types.RouteMetadata (PortableMode (writable))
 
-
-#ifndef mingw32_HOST_OS
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception qualified as Exception
-import Data.ByteString qualified as ByteString
-import System.IO
-  ( IOMode (ReadWriteMode)
-  , hClose
-  , hFlush
-  , openBinaryFile
-  )
-import System.Posix.Files qualified as Posix
 import System.Timeout (timeout)
-#endif
 
 
 data Fixture = Fixture
@@ -198,7 +188,7 @@ spec = sequential $ do
         readMachineId fixture.fixtureEnv.stateDirectory
           `shouldReturn` Right Nothing
 
-    posixConcurrentForgetSpec
+    concurrentForgetSpec
     posixLinkedWorkspaceCreationSpec
 
     it "selects either authoritative endpoint for arbitrary conflicts" $
@@ -1335,15 +1325,13 @@ spec = sequential $ do
             `shouldReturn` configRoot </> dojangName </> fileName
 
 #ifdef mingw32_HOST_OS
-posixConcurrentForgetSpec :: Spec
-posixConcurrentForgetSpec = return ()
-
-
 posixLinkedWorkspaceCreationSpec :: Spec
 posixLinkedWorkspaceCreationSpec = return ()
-#else
-posixConcurrentForgetSpec :: Spec
-posixConcurrentForgetSpec =
+#endif
+
+
+concurrentForgetSpec :: Spec
+concurrentForgetSpec =
   it "does not recreate a workspace after concurrent forget" $
     withFixture $ \fixture -> do
       _ <-
@@ -1351,48 +1339,50 @@ posixConcurrentForgetSpec =
           prepareMachineState fixture.fixtureManifest
       Right (Just machineId) <-
         readMachineId fixture.fixtureEnv.stateDirectory
-      configContents <- readFile fixture.fixtureConfigPath
-      removeFile fixture.fixtureConfigPath
-      configPath <- decodeFS fixture.fixtureConfigPath
-      Posix.createNamedPipe configPath 0o600
       workspaceRoot <-
         mergeWorkspaceRepositoryRoot
           fixture.fixtureEnv.stateDirectory
           fixture.fixtureRepositoryId
       outcome <- newEmptyMVar
+      invocationReady <- newEmptyMVar
+      resumeInvocation <- newEmptyMVar
       let runner :: ProcessRequest -> App IO ProcessResult
           runner request = do
             resultPath <- encodePath $ last request.arguments
             writeFile resultPath "merged"
             return $ ProcessCompleted ExitSuccess "" ""
-      handle <- openBinaryFile configPath ReadWriteMode
-      Exception.bracket (return handle) hClose $ \pipe -> do
-        _ <-
-          forkIO $ do
-            result <-
-              ( Exception.try $
-                  mergeWith fixture runner
-              )
-                :: IO (Either Exception.SomeException ExitCode)
-            putMVar outcome result
-        written <-
-          timeout 30000000 $ do
-            ByteString.hPut pipe $
-              ByteString.replicate (2 * 1024 * 1024) 35
-                <> "\n"
-                <> configContents
-            hFlush pipe
-        written `shouldBe` Just ()
-        let removeTree path = do
-              present <- exists path
-              when present $ removeDirectoryRecursively path
-        forgotten <-
-          forgetRepositoryStateWith
-            fixture.fixtureEnv.stateDirectory
-            fixture.fixtureRepositoryId
-            machineId
-            (const $ removeTree workspaceRoot)
-        forgotten `shouldBe` Right (Just ())
+          beforeInvocation =
+            liftApp $ putMVar invocationReady () >> takeMVar resumeInvocation
+      Exception.bracket_
+        (return ())
+        (putMVar resumeInvocation ())
+        $ do
+          _ <-
+            forkIO $ do
+              result <-
+                ( Exception.try $
+                    runAppWithoutLogging fixture.fixtureEnv $
+                      mergeWithDriverRunnerAndInvocationBarrier
+                        beforeInvocation
+                        runner
+                        Nothing
+                        (Just fixture.fixtureConfigPath)
+                        []
+                )
+                  :: IO (Either Exception.SomeException ExitCode)
+              putMVar outcome result
+          ready <- timeout 30000000 $ takeMVar invocationReady
+          ready `shouldBe` Just ()
+          let removeTree path = do
+                present <- exists path
+                when present $ removeDirectoryRecursively path
+          forgotten <-
+            forgetRepositoryStateWith
+              fixture.fixtureEnv.stateDirectory
+              fixture.fixtureRepositoryId
+              machineId
+              (const $ removeTree workspaceRoot)
+          forgotten `shouldBe` Right (Just ())
       completed <- timeout 30000000 $ takeMVar outcome
       case completed of
         Just (Left err) ->
@@ -1402,7 +1392,7 @@ posixConcurrentForgetSpec =
         Nothing -> fail "Merge did not finish after concurrent forget."
       exists workspaceRoot `shouldReturn` False
 
-
+#ifndef mingw32_HOST_OS
 posixLinkedWorkspaceCreationSpec :: Spec
 posixLinkedWorkspaceCreationSpec =
   it "rejects a linked merge-workspace ancestor before creation" $
