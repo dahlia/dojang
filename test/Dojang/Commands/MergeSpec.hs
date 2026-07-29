@@ -74,7 +74,8 @@ import Dojang.Commands.Merge
   , persistMergedTarget
   )
 import Dojang.ExitCodes
-  ( conflictError
+  ( cliError
+  , conflictError
   , externalProgramNonZeroExit
   , fileNotRoutedError
   , fileWriteError
@@ -192,6 +193,43 @@ spec = sequential $ do
           `shouldReturn` ["source", "base", "destination"]
         readMachineId fixture.fixtureEnv.stateDirectory
           `shouldReturn` Right Nothing
+
+    it "retains pending target publication in dry-run mode" $
+      withFixture $ \fixture -> do
+        let merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+            dryRunEnv = fixture.fixtureEnv{dryRun = True}
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        runAppWithoutLogging
+          dryRunEnv
+          ( mergeWithDriverRunner
+              (error "dry-run publication retry ran a driver")
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldReturn` ExitSuccess
+        readReplicas fixture `shouldReturn` replicate 3 merged
+        pendingPublicationCount fixture `shouldReturn` 1
+
+    it "classifies a missing explicit driver configuration as a CLI error" $
+      withFixture $ \fixture -> do
+        removeFile fixture.fixtureConfigPath
+        mergeWith fixture (error "missing configuration ran a driver")
+          `shouldThrow` (== cliError)
 
     concurrentForgetSpec
     posixLinkedWorkspaceCreationSpec
