@@ -122,11 +122,13 @@ already contain the result but the destination mode or intermediate content
 or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
 to recover the operation.  Conditional replacement briefly moves the old
 replica to a hidden `.dojang-replaced-*` sibling in the same directory.
-Ordinary failures restore it or report the retained path.  If the process or
-machine stops after that move but before the staged result is published, move
-the sibling back to the missing replica path before retrying.  Failed,
-unresolved, and canceled workspaces are retained and printed in the error
-output.  Successful workspaces are removed.
+Before that move, Dojang binds the staged result to its prepared identity,
+contents, and final mode, then verifies the same entry after its rename.
+Ordinary failures restore the old replica or report the retained path.  If the
+process or machine stops after that move but before the staged result is
+published, move the sibling back to the missing replica path before retrying.
+Failed, unresolved, and canceled workspaces are retained and printed in the
+error output.  Successful workspaces are removed.
 `dojang forget` removes every retained merge workspace for the repository.
 Before recursively removing one, it verifies the workspace directory and its
 complete ancestor chain, and refuses cleanup if a symbolic link could redirect

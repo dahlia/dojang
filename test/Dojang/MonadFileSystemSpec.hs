@@ -9,6 +9,7 @@ module Dojang.MonadFileSystemSpec (spec) where
 import Control.Concurrent
   ( forkFinally
   , forkIO
+  , killThread
   , newEmptyMVar
   , putMVar
   , readMVar
@@ -22,7 +23,7 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (xor)
 import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.List (isPrefixOf, sort, sortOn)
+import Data.List (isInfixOf, isPrefixOf, sort, sortOn)
 import Data.Time.Clock (addUTCTime)
 import GHC.IO.Exception
   ( IOErrorType (InappropriateType, InvalidArgument)
@@ -43,7 +44,7 @@ import Prelude qualified (readFile, writeFile)
 
 import Control.Monad (replicateM, when)
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (length, map, readFile, writeFile)
+import Data.ByteString qualified (length, map, readFile, replicate, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
 import System.Directory.OsPath
@@ -87,6 +88,7 @@ import Test.Hspec
   , describe
   , expectationFailure
   , it
+  , pendingWith
   , runIO
   , specify
   , xit
@@ -121,7 +123,6 @@ import Dojang.TestUtils
 
 #ifndef mingw32_HOST_OS
 import Dojang.TestUtils (supportsNonUtf8FileNames)
-import Test.Hspec (pendingWith)
 #endif
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
@@ -143,6 +144,17 @@ nonExistentFP = "---non-existent---"
 
 nonExistentFP' :: FilePath
 nonExistentFP' = "---non-existent-2---"
+
+
+retryRace :: Int -> IO Bool -> IO ()
+retryRace attempts action = go attempts
+ where
+  go remaining
+    | remaining < 1 =
+        expectationFailure "the guarded replacement race was not observed"
+    | otherwise = do
+        observed <- action
+        if observed then return () else go (remaining - 1)
 
 #ifdef mingw32_HOST_OS
 posixRegularFileSpec :: Spec
@@ -846,11 +858,16 @@ spec = do
         Just snapshot <- getFileSnapshot destination
         Just modeSnapshot <- getFileModeSnapshot destination
         writeFile source replacement
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
         replaced <-
           replaceFileIfSnapshot
             snapshot
             modeSnapshot
             original
+            sourceSnapshot
+            sourceMode
+            replacement
             source
             destination
         contents <- readFile destination
@@ -874,17 +891,332 @@ spec = do
         Just modeSnapshot <- getFileModeSnapshot destination
         writeFile source replacement
         writeFile destination concurrent
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
         replaced <-
           replaceFileIfSnapshot
             snapshot
             modeSnapshot
             original
+            sourceSnapshot
+            sourceMode
+            replacement
             source
             destination
         contents <- readFile destination
         sourceExists <- exists source
         return (replaced, contents, sourceExists)
       observed === (False, concurrent, True)
+
+    it "rejects arbitrary staged source replacements" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      concurrent <-
+        forAll $
+          Gen.filter (/= replacement) $
+            Gen.bytes $
+              constantFrom 0 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination original
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source replacement
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        removeFile source
+        writeFile source concurrent
+        replaced <-
+          replaceFileIfSnapshot
+            snapshot
+            modeSnapshot
+            original
+            sourceSnapshot
+            sourceMode
+            replacement
+            source
+            destination
+        destinationContents <- readFile destination
+        sourceContents <- readFile source
+        return (replaced, destinationContents, sourceContents)
+      observed === (False, original, concurrent)
+
+    it "rejects staged source mode changes" $
+      withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination "original"
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source "replacement"
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        setPortableWritable source $ not sourceMode.writable
+        replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          sourceSnapshot
+          sourceMode
+          "replacement"
+          source
+          destination
+          `shouldReturn` False
+        readFile destination `shouldReturn` "original"
+        readFile source `shouldReturn` "replacement"
+
+    it "restores the destination when the staged source vanishes" $
+      retryRace
+        10
+        ( withTempDir $ \tmpDir _ -> do
+            let source = tmpDir </> foo
+                destination = tmpDir </> bar
+                original = Data.ByteString.replicate (32 * 1024 * 1024) 97
+                replacement = "replacement"
+            writeFile destination original
+            Just snapshot <- getFileSnapshot destination
+            Just modeSnapshot <- getFileModeSnapshot destination
+            writeFile source replacement
+            Just sourceSnapshot <- getFileSnapshot source
+            sourceMode <- getPortableMode source
+            stopRacer <- newEmptyMVar
+            raceFinished <- newEmptyMVar
+            racer <-
+              forkFinally
+                ( let waitForQuarantine = do
+                        stopped <- tryReadMVar stopRacer
+                        case stopped of
+                          Just () -> return False
+                          Nothing -> do
+                            present <- exists destination
+                            if present
+                              then threadDelay 50 >> waitForQuarantine
+                              else
+                                (removeFile source >> return True)
+                                  `catchError` \err ->
+                                    if isDoesNotExistError err
+                                      || isWindowsDeletePendingError err
+                                      then return False
+                                      else ioError err
+                  in waitForQuarantine
+                )
+                (putMVar raceFinished)
+            replacementResult <-
+              tryError
+                ( replaceFileIfSnapshot
+                    snapshot
+                    modeSnapshot
+                    original
+                    sourceSnapshot
+                    sourceMode
+                    replacement
+                    source
+                    destination
+                )
+                `Exception.onException` killThread racer
+            _ <- tryPutMVar stopRacer ()
+            raceResult <- timeout 1000000 $ takeMVar raceFinished
+            case raceResult of
+              Just (Right True) -> do
+                replacementResult
+                  `shouldSatisfy` either (const True) not
+                readFile destination `shouldReturn` original
+                exists source `shouldReturn` False
+                names <- mapM decodeFS =<< listDirectory tmpDir
+                names
+                  `shouldSatisfy` all
+                    (not . isPrefixOf ".dojang-replaced-")
+                return True
+              Just (Right False) -> do
+                replacementResult `shouldBe` Right True
+                return False
+              Just (Left err) -> Exception.throwIO err
+              Nothing -> do
+                killThread racer
+                expectationFailure "the staged-source race did not finish"
+                return False
+        )
+
+    it "restores the destination when the published stage vanishes" $
+      if os == "mingw32"
+        then pendingWith "Windows cannot unlink an open published file."
+        else
+          retryRace
+            10
+            ( withTempDir $ \tmpDir _ -> do
+                let source = tmpDir </> foo
+                    destination = tmpDir </> bar
+                    original = "original"
+                    replacement =
+                      Data.ByteString.replicate (32 * 1024 * 1024) 98
+                writeFile destination original
+                Just snapshot <- getFileSnapshot destination
+                Just modeSnapshot <- getFileModeSnapshot destination
+                writeFile source replacement
+                Just sourceSnapshot <- getFileSnapshot source
+                sourceMode <- getPortableMode source
+                stopRacer <- newEmptyMVar
+                raceFinished <- newEmptyMVar
+                racer <-
+                  forkFinally
+                    ( let waitForPublication = do
+                            stopped <- tryReadMVar stopRacer
+                            case stopped of
+                              Just () -> return False
+                              Nothing -> do
+                                staged <- exists source
+                                if staged
+                                  then threadDelay 50 >> waitForPublication
+                                  else
+                                    (removeFile destination >> return True)
+                                      `catchError` \err ->
+                                        if isDoesNotExistError err
+                                          || isWindowsDeletePendingError err
+                                          then return False
+                                          else ioError err
+                      in waitForPublication
+                    )
+                    (putMVar raceFinished)
+                replacementResult <-
+                  tryError
+                    ( replaceFileIfSnapshot
+                        snapshot
+                        modeSnapshot
+                        original
+                        sourceSnapshot
+                        sourceMode
+                        replacement
+                        source
+                        destination
+                    )
+                    `Exception.onException` killThread racer
+                _ <- tryPutMVar stopRacer ()
+                raceResult <- timeout 1000000 $ takeMVar raceFinished
+                case (raceResult, replacementResult) of
+                  (Just (Right True), Left err)
+                    | "the staged file disappeared" `isInfixOf` show err -> do
+                        readFile destination `shouldReturn` original
+                        exists source `shouldReturn` False
+                        names <- mapM decodeFS =<< listDirectory tmpDir
+                        names
+                          `shouldSatisfy` all
+                            (not . isPrefixOf ".dojang-replaced-")
+                        return True
+                  (Just (Right _), Right True) -> return False
+                  (Just (Right _), outcome) -> do
+                    expectationFailure $
+                      "unexpected post-publication outcome: " <> show outcome
+                    return False
+                  (Just (Left err), _) -> Exception.throwIO err
+                  (Nothing, _) -> do
+                    killThread racer
+                    expectationFailure $
+                      "the post-publication race did not finish"
+                    return False
+            )
+
+    it "preserves a replacement of the published staged file" $
+      if os == "mingw32"
+        then pendingWith "Windows cannot replace an open published file."
+        else
+          retryRace
+            10
+            ( withTempDir $ \tmpDir _ -> do
+                let source = tmpDir </> foo
+                    destination = tmpDir </> bar
+                    unexpectedSource = tmpDir </> baz
+                    original = "original"
+                    replacement =
+                      Data.ByteString.replicate (32 * 1024 * 1024) 99
+                    unexpected = "unexpected"
+                writeFile destination original
+                Just snapshot <- getFileSnapshot destination
+                Just modeSnapshot <- getFileModeSnapshot destination
+                writeFile source replacement
+                writeFile unexpectedSource unexpected
+                Just sourceSnapshot <- getFileSnapshot source
+                sourceMode <- getPortableMode source
+                stopRacer <- newEmptyMVar
+                raceFinished <- newEmptyMVar
+                racer <-
+                  forkFinally
+                    ( let waitForPublication = do
+                            stopped <- tryReadMVar stopRacer
+                            case stopped of
+                              Just () -> return False
+                              Nothing -> do
+                                staged <- exists source
+                                if staged
+                                  then threadDelay 50 >> waitForPublication
+                                  else
+                                    ( replaceFile
+                                        unexpectedSource
+                                        destination
+                                        >> return True
+                                    )
+                                      `catchError` \err ->
+                                        if isDoesNotExistError err
+                                          || isWindowsDeletePendingError err
+                                          then return False
+                                          else ioError err
+                      in waitForPublication
+                    )
+                    (putMVar raceFinished)
+                replacementResult <-
+                  tryError
+                    ( replaceFileIfSnapshot
+                        snapshot
+                        modeSnapshot
+                        original
+                        sourceSnapshot
+                        sourceMode
+                        replacement
+                        source
+                        destination
+                    )
+                    `Exception.onException` killThread racer
+                _ <- tryPutMVar stopRacer ()
+                raceResult <- timeout 1000000 $ takeMVar raceFinished
+                case (raceResult, replacementResult) of
+                  (Just (Right True), Left err)
+                    | "the staged file changed" `isInfixOf` show err -> do
+                        readFile destination `shouldReturn` original
+                        exists source `shouldReturn` False
+                        entries <- listDirectory tmpDir
+                        decoded <- mapM decodeFS entries
+                        let quarantines =
+                              [ entry
+                              | (entry, name) <- zip entries decoded
+                              , ".dojang-replaced-" `isPrefixOf` name
+                              ]
+                        case quarantines of
+                          [quarantine] ->
+                            readFile (tmpDir </> quarantine)
+                              `shouldReturn` unexpected
+                          _ ->
+                            expectationFailure $
+                              "expected one quarantined replacement, got "
+                                <> show decoded
+                        return True
+                  (Just (Right True), Left err)
+                    | "the staged file disappeared" `isInfixOf` show err ->
+                        return False
+                  (Just (Right True), Left err)
+                    | "the original file is preserved" `isInfixOf` show err ->
+                        return False
+                  (Just (Right _), Right True) -> return False
+                  (Just (Right _), outcome) -> do
+                    expectationFailure $
+                      "unexpected post-publication outcome: " <> show outcome
+                    return False
+                  (Just (Left err), _) -> Exception.throwIO err
+                  (Nothing, _) -> do
+                    killThread racer
+                    expectationFailure $
+                      "the post-publication race did not finish"
+                    return False
+            )
 
     it "rejects mode changes before conditional replacement" $
       withTempDir $ \tmpDir _ -> do
@@ -895,11 +1227,16 @@ spec = do
         Just modeSnapshot <- getFileModeSnapshot destination
         originalMode <- getPortableMode destination
         writeFile source "replacement"
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
         setPortableWritable destination $ not originalMode.writable
         replaceFileIfSnapshot
           snapshot
           modeSnapshot
           "original"
+          sourceSnapshot
+          sourceMode
+          "replacement"
           source
           destination
           `shouldReturn` False
@@ -916,10 +1253,15 @@ spec = do
         Just modeSnapshot <- getFileModeSnapshot destination
         writeFile source "replacement"
         setPortableWritable source False
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
         replaceFileIfSnapshot
           snapshot
           modeSnapshot
           "original"
+          sourceSnapshot
+          sourceMode
+          "replacement"
           source
           destination
           `shouldReturn` True

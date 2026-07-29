@@ -26,9 +26,11 @@ To be released.
     commits source, destination, then intermediate, and rechecks both content
     convergence and declared destination/intermediate modes before publishing
     machine state.  Replica contents and their final modes are staged together,
-    and publication succeeds only while the destination still has its exact
-    observed contents, identity, and mode.  Concurrent edits are preserved as
-    conflicts, and a replacement link cannot redirect a later mode update.
+    and publication succeeds only while both the destination and staged file
+    still have their exact observed contents, identities, and modes.  The
+    staged file is checked again after its rename.  Concurrent edits are
+    preserved as conflicts, and a replacement link cannot redirect a later
+    mode update.
     Conditional replacement briefly parks the previous replica in a hidden
     `.dojang-replaced-*` sibling; ordinary failures restore it, while that
     sibling can be moved back to a missing replica path after an abrupt process
@@ -445,10 +447,11 @@ To be released.
  -  Added `MonadFileSystem.replaceFileIfSnapshot`,
     `MonadFileSystem.listDirectoryPinned`, and
     `writeFileAtomicallyIfSnapshot` for content-, identity-, and mode-bound
-    replacement, mode staging, and non-recursive directory enumeration that
-    cannot be redirected through a concurrent final-entry replacement.
-    Filesystem-backed interpreters should override the new methods to provide
-    their documented atomicity and pinning guarantees.  [[#48], [#75]]
+    replacement of both the staged source and destination, mode staging, and
+    non-recursive directory enumeration that cannot be redirected through a
+    concurrent final-entry replacement.  Filesystem-backed interpreters should
+    override the new methods to provide their documented atomicity and pinning
+    guarantees.  [[#48], [#75]]
 
  -  Added `withMachineStateLock` and `withRepositoryStateLock` to serialize
     lifecycle work that observes absent state with concurrent machine-identity

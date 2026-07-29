@@ -102,6 +102,7 @@ import System.FileLock qualified as FileLock
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
+  , satisfiesPortableMode
   )
 
 
@@ -492,12 +493,14 @@ class (MonadError IOError m) => MonadFileSystem m where
   replaceFile :: (HasCallStack) => OsPath -> OsPath -> m ()
 
 
-  -- | Replaces a file only while the destination retains an expected snapshot.
+  -- | Replaces a file only while both files retain expected snapshots.
   --
   -- Returns 'False' without consuming the source when the destination changed.
-  -- Filesystem-backed implementations must bind validation to the entry that
-  -- is displaced rather than perform a pathname check followed by an
-  -- unconditional replacement.
+  -- Filesystem-backed implementations must bind validation to both the entry
+  -- that is displaced and the staged entry that is published rather than
+  -- perform pathname checks followed by an unconditional replacement.  The
+  -- published entry must be revalidated after the rename so a source changed
+  -- between its last pathname observation and publication is rejected.
   replaceFileIfSnapshot
     :: (HasCallStack)
     => FileSnapshot
@@ -506,6 +509,12 @@ class (MonadError IOError m) => MonadFileSystem m where
     -- ^ Expected destination identity and mode.
     -> ByteString
     -- ^ Expected destination contents.
+    -> FileSnapshot
+    -- ^ Expected staged source snapshot.
+    -> PortableMode
+    -- ^ Expected staged source mode.
+    -> ByteString
+    -- ^ Expected staged source contents.
     -> OsPath
     -- ^ Staged source file on the same filesystem.
     -> OsPath
@@ -515,16 +524,32 @@ class (MonadError IOError m) => MonadFileSystem m where
     expected
     expectedMode
     expectedContents
+    expectedSource
+    expectedSourceMode
+    expectedSourceContents
     source
     destination = do
-      actual <- getFileSnapshot destination
-      actualMode <- getFileModeSnapshot destination
-      actualContents <- readRegularFile destination
-      if actual == Just expected
-        && actualMode == Just expectedMode
-        && actualContents == Just expectedContents
-        then replaceFile source destination >> return True
-        else return False
+      actualSource <- getFileSnapshot source
+      actualSourceMode <- getFileModeSnapshot source
+      actualSourceContents <- readRegularFile source
+      if not $
+        matchesStagedFile
+          expectedSource
+          expectedSourceMode
+          expectedSourceContents
+          actualSource
+          actualSourceMode
+          actualSourceContents
+        then return False
+        else do
+          actual <- getFileSnapshot destination
+          actualMode <- getFileModeSnapshot destination
+          actualContents <- readRegularFile destination
+          if actual == Just expected
+            && actualMode == Just expectedMode
+            && actualContents == Just expectedContents
+            then replaceFile source destination >> return True
+            else return False
 
 
   -- | Renames a directory without replacing an existing destination.
@@ -1098,15 +1123,24 @@ writeFileAtomicallyIfSnapshot
     let directory = takeDirectory destination
     temporary <- writeTemporaryFile directory template contents
     ( do
-        applyPortableMode temporary mode
+        stagedSnapshot <- getFileSnapshot temporary
         replaced <-
-          replaceFileIfSnapshot
-            expected
-            expectedMode
-            expectedContents
-            temporary
-            destination
-        unless replaced $ removeFileAfterWidening temporary
+          case stagedSnapshot of
+            Nothing -> return False
+            Just snapshot -> do
+              applyPortableMode temporary mode
+              replaceFileIfSnapshot
+                expected
+                expectedMode
+                expectedContents
+                snapshot
+                mode
+                contents
+                temporary
+                destination
+        unless replaced $ do
+          temporaryExists <- exists temporary
+          when temporaryExists $ removeFileAfterWidening temporary
         return replaced
       )
       `catchError` \err -> do
@@ -2341,6 +2375,9 @@ replaceFileIfSnapshotIO
   :: FileSnapshot
   -> FileModeSnapshot
   -> ByteString
+  -> FileSnapshot
+  -> PortableMode
+  -> ByteString
   -> OsPath
   -> OsPath
   -> IO Bool
@@ -2348,12 +2385,17 @@ replaceFileIfSnapshotIO
   expectedSnapshot
   expectedModeSnapshot
   expectedContents
+  expectedSourceSnapshot
+  expectedSourceMode
+  expectedSourceContents
   source
   destination =
     Exception.mask $ \restore -> do
+      sourceMatches <- stagedSourceMatches
       initialSnapshot <- getFileSnapshotIO destination
       initialModeSnapshot <- getFileModeSnapshotIO destination
-      if initialSnapshot /= Just expectedSnapshot
+      if not sourceMatches
+        || initialSnapshot /= Just expectedSnapshot
         || initialModeSnapshot /= Just expectedModeSnapshot
         then return False
         else do
@@ -2374,32 +2416,99 @@ replaceFileIfSnapshotIO
               if not matchesExpected
                 then restoreOriginal quarantine >> return False
                 else do
-                  renameNoReplaceIO "replaceFileIfSnapshot" source destination
-                    `catchError` \err -> do
+                  sourceStillMatches <-
+                    stagedSourceMatches `catchError` \err -> do
                       restoreOriginal quarantine
                       throwError err
-                  unchanged <- getFileSnapshotIO quarantine
-                  unchangedMode <- getFileModeSnapshotIO quarantine
-                  unchangedContents <- readRegularFileIO quarantine
-                  let remainedUnchanged =
-                        maybe
-                          False
-                          (sameFileVersionAfterRename expectedSnapshot)
-                          unchanged
-                          && unchangedMode == Just expectedModeSnapshot
-                          && unchangedContents == Just expectedContents
-                  if remainedUnchanged
-                    then
-                      restore (removeFileAfterWideningIO quarantine)
-                        >> return True
+                  if not sourceStillMatches
+                    then restoreOriginal quarantine >> return False
                     else do
-                      quarantine' <- decodeFS quarantine
-                      throwError $
-                        userError $
-                          "the displaced file changed during replacement; "
-                            <> "its contents are preserved at "
-                            <> quarantine'
+                      renameNoReplaceIO
+                        "replaceFileIfSnapshot"
+                        source
+                        destination
+                        `catchError` \err -> do
+                          restoreOriginal quarantine
+                          throwError err
+                      publishedMatches <-
+                        stagedDestinationMatches
+                          `catchError` reportPreservedOriginal quarantine
+                      if not publishedMatches
+                        then rollbackPublished quarantine
+                        else finishReplacement restore quarantine
    where
+    stagedSourceMatches = observeStagedFile source
+    stagedDestinationMatches = observeStagedFile destination
+    observeStagedFile path = do
+      actualSnapshot <- getFileSnapshotIO path
+      case actualSnapshot of
+        Nothing -> return False
+        Just _ -> do
+          actualModeSnapshot <- getFileModeSnapshotIO path
+          case actualModeSnapshot of
+            Nothing -> return False
+            Just _ -> do
+              actualContents <-
+                readRegularFileIO path `catchError` \err ->
+                  if isDoesNotExistError err
+                    then return Nothing
+                    else throwError err
+              finalSnapshot <- getFileSnapshotIO path
+              finalModeSnapshot <- getFileModeSnapshotIO path
+              return $
+                actualSnapshot == finalSnapshot
+                  && actualModeSnapshot == finalModeSnapshot
+                  && matchesStagedFile
+                    expectedSourceSnapshot
+                    expectedSourceMode
+                    expectedSourceContents
+                    actualSnapshot
+                    actualModeSnapshot
+                    actualContents
+    finishReplacement restore quarantine = do
+      unchanged <- getFileSnapshotIO quarantine
+      unchangedMode <- getFileModeSnapshotIO quarantine
+      unchangedContents <- readRegularFileIO quarantine
+      let remainedUnchanged =
+            maybe
+              False
+              (sameFileVersionAfterRename expectedSnapshot)
+              unchanged
+              && unchangedMode == Just expectedModeSnapshot
+              && unchangedContents == Just expectedContents
+      if remainedUnchanged
+        then
+          restore (removeFileAfterWideningIO quarantine)
+            >> return True
+        else do
+          quarantine' <- decodeFS quarantine
+          throwError $
+            userError $
+              "the displaced file changed during replacement; "
+                <> "its contents are preserved at "
+                <> quarantine'
+    rollbackPublished originalQuarantine = do
+      unexpected <- quarantineFile (128 :: Int) destination
+      case unexpected of
+        Nothing -> do
+          restoreOriginal originalQuarantine
+          throwError $
+            userError $
+              "the staged file disappeared during replacement; "
+                <> "the original file was restored"
+        Just unexpectedQuarantine -> do
+          restoreOriginal originalQuarantine
+          unexpectedQuarantine' <- decodeFS unexpectedQuarantine
+          throwError $
+            userError $
+              "the staged file changed during replacement; the unexpected "
+                <> "entry is preserved at "
+                <> unexpectedQuarantine'
+    reportPreservedOriginal quarantine err = do
+      quarantine' <- decodeFS quarantine
+      throwError $
+        ioeSetErrorString err $
+          "the original file is preserved at " <> quarantine'
     quarantineFile attempts path
       | attempts < 1 =
           throwError $
@@ -2445,6 +2554,30 @@ sameFileVersionAfterRename
     expectedIdentity == actualIdentity
       && expectedSize == actualSize
       && expectedModified == actualModified
+
+
+matchesStagedFile
+  :: FileSnapshot
+  -> PortableMode
+  -> ByteString
+  -> Maybe FileSnapshot
+  -> Maybe FileModeSnapshot
+  -> Maybe ByteString
+  -> Bool
+matchesStagedFile
+  expectedSnapshot
+  expectedMode
+  expectedContents
+  actualSnapshot
+  actualModeSnapshot
+  actualContents =
+    maybe False (sameFileVersionAfterRename expectedSnapshot) actualSnapshot
+      && maybe False matchesMode actualModeSnapshot
+      && actualContents == Just expectedContents
+   where
+    matchesMode (FileModeSnapshot actualIdentity actualMode) =
+      actualIdentity == fileSnapshotIdentity expectedSnapshot
+        && satisfiesPortableMode actualMode expectedMode
 
 
 removeDirectoryIfIdentityIO :: OsPath -> FileIdentity -> IO Bool

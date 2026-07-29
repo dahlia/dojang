@@ -423,6 +423,57 @@ spec = do
           `shouldReturn` destination.contents
         FileSystem.readFile base.path `shouldReturn` base.contents
 
+    it "rejects arbitrary staged replacements before publication" $
+      hedgehog $ do
+        result <- forAll utf8Text
+        replacement <-
+          forAll $
+            Gen.filter (/= result) $
+              Gen.bytes $
+                Range.linear 0 512
+        observed <- liftIO $ withThreeInputs $ \source base destination -> do
+          committed <-
+            runRacingCommitIO
+              (ReplaceStagedBeforePublication replacement)
+              ( commitMergeResultGuarded
+                  (const $ return ())
+                  DefaultMode
+                  source
+                  base
+                  destination
+                  result
+              )
+          sourceAfter <- FileSystem.readFile source.path
+          destinationAfter <- FileSystem.readFile destination.path
+          baseAfter <- FileSystem.readFile base.path
+          return
+            ( committed
+            , sourceAfter
+            , destinationAfter
+            , baseAfter
+            , source.contents
+            , destination.contents
+            , base.contents
+            )
+        let
+          ( committed
+            , sourceAfter
+            , destinationAfter
+            , baseAfter
+            , sourceBefore
+            , destinationBefore
+            , baseBefore
+            ) = observed
+        committed
+          === Right
+            ( Left $
+                MergeInputsChanged $
+                  NonEmpty.singleton SourceInput
+            )
+        sourceAfter === sourceBefore
+        destinationAfter === destinationBefore
+        baseAfter === baseBefore
+
     symlinkIt "does not apply a declared mode through a replacement link" $
       withThreeInputs $ \source base destination -> do
         externalName <- encodeFS "external"
@@ -685,6 +736,7 @@ runReplacingWorkspaceIO
 
 data CommitRace
   = ChangeWhileStaging OsPath ByteString.ByteString
+  | ReplaceStagedBeforePublication ByteString.ByteString
   | ReplaceBeforeMode OsPath OsPath
 
 
@@ -742,6 +794,7 @@ instance FileSystem.MonadFileSystem RacingCommitIO where
       ChangeWhileStaging path concurrent ->
         RacingCommitIO $
           liftIO (FileSystem.writeFile path concurrent :: IO ())
+      ReplaceStagedBeforePublication _ -> return ()
       ReplaceBeforeMode _ _ -> return ()
     return temporary
   withFileLock _ action = action
@@ -796,6 +849,12 @@ instance FileSystem.MonadFileSystem RacingCommitIO where
   setPortableMode path bits = do
     race <- RacingCommitIO ask
     case race of
+      ReplaceStagedBeforePublication replacement ->
+        RacingCommitIO $ liftIO $ do
+          FileSystem.setPortableMode path bits
+          FileSystem.removeFile path
+          FileSystem.writeFile path replacement
+          FileSystem.setPortableMode path bits
       ReplaceBeforeMode watched external
         | path == watched ->
             RacingCommitIO $ liftIO $ do
@@ -809,8 +868,18 @@ instance FileSystem.MonadFileSystem RacingCommitIO where
         RacingCommitIO $
           liftIO (FileSystem.setPortableMode path bits :: IO ())
   setPortableWritable path writable =
-    RacingCommitIO $
-      liftIO (FileSystem.setPortableWritable path writable :: IO ())
+    do
+      race <- RacingCommitIO ask
+      case race of
+        ReplaceStagedBeforePublication replacement ->
+          RacingCommitIO $ liftIO $ do
+            FileSystem.setPortableWritable path writable
+            FileSystem.removeFile path
+            FileSystem.writeFile path replacement
+            FileSystem.setPortableWritable path writable
+        _ ->
+          RacingCommitIO $
+            liftIO (FileSystem.setPortableWritable path writable :: IO ())
   createSymbolicLink target link fileType =
     RacingCommitIO $
       liftIO $

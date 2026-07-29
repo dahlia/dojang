@@ -288,12 +288,26 @@ instance
       . lift
       . createFileAtomicallyWithDefaultPermissions dst template
   replaceFile src = App . lift . lift . lift . replaceFile src
-  replaceFileIfSnapshot snapshot modeSnapshot contents src =
-    App
-      . lift
-      . lift
-      . lift
-      . replaceFileIfSnapshot snapshot modeSnapshot contents src
+  replaceFileIfSnapshot
+    snapshot
+    modeSnapshot
+    contents
+    sourceSnapshot
+    sourceMode
+    sourceContents
+    src =
+      App
+        . lift
+        . lift
+        . lift
+        . replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          contents
+          sourceSnapshot
+          sourceMode
+          sourceContents
+          src
   renameDirectory src = App . lift . lift . lift . renameDirectory src
   writeTemporaryFile directory template contents =
     App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
