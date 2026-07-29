@@ -5,6 +5,7 @@
 
 module Dojang.Syntax.MergeDriverSpec (spec) where
 
+import Control.Monad (forM_)
 import Data.ByteString qualified as ByteString
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict qualified as Map
@@ -133,9 +134,9 @@ spec = do
           _ -> False
 
   describe "formatError" $
-    it "produces a user-facing default-driver diagnostic" $
-      formatError (UnknownDefaultMergeDriver "missing")
-        `shouldBe` "The default merge driver 'missing' is not configured."
+    it "formats every merge-driver configuration error" $
+      forM_ formattedErrors $ \(err, message) ->
+        formatError err `shouldBe` message
  where
   parse source = case readMergeDriverConfig source of
     Left err -> fail $ show err
@@ -166,3 +167,91 @@ validDriver =
 
 validDocumentBytes :: ByteString.ByteString
 validDocumentBytes = Text.encodeUtf8 validDocument
+
+
+formattedErrors :: [(Error, Text.Text)]
+formattedErrors =
+  [
+    ( InvalidUtf8 "decoder failure"
+    , "The merge-driver configuration is not valid UTF-8: decoder failure."
+    )
+  ,
+    ( TomlErrors $ "first error" :| ["second error"]
+    , "The merge-driver configuration is not valid TOML:\n"
+        <> "first error\nsecond error\n"
+    )
+  ,
+    ( TomlWarnings ["unknown field"]
+    , "The merge-driver configuration has unknown or unused fields:\n"
+        <> "unknown field\n"
+    )
+  ,
+    ( InvalidDefaultMergeDriverName "2way" InvalidMergeDriverNameStart
+    , "Invalid default merge-driver name '2way': "
+        <> "merge-driver names must start with an ASCII letter."
+    )
+  ,
+    ( InvalidMergeDriverName "" EmptyMergeDriverName
+    , "Invalid merge-driver name '': merge-driver names cannot be empty."
+    )
+  ,
+    ( InvalidMergeDriverName "bad.name" InvalidMergeDriverNameCharacter
+    , "Invalid merge-driver name 'bad.name': merge-driver names may contain "
+        <> "only ASCII letters, digits, hyphens, and underscores."
+    )
+  , driverError EmptyMergeDriverCommand "the command cannot be empty."
+  , driverError
+      EmptyMergeDriverExecutable
+      "the command executable cannot be empty."
+  , driverError
+      (MergePlaceholderInExecutable "tool-{source}")
+      "the executable 'tool-{source}' cannot contain a merge placeholder."
+  , driverError
+      MissingMergeSourcePlaceholder
+      "the command must contain one whole-argument '{source}' placeholder."
+  , driverError
+      DuplicateMergeSourcePlaceholder
+      "the command must not contain more than one '{source}' placeholder."
+  , driverError
+      MissingMergeBasePlaceholder
+      "the command must contain one whole-argument '{base}' placeholder."
+  , driverError
+      DuplicateMergeBasePlaceholder
+      "the command must not contain more than one '{base}' placeholder."
+  , driverError
+      DuplicateMergeDestinationPlaceholder
+      "the command must not contain more than one '{destination}' placeholder."
+  , driverError
+      MissingMergeResultPlaceholder
+      "the command must contain one whole-argument '{result}' placeholder."
+  , driverError
+      DuplicateMergeResultPlaceholder
+      "the command must not contain more than one '{result}' placeholder."
+  , driverError
+      (EmbeddedMergePlaceholder "--source={source}")
+      ( "the argument '--source={source}' embeds a placeholder; "
+          <> "placeholders must occupy a whole argument."
+      )
+  , driverError
+      (InvalidMergeDriverExitCode 256)
+      "exit code 256 must be between 1 and 255."
+  , driverError
+      (DuplicateMergeDriverExitCode 7)
+      "exit code 7 is listed more than once."
+  , driverError
+      (AmbiguousMergeDriverExitCode 9)
+      "exit code 9 denotes both an unresolved and a canceled merge."
+  , driverError
+      (InvalidMergeDriverEnvironmentName "BAD-NAME")
+      "the environment name 'BAD-NAME' is not portable."
+  , driverError
+      (DuplicateMergeDriverInheritedEnvironmentName "PATH")
+      "the environment name 'PATH' is inherited more than once."
+  ,
+    ( UnknownDefaultMergeDriver "missing"
+    , "The default merge driver 'missing' is not configured."
+    )
+  ]
+ where
+  driverError err message =
+    (InvalidMergeDriver "driver" err, "Invalid merge driver 'driver': " <> message)
