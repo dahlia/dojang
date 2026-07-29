@@ -66,6 +66,7 @@ import Dojang.Commands.Merge
   ( defaultMergeDriverConfigPath
   , makeMergeDriverProcessRequest
   , mergeWithDriverRunner
+  , mergeWithDriverRunnerAndFinalizationBarrier
   , mergeWithDriverRunnerAndInvocationBarrier
   , mergeWithDriverRunnerAndPublisher
   , mergeWithDriverRunnerAndPublisherAndPreparer
@@ -257,6 +258,67 @@ spec = sequential $ do
           mergeWith fixture runner `shouldThrow` (== conflictError)
         readReplicas fixture
           `shouldReturn` ["source", "base", "destination"]
+
+    it "rejects a route retargeted at the commit boundary" $
+      withFixture $ \fixture -> do
+        retargetedName <- encodeFS "retargeted-destination"
+        let retargeted =
+              takeDirectory fixture.destinationPath
+                </> retargetedName
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+            beforeFinalization =
+              writeManifestFile
+                fixture.fixtureRetargetedManifest
+                ( fixture.fixtureEnv.sourceDirectory
+                    </> fixture.fixtureEnv.manifestFile
+                )
+        writeFile retargeted "destination"
+        withEnvVars [("RETARGET", Just retargeted)] $
+          ( runAppWithoutLogging fixture.fixtureEnv $
+              mergeWithDriverRunnerAndFinalizationBarrier
+                beforeFinalization
+                runner
+                Nothing
+                (Just fixture.fixtureConfigPath)
+                []
+          )
+            `shouldThrow` (== conflictError)
+        readReplicas fixture
+          `shouldReturn` ["source", "base", "destination"]
+
+    it "rejects a route retargeted at the recovery boundary" $
+      withFixture $ \fixture -> do
+        retargetedName <- encodeFS "retargeted-destination"
+        let retargeted =
+              takeDirectory fixture.destinationPath
+                </> retargetedName
+            merged = "merged"
+            beforeFinalization =
+              writeManifestFile
+                fixture.fixtureRetargetedManifest
+                ( fixture.fixtureEnv.sourceDirectory
+                    </> fixture.fixtureEnv.manifestFile
+                )
+        writeFile fixture.sourcePath merged
+        writeFile fixture.destinationPath merged
+        writeFile retargeted "destination"
+        withEnvVars [("RETARGET", Just retargeted)] $
+          ( runAppWithoutLogging fixture.fixtureEnv $
+              mergeWithDriverRunnerAndFinalizationBarrier
+                beforeFinalization
+                (error "partial recovery ran a driver")
+                Nothing
+                (Just fixture.fixtureConfigPath)
+                []
+          )
+            `shouldThrow` (== conflictError)
+        readReplicas fixture
+          `shouldReturn` [merged, "base", merged]
+        pendingPublicationCount fixture `shouldReturn` 1
 
     it "maps unreadable policy refresh inputs to the conflict exit code" $
       if os == "mingw32"
@@ -480,6 +542,57 @@ spec = sequential $ do
               []
           )
           `shouldReturn` ExitSuccess
+
+    it "rejects stale policy inside pending target publication" $
+      withFixture $ \fixture -> do
+        retargetedName <- encodeFS "retargeted-destination"
+        let retargeted =
+              takeDirectory fixture.destinationPath
+                </> retargetedName
+            merged = "merged"
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath merged
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+            retargetBeforePublication ctx state managed = do
+              writeManifestFile
+                fixture.fixtureRetargetedManifest
+                ( fixture.fixtureEnv.sourceDirectory
+                    </> fixture.fixtureEnv.manifestFile
+                )
+              persistMergedTarget ctx state managed
+        writeFile retargeted "destination"
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        withEnvVars [("RETARGET", Just retargeted)] $
+          ( runAppWithoutLogging fixture.fixtureEnv $
+              mergeWithDriverRunnerAndPublisher
+                retargetBeforePublication
+                (error "publication retry ran a driver")
+                Nothing
+                (Just fixture.fixtureConfigPath)
+                []
+          )
+            `shouldThrow` (== conflictError)
+        readReplicas fixture `shouldReturn` replicate 3 merged
+        pendingPublicationCount fixture `shouldReturn` 2
+        Right (Just machineId) <-
+          readMachineId fixture.fixtureEnv.stateDirectory
+        Right (Just state) <-
+          readRepositoryState
+            fixture.fixtureEnv.stateDirectory
+            fixture.fixtureRepositoryId
+            machineId
+        state.targetRecords `shouldBe` Map.empty
 
     it "keeps a sibling recovery workspace at its invocation path" $
       withFixture $ \fixture -> do

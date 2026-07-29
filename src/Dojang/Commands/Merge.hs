@@ -12,6 +12,7 @@ module Dojang.Commands.Merge
   , makeMergeDriverProcessRequest
   , merge
   , mergeWithDriverRunner
+  , mergeWithDriverRunnerAndFinalizationBarrier
   , mergeWithDriverRunnerAndInvocationBarrier
   , mergeWithDriverRunnerAndPublisher
   , mergeWithDriverRunnerAndPublisherAndPreparer
@@ -211,6 +212,12 @@ data MergeDriverExecution = MergeDriverExecution
   }
 
 
+data MergeBarriers i = MergeBarriers
+  { beforeInvocation :: App i ()
+  , beforeFinalization :: App i ()
+  }
+
+
 data PreparedMerge = PreparedMerge
   { managed :: ManagedCorrespondence
   , action :: MergeAction
@@ -254,6 +261,32 @@ mergeWithDriverRunner =
 
 
 -- | Runs the merge command with a barrier immediately before guarded
+-- merge finalization.
+--
+-- The injected boundary lets tests coordinate route-policy changes after the
+-- pending-publication marker is durable but before authoritative replicas are
+-- written.  Production passes a no-op barrier.
+mergeWithDriverRunnerAndFinalizationBarrier
+  :: (MonadFileSystem i, AppEffects i)
+  => App i ()
+  -- ^ Barrier before guarded merge finalization.
+  -> (ProcessRequest -> App i ProcessResult)
+  -- ^ Structured process runner.
+  -> Maybe Text
+  -- ^ Optional configured driver name.
+  -> Maybe OsPath
+  -- ^ Optional driver configuration path.
+  -> [OsPath]
+  -- ^ Source, destination, or containing paths to select.
+  -> App i ExitCode
+mergeWithDriverRunnerAndFinalizationBarrier beforeFinalization =
+  runMerge
+    persistMergedTarget
+    prepareMergeWorkspace
+    (MergeBarriers (return ()) beforeFinalization)
+
+
+-- | Runs the merge command with a barrier immediately before guarded
 -- invocation-workspace creation.
 --
 -- The injected barrier lets tests coordinate repository lifecycle changes
@@ -276,7 +309,7 @@ mergeWithDriverRunnerAndInvocationBarrier beforeInvocation =
   runMerge
     persistMergedTarget
     prepareMergeWorkspace
-    beforeInvocation
+    (MergeBarriers beforeInvocation (return ()))
 
 
 -- | Runs the merge command with injectable driver and state-publication
@@ -347,7 +380,7 @@ mergeWithDriverRunnerAndPublisherAndPreparer
     runMerge
       publishTarget
       prepareWorkspace
-      (return ())
+      (MergeBarriers (return ()) (return ()))
       runDriver
       requestedDriver
       requestedConfig
@@ -367,13 +400,13 @@ runMerge
        -> MergeTextInput
        -> App i MergeWorkspace
      )
-  -> App i ()
+  -> MergeBarriers i
   -> (ProcessRequest -> App i ProcessResult)
   -> Maybe Text
   -> Maybe OsPath
   -> [OsPath]
   -> App i ExitCode
-runMerge publish prepare barrier runDriver choice configChoice paths = do
+runMerge publish prepare barriers runDriver choice configChoice paths = do
   pathStyle <- pathStyleFor StandardError
   preHookContext <- ensureContext
   preHookState <- prepareMachineState preHookContext.repository.manifest
@@ -444,7 +477,7 @@ runMerge publish prepare barrier runDriver choice configChoice paths = do
                 forM resolvedDriver $ \driver -> do
                   environment <- processEnvironment
                   return $ MergeDriverExecution driver environment
-              barrier
+              barriers.beforeInvocation
               (invocationRoot, invocationIdentity) <-
                 guardMergeFinalization
                   machineState
@@ -459,6 +492,7 @@ runMerge publish prepare barrier runDriver choice configChoice paths = do
                   driverExecution
                   machineState
                   invocationRoot
+                  barriers.beforeFinalization
                   prepared
               invocationCleaned <-
                 if workspacesCleaned
@@ -883,6 +917,7 @@ processPrepared
   -> Maybe MergeDriverExecution
   -> MachineState
   -> OsPath
+  -> App i ()
   -> [PreparedMerge]
   -> App i Bool
 processPrepared
@@ -893,6 +928,7 @@ processPrepared
   driverExecution
   expectedState
   invocationRoot
+  beforeFinalization
   prepared =
     and
       <$> forM
@@ -934,19 +970,27 @@ processPrepared
                         workspaceIdentity
                         refreshedCtx
                         refreshedManaged
-                    committed <-
-                      guardMergeFinalization refreshedState $
-                        commitMergeRecoveryGuarded
-                          (printCommitStep pathStyle refreshedManaged)
-                          refreshedManaged.route.mode
-                          item.source
-                          item.base
-                          item.destination
+                    beforeFinalization
+                    (committed, finalCtx, finalState, finalManaged) <-
+                      guardMergePolicyFinalization
+                        pathStyle
+                        refreshedState
+                        refreshedManaged
+                        ( \ctx state managed -> do
+                            result <-
+                              commitMergeRecoveryGuarded
+                                (printCommitStep pathStyle managed)
+                                managed.route.mode
+                                item.source
+                                item.base
+                                item.destination
+                            return (result, ctx, state, managed)
+                        )
                     reportCommitResult committed
                     publishTarget
-                      refreshedCtx
-                      refreshedState
-                      refreshedManaged
+                      finalCtx
+                      finalState
+                      finalManaged
                     completePublication
                       pathStyle
                       pending
@@ -965,10 +1009,17 @@ processPrepared
                         workspaceIdentity
                         refreshedCtx
                         refreshedManaged
+                    beforeFinalization
+                    (finalCtx, finalState, finalManaged) <-
+                      guardMergePolicyFinalization
+                        pathStyle
+                        refreshedState
+                        refreshedManaged
+                        (\ctx state managed -> return (ctx, state, managed))
                     publishTarget
-                      refreshedCtx
-                      refreshedState
-                      refreshedManaged
+                      finalCtx
+                      finalState
+                      finalManaged
                     completePublication
                       pathStyle
                       pending
@@ -1010,20 +1061,28 @@ processPrepared
                             workspaceIdentity
                             refreshedCtx
                             refreshedManaged
-                        committed <-
-                          guardMergeFinalization refreshedState $
-                            commitMergeResultGuarded
-                              (printCommitStep pathStyle refreshedManaged)
-                              refreshedManaged.route.mode
-                              item.source
-                              item.base
-                              item.destination
-                              result
+                        beforeFinalization
+                        (committed, finalCtx, finalState, finalManaged) <-
+                          guardMergePolicyFinalization
+                            pathStyle
+                            refreshedState
+                            refreshedManaged
+                            ( \ctx state managed -> do
+                                commitResult <-
+                                  commitMergeResultGuarded
+                                    (printCommitStep pathStyle managed)
+                                    managed.route.mode
+                                    item.source
+                                    item.base
+                                    item.destination
+                                    result
+                                return (commitResult, ctx, state, managed)
+                            )
                         reportCommitResult committed
                         publishTarget
-                          refreshedCtx
-                          refreshedState
-                          refreshedManaged
+                          finalCtx
+                          finalState
+                          finalManaged
                         completePublication
                           pathStyle
                           pending
@@ -1066,34 +1125,59 @@ refreshMergePolicy
   -> MachineState
   -> ManagedCorrespondence
   -> App i (Context (App i), MachineState, ManagedCorrespondence)
-refreshMergePolicy pathStyle expectedState expected = do
-  manifest <- ensureManifest
-  refreshedState <-
-    if manifest.repositoryId == Just expectedState.repositoryId
-      then readExistingMachineState manifest
-      else return Nothing
-  machineState <- case refreshedState of
-    Just state
-      | sameMergeStateIdentity expectedState state -> return state
-    _ ->
-      die' conflictError $
-        "Repository or machine-state identity changed while merging "
-          <> pathStyle expected.correspondence.source.path
-          <> "."
-  ctx <- contextFromExistingMachineState manifest machineState
-  (managed, warnings) <-
-    (makeManagedCorrespond ctx >>= ensureRouteOwnership)
-      `catchError` reportMergeInputRefreshError
-        pathStyle
-        expected.correspondence.source.path
-  printWarnings warnings
-  case find (sameMergePolicy expected) managed of
-    Just refreshed -> return (ctx, machineState, refreshed)
-    Nothing ->
-      die' conflictError $
-        "Route policy changed while merging "
-          <> pathStyle expected.correspondence.source.path
-          <> "."
+refreshMergePolicy =
+  refreshMergePolicyWithWarnings True
+
+
+refreshMergePolicySilently
+  :: (MonadFileSystem i, AppEffects i)
+  => (OsPath -> Text)
+  -> MachineState
+  -> ManagedCorrespondence
+  -> App i (Context (App i), MachineState, ManagedCorrespondence)
+refreshMergePolicySilently =
+  refreshMergePolicyWithWarnings False
+
+
+refreshMergePolicyWithWarnings
+  :: (MonadFileSystem i, AppEffects i)
+  => Bool
+  -> (OsPath -> Text)
+  -> MachineState
+  -> ManagedCorrespondence
+  -> App i (Context (App i), MachineState, ManagedCorrespondence)
+refreshMergePolicyWithWarnings
+  reportWarnings
+  pathStyle
+  expectedState
+  expected = do
+    manifest <- ensureManifest
+    refreshedState <-
+      if manifest.repositoryId == Just expectedState.repositoryId
+        then readExistingMachineState manifest
+        else return Nothing
+    machineState <- case refreshedState of
+      Just state
+        | sameMergeStateIdentity expectedState state -> return state
+      _ ->
+        die' conflictError $
+          "Repository or machine-state identity changed while merging "
+            <> pathStyle expected.correspondence.source.path
+            <> "."
+    ctx <- contextFromExistingMachineState manifest machineState
+    (managed, warnings) <-
+      (makeManagedCorrespond ctx >>= ensureRouteOwnership)
+        `catchError` reportMergeInputRefreshError
+          pathStyle
+          expected.correspondence.source.path
+    when reportWarnings $ printWarnings warnings
+    case find (sameMergePolicy expected) managed of
+      Just refreshed -> return (ctx, machineState, refreshed)
+      Nothing ->
+        die' conflictError $
+          "Route policy changed while merging "
+            <> pathStyle expected.correspondence.source.path
+            <> "."
 
 
 sameMergeStateIdentity :: MachineState -> MachineState -> Bool
@@ -1133,6 +1217,24 @@ guardMergeFinalization machineState action = do
   case guarded of
     Left err -> die' machineStateError $ formatStateError err
     Right result -> return result
+
+
+guardMergePolicyFinalization
+  :: (MonadFileSystem i, AppEffects i)
+  => (OsPath -> Text)
+  -> MachineState
+  -> ManagedCorrespondence
+  -> ( Context (App i)
+       -> MachineState
+       -> ManagedCorrespondence
+       -> App i result
+     )
+  -> App i result
+guardMergePolicyFinalization pathStyle machineState managed action =
+  guardMergeFinalization machineState $ do
+    (currentCtx, currentState, currentManaged) <-
+      refreshMergePolicySilently pathStyle machineState managed
+    action currentCtx currentState currentManaged
 
 
 workspaceProcessRequest
@@ -1497,41 +1599,46 @@ requireIdentity path = do
             <> "."
 
 
--- | Publishes a managed-target record only while all three replicas still
--- converge and the destination and intermediate replicas still satisfy the
--- route's declared mode.  Lost content or mode convergence aborts publication
--- so the caller can retain its recovery journal.  A converged deletion has no
--- mode to validate.
+-- | Publishes a managed-target record only while the current route policy
+-- still matches and all three replicas still converge.  The caller-supplied
+-- context is not trusted for observation: the current context and route are
+-- rebuilt from the manifest under the repository-generation lock.  Stale
+-- policy, lost content convergence, or destination/intermediate mode drift
+-- aborts publication so the caller can retain its recovery journal.  A
+-- converged deletion has no mode to validate.
 persistMergedTarget
   :: (MonadFileSystem i, AppEffects i)
   => Context (App i)
   -> MachineState
   -> ManagedCorrespondence
   -> App i ()
-persistMergedTarget ctx machineState managed = do
+persistMergedTarget _ctx machineState managed = do
   now <- currentTime
   root <- asks (.stateDirectory)
+  pathStyle <- pathStyleFor StandardError
   result <-
     updateManagedTargetsWith
       root
       now
       machineState
       ( \existing -> do
+          (currentCtx, _, currentManaged) <-
+            refreshMergePolicySilently pathStyle machineState managed
           transaction <-
             newTargetSnapshotTransaction machineState.targetSnapshotRoot
           observation <-
             ( do
                 contentObservation <-
                   observeConvergedManagedTarget
-                    ctx.repository
+                    currentCtx.repository
                     transaction
                     Merged
                     now
-                    managed
+                    currentManaged
                 case contentObservation of
                   Just (_, Just _) -> do
                     modesConverged <-
-                      declaredMergeModesConverged managed
+                      declaredMergeModesConverged currentManaged
                     return $
                       if modesConverged
                         then contentObservation
