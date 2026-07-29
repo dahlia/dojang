@@ -18,6 +18,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.Either (isLeft)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict qualified as Map
@@ -481,20 +482,76 @@ spec = do
               , DuringMaterialization
               ]
         observed <- liftIO $ withTempDir $ \root _ -> do
-          managed <- fixtureManagedAt root
+          template <- fixtureManagedAt root
           repository <- fixtureRepositoryAt root
           snapshotRootName <- encodeFS "target-snapshots"
-          let intermediate = managed.correspondence.intermediate.path
-              source = managed.correspondence.source.path
-              destination = managed.correspondence.destination.path
-          createDirectories $ takeDirectory intermediate
+          parentName <- encodeFS "parent"
+          rejectedName <- encodeFS "rejected"
+          destinationRootName <- encodeFS "destination-tree"
+          let templateRoute = template.route
+              sourceRoot =
+                repository.sourcePath </> templateRoute.routeName
+              intermediateRoot =
+                root </> snapshotRootName </> templateRoute.routeName
+              destinationRoot = root </> destinationRootName
+              rejectedRelative = parentName </> rejectedName
+              source = sourceRoot </> rejectedRelative
+              intermediate = intermediateRoot </> rejectedRelative
+              destination = destinationRoot </> rejectedRelative
+              route =
+                RouteResult
+                  sourceRoot
+                  templateRoute.routeName
+                  destinationRoot
+                  FileSystem.Directory
+                  templateRoute.mode
+                  templateRoute.kind
+                  templateRoute.routeDefinition
+                  templateRoute.routeProvenance
+                  templateRoute.codec
+              fileEntry path =
+                FileEntry
+                  path
+                  (File $ fromIntegral $ ByteString.length original)
+              managed =
+                ManagedCorrespondence
+                  route
+                  rejectedRelative
+                  ( FileCorrespondence
+                      (fileEntry source)
+                      Unchanged
+                      (fileEntry intermediate)
+                      (fileEntry destination)
+                      Unchanged
+                  )
+              directoryEntry path = FileEntry path Directory
+              successful =
+                ManagedCorrespondence
+                  route
+                  parentName
+                  ( FileCorrespondence
+                      (directoryEntry $ sourceRoot </> parentName)
+                      Unchanged
+                      (directoryEntry $ intermediateRoot </> parentName)
+                      (directoryEntry $ destinationRoot </> parentName)
+                      Unchanged
+                  )
           createDirectories $ takeDirectory source
-          writeFile intermediate original
+          createDirectories $ takeDirectory intermediate
+          createDirectories $ takeDirectory destination
           writeFile source original
+          writeFile intermediate original
           writeFile destination original
           transaction <-
             newTargetSnapshotTransaction $ root </> snapshotRootName
           now <- getCurrentTime
+          Just (_, Just successfulTarget) <-
+            observeConvergedManagedTarget
+              repository
+              transaction
+              Applied
+              now
+              successful
           outcome <-
             runPublicationRaceIO
               destination
@@ -512,8 +569,22 @@ spec = do
               if racePoint == DuringMaterialization
                 then intermediate
                 else destination
-          return (outcome, changedContents)
-        observed === (Right Nothing, concurrent)
+          successfulBaselineExists <-
+            isDirectory successfulTarget.snapshotPath
+          transactionEntries <-
+            listDirectoryRecursively transaction []
+          let snapshotCount =
+                length
+                  [ ()
+                  | (FileSystem.File, _) <- transactionEntries
+                  ]
+          return
+            ( outcome
+            , changedContents
+            , successfulBaselineExists
+            , snapshotCount
+            )
+        observed === (Right Nothing, concurrent, True, 0)
 
     it "propagates stable publication observation failures" $
       withTempDir $ \root _ -> do

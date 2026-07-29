@@ -138,6 +138,9 @@ fingerprinting and immutable-baseline materialization, verifies that the
 fingerprint and baseline describe those same contents, then revalidates every
 replica.  A change during any of those steps therefore aborts publication
 instead of combining observations from different versions.
+The rejected baseline is removed even when another item keeps the same
+multi-file snapshot transaction alive.  Its ancestors are retained because an
+empty directory may itself be another successfully recorded baseline.
 The pending-publication marker also remains after a guarded commit abort and is
 removed only after target publication succeeds, so a later converged state can
 still repair its machine-state record.

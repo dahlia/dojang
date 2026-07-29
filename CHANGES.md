@@ -38,9 +38,11 @@ To be released.
     publication completes.  Target fingerprints and immutable baselines are
     built from one stable set of replica contents, identities, and modes, then
     revalidated before publication, so a concurrent edit cannot combine
-    different replica versions in machine state.  Failed, unresolved, and
-    canceled workspaces remain available for recovery until `dojang forget`
-    removes them.  Workspace
+    different replica versions in machine state.  A rejected item removes its
+    unreferenced baseline without pruning ancestors that may be successful
+    directory baselines retained in the same multi-file transaction.  Failed,
+    unresolved, and canceled workspaces remain available for recovery until
+    `dojang forget` removes them.  Workspace
     cleanup validates the directory and its complete ancestor chain before
     recursive removal, so a symbolic link cannot redirect deletion outside
     machine-local state.  Partial workspace setup is cleaned when possible, and

@@ -447,12 +447,13 @@ observeStableConvergedFileTarget
                   [source, intermediate, destination]
             snapshot <-
               observeStableRegularFile value.snapshotPath
-            return $
-              if replicasStable
-                && value.fingerprint == expectedFingerprint
-                && fmap (.stableContents) snapshot == Just contents
-                then Just (value.targetId, Just value)
-                else Nothing
+            if replicasStable
+              && value.fingerprint == expectedFingerprint
+              && fmap (.stableContents) snapshot == Just contents
+              then return $ Just (value.targetId, Just value)
+              else do
+                discardTargetSnapshot value.snapshotPath
+                return Nothing
       _ -> return Nothing
    where
     sourceMatches :: StableRegularFile -> StableRegularFile -> Bool
