@@ -94,14 +94,61 @@ int dojang_file_type_at(int fd, const char *name)
     return 3;
 }
 
+static int dojang_fsync(int fd)
+{
+    int result;
+
+    do {
+        result = fsync(fd);
+    } while (result != 0 && errno == EINTR);
+    return result;
+}
+
+static void dojang_remove_created_file_at(int fd, const char *name)
+{
+    (void) unlinkat(fd, name, 0);
+    (void) dojang_fsync(fd);
+}
+
 /*
- * Create one empty regular file relative to an already pinned directory.
- * Return 1 on success or a negated errno.
+ * Make a newly created file and its directory entry durable.  Remove the
+ * entry on failure so callers never accept a recovery artifact that has not
+ * reached stable storage.
+ */
+static int dojang_finish_created_file_at(
+    int fd,
+    const char *name,
+    int created
+)
+{
+    int saved_errno;
+
+    if (dojang_fsync(created) != 0) {
+        saved_errno = errno;
+        (void) close(created);
+        dojang_remove_created_file_at(fd, name);
+        return -saved_errno;
+    }
+    if (close(created) != 0) {
+        saved_errno = errno;
+        dojang_remove_created_file_at(fd, name);
+        return -saved_errno;
+    }
+    if (dojang_fsync(fd) != 0) {
+        saved_errno = errno;
+        dojang_remove_created_file_at(fd, name);
+        return -saved_errno;
+    }
+    return 1;
+}
+
+/*
+ * Create and durably publish one empty regular file relative to an already
+ * pinned directory.  Return 1 on success or a negated errno.
  */
 int dojang_create_empty_file_at(int fd, const char *name)
 {
     int created;
-    int saved_errno;
 
     created = openat(
         fd,
@@ -112,16 +159,13 @@ int dojang_create_empty_file_at(int fd, const char *name)
     if (created == -1) {
         return -errno;
     }
-    if (close(created) == 0) {
-        return 1;
-    }
-    saved_errno = errno;
-    return -saved_errno;
+    return dojang_finish_created_file_at(fd, name, created);
 }
 
 /*
- * Create one owner-only regular file with complete contents relative to an
- * already pinned directory.  Return 1 on success or a negated errno.
+ * Create and durably publish one owner-only regular file with complete
+ * contents relative to an already pinned directory.  Return 1 on success or
+ * a negated errno.
  */
 int dojang_create_private_file_at(
     int fd,
@@ -146,7 +190,7 @@ int dojang_create_private_file_at(
     if (fchmod(created, 0600) != 0) {
         saved_errno = errno;
         (void) close(created);
-        (void) unlinkat(fd, name, 0);
+        dojang_remove_created_file_at(fd, name);
         return -saved_errno;
     }
     offset = 0;
@@ -160,22 +204,17 @@ int dojang_create_private_file_at(
             }
             saved_errno = errno;
             (void) close(created);
-            (void) unlinkat(fd, name, 0);
+            dojang_remove_created_file_at(fd, name);
             return -saved_errno;
         }
         if (written == 0) {
             (void) close(created);
-            (void) unlinkat(fd, name, 0);
+            dojang_remove_created_file_at(fd, name);
             return -EIO;
         }
         offset += (size_t) written;
     }
-    if (close(created) == 0) {
-        return 1;
-    }
-    saved_errno = errno;
-    (void) unlinkat(fd, name, 0);
-    return -saved_errno;
+    return dojang_finish_created_file_at(fd, name, created);
 }
 
 /*

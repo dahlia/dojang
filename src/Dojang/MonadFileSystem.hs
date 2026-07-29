@@ -1520,7 +1520,7 @@ foreign import ccall unsafe "dojang_file_type_at"
   c_fileTypeAt :: CInt -> CString -> IO CInt
 
 
-foreign import ccall unsafe "dojang_create_empty_file_at"
+foreign import ccall safe "dojang_create_empty_file_at"
   -- Returns 1 after creation or a negated errno.
   c_createEmptyFileAt :: CInt -> CString -> IO CInt
 
