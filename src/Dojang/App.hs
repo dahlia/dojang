@@ -312,6 +312,18 @@ instance
   createDirectory = App . lift . lift . lift . createDirectory
   createPrivateDirectory = App . lift . lift . lift . createPrivateDirectory
   removeFile = App . lift . lift . lift . removeFile
+  createEmptyFileInDirectoryIfIdentity pathIdentity identity =
+    App
+      . lift
+      . lift
+      . lift
+      . createEmptyFileInDirectoryIfIdentity pathIdentity identity
+  removeFileInDirectoryIfIdentity pathIdentity identity =
+    App
+      . lift
+      . lift
+      . lift
+      . removeFileInDirectoryIfIdentity pathIdentity identity
   removeDirectory = App . lift . lift . lift . removeDirectory
   removeDirectoryRecursivelyIfIdentity path =
     App . lift . lift . lift . removeDirectoryRecursivelyIfIdentity path

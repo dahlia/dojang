@@ -10,10 +10,10 @@
 #include <stddef.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <sys/syscall.h>
-#include <unistd.h>
 #endif
 
 void *dojang_fdopendir(int fd)
@@ -92,6 +92,43 @@ int dojang_file_type_at(int fd, const char *name)
         return 1;
     }
     return 3;
+}
+
+/*
+ * Create one empty regular file relative to an already pinned directory.
+ * Return 1 on success or a negated errno.
+ */
+int dojang_create_empty_file_at(int fd, const char *name)
+{
+    int created;
+    int saved_errno;
+
+    created = openat(
+        fd,
+        name,
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        0666
+    );
+    if (created == -1) {
+        return -errno;
+    }
+    if (close(created) == 0) {
+        return 1;
+    }
+    saved_errno = errno;
+    return -saved_errno;
+}
+
+/*
+ * Remove one non-directory entry relative to an already pinned directory.
+ * Return 1 on success or a negated errno.
+ */
+int dojang_remove_file_at(int fd, const char *name)
+{
+    if (unlinkat(fd, name, 0) != 0) {
+        return -errno;
+    }
+    return 1;
 }
 
 #endif

@@ -410,6 +410,38 @@ posixCopyInterruptionSpec = do
 
 posixTraversalRaceSpec :: Spec
 posixTraversalRaceSpec = do
+  specify "identity-bound marker I/O rejects a relinked ancestor" $
+    withTempDir $ \tmpDir _ -> do
+      invocationName <- encodeFS "invocation"
+      workspaceName <- encodeFS "workspace"
+      parkedName <- encodeFS "parked"
+      createMarkerName <- encodeFS "pending-create"
+      removeMarkerName <- encodeFS "pending-remove"
+      let invocation = tmpDir </> invocationName
+          workspace = invocation </> workspaceName
+          parked = tmpDir </> parkedName
+          parkedWorkspace = parked </> workspaceName
+          parkedCreateMarker = parkedWorkspace </> createMarkerName
+          parkedRemoveMarker = parkedWorkspace </> removeMarkerName
+      createDirectories workspace
+      writeFile (workspace </> removeMarkerName) "retained"
+      Just identity <- getFileIdentity workspace
+      Just pathIdentity <- captureDirectoryPathIdentity workspace
+      renameDirectory invocation parked
+      createSymbolicLink parked invocation Directory
+      createEmptyFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        createMarkerName
+        `shouldReturn` False
+      removeFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        removeMarkerName
+        `shouldReturn` False
+      exists parkedCreateMarker `shouldReturn` False
+      readFile parkedRemoveMarker `shouldReturn` "retained"
+
   specify "listDirectoryPinned never follows a raced directory link" $
     withTempDir $ \tmpDir _ -> do
       nestedName <- encodeFS "nested-pinned"
@@ -1159,6 +1191,67 @@ spec = do
             readFile (owned </> sentinelName) `shouldReturn` contents
             sort <$> listDirectory tmpDir
               `shouldReturn` sort [ownedName, movedName]
+
+    specify
+      "identity-bound marker I/O preserves arbitrary directory replacements"
+      $ hedgehog
+      $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        replaceAncestor <- forAll Gen.bool
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            invocationName <- encodeFS "invocation"
+            workspaceName <- encodeFS "workspace"
+            parkedName <- encodeFS "parked"
+            markerName <- encodeFS "pending-target"
+            let invocation = tmpDir </> invocationName
+                workspace = invocation </> workspaceName
+                parked =
+                  if replaceAncestor
+                    then tmpDir </> parkedName
+                    else invocation </> parkedName
+                replacementMarker = workspace </> markerName
+            createDirectories workspace
+            Just identity <- getFileIdentity workspace
+            Just pathIdentity <- captureDirectoryPathIdentity workspace
+            renameDirectory
+              (if replaceAncestor then invocation else workspace)
+              parked
+            createDirectories workspace
+            writeFile replacementMarker contents
+            createEmptyFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              markerName
+              `shouldReturn` False
+            removeFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              markerName
+              `shouldReturn` False
+            readFile replacementMarker `shouldReturn` contents
+
+    specify "identity-bound marker I/O updates its captured directory" $
+      withTempDir $ \tmpDir _ -> do
+        workspaceName <- encodeFS "workspace"
+        markerName <- encodeFS "pending-target"
+        let workspace = tmpDir </> workspaceName
+            marker = workspace </> markerName
+        createDirectory workspace
+        Just identity <- getFileIdentity workspace
+        Just pathIdentity <- captureDirectoryPathIdentity workspace
+        createEmptyFileInDirectoryIfIdentity
+          pathIdentity
+          identity
+          markerName
+          `shouldReturn` True
+        readFile marker `shouldReturn` ""
+        removeFileInDirectoryIfIdentity
+          pathIdentity
+          identity
+          markerName
+          `shouldReturn` True
+        exists marker `shouldReturn` False
 
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir

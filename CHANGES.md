@@ -56,7 +56,9 @@ To be released.
     created live workspace.  Retried merges scan each known workspace directory
     through a pinned entry and revalidate its complete path identity before
     removing markers or recovery data, without descending into driver-created
-    subdirectories.
+    subdirectories.  Pending-publication marker creation and removal stay
+    bound to the captured workspace and ancestor identities, so a concurrent
+    directory replacement is retained instead of being modified.
     Driver outcome codes are limited to the portable range 1–255.  The command
     supports source, destination, and directory selectors, `--driver`,
     `--driver-file`, `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version

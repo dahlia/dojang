@@ -86,7 +86,6 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
   , matchesDirectoryPathIdentity
-  , writeFileAtomically
   )
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.Syntax.MergeDriver qualified as MergeDriverSyntax
@@ -1277,13 +1276,26 @@ createPendingPublication workspace workspaceIdentity ctx managed = do
   identifier <- managedTargetId ctx.repository managed
   markerName <- encodePath $ "pending-" <> Text.unpack identifier
   let marker = workspace.root </> markerName
-  writeFileAtomically marker "pending.tmp" ""
   workspacePathIdentity <-
     captureDirectoryPathIdentity workspace.root >>= \case
       Just identity -> return identity
       Nothing ->
         throwError $
-          userError "merge workspace path changed while publishing its marker"
+          userError "merge workspace path changed while publishing its marker."
+  created <-
+    createEmptyFileInDirectoryIfIdentity
+      workspacePathIdentity
+      workspaceIdentity
+      markerName
+  unless created $
+    throwError $
+      userError "merge workspace path changed while publishing its marker."
+  pathUnchanged <- matchesDirectoryPathIdentity workspacePathIdentity
+  identityUnchanged <-
+    (== Just workspaceIdentity) <$> getFileIdentity workspace.root
+  unless (pathUnchanged && identityUnchanged) $
+    throwError $
+      userError "merge workspace path changed while publishing its marker."
   return $
     PendingPublication
       marker
@@ -1299,16 +1311,15 @@ completePublication
   -> [PendingPublication]
   -> App i ()
 completePublication pathStyle current previous = do
-  currentPathUnchanged <- pathStillMatches current
-  if currentPathUnchanged
-    then removePendingMarker current.marker
+  currentMarkerRemoved <- removePendingMarker current
+  if currentMarkerRemoved
+    then return ()
     else warnMarkerRetained current
   forM_ previous $ \pending -> do
-    markerPathUnchanged <- pathStillMatches pending
-    if not markerPathUnchanged
+    markerRemoved <- removePendingMarker pending
+    if not markerRemoved
       then warnRetained pending
       else do
-        removePendingMarker pending.marker
         cleanupPathUnchanged <- pathStillMatches pending
         if not cleanupPathUnchanged
           then warnRetained pending
@@ -1347,11 +1358,13 @@ completePublication pathStyle current previous = do
 
 removePendingMarker
   :: (MonadFileSystem i, AppEffects i)
-  => OsPath
-  -> App i ()
-removePendingMarker marker =
-  removeFile marker `catchError` \err ->
-    unless (isDoesNotExistError err) $ throwError err
+  => PendingPublication
+  -> App i Bool
+removePendingMarker pending =
+  removeFileInDirectoryIfIdentity
+    pending.workspacePathIdentity
+    pending.workspaceIdentity
+    (takeFileName pending.marker)
 
 
 currentMergeWorkspaceRepositoryRoot

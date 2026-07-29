@@ -648,6 +648,12 @@ instance MonadFileSystem CommandEffectTest where
   createDirectory = liftCommandEffectBase . createDirectory
   createPrivateDirectory = liftCommandEffectBase . createPrivateDirectory
   removeFile = liftCommandEffectBase . removeFile
+  createEmptyFileInDirectoryIfIdentity pathIdentity identity =
+    liftCommandEffectBase
+      . createEmptyFileInDirectoryIfIdentity pathIdentity identity
+  removeFileInDirectoryIfIdentity pathIdentity identity =
+    liftCommandEffectBase
+      . removeFileInDirectoryIfIdentity pathIdentity identity
   removeDirectory = liftCommandEffectBase . removeDirectory
   removeDirectoryRecursivelyIfIdentity path =
     liftCommandEffectBase . removeDirectoryRecursivelyIfIdentity path

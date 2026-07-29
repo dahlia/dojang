@@ -73,6 +73,7 @@ import Control.Monad.State.Strict
 import Data.ByteString (ByteString)
 import Data.ByteString qualified
   ( concat
+  , empty
   , hGetContents
   , hGetSome
   , hPut
@@ -715,6 +716,68 @@ class (MonadError IOError m) => MonadFileSystem m where
   removeFile :: (HasCallStack) => OsPath -> m ()
 
 
+  -- | Creates an empty file inside a captured directory path.
+  --
+  -- Returns 'False' without changing anything when either the directory or an
+  -- ancestor no longer has the captured identity, or when the directory's
+  -- identity differs from the separately captured final identity.  The entry
+  -- name must be a single path component.  Filesystem-backed implementations
+  -- must bind validation and creation to pinned directory handles so a
+  -- concurrent pathname replacement cannot redirect the write.
+  createEmptyFileInDirectoryIfIdentity
+    :: (HasCallStack)
+    => DirectoryPathIdentity
+    -> FileIdentity
+    -> OsPath
+    -> m Bool
+  createEmptyFileInDirectoryIfIdentity pathIdentity identity entryName = do
+    validateDirectoryEntryName
+      "createEmptyFileInDirectoryIfIdentity"
+      entryName
+    let directory = directoryPathIdentityPath pathIdentity
+    pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
+    actualIdentity <- getFileIdentity directory
+    if pathUnchanged && actualIdentity == Just identity
+      then do
+        createFileAtomicallyWithDefaultPermissions
+          (directory </> entryName)
+          "dojang-pinned.tmp"
+          Data.ByteString.empty
+        return True
+      else return False
+
+
+  -- | Removes a file inside a captured directory path.
+  --
+  -- A missing file counts as successful removal.  Returns 'False' without
+  -- changing anything when either the directory or an ancestor no longer has
+  -- the captured identity, or when the directory's identity differs from the
+  -- separately captured final identity.  The entry name must be a single path
+  -- component.  Filesystem-backed implementations must bind validation and
+  -- removal to pinned directory handles.
+  removeFileInDirectoryIfIdentity
+    :: (HasCallStack)
+    => DirectoryPathIdentity
+    -> FileIdentity
+    -> OsPath
+    -> m Bool
+  removeFileInDirectoryIfIdentity pathIdentity identity entryName = do
+    validateDirectoryEntryName
+      "removeFileInDirectoryIfIdentity"
+      entryName
+    let directory = directoryPathIdentityPath pathIdentity
+    pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
+    actualIdentity <- getFileIdentity directory
+    if pathUnchanged && actualIdentity == Just identity
+      then
+        (removeFile (directory </> entryName) >> return True)
+          `catchError` \err ->
+            if isDoesNotExistError err
+              then return True
+              else throwError err
+      else return False
+
+
   -- | Removes a directory.  It must be empty.
   removeDirectory :: (HasCallStack) => OsPath -> m ()
 
@@ -899,6 +962,26 @@ class (MonadError IOError m) => MonadFileSystem m where
     -- ^ The intrinsic link type ('Directory' for a directory link;
     -- everything else creates a file link).
     -> m ()
+
+
+directoryPathIdentityPath :: DirectoryPathIdentity -> OsPath
+directoryPathIdentityPath (DirectoryPathIdentity path _) = path
+
+
+validateDirectoryEntryName
+  :: (HasCallStack, MonadFileSystem m) => String -> OsPath -> m ()
+validateDirectoryEntryName location entryName = do
+  decoded <- decodePath entryName
+  unless
+    ( not (Prelude.null decoded)
+        && decoded /= "."
+        && decoded /= ".."
+        && not (isAbsolute entryName)
+        && takeFileName entryName == entryName
+    )
+    $ throwError
+    $ mkIOError InvalidArgument location Nothing (Just decoded)
+      `ioeSetErrorString` "entry name is not a single path component"
 
 
 -- | Writes a sibling temporary file and atomically replaces the destination.
@@ -1216,6 +1299,85 @@ throwPinnedDirectoryError path message = do
   ioError $
     mkIOError InappropriateType "listDirectoryRecursively" Nothing (Just path')
       `ioeSetErrorString` message
+
+
+withMatchingDirectoryPathIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> IO a
+  -> IO (Maybe a)
+withMatchingDirectoryPathIdentityIO
+  (DirectoryPathIdentity _ entries)
+  expectedIdentity
+  action =
+    case reverse entries of
+      (_, finalIdentity) : _
+        | finalIdentity == expectedIdentity -> do
+            pinned <-
+              pin entries `catchError` const (return Nothing)
+            case pinned of
+              Nothing -> return Nothing
+              Just (Left err) -> throwError err
+              Just (Right value) -> return $ Just value
+      _ -> return Nothing
+   where
+    pin [] = Just <$> tryError action
+    pin ((path, expected) : rest) =
+      withEntryHandle
+        path
+        (Win32.fILE_SHARE_READ .|. Win32.fILE_SHARE_WRITE)
+        $ \information -> do
+          let attributes = information.bhfiFileAttributes
+              supported =
+                attributes .&. Win32.fILE_ATTRIBUTE_REPARSE_POINT == 0
+                  && attributes .&. Win32.fILE_ATTRIBUTE_DIRECTORY /= 0
+              unchanged =
+                fileIdentityFromInformation information == expected
+          if supported && unchanged
+            then pin rest
+            else return Nothing
+
+
+createEmptyFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+createEmptyFileInDirectoryIfIdentityIO
+  pathIdentity@(DirectoryPathIdentity directory _)
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "createEmptyFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ createFileAtomicallyWithDefaultPermissionsIO
+          (directory </> entryName)
+          "dojang-pinned.tmp"
+          Data.ByteString.empty
+    return $ maybe False (const True) result
+
+
+removeFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+removeFileInDirectoryIfIdentityIO
+  pathIdentity@(DirectoryPathIdentity directory _)
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "removeFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        ( OsDirectory.removeFile (directory </> entryName)
+            `catchError` \err ->
+              if isDoesNotExistError err
+                then return ()
+                else throwError err
+        )
+    return $ maybe False (const True) result
 #else
 data DirectoryStream
 
@@ -1238,6 +1400,16 @@ foreign import ccall unsafe "dojang_file_type_at"
   -- Returns 1 for a directory, 2 for a symbolic link, 3 for another entry,
   -- or a negated errno.
   c_fileTypeAt :: CInt -> CString -> IO CInt
+
+
+foreign import ccall unsafe "dojang_create_empty_file_at"
+  -- Returns 1 after creation or a negated errno.
+  c_createEmptyFileAt :: CInt -> CString -> IO CInt
+
+
+foreign import ccall unsafe "dojang_remove_file_at"
+  -- Returns 1 after removal or a negated errno.
+  c_removeFileAt :: CInt -> CString -> IO CInt
 
 
 listDirectoryRecursivelyIO
@@ -1361,6 +1533,117 @@ throwErrnoCode location err =
       (CError.Errno err)
       Nothing
       Nothing
+
+
+withMatchingDirectoryPathIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> (Fd -> IO a)
+  -> IO (Maybe a)
+withMatchingDirectoryPathIdentityIO
+  (DirectoryPathIdentity _ entries)
+  expectedIdentity
+  action =
+    case reverse entries of
+      (_, finalIdentity) : _
+        | finalIdentity == expectedIdentity -> pin Nothing entries
+      _ -> return Nothing
+   where
+    pin _ [] = return Nothing
+    pin parent ((entry, expected) : rest) =
+      Exception.mask $ \restore -> do
+        entry' <-
+          decodeFS $
+            case parent of
+              Nothing -> entry
+              Just _ -> takeFileName entry
+        opened <-
+          tryError $
+            Posix.openFdAt
+              parent
+              entry'
+              Posix.ReadOnly
+              Posix.defaultFileFlags
+                { Posix.nonBlock = True
+                , Posix.nofollow = True
+                , Posix.cloexec = True
+                , Posix.directory = True
+                }
+        case opened of
+          Left _ -> return Nothing
+          Right descriptor ->
+            Exception.bracket
+              (return descriptor)
+              Posix.closeFd
+              $ \pinned -> do
+                status <- Posix.getFdStatus pinned
+                if fileIdentityFromStatus status /= expected
+                  then return Nothing
+                  else case rest of
+                    [] -> Just <$> restore (action pinned)
+                    _ -> restore $ pin (Just pinned) rest
+
+
+createEmptyFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+createEmptyFileInDirectoryIfIdentityIO
+  pathIdentity
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "createEmptyFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ \descriptor ->
+          runDirectoryEntryOperation
+            "createEmptyFileInDirectoryIfIdentity"
+            descriptor
+            entryName
+            c_createEmptyFileAt
+    return $ maybe False (const True) result
+
+
+removeFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+removeFileInDirectoryIfIdentityIO
+  pathIdentity
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "removeFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        ( \descriptor ->
+            runDirectoryEntryOperation
+              "removeFileInDirectoryIfIdentity"
+              descriptor
+              entryName
+              c_removeFileAt
+              `catchError` \err ->
+                if isDoesNotExistError err
+                  then return ()
+                  else throwError err
+        )
+    return $ maybe False (const True) result
+
+
+runDirectoryEntryOperation
+  :: String
+  -> Fd
+  -> OsPath
+  -> (CInt -> CString -> IO CInt)
+  -> IO ()
+runDirectoryEntryOperation location descriptor entryName action = do
+  entryName' <- decodeFS entryName
+  PosixInternal.withFilePath entryName' $ \entryPath -> do
+    result <- action (fromIntegral descriptor) entryPath
+    when (result < 0) $ throwErrnoCode location $ negate result
 #endif
 
 #if defined(linux_HOST_OS)
@@ -2330,6 +2613,14 @@ instance MonadFileSystem IO where
 
 
   removeFile = OsDirectory.removeFile
+
+
+  createEmptyFileInDirectoryIfIdentity =
+    createEmptyFileInDirectoryIfIdentityIO
+
+
+  removeFileInDirectoryIfIdentity =
+    removeFileInDirectoryIfIdentityIO
 
 
   removeDirectory = OsDirectory.removeDirectory
