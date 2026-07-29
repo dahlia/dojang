@@ -17,8 +17,10 @@ module Dojang.Types.Merge
   , MergeTextInput (..)
   , MergeWorkspace (..)
   , classifyMergeContents
-  , commitMergeResultGuarded
   , commitMergeRecoveryGuarded
+  , commitMergeRecoveryGuardedWithBoundary
+  , commitMergeResultGuarded
+  , commitMergeResultGuardedWithBoundary
   , mergeCommitOrder
   , mergeWorkspaceRepositoryRoot
   , observeMergeTextInput
@@ -52,6 +54,7 @@ import Dojang.Types.RouteMetadata
   , RouteMode
   , portableModeFromBits
   , posixFileModeBits
+  , satisfiesPortableMode
   )
 
 
@@ -240,48 +243,94 @@ commitMergeResultGuarded
   -> ByteString
   -- ^ Validated driver result.
   -> m (Either MergeCommitError ())
-commitMergeResultGuarded observe declaredMode source base destination result =
-  go
-    [
-      ( SourceCommitReplica
-      , [source, destination, base]
-      , source
-      , False
-      )
-    ,
-      ( DestinationCommitReplica
-      , [destination, base]
-      , destination
-      , True
-      )
-    ,
-      ( IntermediateCommitReplica
-      , [base]
-      , base
-      , True
-      )
-    ]
- where
-  go [] = return $ Right ()
-  go ((replica, remaining, input, applyDeclaredMode) : rest) = do
+commitMergeResultGuarded observe =
+  commitMergeResultGuardedWithBoundary $ \replica action -> do
     observe replica
-    changed <- filterM (fmap not . revalidateMergeTextInput) remaining
-    case NonEmpty.nonEmpty $ (.role) <$> changed of
-      Just roles -> return $ Left $ MergeInputsChanged roles
-      Nothing -> do
-        replaced <-
-          replaceMergeInput
-            declaredMode
-            applyDeclaredMode
-            input
-            result
-        if replaced
-          then go rest
-          else
-            return $
-              Left $
-                MergeInputsChanged $
-                  NonEmpty.singleton input.role
+    action
+
+
+-- | Commits a validated result while wrapping every replica replacement in
+-- an application-supplied policy boundary.
+--
+-- The wrapper can revalidate external policy immediately before and after the
+-- replacement.  It must run the supplied action exactly once.
+commitMergeResultGuardedWithBoundary
+  :: (MonadFileSystem m)
+  => (MergeCommitReplica -> m Bool -> m Bool)
+  -- ^ Wrapper around each guarded replica replacement.
+  -> RouteMode
+  -- ^ Declared destination metadata.
+  -> MergeTextInput
+  -- ^ Stable source input.
+  -> MergeTextInput
+  -- ^ Stable intermediate input.
+  -> MergeTextInput
+  -- ^ Stable destination input.
+  -> ByteString
+  -- ^ Validated driver result.
+  -> m (Either MergeCommitError ())
+commitMergeResultGuardedWithBoundary
+  around
+  declaredMode
+  source
+  base
+  destination
+  result =
+    go
+      [
+        ( SourceCommitReplica
+        , [source, destination, base]
+        , source
+        , False
+        )
+      ,
+        ( DestinationCommitReplica
+        , [destination, base]
+        , destination
+        , True
+        )
+      ,
+        ( IntermediateCommitReplica
+        , [base]
+        , base
+        , True
+        )
+      ]
+   where
+    go [] = return $ Right ()
+    go ((replica, remaining, input, applyDeclaredMode) : rest) = do
+      changed <- filterM (fmap not . revalidateMergeTextInput) remaining
+      case NonEmpty.nonEmpty $ (.role) <$> changed of
+        Just roles -> return $ Left $ MergeInputsChanged roles
+        Nothing
+          | alreadyCommitted applyDeclaredMode input -> go rest
+          | otherwise -> do
+              replaced <-
+                around replica $
+                  replaceMergeInput
+                    declaredMode
+                    applyDeclaredMode
+                    input
+                    result
+              if replaced
+                then go rest
+                else
+                  return $
+                    Left $
+                      MergeInputsChanged $
+                        NonEmpty.singleton input.role
+    alreadyCommitted :: Bool -> MergeTextInput -> Bool
+    alreadyCommitted applyDeclaredMode input =
+      input.contents == result
+        && ( not applyDeclaredMode
+               || case posixFileModeBits declaredMode of
+                 Nothing -> True
+                 Just bits ->
+                   let FileModeSnapshot _ currentMode = input.modeSnapshot
+                   in satisfiesPortableMode
+                        currentMode
+                        (portableModeFromBits bits)
+           )
 
 
 -- | Finishes an interrupted merge after source and destination already agree.
@@ -303,8 +352,32 @@ commitMergeRecoveryGuarded
   -> MergeTextInput
   -- ^ Stable destination input containing the accepted result.
   -> m (Either MergeCommitError ())
-commitMergeRecoveryGuarded
-  observe
+commitMergeRecoveryGuarded observe =
+  commitMergeRecoveryGuardedWithBoundary $ \replica action -> do
+    observe replica
+    action
+
+
+-- | Repairs an interrupted merge while wrapping each replica replacement in
+-- an application-supplied policy boundary.
+--
+-- The wrapper can revalidate external policy immediately before and after the
+-- replacement.  It must run the supplied action exactly once.
+commitMergeRecoveryGuardedWithBoundary
+  :: (MonadFileSystem m)
+  => (MergeCommitReplica -> m Bool -> m Bool)
+  -- ^ Wrapper around each guarded replica replacement.
+  -> RouteMode
+  -- ^ Declared destination metadata.
+  -> MergeTextInput
+  -- ^ Stable source input containing the accepted result.
+  -> MergeTextInput
+  -- ^ Stable intermediate input to repair.
+  -> MergeTextInput
+  -- ^ Stable destination input containing the accepted result.
+  -> m (Either MergeCommitError ())
+commitMergeRecoveryGuardedWithBoundary
+  around
   declaredMode
   source
   base
@@ -315,17 +388,17 @@ commitMergeRecoveryGuarded
         case posixFileModeBits declaredMode of
           Nothing -> repairBase [source, destination, base] Nothing
           Just bits -> do
-            observe DestinationCommitReplica
             changed <- changedInputs [source, destination, base]
             case changed of
               Just roles -> return $ Left $ MergeInputsChanged roles
               Nothing -> do
                 replaced <-
-                  replaceMergeInput
-                    declaredMode
-                    True
-                    destination
-                    destination.contents
+                  around DestinationCommitReplica $
+                    replaceMergeInput
+                      declaredMode
+                      True
+                      destination
+                      destination.contents
                 if not replaced
                   then
                     return $
@@ -351,17 +424,17 @@ commitMergeRecoveryGuarded
       NonEmpty.nonEmpty . fmap (.role)
         <$> filterM (fmap not . revalidateMergeTextInput) inputs
     repairBase remaining declaredBits = do
-      observe IntermediateCommitReplica
       changed <- changedInputs remaining
       case changed of
         Just roles -> return $ Left $ MergeInputsChanged roles
         Nothing -> do
           replaced <-
-            replaceMergeInput
-              declaredMode
-              (maybe False (const True) declaredBits)
-              base
-              source.contents
+            around IntermediateCommitReplica $
+              replaceMergeInput
+                declaredMode
+                (maybe False (const True) declaredBits)
+                base
+                source.contents
           if replaced
             then return $ Right ()
             else

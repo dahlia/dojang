@@ -21,14 +21,18 @@ To be released.
     updates use identity-, content-, and mode-checked staging, and machine
     state is published only after one stable observation proves that all three
     replicas and their declared modes have converged.  Concurrent edits,
-    repository forgetting, recreation, and policy changes therefore leave a
-    retryable conflict instead of accepting stale work.  [[#48], [#75]]
+    repository forgetting, recreation, and policy changes are checked before
+    and after every replica replacement, so they leave a retryable conflict
+    instead of accepting stale work.  [[#48], [#75]]
 
  -  Interrupted merge commits and state publication are recoverable on retry.
     Conditional replacement preserves the previous replica in a private
     sibling until publication is safe, while pending markers retain converged
     but unpublished work.  New workspace directories and private markers are
-    durably published before replica writes begin.  Rejected baselines are
+    durably published before replica writes begin.  Each marker authenticates
+    the original and accepted contents of every replica, so any subset made
+    durable by a crash can be recovered without replacing replicas that
+    already contain the accepted contents and mode.  Rejected baselines are
     removed without disturbing successful entries from the same transaction.
     [[#48], [#75]]
 

@@ -377,6 +377,85 @@ spec = do
             , replicate 3 result
             )
 
+    it "does not replace replicas that already contain arbitrary results" $
+      hedgehog $ do
+        result <- forAll utf8Text
+        observed <- liftIO $ withThreeInputs $ \source base destination -> do
+          let paths = [source.path, destination.path, base.path]
+          mapM_ (`FileSystem.writeFile` result) paths
+          Right refreshedSource <-
+            observeMergeTextInput SourceInput source.path
+          Right refreshedBase <-
+            observeMergeTextInput BaseInput base.path
+          Right refreshedDestination <-
+            observeMergeTextInput DestinationInput destination.path
+          identitiesBefore <- mapM FileSystem.getFileIdentity paths
+          orderRef <- newIORef []
+          committed <-
+            commitMergeResultGuarded
+              (\replica -> modifyIORef' orderRef (<> [replica]))
+              DefaultMode
+              refreshedSource
+              refreshedBase
+              refreshedDestination
+              result
+          identitiesAfter <- mapM FileSystem.getFileIdentity paths
+          order <- readIORef orderRef
+          return (committed, order, identitiesBefore, identitiesAfter)
+        let (committed, order, identitiesBefore, identitiesAfter) = observed
+        committed === Right ()
+        order === []
+        identitiesBefore === identitiesAfter
+
+    it "repairs arbitrary declared modes on already committed results" $
+      hedgehog $ do
+        result <- forAll utf8Text
+        (declaredMode, mismatchingBits) <-
+          forAll $
+            Gen.element $
+              if os == "mingw32"
+                then [(ReadOnly, 0o600)]
+                else
+                  [ (Private, 0o644)
+                  , (Executable, 0o644)
+                  , (PrivateExecutable, 0o644)
+                  , (ReadOnly, 0o600)
+                  ]
+        observed <- liftIO $ withThreeInputs $ \source base destination -> do
+          let paths = [source.path, destination.path, base.path]
+          mapM_ (`FileSystem.writeFile` result) paths
+          FileSystem.setPortableMode destination.path mismatchingBits
+          FileSystem.setPortableMode base.path mismatchingBits
+          Right refreshedSource <-
+            observeMergeTextInput SourceInput source.path
+          Right refreshedBase <-
+            observeMergeTextInput BaseInput base.path
+          Right refreshedDestination <-
+            observeMergeTextInput DestinationInput destination.path
+          orderRef <- newIORef []
+          committed <-
+            commitMergeResultGuarded
+              (\replica -> modifyIORef' orderRef (<> [replica]))
+              declaredMode
+              refreshedSource
+              refreshedBase
+              refreshedDestination
+              result
+          order <- readIORef orderRef
+          destinationMode <-
+            FileSystem.getPortableMode destination.path
+          baseMode <- FileSystem.getPortableMode base.path
+          return (committed, order, destinationMode, baseMode)
+        let
+          (committed, order, destinationMode, baseMode) = observed
+          Just expectedBits = posixFileModeBits declaredMode
+          expectedMode = portableModeFromBits expectedBits
+        committed === Right ()
+        order
+          === [DestinationCommitReplica, IntermediateCommitReplica]
+        satisfiesPortableMode destinationMode expectedMode === True
+        satisfiesPortableMode baseMode expectedMode === True
+
     it "stops after source when the destination changes before its step" $
       withThreeInputs $ \source base destination -> do
         let result = "merged"

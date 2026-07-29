@@ -16,6 +16,7 @@ module Dojang.Commands.Merge
   , mergeWithDriverRunnerAndInvocationBarrier
   , mergeWithDriverRunnerAndPublisher
   , mergeWithDriverRunnerAndPublisherAndPreparer
+  , mergeWithDriverRunnerAndReplicaBarrier
   , persistMergedTarget
   ) where
 
@@ -138,8 +139,8 @@ import Dojang.Types.Merge
   , MergeTextInput (..)
   , MergeWorkspace (..)
   , classifyMergeContents
-  , commitMergeRecoveryGuarded
-  , commitMergeResultGuarded
+  , commitMergeRecoveryGuardedWithBoundary
+  , commitMergeResultGuardedWithBoundary
   , mergeWorkspaceRepositoryRoot
   , observeMergeTextInput
   , prepareMergeWorkspace
@@ -202,11 +203,12 @@ data MergeAction
   = RunMergeDriver
   | RecoverMergeReplicas
   | PublishMergedTarget
-  | RecoverPendingMergeResult ByteString
+  | RecoverPendingMergeResult PendingMergeJournal
 
 
 data PendingMergeJournal = PendingMergeJournal
-  { baseDigest :: ByteString
+  { sourceDigest :: ByteString
+  , baseDigest :: ByteString
   , destinationDigest :: ByteString
   , resultDigest :: ByteString
   , result :: ByteString
@@ -229,6 +231,7 @@ data MergeDriverExecution = MergeDriverExecution
 data MergeBarriers i = MergeBarriers
   { beforeInvocation :: App i ()
   , beforeFinalization :: App i ()
+  , afterReplicaWrite :: MergeCommitReplica -> App i ()
   }
 
 
@@ -297,7 +300,7 @@ mergeWithDriverRunnerAndFinalizationBarrier beforeFinalization =
   runMerge
     persistMergedTarget
     prepareMergeWorkspace
-    (MergeBarriers (return ()) beforeFinalization)
+    (MergeBarriers (return ()) beforeFinalization $ const $ return ())
 
 
 -- | Runs the merge command with a barrier immediately before guarded
@@ -323,7 +326,31 @@ mergeWithDriverRunnerAndInvocationBarrier beforeInvocation =
   runMerge
     persistMergedTarget
     prepareMergeWorkspace
-    (MergeBarriers beforeInvocation (return ()))
+    (MergeBarriers beforeInvocation (return ()) $ const $ return ())
+
+
+-- | Runs the merge command with a barrier after each guarded replica write.
+--
+-- The injected boundary lets tests coordinate route-policy changes between
+-- authoritative replica replacements.  Production passes a no-op barrier.
+mergeWithDriverRunnerAndReplicaBarrier
+  :: (MonadFileSystem i, AppEffects i)
+  => (MergeCommitReplica -> App i ())
+  -- ^ Barrier after each successful replica write.
+  -> (ProcessRequest -> App i ProcessResult)
+  -- ^ Structured process runner.
+  -> Maybe Text
+  -- ^ Optional configured driver name.
+  -> Maybe OsPath
+  -- ^ Optional driver configuration path.
+  -> [OsPath]
+  -- ^ Source, destination, or containing paths to select.
+  -> App i ExitCode
+mergeWithDriverRunnerAndReplicaBarrier afterReplicaWrite =
+  runMerge
+    persistMergedTarget
+    prepareMergeWorkspace
+    (MergeBarriers (return ()) (return ()) afterReplicaWrite)
 
 
 -- | Runs the merge command with injectable driver and state-publication
@@ -394,7 +421,7 @@ mergeWithDriverRunnerAndPublisherAndPreparer
     runMerge
       publishTarget
       prepareWorkspace
-      (MergeBarriers (return ()) (return ()))
+      (MergeBarriers (return ()) (return ()) $ const $ return ())
       runDriver
       requestedDriver
       requestedConfig
@@ -512,6 +539,7 @@ runMerge publish prepare barriers runDriver choice configChoice paths = do
                   machineState
                   invocationRoot
                   barriers.beforeFinalization
+                  barriers.afterReplicaWrite
                   prepared
               invocationCleaned <-
                 if workspacesCleaned
@@ -904,7 +932,7 @@ recoverPendingMergeResult
   -> MergeTextInput
   -> MergeTextInput
   -> MergeTextInput
-  -> App i (Maybe ByteString)
+  -> App i (Maybe PendingMergeJournal)
 recoverPendingMergeResult pending source base destination =
   firstAccepted pending
  where
@@ -913,11 +941,17 @@ recoverPendingMergeResult pending source base destination =
     journal <- readPendingMergeJournal publication
     case journal of
       Just value
-        | digest source.contents == value.resultDigest
-        , digest base.contents == value.baseDigest
-        , digest destination.contents == value.destinationDigest ->
-            return $ Just value.result
+        | authenticated source.contents value.sourceDigest value.resultDigest
+        , authenticated base.contents value.baseDigest value.resultDigest
+        , authenticated
+            destination.contents
+            value.destinationDigest
+            value.resultDigest ->
+            return $ Just value
       _ -> firstAccepted rest
+  authenticated contents originalDigest acceptedDigest =
+    let currentDigest = digest contents
+    in currentDigest == originalDigest || currentDigest == acceptedDigest
 
 
 classifyAction
@@ -975,6 +1009,7 @@ processPrepared
   -> MachineState
   -> OsPath
   -> App i ()
+  -> (MergeCommitReplica -> App i ())
   -> [PreparedMerge]
   -> App i Bool
 processPrepared
@@ -986,6 +1021,7 @@ processPrepared
   expectedState
   invocationRoot
   beforeFinalization
+  afterReplicaWrite
   prepared =
     and
       <$> forM
@@ -1012,7 +1048,7 @@ processPrepared
                 retainAndAbort exitCode = do
                   printRetained pathStyle workspace.root
                   abortCommand exitCode
-                finalizeWith message resultContents commitStep = do
+                finalizeWith message journal commitStep = do
                   (refreshedCtx, refreshedState, refreshedManaged) <-
                     refreshMergePolicy pathStyle expectedState item.managed
                   forM_ message printStderr
@@ -1022,9 +1058,7 @@ processPrepared
                       workspaceIdentity
                       refreshedCtx
                       refreshedManaged
-                      item.base.contents
-                      item.destination.contents
-                      resultContents
+                      journal
                   beforeFinalization
                   (commitResult, finalCtx, finalState, finalManaged) <-
                     guardMergePolicyFinalization
@@ -1032,7 +1066,7 @@ processPrepared
                       refreshedState
                       refreshedManaged
                       ( \ctx state managed -> do
-                          committed <- commitStep managed
+                          committed <- commitStep state managed
                           return (committed, ctx, state, managed)
                       )
                   forM_ commitResult reportCommitResult
@@ -1054,11 +1088,16 @@ processPrepared
                             <> pathStyle item.managed.correspondence.source.path
                             <> "..."
                       )
-                      item.source.contents
-                      ( \managed ->
+                      ( makePendingMergeJournal
+                          item.source.contents
+                          item.base.contents
+                          item.destination.contents
+                          item.source.contents
+                      )
+                      ( \state managed ->
                           Just
-                            <$> commitMergeRecoveryGuarded
-                              (printCommitStep pathStyle managed)
+                            <$> commitMergeRecoveryGuardedWithBoundary
+                              (commitReplica state managed)
                               managed.route.mode
                               item.source
                               item.base
@@ -1071,25 +1110,30 @@ processPrepared
                             <> pathStyle item.managed.correspondence.source.path
                             <> "..."
                       )
-                      item.source.contents
-                      (const $ return Nothing)
-                  RecoverPendingMergeResult result ->
+                      ( makePendingMergeJournal
+                          item.source.contents
+                          item.base.contents
+                          item.destination.contents
+                          item.source.contents
+                      )
+                      (\_ _ -> return Nothing)
+                  RecoverPendingMergeResult journal ->
                     finalizeWith
                       ( Just $
                           "Finishing accepted merge result for "
                             <> pathStyle item.managed.correspondence.source.path
                             <> "..."
                       )
-                      result
-                      ( \managed ->
+                      journal
+                      ( \state managed ->
                           Just
-                            <$> commitMergeResultGuarded
-                              (printCommitStep pathStyle managed)
+                            <$> commitMergeResultGuardedWithBoundary
+                              (commitReplica state managed)
                               managed.route.mode
                               item.source
                               item.base
                               item.destination
-                              result
+                              journal.result
                       )
                   RunMergeDriver -> do
                     case driverExecution of
@@ -1121,11 +1165,16 @@ processPrepared
                             resultRead
                         finalizeWith
                           Nothing
-                          result
-                          ( \managed ->
+                          ( makePendingMergeJournal
+                              item.source.contents
+                              item.base.contents
+                              item.destination.contents
+                              result
+                          )
+                          ( \state managed ->
                               Just
-                                <$> commitMergeResultGuarded
-                                  (printCommitStep pathStyle managed)
+                                <$> commitMergeResultGuardedWithBoundary
+                                  (commitReplica state managed)
                                   managed.route.mode
                                   item.source
                                   item.base
@@ -1136,6 +1185,19 @@ processPrepared
               `catchError` retainAndReport
         )
    where
+    commitReplica
+      :: MachineState
+      -> ManagedCorrespondence
+      -> MergeCommitReplica
+      -> App i Bool
+      -> App i Bool
+    commitReplica state managed replica replacement = do
+      _ <- refreshMergePolicySilently pathStyle state managed
+      printCommitStep pathStyle managed replica
+      replaced <- replacement
+      when replaced $ afterReplicaWrite replica
+      _ <- refreshMergePolicySilently pathStyle state managed
+      return replaced
     reportCommitResult :: Either MergeCommitError () -> App i ()
     reportCommitResult = \case
       Left (MergeInputsChanged roles) ->
@@ -1388,16 +1450,31 @@ ensureDriverResolved driver = \case
         <> "."
 
 
-renderPendingMergeJournal
-  :: ByteString -> ByteString -> ByteString -> ByteString
-renderPendingMergeJournal base destination result =
+makePendingMergeJournal
+  :: ByteString
+  -> ByteString
+  -> ByteString
+  -> ByteString
+  -> PendingMergeJournal
+makePendingMergeJournal source base destination result =
+  PendingMergeJournal
+    (digest source)
+    (digest base)
+    (digest destination)
+    (digest result)
+    result
+
+
+renderPendingMergeJournal :: PendingMergeJournal -> ByteString
+renderPendingMergeJournal journal =
   ByteString8.intercalate
     "\n"
-    [ "dojang-merge-v1"
-    , digest base
-    , digest destination
-    , digest result
-    , result
+    [ "dojang-merge-v2"
+    , journal.sourceDigest
+    , journal.baseDigest
+    , journal.destinationDigest
+    , journal.resultDigest
+    , journal.result
     ]
 
 
@@ -1437,19 +1514,26 @@ pendingWorkspaceStillMatches pending =
 parsePendingMergeJournal :: ByteString -> Maybe PendingMergeJournal
 parsePendingMergeJournal contents =
   case ByteString8.split '\n' contents of
-    "dojang-merge-v1" : baseDigest : destinationDigest : resultDigest : rest
-      | validDigest baseDigest
-      , validDigest destinationDigest
-      , validDigest resultDigest
-      , digest result == resultDigest ->
-          Just $
-            PendingMergeJournal
-              baseDigest
-              destinationDigest
-              resultDigest
-              result
-     where
-      result = ByteString8.intercalate "\n" rest
+    "dojang-merge-v2"
+      : sourceDigest
+      : baseDigest
+      : destinationDigest
+      : resultDigest
+      : rest
+        | validDigest sourceDigest
+        , validDigest baseDigest
+        , validDigest destinationDigest
+        , validDigest resultDigest
+        , digest result == resultDigest ->
+            Just $
+              PendingMergeJournal
+                sourceDigest
+                baseDigest
+                destinationDigest
+                resultDigest
+                result
+       where
+        result = ByteString8.intercalate "\n" rest
     _ -> Nothing
  where
   validDigest value =
@@ -1564,18 +1648,14 @@ createPendingPublication
   -> FileIdentity
   -> Context (App i)
   -> ManagedCorrespondence
-  -> ByteString
-  -> ByteString
-  -> ByteString
+  -> PendingMergeJournal
   -> App i PendingPublication
 createPendingPublication
   workspace
   workspaceIdentity
   ctx
   managed
-  base
-  destination
-  result = do
+  journal = do
     identifier <- managedTargetId ctx.repository managed
     markerName <- encodePath $ "pending-" <> Text.unpack identifier
     let marker = workspace.root </> markerName
@@ -1590,7 +1670,7 @@ createPendingPublication
         workspacePathIdentity
         workspaceIdentity
         markerName
-        (renderPendingMergeJournal base destination result)
+        (renderPendingMergeJournal journal)
     unless markerCreated $
       throwError $
         userError "merge workspace path changed while publishing its marker."

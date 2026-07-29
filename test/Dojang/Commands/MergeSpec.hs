@@ -70,6 +70,7 @@ import Dojang.Commands.Merge
   , mergeWithDriverRunnerAndInvocationBarrier
   , mergeWithDriverRunnerAndPublisher
   , mergeWithDriverRunnerAndPublisherAndPreparer
+  , mergeWithDriverRunnerAndReplicaBarrier
   , persistMergedTarget
   )
 import Dojang.ExitCodes
@@ -114,7 +115,10 @@ import Dojang.Types.Manifest
   ( Manifest (fileRoutes, hooks, repositoryId)
   , manifest
   )
-import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
+import Dojang.Types.Merge
+  ( MergeCommitReplica (SourceCommitReplica)
+  , mergeWorkspaceRepositoryRoot
+  )
 import Dojang.Types.MergeDriver (makeMergeDriverSpec)
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.RepositoryId (RepositoryId, parseRepositoryId)
@@ -289,6 +293,39 @@ spec = sequential $ do
             `shouldThrow` (== conflictError)
         readReplicas fixture
           `shouldReturn` ["source", "base", "destination"]
+
+    it "rejects a route retargeted between replica writes" $
+      withFixture $ \fixture -> do
+        retargetedName <- encodeFS "retargeted-destination"
+        let retargeted =
+              takeDirectory fixture.destinationPath
+                </> retargetedName
+            runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+            afterReplica replica =
+              when (replica == SourceCommitReplica) $
+                writeManifestFile
+                  fixture.fixtureRetargetedManifest
+                  ( fixture.fixtureEnv.sourceDirectory
+                      </> fixture.fixtureEnv.manifestFile
+                  )
+        writeFile retargeted "destination"
+        withEnvVars [("RETARGET", Just retargeted)] $
+          ( runAppWithoutLogging fixture.fixtureEnv $
+              mergeWithDriverRunnerAndReplicaBarrier
+                afterReplica
+                runner
+                Nothing
+                (Just fixture.fixtureConfigPath)
+                []
+          )
+            `shouldThrow` (== conflictError)
+        readReplicas fixture
+          `shouldReturn` ["merged", "base", "destination"]
+        pendingPublicationCount fixture `shouldReturn` 1
 
     it "rejects a route retargeted at the recovery boundary" $
       withFixture $ \fixture -> do
@@ -1069,7 +1106,7 @@ spec = sequential $ do
             restore
             (mergeWith fixture runner `shouldThrow` (== fileWriteError))
 
-    it "recovers arbitrary source-first commit prefixes" $
+    it "recovers every journal-authenticated commit subset" $
       if os == "mingw32"
         then return ()
         else hedgehog $ do
@@ -1093,6 +1130,9 @@ spec = sequential $ do
             forAll $ Gen.text (Range.linear 0 40) Gen.alphaNum
           resultSuffix <-
             forAll $ Gen.text (Range.linear 0 40) Gen.alphaNum
+          sourceCommitted <- forAll Gen.bool
+          baseCommitted <- forAll Gen.bool
+          destinationCommitted <- forAll Gen.bool
           let resultText = resultPrefix <> "\n" <> resultSuffix
           let source = Text.encodeUtf8 sourceText
               base = Text.encodeUtf8 baseText
@@ -1117,8 +1157,17 @@ spec = sequential $ do
             readReplicas fixture
               `shouldReturn` [result, base, destination]
             pendingPublicationCount fixture `shouldReturn` 1
+            writeFile
+              fixture.sourcePath
+              (if sourceCommitted then result else source)
+            writeFile
+              fixture.basePath
+              (if baseCommitted then result else base)
+            writeFile
+              fixture.destinationPath
+              (if destinationCommitted then result else destination)
             removeFile fixture.fixtureConfigPath
-            mergeWith fixture (error "commit-prefix recovery ran a driver")
+            mergeWith fixture (error "journal recovery ran a driver")
               `shouldReturn` ExitSuccess
             readReplicas fixture `shouldReturn` replicate 3 result
             pendingPublicationCount fixture `shouldReturn` 0

@@ -104,9 +104,12 @@ link cannot redirect a later permission change.  After the driver exits,
 Dojang also reloads the routing context and rejects the result if the selected
 route or its resolved paths, kind, mode, codec, or provenance changed.
 A changed repository, machine, or state generation identity also rejects the
-result.  Invocation-workspace creation and final replica writes hold the
-repository-generation lock, so `dojang forget` cannot approve deletion between
-workspace cleanup and recreation or while a merge commit is in progress.
+result.  The same route-policy check runs immediately before and after every
+replica replacement, so a manifest or environment change between writes stops
+the remaining commit.  Invocation-workspace creation and final replica writes
+hold the repository-generation lock, so `dojang forget` cannot approve
+deletion between workspace cleanup and recreation or while a merge commit is
+in progress.
 Target publication checks the captured generation again under its state-update
 lock and rejects data from a forgotten and recreated generation.  Post-merge
 hook setup reloads the current manifest, environment, and machine facts while
@@ -117,15 +120,17 @@ prevents hook launch without recreating state.
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
 both authoritative copies contain the result.  Before the first write, Dojang
-journals the accepted result together with hashes of the original base and
-destination.  If a later write fails, earlier writes remain.  A retry uses that
-journal to finish a commit interrupted after the source write, but only while
-the source contains the accepted result and the other inputs still match their
-recorded hashes.  It also recognizes the case where both authoritative copies
-already contain the result but the destination mode or intermediate content or
-mode is still stale.  Rerun `dojang merge` or inspect the reported workspace to
-recover the operation.  Conditional replacement briefly moves the old replica
-to a hidden `.dojang-replaced-*` sibling in the same directory.
+journals the accepted result together with hashes of every original replica.
+If a later write fails, earlier writes remain, while a crash may make any
+subset of the writes durable.  A retry accepts each replica only when its hash
+matches either its recorded original or the accepted result, then finishes the
+whole commit without rerunning the driver.  Replicas that already contain the
+accepted result and required mode are not replaced.  It also recognizes the
+case where both authoritative copies already contain the result but the
+destination mode or intermediate content or mode is still stale.  Rerun
+`dojang merge` or inspect the reported workspace to recover the operation.
+Conditional replacement briefly moves the old replica to a hidden
+`.dojang-replaced-*` sibling in the same directory.
 Before that move, Dojang binds the staged result to its prepared identity,
 contents, and final mode, then verifies the same entry after its rename.
 Ordinary failures restore the old replica or report the retained path.  If the
