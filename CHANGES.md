@@ -46,21 +46,27 @@ To be released.
     `dojang forget` removes them.  Workspace
     cleanup validates the directory and its complete ancestor chain before
     recursive removal, so a symbolic link cannot redirect deletion outside
-    machine-local state.  Partial workspace setup is cleaned when possible, and
-    later filesystem failures retain recovery data and use exit status 2.
-    Final invocation cleanup failures use the same status and identify the
-    workspace root to inspect.  Input read failures, including preliminary
-    conflict detection, post-driver policy refresh, and final publication
-    observation, are reported as conflicts.  Unreadable driver results are
-    rejected before replica writes and use exit status 4.  Cleanup of retained
-    workspaces for an absent machine or repository record is serialized with
-    concurrent state creation, so it cannot remove a newly created live
-    workspace.  Retried merges scan each known workspace directory through a
-    pinned entry and revalidate its complete path identity before removing
-    markers or recovery data, without descending into driver-created
-    subdirectories.  Pending-publication marker creation and removal stay
-    bound to the captured workspace and ancestor identities, so a concurrent
-    directory replacement is retained instead of being modified.
+    machine-local state.  Workspace input copies are created relative to a
+    pinned workspace directory with their owner-only mode, so replacing the
+    workspace path cannot redirect those writes.  Partial workspace setup is
+    cleaned when possible, and later filesystem failures retain recovery data
+    and use exit status 2.  Final invocation cleanup failures use the same
+    status and identify the workspace root to inspect; its empty parent is
+    removed only after a pinned empty-directory check and while its captured
+    identity still matches.  Sibling recovery workspaces therefore remain at
+    their original paths.  Input read failures, including preliminary conflict
+    detection, post-driver policy refresh, and final publication observation,
+    are reported as conflicts.
+    Unreadable driver results are rejected before replica writes and use exit
+    status 4.  Cleanup of retained workspaces for an absent machine or
+    repository record is serialized with concurrent state creation, so it
+    cannot remove a newly created live workspace.  Retried merges scan each
+    known workspace directory through a pinned entry and revalidate its
+    complete path identity before removing markers or recovery data, without
+    descending into driver-created subdirectories.  Pending-publication marker
+    creation and removal stay bound to the captured workspace and ancestor
+    identities, so a concurrent directory replacement is retained instead of
+    being modified.
     Driver outcome codes are limited to the portable range 1–255.  The command
     supports source, destination, and directory selectors, `--driver`,
     `--driver-file`, `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version

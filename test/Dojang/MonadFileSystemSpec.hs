@@ -41,7 +41,7 @@ import System.IO.Error
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
-import Control.Monad (replicateM)
+import Control.Monad (replicateM, when)
 import Control.Monad.Except (MonadError (catchError), tryError)
 import Data.ByteString qualified (length, map, readFile, writeFile)
 import Hedgehog.Gen qualified as Gen
@@ -1169,6 +1169,52 @@ spec = do
           `shouldReturn` True
         exists owned `shouldReturn` False
 
+    specify "removeDirectoryIfIdentity removes only its empty directory" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        let owned = tmpDir </> ownedName
+        createDirectory owned
+        Just identity <- getFileIdentity owned
+        removeDirectoryIfIdentity owned identity `shouldReturn` True
+        exists owned `shouldReturn` False
+
+    specify "removeDirectoryIfIdentity restores a nonempty directory" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        childName <- encodeFS "child"
+        let owned = tmpDir </> ownedName
+            child = owned </> childName
+        createDirectory owned
+        writeFile child "retained"
+        Just identity <- getFileIdentity owned
+        removeDirectoryIfIdentity owned identity
+          `shouldThrow` (not . isDoesNotExistError)
+        readFile child `shouldReturn` "retained"
+
+    specify "removeDirectoryIfIdentity preserves arbitrary replacements" $
+      hedgehog $ do
+        replaceOriginal <- forAll Gen.bool
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            ownedName <- encodeFS "owned"
+            movedName <- encodeFS "moved"
+            let owned = tmpDir </> ownedName
+                moved = tmpDir </> movedName
+            createDirectory owned
+            Just identity <- getFileIdentity owned
+            when replaceOriginal $ do
+              renameDirectory owned moved
+              createDirectory owned
+            removed <- removeDirectoryIfIdentity owned identity
+            if replaceOriginal
+              then do
+                removed `shouldBe` False
+                sort <$> listDirectory tmpDir
+                  `shouldReturn` sort [ownedName, movedName]
+              else do
+                removed `shouldBe` True
+                exists owned `shouldReturn` False
+
     specify
       "removeDirectoryRecursivelyIfIdentity preserves arbitrary replacements"
       $ hedgehog
@@ -1197,6 +1243,7 @@ spec = do
       $ hedgehog
       $ do
         contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        privateContents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
         replaceAncestor <- forAll Gen.bool
         liftIO $
           withTempDir $ \tmpDir _ -> do
@@ -1204,6 +1251,7 @@ spec = do
             workspaceName <- encodeFS "workspace"
             parkedName <- encodeFS "parked"
             markerName <- encodeFS "pending-target"
+            privateName <- encodeFS "source"
             let invocation = tmpDir </> invocationName
                 workspace = invocation </> workspaceName
                 parked =
@@ -1211,6 +1259,7 @@ spec = do
                     then tmpDir </> parkedName
                     else invocation </> parkedName
                 replacementMarker = workspace </> markerName
+                replacementPrivate = workspace </> privateName
             createDirectories workspace
             Just identity <- getFileIdentity workspace
             Just pathIdentity <- captureDirectoryPathIdentity workspace
@@ -1219,10 +1268,17 @@ spec = do
               parked
             createDirectories workspace
             writeFile replacementMarker contents
+            writeFile replacementPrivate contents
             createEmptyFileInDirectoryIfIdentity
               pathIdentity
               identity
               markerName
+              `shouldReturn` False
+            createPrivateFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              privateName
+              privateContents
               `shouldReturn` False
             removeFileInDirectoryIfIdentity
               pathIdentity
@@ -1230,13 +1286,16 @@ spec = do
               markerName
               `shouldReturn` False
             readFile replacementMarker `shouldReturn` contents
+            readFile replacementPrivate `shouldReturn` contents
 
     specify "identity-bound marker I/O updates its captured directory" $
       withTempDir $ \tmpDir _ -> do
         workspaceName <- encodeFS "workspace"
         markerName <- encodeFS "pending-target"
+        privateName <- encodeFS "source"
         let workspace = tmpDir </> workspaceName
             marker = workspace </> markerName
+            private = workspace </> privateName
         createDirectory workspace
         Just identity <- getFileIdentity workspace
         Just pathIdentity <- captureDirectoryPathIdentity workspace
@@ -1246,12 +1305,45 @@ spec = do
           markerName
           `shouldReturn` True
         readFile marker `shouldReturn` ""
+        createPrivateFileInDirectoryIfIdentity
+          pathIdentity
+          identity
+          privateName
+          "private"
+          `shouldReturn` True
+        readFile private `shouldReturn` "private"
+        privateMode <- getPortableMode private
+        privateMode.posixBits
+          `shouldSatisfy` maybe True (== 0o600)
         removeFileInDirectoryIfIdentity
           pathIdentity
           identity
           markerName
           `shouldReturn` True
         exists marker `shouldReturn` False
+
+    specify "identity-bound private writes preserve arbitrary contents" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            workspaceName <- encodeFS "workspace"
+            privateName <- encodeFS "source"
+            let workspace = tmpDir </> workspaceName
+                private = workspace </> privateName
+            createDirectory workspace
+            Just identity <- getFileIdentity workspace
+            Just pathIdentity <- captureDirectoryPathIdentity workspace
+            createPrivateFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              privateName
+              contents
+              `shouldReturn` True
+            readFile private `shouldReturn` contents
+            privateMode <- getPortableMode private
+            privateMode.posixBits
+              `shouldSatisfy` maybe True (== 0o600)
 
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir

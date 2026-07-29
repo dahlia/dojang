@@ -120,6 +120,65 @@ int dojang_create_empty_file_at(int fd, const char *name)
 }
 
 /*
+ * Create one owner-only regular file with complete contents relative to an
+ * already pinned directory.  Return 1 on success or a negated errno.
+ */
+int dojang_create_private_file_at(
+    int fd,
+    const char *name,
+    const unsigned char *contents,
+    size_t length
+)
+{
+    int created;
+    int saved_errno;
+    size_t offset;
+
+    created = openat(
+        fd,
+        name,
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        0600
+    );
+    if (created == -1) {
+        return -errno;
+    }
+    if (fchmod(created, 0600) != 0) {
+        saved_errno = errno;
+        (void) close(created);
+        (void) unlinkat(fd, name, 0);
+        return -saved_errno;
+    }
+    offset = 0;
+    while (offset < length) {
+        size_t remaining = length - offset;
+        size_t chunk = remaining > 1048576 ? 1048576 : remaining;
+        ssize_t written = write(created, contents + offset, chunk);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            saved_errno = errno;
+            (void) close(created);
+            (void) unlinkat(fd, name, 0);
+            return -saved_errno;
+        }
+        if (written == 0) {
+            (void) close(created);
+            (void) unlinkat(fd, name, 0);
+            return -EIO;
+        }
+        offset += (size_t) written;
+    }
+    if (close(created) == 0) {
+        return 1;
+    }
+    saved_errno = errno;
+    (void) unlinkat(fd, name, 0);
+    return -saved_errno;
+}
+
+/*
  * Remove one non-directory entry relative to an already pinned directory.
  * Return 1 on success or a negated errno.
  */

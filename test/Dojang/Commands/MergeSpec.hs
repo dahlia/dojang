@@ -491,6 +491,43 @@ spec = sequential $ do
           )
           `shouldReturn` ExitSuccess
 
+    it "keeps a sibling recovery workspace at its invocation path" $
+      withFixture $ \fixture -> do
+        unrelatedName <- encodeFS "unrelated-workspace"
+        sentinelName <- encodeFS "retained"
+        let runner :: ProcessRequest -> App IO ProcessResult
+            runner request = do
+              resultPath <- encodePath $ last request.arguments
+              writeFile resultPath "merged"
+              return $ ProcessCompleted ExitSuccess "" ""
+            failPublication _ _ _ = abortCommand machineStateError
+        ( runAppWithoutLogging fixture.fixtureEnv $
+            mergeWithDriverRunnerAndPublisher
+              failPublication
+              runner
+              Nothing
+              (Just fixture.fixtureConfigPath)
+              []
+          )
+          `shouldThrow` (== machineStateError)
+        [pendingMarker] <- pendingPublicationPaths fixture
+        let workspace = takeDirectory pendingMarker
+            invocation = takeDirectory workspace
+            repositoryRoot = takeDirectory invocation
+            unrelated = invocation </> unrelatedName
+            sentinel = unrelated </> sentinelName
+        createDirectory unrelated
+        writeFile sentinel "retained"
+        removeFile fixture.fixtureConfigPath
+        mergeWith fixture (error "publication retry ran a driver")
+          `shouldReturn` ExitSuccess
+        readFile sentinel `shouldReturn` "retained"
+        listDirectory invocation `shouldReturn` [unrelatedName]
+        rootEntries <- listDirectory repositoryRoot
+        decoded <- mapM decodeFS rootEntries
+        filter (".dojang-empty-cleanup-" `isPrefixOf`) decoded
+          `shouldBe` []
+
     symlinkIt "preserves pending markers beneath a replaced invocation ancestor" $
       withFixture $ \fixture -> do
         let merged = "merged"

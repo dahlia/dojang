@@ -1357,14 +1357,29 @@ completePublication pathStyle current previous = do
         if not cleanupPathUnchanged
           then warnRetained pending
           else do
+            let invocation = takeDirectory pending.workspace
+            invocationIdentity <-
+              getFileIdentity invocation
+                `catchError` const (return Nothing)
             cleaned <-
               removeDirectoryRecursivelyIfIdentity
                 pending.workspace
                 pending.workspaceIdentity
             unless cleaned $ warnRetained pending
             when cleaned $
-              removeDirectory (takeDirectory pending.workspace)
-                `catchError` const (return ())
+              forM_ invocationIdentity $ \expected -> do
+                entries <-
+                  listDirectoryPinned invocation
+                    `catchError` \err -> do
+                      warnInvocationCleanupFailed invocation err
+                      return [invocation]
+                when (null entries) $ do
+                  _ <-
+                    removeDirectoryIfIdentity invocation expected
+                      `catchError` \err -> do
+                        warnInvocationCleanupFailed invocation err
+                        return False
+                  return ()
  where
   pathStillMatches
     :: (MonadFileSystem i, AppEffects i)
@@ -1386,6 +1401,13 @@ completePublication pathStyle current previous = do
     printStderr' Warning $
       "The completed merge workspace could not be removed: "
         <> pathStyle pending.workspace
+        <> "."
+  warnInvocationCleanupFailed invocation err =
+    printStderr' Warning $
+      "The empty merge invocation workspace could not be removed: "
+        <> pathStyle invocation
+        <> ": "
+        <> Text.pack (ioeGetErrorString err)
         <> "."
 
 

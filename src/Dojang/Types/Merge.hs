@@ -1,5 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -26,7 +27,7 @@ module Dojang.Types.Merge
   , revalidateMergeTextInput
   ) where
 
-import Control.Monad (filterM, forM_)
+import Control.Monad (filterM, unless)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
@@ -41,6 +42,7 @@ import Dojang.MonadFileSystem
   ( FileModeSnapshot (FileModeSnapshot)
   , FileSnapshot
   , MonadFileSystem (..)
+  , captureDirectoryPathIdentity
   , fileSnapshotIdentity
   , writeFileAtomicallyIfSnapshot
   )
@@ -483,10 +485,20 @@ prepareMergeWorkspace
   -> m MergeWorkspace
 prepareMergeWorkspace root source base destination = do
   createPrivateDirectory root
-  identity <- getFileIdentity root
-  prepareContents `catchError` cleanAfterFailure identity
+  getFileIdentity root >>= \case
+    Nothing ->
+      throwError $
+        userError "created merge workspace has no stable directory identity"
+    Just identity ->
+      prepareContents identity `catchError` cleanAfterFailure identity
  where
-  prepareContents = do
+  prepareContents identity = do
+    pathIdentity <-
+      captureDirectoryPathIdentity root >>= \case
+        Nothing ->
+          throwError $
+            userError "created merge workspace path has no stable identity"
+        Just value -> return value
     sourceName <- encodePathName "source"
     baseName <- encodePathName "base"
     destinationName <- encodePathName "destination"
@@ -499,22 +511,31 @@ prepareMergeWorkspace root source base destination = do
             , destination = root </> destinationName
             , result = root </> resultName
             }
-    writePrivate workspace.source source.contents
-    writePrivate workspace.base base.contents
-    writePrivate workspace.destination destination.contents
-    writePrivate workspace.result destination.contents
+    writePrivate pathIdentity identity sourceName source.contents
+    writePrivate pathIdentity identity baseName base.contents
+    writePrivate
+      pathIdentity
+      identity
+      destinationName
+      destination.contents
+    writePrivate pathIdentity identity resultName destination.contents
     return workspace
   cleanAfterFailure identity err = do
-    forM_ identity $ \expected -> do
-      _ <-
-        removeDirectoryRecursivelyIfIdentity root expected
-          `catchError` const (return False)
-      return ()
+    _ <-
+      removeDirectoryRecursivelyIfIdentity root identity
+        `catchError` const (return False)
     throwError err
   encodePathName = encodePath
-  writePrivate path contents = do
-    writeFile path contents
-    setPortableMode path 0o600
+  writePrivate pathIdentity identity entryName contents = do
+    created <-
+      createPrivateFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        entryName
+        contents
+    unless created $
+      throwError $
+        userError "merge workspace path changed during private-file creation"
 
 
 -- | Reads and validates a stable regular UTF-8 merge result.

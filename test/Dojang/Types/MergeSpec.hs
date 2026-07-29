@@ -17,7 +17,7 @@ import Control.Monad.Except
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Data.ByteString qualified as ByteString
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Text.Encoding qualified as Text
 import Hedgehog (Gen)
@@ -243,6 +243,32 @@ spec = do
             prepareMergeWorkspace workspacePath source base destination
         result `shouldSatisfy` either (const True) (const False)
         FileSystem.exists workspacePath `shouldReturn` False
+
+    it "does not write inputs into a replaced workspace directory" $
+      withThreeInputs $ \source base destination -> do
+        workspaceName <- encodeFS "workspace"
+        parkedName <- encodeFS "parked-workspace"
+        sentinelName <- encodeFS "replacement"
+        let parent = takeDirectory source.path
+            workspacePath = parent </> workspaceName
+            parkedPath = parent </> parkedName
+            sentinelPath = workspacePath </> sentinelName
+        replaced <- newIORef False
+        result <-
+          runReplacingWorkspaceIO
+            workspacePath
+            parkedPath
+            sentinelPath
+            replaced
+            $ prepareMergeWorkspace
+              workspacePath
+              source
+              base
+              destination
+        result `shouldSatisfy` either (const True) (const False)
+        FileSystem.readFile sentinelPath `shouldReturn` "replacement"
+        FileSystem.listDirectory workspacePath
+          `shouldReturn` [sentinelName]
 
   describe "readMergeResult" $ do
     it "accepts arbitrary UTF-8 text from a regular result file" $ hedgehog $ do
@@ -617,14 +643,44 @@ assertPrivateFile path = do
 
 
 newtype FailingWorkspaceIO a
-  = FailingWorkspaceIO (ExceptT IOError IO a)
+  = FailingWorkspaceIO
+      (ReaderT WorkspaceSetupFailure (ExceptT IOError IO) a)
   deriving (Functor, Applicative, Monad, MonadError IOError)
+
+
+data WorkspaceSetupFailure
+  = FailPrivateFileMode
+  | ReplaceWorkspaceBeforeWrite
+      OsPath
+      OsPath
+      OsPath
+      (IORef Bool)
 
 
 runFailingWorkspaceIO
   :: FailingWorkspaceIO a
   -> IO (Either IOError a)
-runFailingWorkspaceIO (FailingWorkspaceIO action) = runExceptT action
+runFailingWorkspaceIO (FailingWorkspaceIO action) =
+  runExceptT $ runReaderT action FailPrivateFileMode
+
+
+runReplacingWorkspaceIO
+  :: OsPath
+  -> OsPath
+  -> OsPath
+  -> IORef Bool
+  -> FailingWorkspaceIO a
+  -> IO (Either IOError a)
+runReplacingWorkspaceIO
+  workspace
+  parked
+  sentinel
+  replaced
+  (FailingWorkspaceIO action) =
+    runExceptT $
+      runReaderT
+        action
+        (ReplaceWorkspaceBeforeWrite workspace parked sentinel replaced)
 
 
 data CommitRace
@@ -813,6 +869,34 @@ instance FileSystem.MonadFileSystem FailingWorkspaceIO where
   createDirectory value =
     FailingWorkspaceIO $
       liftIO (FileSystem.createDirectory value :: IO ())
+  createPrivateFileInDirectoryIfIdentity
+    pathIdentity
+    identity
+    entryName
+    contents = do
+      failure <- FailingWorkspaceIO ask
+      case failure of
+        FailPrivateFileMode ->
+          throwError $ userError "injected private-file mode failure"
+        ReplaceWorkspaceBeforeWrite workspace parked sentinel replaced -> do
+          alreadyReplaced <-
+            FailingWorkspaceIO $ liftIO $ readIORef replaced
+          if alreadyReplaced
+            then return ()
+            else FailingWorkspaceIO $ liftIO $ do
+              writeIORef replaced True
+              FileSystem.renameDirectory workspace parked
+              FileSystem.createPrivateDirectory workspace
+              FileSystem.writeFile sentinel "replacement"
+          FailingWorkspaceIO $
+            liftIO $
+              ( FileSystem.createPrivateFileInDirectoryIfIdentity
+                  pathIdentity
+                  identity
+                  entryName
+                  contents
+                  :: IO Bool
+              )
   removeFile value =
     FailingWorkspaceIO $ liftIO (FileSystem.removeFile value :: IO ())
   removeDirectory value =
@@ -834,9 +918,6 @@ instance FileSystem.MonadFileSystem FailingWorkspaceIO where
       liftIO (FileSystem.getFileIdentity value :: IO (Maybe FileSystem.FileIdentity))
   getPortableMode value =
     FailingWorkspaceIO $ liftIO (FileSystem.getPortableMode value)
-  setPortableMode _ bits
-    | bits == 0o600 =
-        throwError $ userError "injected private-file mode failure"
   setPortableMode path bits =
     FailingWorkspaceIO $
       liftIO (FileSystem.setPortableMode path bits :: IO ())

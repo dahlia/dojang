@@ -81,6 +81,7 @@ import Data.ByteString qualified
   , null
   , readFile
   , unpack
+  , useAsCStringLen
   , writeFile
   )
 import Data.Map.Strict (Map, alter, fromList, keys, toAscList, (!?))
@@ -128,7 +129,7 @@ import Foreign.C.Error qualified as CError
 import Foreign.C.String (CString)
 import Foreign.C.Types (CInt (CInt), CSize (CSize))
 import Foreign.Marshal.Alloc (allocaBytes)
-import Foreign.Ptr (Ptr)
+import Foreign.Ptr (Ptr, castPtr)
 import GHC.Foreign qualified as GHC
 import GHC.IO.Encoding (getFileSystemEncoding)
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
@@ -747,6 +748,45 @@ class (MonadError IOError m) => MonadFileSystem m where
       else return False
 
 
+  -- | Creates an owner-only regular file inside a captured directory path.
+  --
+  -- Returns 'False' without changing anything when either the directory or an
+  -- ancestor no longer has the captured identity, or when the directory's
+  -- identity differs from the separately captured final identity.  The entry
+  -- name must be a single path component.  Filesystem-backed implementations
+  -- must bind validation, creation, content writing, and the owner-only mode
+  -- to pinned directory handles so a concurrent pathname replacement cannot
+  -- redirect the write.
+  createPrivateFileInDirectoryIfIdentity
+    :: (HasCallStack)
+    => DirectoryPathIdentity
+    -> FileIdentity
+    -> OsPath
+    -> ByteString
+    -> m Bool
+  createPrivateFileInDirectoryIfIdentity
+    pathIdentity
+    identity
+    entryName
+    contents = do
+      validateDirectoryEntryName
+        "createPrivateFileInDirectoryIfIdentity"
+        entryName
+      let directory = directoryPathIdentityPath pathIdentity
+      pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
+      actualIdentity <- getFileIdentity directory
+      if pathUnchanged && actualIdentity == Just identity
+        then do
+          let path = directory </> entryName
+          createFileAtomicallyWithDefaultPermissions
+            path
+            "dojang-private.tmp"
+            contents
+          setPortableMode path 0o600
+          return True
+        else return False
+
+
   -- | Removes a file inside a captured directory path.
   --
   -- A missing file counts as successful removal.  Returns 'False' without
@@ -780,6 +820,22 @@ class (MonadError IOError m) => MonadFileSystem m where
 
   -- | Removes a directory.  It must be empty.
   removeDirectory :: (HasCallStack) => OsPath -> m ()
+
+
+  -- | Removes an empty directory only when it has the expected identity.
+  --
+  -- Returns 'False' without removing anything when the path is absent, its
+  -- identity differs, or the interpreter cannot verify identities.
+  -- Filesystem-backed implementations must bind the final identity check to
+  -- the directory entry being removed so a concurrent pathname replacement
+  -- is preserved.
+  removeDirectoryIfIdentity
+    :: (HasCallStack) => OsPath -> FileIdentity -> m Bool
+  removeDirectoryIfIdentity path expectedIdentity = do
+    actualIdentity <- getFileIdentity path
+    if actualIdentity == Just expectedIdentity
+      then removeDirectory path >> return True
+      else return False
 
 
   -- | Removes a directory entirely, including all its contents.
@@ -1358,6 +1414,34 @@ createEmptyFileInDirectoryIfIdentityIO
     return $ maybe False (const True) result
 
 
+createPrivateFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> OsPath
+  -> ByteString
+  -> IO Bool
+createPrivateFileInDirectoryIfIdentityIO
+  pathIdentity@(DirectoryPathIdentity directory _)
+  expectedIdentity
+  entryName
+  contents = do
+    validateDirectoryEntryName
+      "createPrivateFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ do
+          let destination = directory </> entryName
+          createFileAtomicallyWithDefaultPermissionsIO
+            destination
+            "dojang-private.tmp"
+            contents
+          setPortableModeIO destination 0o600
+    return $ maybe False (const True) result
+
+
 removeFileInDirectoryIfIdentityIO
   :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
 removeFileInDirectoryIfIdentityIO
@@ -1405,6 +1489,15 @@ foreign import ccall unsafe "dojang_file_type_at"
 foreign import ccall unsafe "dojang_create_empty_file_at"
   -- Returns 1 after creation or a negated errno.
   c_createEmptyFileAt :: CInt -> CString -> IO CInt
+
+
+foreign import ccall safe "dojang_create_private_file_at"
+  c_createPrivateFileAt
+    :: CInt
+    -> CString
+    -> Ptr Word8
+    -> CSize
+    -> IO CInt
 
 
 foreign import ccall unsafe "dojang_remove_file_at"
@@ -1603,6 +1696,41 @@ createEmptyFileInDirectoryIfIdentityIO
             descriptor
             entryName
             c_createEmptyFileAt
+    return $ maybe False (const True) result
+
+
+createPrivateFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> OsPath
+  -> ByteString
+  -> IO Bool
+createPrivateFileInDirectoryIfIdentityIO
+  pathIdentity
+  expectedIdentity
+  entryName
+  contents = do
+    validateDirectoryEntryName
+      "createPrivateFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ \descriptor -> do
+          entryName' <- decodeFS entryName
+          PosixInternal.withFilePath entryName' $ \entryPath ->
+            Data.ByteString.useAsCStringLen contents $ \(buffer, byteCount) -> do
+              created <-
+                c_createPrivateFileAt
+                  (fromIntegral descriptor)
+                  entryPath
+                  (castPtr buffer)
+                  (fromIntegral byteCount)
+              when (created < 0) $
+                throwErrnoCode
+                  "createPrivateFileInDirectoryIfIdentity"
+                  (negate created)
     return $ maybe False (const True) result
 
 
@@ -2319,6 +2447,73 @@ sameFileVersionAfterRename
       && expectedModified == actualModified
 
 
+removeDirectoryIfIdentityIO :: OsPath -> FileIdentity -> IO Bool
+removeDirectoryIfIdentityIO path expectedIdentity =
+  Exception.mask $ \restore -> do
+    initialIdentity <- getFileIdentityIO path
+    if initialIdentity /= Just expectedIdentity
+      then return False
+      else do
+        quarantined <- quarantineDirectory maximumQuarantineAttempts path
+        case quarantined of
+          Nothing -> return False
+          Just quarantine -> do
+            actualIdentity <- tryError $ getFileIdentityIO quarantine
+            case actualIdentity of
+              Left err -> do
+                restoreQuarantine quarantine
+                throwError err
+              Right identity ->
+                if identity /= Just expectedIdentity
+                  then restoreQuarantine quarantine >> return False
+                  else do
+                    (restore $ OsDirectory.removeDirectory quarantine)
+                      `catchError` \err -> do
+                        restoreQuarantine quarantine
+                        throwError err
+                    return True
+ where
+  quarantineDirectory attempts source
+    | attempts < 1 =
+        throwError $
+          userError "could not allocate a unique empty-directory cleanup path"
+    | otherwise = do
+        randomBytes <- getEntropy 16
+        name <-
+          encodeFS $
+            ".dojang-empty-cleanup-"
+              <> encodeRandomHex (Data.ByteString.unpack randomBytes)
+        let quarantine = takeDirectory source </> name
+        ( ( retryOnPermissionErrorsOnWindows 10 $
+              renameNoReplaceIO "renameDirectory" source quarantine
+          )
+            >> return (Just quarantine)
+          )
+          `catchError` \err ->
+            if isDoesNotExistError err
+              then return Nothing
+              else
+                if isAlreadyExistsError err
+                  then quarantineDirectory (attempts - 1) source
+                  else throwError err
+
+  restoreQuarantine quarantine =
+    ( retryOnPermissionErrorsOnWindows 10 $
+        renameNoReplaceIO "renameDirectory" quarantine path
+    )
+      `catchError` \err -> do
+        quarantine' <- decodeFS quarantine
+        throwError $
+          userError $
+            "empty-directory cleanup preserved a directory at "
+              <> quarantine'
+              <> ": "
+              <> Exception.displayException err
+
+  maximumQuarantineAttempts :: Int
+  maximumQuarantineAttempts = 128
+
+
 removeDirectoryRecursivelyIfIdentityIO
   :: OsPath -> FileIdentity -> IO Bool
 removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
@@ -2619,11 +2814,19 @@ instance MonadFileSystem IO where
     createEmptyFileInDirectoryIfIdentityIO
 
 
+  createPrivateFileInDirectoryIfIdentity =
+    createPrivateFileInDirectoryIfIdentityIO
+
+
   removeFileInDirectoryIfIdentity =
     removeFileInDirectoryIfIdentityIO
 
 
   removeDirectory = OsDirectory.removeDirectory
+
+
+  removeDirectoryIfIdentity =
+    removeDirectoryIfIdentityIO
 
 
   -- See also: https://github.com/jaspervdj/hakyll/pull/783

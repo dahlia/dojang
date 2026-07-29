@@ -154,11 +154,16 @@ and pending-marker creation and removal remain bound to the captured workspace
 and ancestor identities.  A concurrently replaced directory is retained
 instead of being modified.  Recovery does not recurse into subdirectories
 created by a driver.  Workspace setup removes partial private copies when
-possible.  Later filesystem failures retain the workspace and use exit status
-2.  A failure while removing a completed invocation workspace uses the same
-status and identifies the workspace root to inspect.  A driver result that
-cannot be read is invalid output instead: it is rejected before any replica
-write and uses exit status 4.
+possible.  Each input copy is created with its owner-only mode relative to a
+pinned workspace directory, so replacing the workspace path cannot redirect
+those writes.  Later filesystem failures retain the workspace and use exit
+status 2.  A failure while removing a completed invocation workspace uses the
+same status and identifies the workspace root to inspect.  Its empty invocation
+parent is removed only after a pinned empty-directory check and while the
+identity captured before workspace cleanup still matches.  Sibling recovery
+workspaces therefore stay at their original paths.  A driver result that cannot
+be read is invalid output instead: it is rejected before any replica write and
+uses exit status 4.
 
 The command runs `pre-merge` hooks before loading the context used for conflict
 selection.  Before selecting `post-merge` hooks after a successful command, it
