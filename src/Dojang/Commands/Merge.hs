@@ -22,6 +22,10 @@ module Dojang.Commands.Merge
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.Except (MonadError (catchError, throwError))
 import Control.Monad.Reader (asks)
+import Crypto.Hash.SHA256 qualified as SHA256
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
+import Data.ByteString.Char8 qualified as ByteString8
 import Data.List (find, isPrefixOf, nubBy)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
@@ -29,6 +33,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.UUID qualified as UUID
+import Numeric (showHex)
 import System.Exit (ExitCode (..))
 import System.IO.Error (ioeGetErrorString, isDoesNotExistError)
 import System.OsPath
@@ -196,7 +201,15 @@ data MergeAction
   = RunMergeDriver
   | RecoverMergeReplicas
   | PublishMergedTarget
-  deriving (Eq, Show)
+  | RecoverPendingMergeResult ByteString
+
+
+data PendingMergeJournal = PendingMergeJournal
+  { baseDigest :: ByteString
+  , destinationDigest :: ByteString
+  , resultDigest :: ByteString
+  , result :: ByteString
+  }
 
 
 data ResolvedMergeDriver = ResolvedMergeDriver
@@ -439,7 +452,7 @@ runMerge publish prepare barriers runDriver choice configChoice paths = do
           return ExitSuccess
         else do
           resolvedDriver <-
-            if any ((== RunMergeDriver) . (.action)) prepared
+            if any (isRunMergeDriver . (.action)) prepared
               then Just <$> resolveDriver pathStyle
               else return Nothing
           dryRunEnabled <- asks (.dryRun)
@@ -454,6 +467,11 @@ runMerge publish prepare barriers runDriver choice configChoice paths = do
                 PublishMergedTarget ->
                   printStderr $
                     "Would finish publishing the merged target for "
+                      <> pathStyle item.managed.correspondence.source.path
+                      <> "."
+                RecoverPendingMergeResult _ ->
+                  printStderr $
+                    "Would finish committing the accepted merge result for "
                       <> pathStyle item.managed.correspondence.source.path
                       <> "."
                 RunMergeDriver ->
@@ -823,18 +841,29 @@ prepareCandidate pathStyle candidate
           DestinationInput
           correspondence.destination.path
       case (sourceResult, baseResult, destinationResult) of
-        (Right source, Right base, Right destination) ->
+        (Right source, Right base, Right destination) -> do
+          pendingResult <-
+            recoverPendingMergeResult
+              candidate.pendingPublications
+              source
+              base
+              destination
+          let action =
+                maybe
+                  (classifyAction managed candidate source base destination)
+                  (Just . RecoverPendingMergeResult)
+                  pendingResult
           return $
-            ( \action ->
+            ( \selectedAction ->
                 PreparedMerge
                   managed
-                  action
+                  selectedAction
                   candidate.pendingPublications
                   source
                   base
                   destination
             )
-              <$> classifyAction managed candidate source base destination
+              <$> action
         (Left err, _, _) -> rejectInput err
         (_, Left err, _) -> rejectInput err
         (_, _, Left err) -> rejectInput err
@@ -861,6 +890,33 @@ prepareCandidate pathStyle candidate
             <> ": "
             <> pendingReason
         return Nothing
+
+
+isRunMergeDriver :: MergeAction -> Bool
+isRunMergeDriver RunMergeDriver = True
+isRunMergeDriver _ = False
+
+
+recoverPendingMergeResult
+  :: (MonadFileSystem i, AppEffects i)
+  => [PendingPublication]
+  -> MergeTextInput
+  -> MergeTextInput
+  -> MergeTextInput
+  -> App i (Maybe ByteString)
+recoverPendingMergeResult pending source base destination =
+  firstAccepted pending
+ where
+  firstAccepted [] = return Nothing
+  firstAccepted (publication : rest) = do
+    journal <- readPendingMergeJournal publication
+    case journal of
+      Just value
+        | digest source.contents == value.resultDigest
+        , digest base.contents == value.baseDigest
+        , digest destination.contents == value.destinationDigest ->
+            return $ Just value.result
+      _ -> firstAccepted rest
 
 
 classifyAction
@@ -970,6 +1026,9 @@ processPrepared
                         workspaceIdentity
                         refreshedCtx
                         refreshedManaged
+                        item.base.contents
+                        item.destination.contents
+                        item.source.contents
                     beforeFinalization
                     (committed, finalCtx, finalState, finalManaged) <-
                       guardMergePolicyFinalization
@@ -1009,6 +1068,9 @@ processPrepared
                         workspaceIdentity
                         refreshedCtx
                         refreshedManaged
+                        item.base.contents
+                        item.destination.contents
+                        item.source.contents
                     beforeFinalization
                     (finalCtx, finalState, finalManaged) <-
                       guardMergePolicyFinalization
@@ -1016,6 +1078,49 @@ processPrepared
                         refreshedState
                         refreshedManaged
                         (\ctx state managed -> return (ctx, state, managed))
+                    publishTarget
+                      finalCtx
+                      finalState
+                      finalManaged
+                    completePublication
+                      pathStyle
+                      pending
+                      item.pendingPublications
+                    cleanWorkspace workspace workspaceIdentity
+                  RecoverPendingMergeResult result -> do
+                    (refreshedCtx, refreshedState, refreshedManaged) <-
+                      refreshMergePolicy pathStyle expectedState item.managed
+                    printStderr $
+                      "Finishing accepted merge result for "
+                        <> pathStyle item.managed.correspondence.source.path
+                        <> "..."
+                    pending <-
+                      createPendingPublication
+                        workspace
+                        workspaceIdentity
+                        refreshedCtx
+                        refreshedManaged
+                        item.base.contents
+                        item.destination.contents
+                        result
+                    beforeFinalization
+                    (committed, finalCtx, finalState, finalManaged) <-
+                      guardMergePolicyFinalization
+                        pathStyle
+                        refreshedState
+                        refreshedManaged
+                        ( \ctx state managed -> do
+                            commitResult <-
+                              commitMergeResultGuarded
+                                (printCommitStep pathStyle managed)
+                                managed.route.mode
+                                item.source
+                                item.base
+                                item.destination
+                                result
+                            return (commitResult, ctx, state, managed)
+                        )
+                    reportCommitResult committed
                     publishTarget
                       finalCtx
                       finalState
@@ -1061,6 +1166,9 @@ processPrepared
                             workspaceIdentity
                             refreshedCtx
                             refreshedManaged
+                            item.base.contents
+                            item.destination.contents
+                            result
                         beforeFinalization
                         (committed, finalCtx, finalState, finalManaged) <-
                           guardMergePolicyFinalization
@@ -1344,6 +1452,86 @@ ensureDriverResolved driver = \case
         <> "."
 
 
+renderPendingMergeJournal
+  :: ByteString -> ByteString -> ByteString -> ByteString
+renderPendingMergeJournal base destination result =
+  ByteString8.intercalate
+    "\n"
+    [ "dojang-merge-v1"
+    , digest base
+    , digest destination
+    , digest result
+    , result
+    ]
+
+
+readPendingMergeJournal
+  :: (MonadFileSystem i, AppEffects i)
+  => PendingPublication
+  -> App i (Maybe PendingMergeJournal)
+readPendingMergeJournal pending =
+  do
+    validBefore <- pendingWorkspaceStillMatches pending
+    if not validBefore
+      then return Nothing
+      else do
+        resultRead <- readMergeResult pending.marker
+        validAfter <- pendingWorkspaceStillMatches pending
+        return $ case (validAfter, resultRead) of
+          (True, Right contents) -> parsePendingMergeJournal contents
+          _ -> Nothing
+
+
+pendingWorkspaceStillMatches
+  :: (MonadFileSystem i, AppEffects i)
+  => PendingPublication
+  -> App i Bool
+pendingWorkspaceStillMatches pending =
+  ( do
+      pathMatches <-
+        matchesDirectoryPathIdentity pending.workspacePathIdentity
+      identityMatches <-
+        (== Just pending.workspaceIdentity)
+          <$> getFileIdentity pending.workspace
+      return $ pathMatches && identityMatches
+  )
+    `catchError` const (return False)
+
+
+parsePendingMergeJournal :: ByteString -> Maybe PendingMergeJournal
+parsePendingMergeJournal contents =
+  case ByteString8.split '\n' contents of
+    "dojang-merge-v1" : baseDigest : destinationDigest : resultDigest : rest
+      | validDigest baseDigest
+      , validDigest destinationDigest
+      , validDigest resultDigest
+      , digest result == resultDigest ->
+          Just $
+            PendingMergeJournal
+              baseDigest
+              destinationDigest
+              resultDigest
+              result
+     where
+      result = ByteString8.intercalate "\n" rest
+    _ -> Nothing
+ where
+  validDigest value =
+    ByteString.length value == 64
+      && ByteString.all isLowerHexDigit value
+  isLowerHexDigit byte =
+    (byte >= 48 && byte <= 57)
+      || (byte >= 97 && byte <= 102)
+
+
+digest :: ByteString -> ByteString
+digest = ByteString8.pack . concatMap byteHex . ByteString.unpack . SHA256.hash
+ where
+  byteHex byte = case showHex byte "" of
+    [digit] -> ['0', digit]
+    digits -> digits
+
+
 findPendingPublications
   :: (MonadFileSystem i, AppEffects i)
   => MachineState
@@ -1440,37 +1628,48 @@ createPendingPublication
   -> FileIdentity
   -> Context (App i)
   -> ManagedCorrespondence
+  -> ByteString
+  -> ByteString
+  -> ByteString
   -> App i PendingPublication
-createPendingPublication workspace workspaceIdentity ctx managed = do
-  identifier <- managedTargetId ctx.repository managed
-  markerName <- encodePath $ "pending-" <> Text.unpack identifier
-  let marker = workspace.root </> markerName
-  workspacePathIdentity <-
-    captureDirectoryPathIdentity workspace.root >>= \case
-      Just identity -> return identity
-      Nothing ->
-        throwError $
-          userError "merge workspace path changed while publishing its marker."
-  created <-
-    createEmptyFileInDirectoryIfIdentity
-      workspacePathIdentity
-      workspaceIdentity
-      markerName
-  unless created $
-    throwError $
-      userError "merge workspace path changed while publishing its marker."
-  pathUnchanged <- matchesDirectoryPathIdentity workspacePathIdentity
-  identityUnchanged <-
-    (== Just workspaceIdentity) <$> getFileIdentity workspace.root
-  unless (pathUnchanged && identityUnchanged) $
-    throwError $
-      userError "merge workspace path changed while publishing its marker."
-  return $
-    PendingPublication
-      marker
-      workspace.root
-      workspaceIdentity
-      workspacePathIdentity
+createPendingPublication
+  workspace
+  workspaceIdentity
+  ctx
+  managed
+  base
+  destination
+  result = do
+    identifier <- managedTargetId ctx.repository managed
+    markerName <- encodePath $ "pending-" <> Text.unpack identifier
+    let marker = workspace.root </> markerName
+    workspacePathIdentity <-
+      captureDirectoryPathIdentity workspace.root >>= \case
+        Just identity -> return identity
+        Nothing ->
+          throwError $
+            userError "merge workspace path changed while publishing its marker."
+    markerCreated <-
+      createPrivateFileInDirectoryIfIdentity
+        workspacePathIdentity
+        workspaceIdentity
+        markerName
+        (renderPendingMergeJournal base destination result)
+    unless markerCreated $
+      throwError $
+        userError "merge workspace path changed while publishing its marker."
+    pathUnchanged <- matchesDirectoryPathIdentity workspacePathIdentity
+    identityUnchanged <-
+      (== Just workspaceIdentity) <$> getFileIdentity workspace.root
+    unless (pathUnchanged && identityUnchanged) $
+      throwError $
+        userError "merge workspace path changed while publishing its marker."
+    return $
+      PendingPublication
+        marker
+        workspace.root
+        workspaceIdentity
+        workspacePathIdentity
 
 
 completePublication

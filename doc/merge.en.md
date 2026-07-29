@@ -116,12 +116,16 @@ prevents hook launch without recreating state.
 
 Results are committed in source, destination, then intermediate order.  This
 order prevents the intermediate snapshot from claiming convergence before
-both authoritative copies contain the result.  If a later write fails, earlier
-writes remain.  A retry recognizes the case where both authoritative copies
-already contain the result but the destination mode or intermediate content
-or mode is still stale.  Rerun `dojang merge` or inspect the reported workspace
-to recover the operation.  Conditional replacement briefly moves the old
-replica to a hidden `.dojang-replaced-*` sibling in the same directory.
+both authoritative copies contain the result.  Before the first write, Dojang
+journals the accepted result together with hashes of the original base and
+destination.  If a later write fails, earlier writes remain.  A retry uses that
+journal to finish a commit interrupted after the source write, but only while
+the source contains the accepted result and the other inputs still match their
+recorded hashes.  It also recognizes the case where both authoritative copies
+already contain the result but the destination mode or intermediate content or
+mode is still stale.  Rerun `dojang merge` or inspect the reported workspace to
+recover the operation.  Conditional replacement briefly moves the old replica
+to a hidden `.dojang-replaced-*` sibling in the same directory.
 Before that move, Dojang binds the staged result to its prepared identity,
 contents, and final mode, then verifies the same entry after its rename.
 Ordinary failures restore the old replica or report the retained path.  If the

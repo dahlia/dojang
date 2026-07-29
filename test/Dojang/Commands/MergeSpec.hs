@@ -1069,6 +1069,91 @@ spec = sequential $ do
             restore
             (mergeWith fixture runner `shouldThrow` (== fileWriteError))
 
+    it "recovers arbitrary source-first commit prefixes" $
+      if os == "mingw32"
+        then return ()
+        else hedgehog $ do
+          width <- forAll $ Gen.int $ Range.linear 1 40
+          sourceText <-
+            forAll $ Gen.text (Range.singleton width) Gen.alphaNum
+          baseText <-
+            forAll $
+              Gen.filter
+                (/= sourceText)
+                (Gen.text (Range.singleton width) Gen.alphaNum)
+          destinationText <-
+            forAll $
+              Gen.filter
+                ( \value ->
+                    value /= sourceText
+                      && value /= baseText
+                )
+                (Gen.text (Range.singleton width) Gen.alphaNum)
+          resultPrefix <-
+            forAll $ Gen.text (Range.linear 0 40) Gen.alphaNum
+          resultSuffix <-
+            forAll $ Gen.text (Range.linear 0 40) Gen.alphaNum
+          let resultText = resultPrefix <> "\n" <> resultSuffix
+          let source = Text.encodeUtf8 sourceText
+              base = Text.encodeUtf8 baseText
+              destination = Text.encodeUtf8 destinationText
+              result = Text.encodeUtf8 resultText
+          evalIO $ withFixture $ \fixture -> do
+            writeFile fixture.sourcePath source
+            writeFile fixture.basePath base
+            writeFile fixture.destinationPath destination
+            let destinationParent = takeDirectory fixture.destinationPath
+                runner :: ProcessRequest -> App IO ProcessResult
+                runner request = do
+                  resultPath <- encodePath $ last request.arguments
+                  writeFile resultPath result
+                  setPortableMode destinationParent 0o500
+                  return $ ProcessCompleted ExitSuccess "" ""
+                restore = setPortableMode destinationParent 0o700
+            bracket_
+              (return ())
+              restore
+              (mergeWith fixture runner `shouldThrow` (== fileWriteError))
+            readReplicas fixture
+              `shouldReturn` [result, base, destination]
+            pendingPublicationCount fixture `shouldReturn` 1
+            removeFile fixture.fixtureConfigPath
+            mergeWith fixture (error "commit-prefix recovery ran a driver")
+              `shouldReturn` ExitSuccess
+            readReplicas fixture `shouldReturn` replicate 3 result
+            pendingPublicationCount fixture `shouldReturn` 0
+
+    it "reruns the driver when an accepted-result journal is corrupt" $
+      if os == "mingw32"
+        then return ()
+        else withFixture $ \fixture -> do
+          let accepted = "accepted\nresult"
+              replacement = "replacement\nresult"
+              destinationParent = takeDirectory fixture.destinationPath
+              interruptedRunner :: ProcessRequest -> App IO ProcessResult
+              interruptedRunner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath accepted
+                setPortableMode destinationParent 0o500
+                return $ ProcessCompleted ExitSuccess "" ""
+              retryRunner :: ProcessRequest -> App IO ProcessResult
+              retryRunner request = do
+                resultPath <- encodePath $ last request.arguments
+                writeFile resultPath replacement
+                return $ ProcessCompleted ExitSuccess "" ""
+              restore = setPortableMode destinationParent 0o700
+          bracket_
+            (return ())
+            restore
+            ( mergeWith fixture interruptedRunner
+                `shouldThrow` (== fileWriteError)
+            )
+          [pendingMarker] <- pendingPublicationPaths fixture
+          writeFile pendingMarker "corrupt"
+          mergeWith fixture retryRunner `shouldReturn` ExitSuccess
+          readReplicas fixture `shouldReturn` replicate 3 replacement
+          pendingPublicationCount fixture `shouldReturn` 0
+
     it "maps invocation-root failures to the file-write exit code" $
       if os == "mingw32"
         then return ()
