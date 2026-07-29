@@ -8,72 +8,39 @@ To be released.
 
 ### Command-line interface
 
- -  Added `dojang merge` to resolve divergent regular UTF-8 files with a
-    machine-local, shell-free three-way merge driver.  Drivers receive
-    owner-only copies of the source, common intermediate snapshot,
-    destination, and result, with explicit argument placeholders, environment
-    allowlists, and exit-code classifications.  Dojang validates every
-    selected conflict before starting a driver, rechecks authoritative inputs
-    before each write, and rejects results if the route or repository-state
-    identity changes while its driver runs.  Invocation-workspace creation and
-    final replica writes hold the repository-generation lock, and target
-    publication revalidates that generation under the same lock used for its
-    state update, so concurrent forgetting or recreation cannot accept stale
-    merge work or leave a workspace after forgetting succeeds.  Post-merge
-    hook setup reloads the current manifest and environment while reusing and
-    validating the captured generation, so removed hooks stay removed and it
-    cannot recreate state or launch hooks after forgetting completes.  It
-    commits source, destination, then intermediate, and rechecks both content
-    convergence and declared destination/intermediate modes before publishing
-    machine state.  Replica contents and their final modes are staged together,
-    and publication succeeds only while both the destination and staged file
-    still have their exact observed contents, identities, and modes.  The
-    staged file is checked again after its rename.  Concurrent edits are
-    preserved as conflicts, and a replacement link cannot redirect a later
-    mode update.
-    Conditional replacement briefly parks the previous replica in a hidden
-    `.dojang-replaced-*` sibling; ordinary failures restore it, while that
-    sibling can be moved back to a missing replica path after an abrupt process
-    or machine stop.  It records
-    successful targets as updated by `merge` and recognizes an interrupted
-    final write or mode update when the command is retried.  Pending publication
-    markers survive guarded commit aborts and are removed only after target
-    publication completes.  Target fingerprints and immutable baselines are
-    built from one stable set of replica contents, identities, and modes, then
-    revalidated before publication, so a concurrent edit cannot combine
-    different replica versions in machine state.  A rejected item removes its
-    unreferenced baseline without pruning ancestors that may be successful
-    directory baselines retained in the same multi-file transaction.  Failed,
-    unresolved, and canceled workspaces remain available for recovery until
-    `dojang forget` removes them.  Workspace
-    cleanup validates the directory and its complete ancestor chain before
-    recursive removal, so a symbolic link cannot redirect deletion outside
-    machine-local state.  Workspace input copies are created relative to a
-    pinned workspace directory with their owner-only mode, so replacing the
-    workspace path cannot redirect those writes.  Partial workspace setup is
-    cleaned when possible, and later filesystem failures retain recovery data
-    and use exit status 2.  Final invocation cleanup failures use the same
-    status and identify the workspace root to inspect; its empty parent is
-    removed only after a pinned empty-directory check and while its captured
-    identity still matches.  Sibling recovery workspaces therefore remain at
-    their original paths.  Input read failures, including preliminary conflict
-    detection, post-driver policy refresh, and final publication observation,
-    are reported as conflicts.
-    Unreadable driver results are rejected before replica writes and use exit
-    status 4.  Cleanup of retained workspaces for an absent machine or
-    repository record is serialized with concurrent state creation, so it
-    cannot remove a newly created live workspace.  Retried merges scan each
-    known workspace directory through a pinned entry and revalidate its
-    complete path identity before removing markers or recovery data, without
-    descending into driver-created subdirectories.  Pending-publication marker
-    creation and removal stay bound to the captured workspace and ancestor
-    identities, so a concurrent directory replacement is retained instead of
-    being modified.
-    Driver outcome codes are limited to the portable range 1–255.  The command
-    supports source, destination, and directory selectors, `--driver`,
-    `--driver-file`, `--dry-run`, and `pre-merge`/`post-merge` hooks.  Version
-    0.3 supports identity-copy routes whose three replicas are regular UTF-8
-    files.  [[#48], [#75]]
+ -  Added `dojang merge` for divergent regular UTF-8 files on identity-copy
+    routes.  It runs a shell-free, machine-local three-way merge driver with
+    owner-only inputs, explicit argument placeholders, an environment
+    allowlist, and portable outcome codes from 1 through 255.  Source,
+    destination, and directory selectors, `--driver`, `--driver-file`,
+    `--dry-run`, and `pre-merge`/`post-merge` hooks are supported.  [[#48],
+    [#75]]
+
+ -  Merge publication is bound to the repository generation and the route
+    policy observed for the conflict.  Source, destination, and intermediate
+    updates use identity-, content-, and mode-checked staging, and machine
+    state is published only after one stable observation proves that all three
+    replicas and their declared modes have converged.  Concurrent edits,
+    repository forgetting, recreation, and policy changes therefore leave a
+    retryable conflict instead of accepting stale work.  [[#48], [#75]]
+
+ -  Interrupted merge commits and state publication are recoverable on retry.
+    Conditional replacement preserves the previous replica in a private
+    sibling until publication is safe, while pending markers retain converged
+    but unpublished work.  Rejected baselines are removed without disturbing
+    successful entries from the same transaction.  [[#48], [#75]]
+
+ -  Failed, unresolved, and canceled workspaces remain available until
+    recovery or `dojang forget`.  Workspace creation, scanning, marker updates,
+    and cleanup are bound to pinned directory identities and validate complete
+    ancestor chains, preventing replacement links from redirecting writes or
+    removal outside machine-local state.  Cleanup is serialized with
+    repository lifecycle changes.  [[#48], [#75]]
+
+ -  Merge input changes and unreadable authoritative replicas are reported as
+    conflicts.  Invalid or unreadable successful driver output uses exit
+    status 4, while workspace and replica write failures retain recovery data
+    and use exit status 2.  [[#48], [#75]]
 
  -  Added `dojang init --from SOURCE` to acquire, validate, enroll, and
     optionally apply an existing repository in one command.  Local directories

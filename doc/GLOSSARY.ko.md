@@ -67,9 +67,9 @@
 | managed target               | 관리 대상                  |                                                                                              |
 | manifest                     | 선언 파일                  | 짧은 문서 제목이나 링크에서는 “선언”으로 쓸 수 있습니다.                                     |
 | manifest variable            | 선언 변수                  | `vars` 구획에서 정의하는 재사용 가능한 값을 뜻합니다.                                        |
-| merge driver                 | 병합 드라이버              | `dojang merge`가 격리된 입력으로 실행하는 외부 명령을 뜻합니다.                              |
 | marker                       | 마커                       |                                                                                              |
 | match                        | 일치, 일치하다             |                                                                                              |
+| merge driver                 | 병합 드라이버              | `dojang merge`가 격리된 입력으로 실행하는 외부 명령을 뜻합니다.                              |
 | moniker                      | 모니커                     |                                                                                              |
 | named pipe                   | 명명 파이프                |                                                                                              |
 | null route                   | 공 경로 규칙               |                                                                                              |

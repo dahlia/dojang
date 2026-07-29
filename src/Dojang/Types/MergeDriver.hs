@@ -247,7 +247,10 @@ makeMergeDriverSpec command inherited fixed unresolved canceled = do
         Left $ InvalidMergeDriverExitCode value
     | otherwise = Right $ fromIntegral value
   repeated values =
-    case [value | values'@(value : _) <- group $ sort values, length values' > 1] of
+    case [ value
+         | values'@(value : _) <- group $ sort values
+         , length values' > 1
+         ] of
       value : _ -> Just value
       [] -> Nothing
 

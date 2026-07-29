@@ -503,6 +503,8 @@ runMerge publish prepare barrier runDriver choice configChoice paths = do
       either (reportLookupError choice) return $
         lookupMergeDriver choice config
     return $ ResolvedMergeDriver platform driverName driver
+
+
 runPostMergeHooks
   :: (MonadFileSystem i, AppEffects i)
   => [OsPath]
@@ -1056,6 +1058,8 @@ processPrepared
             <> pathStyle workspace.root
             <> "."
       return cleaned
+
+
 refreshMergePolicy
   :: (MonadFileSystem i, AppEffects i)
   => (OsPath -> Text)
@@ -1398,18 +1402,19 @@ completePublication pathStyle current previous = do
             unless cleaned $ warnRetained pending
             when cleaned $
               forM_ invocationIdentity $ \expected -> do
-                entries <-
-                  listDirectoryPinned invocation
+                maybeEntries <-
+                  (Just <$> listDirectoryPinned invocation)
                     `catchError` \err -> do
                       warnInvocationCleanupFailed invocation err
-                      return [invocation]
-                when (null entries) $ do
-                  _ <-
-                    removeDirectoryIfIdentity invocation expected
-                      `catchError` \err -> do
-                        warnInvocationCleanupFailed invocation err
-                        return False
-                  return ()
+                      return Nothing
+                forM_ maybeEntries $ \entries ->
+                  when (null entries) $ do
+                    _ <-
+                      removeDirectoryIfIdentity invocation expected
+                        `catchError` \err -> do
+                          warnInvocationCleanupFailed invocation err
+                          return False
+                    return ()
  where
   pathStillMatches
     :: (MonadFileSystem i, AppEffects i)
