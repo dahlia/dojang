@@ -47,6 +47,7 @@ import Control.Monad.Except (MonadError (catchError), tryError)
 import Data.ByteString qualified (length, map, readFile, replicate, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
+import Hedgehog.Range qualified as Range
 import System.Directory.OsPath
   ( createDirectoryLink
   , createFileLink
@@ -110,6 +111,7 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
   , dryRunIO
+  , durableFilePublication
   , isNoReplaceUnsupportedError
   , matchesDirectoryPathIdentity
   , noReplaceUnsupportedError
@@ -1579,6 +1581,44 @@ spec = do
             readFile (owned </> sentinelName) `shouldReturn` contents
             sort <$> listDirectory tmpDir
               `shouldReturn` sort [ownedName, movedName]
+
+    specify
+      "durable file publication flushes contents before write-through rename"
+      $ do
+        completed <- newIORef ([] :: [String])
+        let step name =
+              atomicModifyIORef' completed $ \names ->
+                (names <> [name], ())
+        durableFilePublication
+          (step "runtime buffers")
+          (step "device buffers")
+          (step "close")
+          (step "write-through rename")
+        readIORef completed
+          `shouldReturn` [ "runtime buffers"
+                         , "device buffers"
+                         , "close"
+                         , "write-through rename"
+                         ]
+
+    specify "durable file publication stops after arbitrary barrier failures" $
+      hedgehog $ do
+        failureStep <- forAll $ Gen.int $ Range.linear 0 3
+        liftIO $ do
+          completed <- newIORef []
+          let step index = do
+                atomicModifyIORef' completed $ \indices ->
+                  (indices <> [index], ())
+                when (index == failureStep) $
+                  ioError $
+                    userError "durability barrier failed"
+          durableFilePublication
+            (step 0)
+            (step 1)
+            (step 2)
+            (step 3)
+            `shouldThrow` (const True :: IOError -> Bool)
+          readIORef completed `shouldReturn` [0 .. failureStep]
 
     specify
       "identity-bound marker I/O preserves arbitrary directory replacements"

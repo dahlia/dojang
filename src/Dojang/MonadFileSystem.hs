@@ -17,6 +17,7 @@ module Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , dryRunIO
   , dryRunIO'
+  , durableFilePublication
   , captureDirectoryPathIdentity
   , fileSnapshotIdentity
   , isNoReplaceUnsupportedError
@@ -1180,6 +1181,60 @@ createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
     renameNoReplaceIO "renameFileNoReplace" temporaryPath destination
 
 
+-- | Sequences the durability barriers required to publish a staged file.
+--
+-- The runtime buffer is flushed first, followed by the operating-system file
+-- buffer.  The file is then closed before its name is published using a
+-- write-through operation.
+durableFilePublication
+  :: (Monad m)
+  => m ()
+  -- ^ Flush the language-runtime buffer.
+  -> m ()
+  -- ^ Flush the operating-system file buffer to stable storage.
+  -> m ()
+  -- ^ Close the staged file.
+  -> m ()
+  -- ^ Publish the staged name with write-through semantics.
+  -> m ()
+durableFilePublication
+  flushRuntimeBuffer
+  flushDeviceBuffer
+  closeStagedFile
+  publishStagedFile = do
+    flushRuntimeBuffer
+    flushDeviceBuffer
+    closeStagedFile
+    publishStagedFile
+
+#ifdef mingw32_HOST_OS
+createFileAtomicallyDurablyWithDefaultPermissionsIO
+  :: OsPath -> FilePath -> ByteString -> IO ()
+createFileAtomicallyDurablyWithDefaultPermissionsIO
+  destination
+  template
+  contents = do
+    directory <- decodeFS $ takeDirectory destination
+    Exception.bracketOnError
+      (openBinaryTempFileWithDefaultPermissions directory template)
+      discardTemporary
+      publishTemporary
+   where
+    discardTemporary (temporary, handle) = do
+      hClose handle `catchError` const (return ())
+      Directory.removeFile temporary `catchError` const (return ())
+
+    publishTemporary (temporary, handle) = do
+      Data.ByteString.hPut handle contents
+      temporaryPath <- encodeFS temporary
+      durableFilePublication
+        (hFlush handle)
+        (Win32.withHandleToHANDLE handle Win32.flushFileBuffers)
+        (hClose handle)
+        (renameNoReplaceWriteThroughIO temporaryPath destination)
+#endif
+
+
 -- | Tests whether a no-replace rename is unsupported by the filesystem.
 isNoReplaceUnsupportedError :: IOError -> Bool
 isNoReplaceUnsupportedError err =
@@ -1441,7 +1496,7 @@ createEmptyFileInDirectoryIfIdentityIO
       withMatchingDirectoryPathIdentityIO
         pathIdentity
         expectedIdentity
-        $ createFileAtomicallyWithDefaultPermissionsIO
+        $ createFileAtomicallyDurablyWithDefaultPermissionsIO
           (directory </> entryName)
           "dojang-pinned.tmp"
           Data.ByteString.empty
@@ -1468,7 +1523,7 @@ createPrivateFileInDirectoryIfIdentityIO
         expectedIdentity
         $ do
           let destination = directory </> entryName
-          createFileAtomicallyWithDefaultPermissionsIO
+          createFileAtomicallyDurablyWithDefaultPermissionsIO
             destination
             "dojang-private.tmp"
             contents
@@ -2155,6 +2210,20 @@ renameNoReplaceIO _location source destination = do
   source' <- decodeFS source
   destination' <- decodeFS destination
   Win32.moveFile source' destination'
+
+
+renameNoReplaceWriteThroughIO :: OsPath -> OsPath -> IO ()
+renameNoReplaceWriteThroughIO source destination = do
+  source' <- decodeFS source
+  destination' <- decodeFS destination
+  Win32.moveFileEx
+    source'
+    (Just destination')
+    moveFileWriteThrough
+ where
+  -- Win32 2.14 does not expose the MOVEFILE_WRITE_THROUGH constant.
+  moveFileWriteThrough :: Win32.MoveFileFlag
+  moveFileWriteThrough = 0x00000008
 
 
 #else
