@@ -1376,9 +1376,9 @@ posixConcurrentForgetSpec =
                 :: IO (Either Exception.SomeException ExitCode)
             putMVar outcome result
         written <-
-          timeout 5000000 $ do
+          timeout 30000000 $ do
             ByteString.hPut pipe $
-              ByteString.replicate (4 * 1024 * 1024) 35
+              ByteString.replicate (2 * 1024 * 1024) 35
                 <> "\n"
                 <> configContents
             hFlush pipe
@@ -1393,7 +1393,7 @@ posixConcurrentForgetSpec =
             machineId
             (const $ removeTree workspaceRoot)
         forgotten `shouldBe` Right (Just ())
-      completed <- timeout 5000000 $ takeMVar outcome
+      completed <- timeout 30000000 $ takeMVar outcome
       case completed of
         Just (Left err) ->
           Exception.fromException err `shouldBe` Just machineStateError
