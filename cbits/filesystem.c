@@ -104,6 +104,18 @@ static int dojang_fsync(int fd)
     return result;
 }
 
+/*
+ * Synchronize an already pinned directory.  Return 1 on success or a negated
+ * errno so the Haskell caller can preserve the original failure.
+ */
+int dojang_fsync_directory(int fd)
+{
+    if (dojang_fsync(fd) != 0) {
+        return -errno;
+    }
+    return 1;
+}
+
 static void dojang_remove_created_file_at(int fd, const char *name)
 {
     (void) unlinkat(fd, name, 0);

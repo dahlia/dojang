@@ -92,6 +92,7 @@ import Dojang.MonadFileSystem
   , FileModeSnapshot (FileModeSnapshot)
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
+  , createPrivateDirectoriesDurably
   , matchesDirectoryPathIdentity
   )
 import Dojang.MonadFileSystem qualified as FileSystem
@@ -1011,125 +1012,85 @@ processPrepared
                 retainAndAbort exitCode = do
                   printRetained pathStyle workspace.root
                   abortCommand exitCode
+                finalizeWith message resultContents commitStep = do
+                  (refreshedCtx, refreshedState, refreshedManaged) <-
+                    refreshMergePolicy pathStyle expectedState item.managed
+                  forM_ message printStderr
+                  pending <-
+                    createPendingPublication
+                      workspace
+                      workspaceIdentity
+                      refreshedCtx
+                      refreshedManaged
+                      item.base.contents
+                      item.destination.contents
+                      resultContents
+                  beforeFinalization
+                  (commitResult, finalCtx, finalState, finalManaged) <-
+                    guardMergePolicyFinalization
+                      pathStyle
+                      refreshedState
+                      refreshedManaged
+                      ( \ctx state managed -> do
+                          committed <- commitStep managed
+                          return (committed, ctx, state, managed)
+                      )
+                  forM_ commitResult reportCommitResult
+                  publishTarget
+                    finalCtx
+                    finalState
+                    finalManaged
+                  completePublication
+                    pathStyle
+                    pending
+                    item.pendingPublications
+                  cleanWorkspace workspace workspaceIdentity
                 runWorkspace :: App i Bool
                 runWorkspace = case item.action of
-                  RecoverMergeReplicas -> do
-                    (refreshedCtx, refreshedState, refreshedManaged) <-
-                      refreshMergePolicy pathStyle expectedState item.managed
-                    printStderr $
-                      "Finishing merged baseline for "
-                        <> pathStyle item.managed.correspondence.source.path
-                        <> "..."
-                    pending <-
-                      createPendingPublication
-                        workspace
-                        workspaceIdentity
-                        refreshedCtx
-                        refreshedManaged
-                        item.base.contents
-                        item.destination.contents
-                        item.source.contents
-                    beforeFinalization
-                    (committed, finalCtx, finalState, finalManaged) <-
-                      guardMergePolicyFinalization
-                        pathStyle
-                        refreshedState
-                        refreshedManaged
-                        ( \ctx state managed -> do
-                            result <-
-                              commitMergeRecoveryGuarded
-                                (printCommitStep pathStyle managed)
-                                managed.route.mode
-                                item.source
-                                item.base
-                                item.destination
-                            return (result, ctx, state, managed)
-                        )
-                    reportCommitResult committed
-                    publishTarget
-                      finalCtx
-                      finalState
-                      finalManaged
-                    completePublication
-                      pathStyle
-                      pending
-                      item.pendingPublications
-                    cleanWorkspace workspace workspaceIdentity
-                  PublishMergedTarget -> do
-                    (refreshedCtx, refreshedState, refreshedManaged) <-
-                      refreshMergePolicy pathStyle expectedState item.managed
-                    printStderr $
-                      "Publishing merged target for "
-                        <> pathStyle item.managed.correspondence.source.path
-                        <> "..."
-                    pending <-
-                      createPendingPublication
-                        workspace
-                        workspaceIdentity
-                        refreshedCtx
-                        refreshedManaged
-                        item.base.contents
-                        item.destination.contents
-                        item.source.contents
-                    beforeFinalization
-                    (finalCtx, finalState, finalManaged) <-
-                      guardMergePolicyFinalization
-                        pathStyle
-                        refreshedState
-                        refreshedManaged
-                        (\ctx state managed -> return (ctx, state, managed))
-                    publishTarget
-                      finalCtx
-                      finalState
-                      finalManaged
-                    completePublication
-                      pathStyle
-                      pending
-                      item.pendingPublications
-                    cleanWorkspace workspace workspaceIdentity
-                  RecoverPendingMergeResult result -> do
-                    (refreshedCtx, refreshedState, refreshedManaged) <-
-                      refreshMergePolicy pathStyle expectedState item.managed
-                    printStderr $
-                      "Finishing accepted merge result for "
-                        <> pathStyle item.managed.correspondence.source.path
-                        <> "..."
-                    pending <-
-                      createPendingPublication
-                        workspace
-                        workspaceIdentity
-                        refreshedCtx
-                        refreshedManaged
-                        item.base.contents
-                        item.destination.contents
-                        result
-                    beforeFinalization
-                    (committed, finalCtx, finalState, finalManaged) <-
-                      guardMergePolicyFinalization
-                        pathStyle
-                        refreshedState
-                        refreshedManaged
-                        ( \ctx state managed -> do
-                            commitResult <-
-                              commitMergeResultGuarded
-                                (printCommitStep pathStyle managed)
-                                managed.route.mode
-                                item.source
-                                item.base
-                                item.destination
-                                result
-                            return (commitResult, ctx, state, managed)
-                        )
-                    reportCommitResult committed
-                    publishTarget
-                      finalCtx
-                      finalState
-                      finalManaged
-                    completePublication
-                      pathStyle
-                      pending
-                      item.pendingPublications
-                    cleanWorkspace workspace workspaceIdentity
+                  RecoverMergeReplicas ->
+                    finalizeWith
+                      ( Just $
+                          "Finishing merged baseline for "
+                            <> pathStyle item.managed.correspondence.source.path
+                            <> "..."
+                      )
+                      item.source.contents
+                      ( \managed ->
+                          Just
+                            <$> commitMergeRecoveryGuarded
+                              (printCommitStep pathStyle managed)
+                              managed.route.mode
+                              item.source
+                              item.base
+                              item.destination
+                      )
+                  PublishMergedTarget ->
+                    finalizeWith
+                      ( Just $
+                          "Publishing merged target for "
+                            <> pathStyle item.managed.correspondence.source.path
+                            <> "..."
+                      )
+                      item.source.contents
+                      (const $ return Nothing)
+                  RecoverPendingMergeResult result ->
+                    finalizeWith
+                      ( Just $
+                          "Finishing accepted merge result for "
+                            <> pathStyle item.managed.correspondence.source.path
+                            <> "..."
+                      )
+                      result
+                      ( \managed ->
+                          Just
+                            <$> commitMergeResultGuarded
+                              (printCommitStep pathStyle managed)
+                              managed.route.mode
+                              item.source
+                              item.base
+                              item.destination
+                              result
+                      )
                   RunMergeDriver -> do
                     case driverExecution of
                       Nothing ->
@@ -1158,44 +1119,19 @@ processPrepared
                             )
                             return
                             resultRead
-                        (refreshedCtx, refreshedState, refreshedManaged) <-
-                          refreshMergePolicy pathStyle expectedState item.managed
-                        pending <-
-                          createPendingPublication
-                            workspace
-                            workspaceIdentity
-                            refreshedCtx
-                            refreshedManaged
-                            item.base.contents
-                            item.destination.contents
-                            result
-                        beforeFinalization
-                        (committed, finalCtx, finalState, finalManaged) <-
-                          guardMergePolicyFinalization
-                            pathStyle
-                            refreshedState
-                            refreshedManaged
-                            ( \ctx state managed -> do
-                                commitResult <-
-                                  commitMergeResultGuarded
-                                    (printCommitStep pathStyle managed)
-                                    managed.route.mode
-                                    item.source
-                                    item.base
-                                    item.destination
-                                    result
-                                return (commitResult, ctx, state, managed)
-                            )
-                        reportCommitResult committed
-                        publishTarget
-                          finalCtx
-                          finalState
-                          finalManaged
-                        completePublication
-                          pathStyle
-                          pending
-                          item.pendingPublications
-                        cleanWorkspace workspace workspaceIdentity
+                        finalizeWith
+                          Nothing
+                          result
+                          ( \managed ->
+                              Just
+                                <$> commitMergeResultGuarded
+                                  (printCommitStep pathStyle managed)
+                                  managed.route.mode
+                                  item.source
+                                  item.base
+                                  item.destination
+                                  result
+                          )
             catchCommandExit runWorkspace retainAndAbort
               `catchError` retainAndReport
         )
@@ -1773,12 +1709,12 @@ createInvocationRoot
   -> App i (OsPath, FileIdentity)
 createInvocationRoot machineState = do
   repositoryRoot <- currentMergeWorkspaceRepositoryRoot machineState
-  createDirectories repositoryRoot
+  createPrivateDirectoriesDurably repositoryRoot
   setPortableMode repositoryRoot 0o700
   identifier <- newUUID
   invocationName <- encodePath $ Text.unpack $ UUID.toText identifier
   let invocationRoot = repositoryRoot </> invocationName
-  createPrivateDirectory invocationRoot
+  createPrivateDirectoryDurably invocationRoot
   identity <- requireIdentity invocationRoot
   return (invocationRoot, identity)
 

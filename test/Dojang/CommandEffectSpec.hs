@@ -112,6 +112,14 @@ testBinaryProcessInterruptibility = return ()
 spec :: Spec
 spec = do
   describe "runCommandEffectTest" $ do
+    it "delegates durable private directory creation" $ do
+      path <- encodeFS "durable-private-directory"
+      result <-
+        runCommandEffectTest [] $ do
+          FileSystem.createPrivateDirectoryDurably path
+          FileSystem.isDirectory path
+      result `shouldBe` Right (True, [])
+
     it "replays arbitrary environment lookups in order" $ hedgehog $ do
       names <-
         forAll $

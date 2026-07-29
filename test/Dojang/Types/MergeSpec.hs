@@ -754,6 +754,9 @@ runRacingCommitIO race (RacingCommitIO action) =
 
 
 instance FileSystem.MonadFileSystem RacingCommitIO where
+  createPrivateDirectoryDurably path =
+    RacingCommitIO $
+      liftIO (FileSystem.createPrivateDirectoryDurably path :: IO ())
   encodePath value =
     RacingCommitIO $ liftIO (FileSystem.encodePath value :: IO OsPath)
   decodePath value =
@@ -887,6 +890,9 @@ instance FileSystem.MonadFileSystem RacingCommitIO where
 
 
 instance FileSystem.MonadFileSystem FailingWorkspaceIO where
+  createPrivateDirectoryDurably path =
+    FailingWorkspaceIO $
+      liftIO (FileSystem.createPrivateDirectoryDurably path :: IO ())
   encodePath value =
     FailingWorkspaceIO $ liftIO (FileSystem.encodePath value :: IO OsPath)
   decodePath value =

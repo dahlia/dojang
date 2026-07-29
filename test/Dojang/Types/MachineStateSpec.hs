@@ -3479,6 +3479,8 @@ runFailingReplaceIO target (FailingReplaceIO action) =
 
 
 instance MonadFileSystem FailingReplaceIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
@@ -3533,6 +3535,8 @@ runFailingCopyIO target (FailingCopyIO action) =
 
 
 instance MonadFileSystem FailingCopyIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
@@ -3588,6 +3592,8 @@ runFailingRemoveIO target (FailingRemoveIO action) =
 
 
 instance MonadFileSystem FailingRemoveIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)

@@ -27,8 +27,10 @@ To be released.
  -  Interrupted merge commits and state publication are recoverable on retry.
     Conditional replacement preserves the previous replica in a private
     sibling until publication is safe, while pending markers retain converged
-    but unpublished work.  Rejected baselines are removed without disturbing
-    successful entries from the same transaction.  [[#48], [#75]]
+    but unpublished work.  New workspace directories and private markers are
+    durably published before replica writes begin.  Rejected baselines are
+    removed without disturbing successful entries from the same transaction.
+    [[#48], [#75]]
 
  -  Failed, unresolved, and canceled workspaces remain available until
     recovery or `dojang forget`.  Workspace creation, scanning, marker updates,

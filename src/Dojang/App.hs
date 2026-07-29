@@ -325,6 +325,8 @@ instance
   copyFilePermissions src = App . lift . lift . lift . copyFilePermissions src
   createDirectory = App . lift . lift . lift . createDirectory
   createPrivateDirectory = App . lift . lift . lift . createPrivateDirectory
+  createPrivateDirectoryDurably =
+    App . lift . lift . lift . createPrivateDirectoryDurably
   removeFile = App . lift . lift . lift . removeFile
   createEmptyFileInDirectoryIfIdentity pathIdentity identity =
     App

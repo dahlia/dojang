@@ -15,6 +15,7 @@ module Dojang.MonadFileSystem
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
+  , createPrivateDirectoriesDurably
   , dryRunIO
   , dryRunIO'
   , durableFilePublication
@@ -120,6 +121,7 @@ import Foreign
   )
 import Foreign.C.Types (CInt (CInt))
 import Data.Int (Int64)
+import Data.Time.Clock (NominalDiffTime, diffUTCTime, getCurrentTime)
 import System.IO (IOMode (ReadMode), hIsSeekable)
 import System.Win32.File qualified as Win32
 import System.Win32.String qualified as Win32String
@@ -699,6 +701,14 @@ class (MonadError IOError m) => MonadFileSystem m where
     setPortableMode path 0o700
 
 
+  -- | Creates an owner-only directory and durably publishes its entry.
+  --
+  -- Filesystem-backed implementations must not return until the new
+  -- directory's name is recoverable after a system crash.  Virtual and test
+  -- filesystems may simply delegate to 'createPrivateDirectory'.
+  createPrivateDirectoryDurably :: (HasCallStack) => OsPath -> m ()
+
+
   -- | Creates a directory at the given path, including all parent directories.
   createDirectories :: (HasCallStack) => OsPath -> m ()
   createDirectories path =
@@ -807,8 +817,9 @@ class (MonadError IOError m) => MonadFileSystem m where
           createFileAtomicallyWithDefaultPermissions
             path
             "dojang-private.tmp"
-            contents
+            Data.ByteString.empty
           setPortableMode path 0o600
+          writeFile path contents
           return True
         else return False
 
@@ -1066,6 +1077,58 @@ validateDirectoryEntryName location entryName = do
       `ioeSetErrorString` "entry name is not a single path component"
 
 
+-- | Creates every missing directory in a path privately and durably.
+--
+-- Existing directory components are preserved.  Symbolic links and
+-- non-directory components are rejected so a newly created child cannot be
+-- redirected outside the requested path.
+createPrivateDirectoriesDurably
+  :: (HasCallStack, MonadFileSystem m) => OsPath -> m ()
+createPrivateDirectoriesDurably path =
+  ( forM_ ancestors $ \ancestor -> do
+      symbolicLink <- isSymlink ancestor
+      when symbolicLink $ do
+        ancestor' <- decodePath ancestor
+        throwError $ symlinkError ancestor'
+      directory <- isDirectory ancestor
+      unless directory $ do
+        file <- isFile ancestor
+        if file
+          then do
+            ancestor' <- decodePath ancestor
+            throwError $ fileError ancestor'
+          else
+            createPrivateDirectoryDurably ancestor `catchError` \err ->
+              if isAlreadyExistsError err
+                then do
+                  createdSymlink <- isSymlink ancestor
+                  createdByPeer <- isDirectory ancestor
+                  unless (not createdSymlink && createdByPeer) $ throwError err
+                else throwError err
+  )
+    `mapError` (`ioePrependLocation` "createPrivateDirectoriesDurably")
+ where
+  ancestors =
+    map joinPath $
+      drop 1 $
+        inits $
+          splitDirectories path
+  fileError path' =
+    mkIOError
+      InappropriateType
+      "createPrivateDirectoriesDurably"
+      Nothing
+      (Just path')
+      `ioeSetErrorString` "one of its ancestors is a non-directory file"
+  symlinkError path' =
+    mkIOError
+      InappropriateType
+      "createPrivateDirectoriesDurably"
+      Nothing
+      (Just path')
+      `ioeSetErrorString` "one of its ancestors is a symbolic link"
+
+
 -- | Writes a sibling temporary file and atomically replaces the destination.
 writeFileAtomically
   :: (HasCallStack, MonadFileSystem m)
@@ -1183,12 +1246,16 @@ createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
 
 -- | Sequences the durability barriers required to publish a staged file.
 --
--- The runtime buffer is flushed first, followed by the operating-system file
--- buffer.  The file is then closed before its name is published using a
--- write-through operation.
+-- The final mode is applied before contents are written.  The runtime buffer
+-- is then flushed, followed by the operating-system file buffer.  The file is
+-- closed before its name is published using a write-through operation.
 durableFilePublication
   :: (Monad m)
   => m ()
+  -- ^ Apply the final mode to the staged file.
+  -> m ()
+  -- ^ Write the complete contents.
+  -> m ()
   -- ^ Flush the language-runtime buffer.
   -> m ()
   -- ^ Flush the operating-system file buffer to stable storage.
@@ -1198,21 +1265,26 @@ durableFilePublication
   -- ^ Publish the staged name with write-through semantics.
   -> m ()
 durableFilePublication
+  applyFinalMode
+  writeContents
   flushRuntimeBuffer
   flushDeviceBuffer
   closeStagedFile
   publishStagedFile = do
+    applyFinalMode
+    writeContents
     flushRuntimeBuffer
     flushDeviceBuffer
     closeStagedFile
     publishStagedFile
 
 #ifdef mingw32_HOST_OS
-createFileAtomicallyDurablyWithDefaultPermissionsIO
-  :: OsPath -> FilePath -> ByteString -> IO ()
-createFileAtomicallyDurablyWithDefaultPermissionsIO
+createFileAtomicallyDurablyIO
+  :: OsPath -> FilePath -> Maybe Word -> ByteString -> IO ()
+createFileAtomicallyDurablyIO
   destination
   template
+  mode
   contents = do
     directory <- decodeFS $ takeDirectory destination
     Exception.bracketOnError
@@ -1225,9 +1297,10 @@ createFileAtomicallyDurablyWithDefaultPermissionsIO
       Directory.removeFile temporary `catchError` const (return ())
 
     publishTemporary (temporary, handle) = do
-      Data.ByteString.hPut handle contents
       temporaryPath <- encodeFS temporary
       durableFilePublication
+        (forM_ mode $ setPortableModeIO temporaryPath)
+        (Data.ByteString.hPut handle contents)
         (hFlush handle)
         (Win32.withHandleToHANDLE handle Win32.flushFileBuffers)
         (hClose handle)
@@ -1496,9 +1569,10 @@ createEmptyFileInDirectoryIfIdentityIO
       withMatchingDirectoryPathIdentityIO
         pathIdentity
         expectedIdentity
-        $ createFileAtomicallyDurablyWithDefaultPermissionsIO
+        $ createFileAtomicallyDurablyIO
           (directory </> entryName)
           "dojang-pinned.tmp"
+          Nothing
           Data.ByteString.empty
     return $ maybe False (const True) result
 
@@ -1521,13 +1595,11 @@ createPrivateFileInDirectoryIfIdentityIO
       withMatchingDirectoryPathIdentityIO
         pathIdentity
         expectedIdentity
-        $ do
-          let destination = directory </> entryName
-          createFileAtomicallyDurablyWithDefaultPermissionsIO
-            destination
-            "dojang-private.tmp"
-            contents
-          setPortableModeIO destination 0o600
+        $ createFileAtomicallyDurablyIO
+          (directory </> entryName)
+          "dojang-private.tmp"
+          (Just 0o600)
+          contents
     return $ maybe False (const True) result
 
 
@@ -1573,6 +1645,11 @@ foreign import ccall unsafe "dojang_file_type_at"
   -- Returns 1 for a directory, 2 for a symbolic link, 3 for another entry,
   -- or a negated errno.
   c_fileTypeAt :: CInt -> CString -> IO CInt
+
+
+foreign import ccall safe "dojang_fsync_directory"
+  -- Returns 1 after synchronization or a negated errno.
+  c_fsyncDirectory :: CInt -> IO CInt
 
 
 foreign import ccall safe "dojang_create_empty_file_at"
@@ -2143,6 +2220,77 @@ createPrivateDirectoryIO path = do
     Win32.createDirectory path' $ Just attributes
 
 
+createPrivateDirectoryDurablyIO :: OsPath -> IO ()
+createPrivateDirectoryDurablyIO destination = do
+  cleanupPrivateDirectoryStagingIO $ takeDirectory destination
+  allocate (128 :: Int)
+ where
+  allocate attempts
+    | attempts < 1 =
+        throwError $
+          userError "could not allocate a durable private-directory path"
+    | otherwise = do
+        randomBytes <- getEntropy 16
+        name <-
+          encodeFS $
+            privateDirectoryStagingPrefix
+              <> encodeRandomHex (Data.ByteString.unpack randomBytes)
+        let temporary = takeDirectory destination </> name
+        created <- tryError $ createPrivateDirectoryIO temporary
+        case created of
+          Left err
+            | isAlreadyExistsError err -> allocate $ attempts - 1
+            | otherwise -> throwError err
+          Right () ->
+            renameNoReplaceWriteThroughIO temporary destination
+              `Exception.onException`
+                ( OsDirectory.removeDirectory temporary
+                    `catchError` const (return ())
+                )
+
+
+cleanupPrivateDirectoryStagingIO :: OsPath -> IO ()
+cleanupPrivateDirectoryStagingIO parent = do
+  entries <- OsDirectory.listDirectory parent
+  forM_ entries $ \entry -> do
+    name <- decodeFS entry
+    when (privateDirectoryStagingPrefix `isPrefixOf` name) $ do
+      let staging = parent </> entry
+      symbolicLink <-
+        OsDirectory.pathIsSymbolicLink staging
+          `catchError` const (return True)
+      stale <- privateDirectoryStagingIsStaleIO staging
+      when (not symbolicLink && stale) $ do
+        identity <-
+          getFileIdentityIO staging
+            `catchError` const (return Nothing)
+        forM_ identity $ \expected ->
+          void $
+            removeDirectoryIfIdentityIO staging expected
+              `catchError` const (return False)
+
+
+privateDirectoryStagingPrefix :: String
+privateDirectoryStagingPrefix = ".dojang-private-directory-"
+
+
+privateDirectoryStagingIsStaleIO :: OsPath -> IO Bool
+privateDirectoryStagingIsStaleIO staging =
+  ( do
+      staging' <- decodeFS staging
+      modifiedTime <- Directory.getModificationTime staging'
+      currentTime <- getCurrentTime
+      return $
+        diffUTCTime currentTime modifiedTime
+          >= privateDirectoryStagingMinimumAge
+  )
+    `catchError` const (return False)
+
+
+privateDirectoryStagingMinimumAge :: NominalDiffTime
+privateDirectoryStagingMinimumAge = 300
+
+
 ensurePersistentAcls :: FilePath -> IO ()
 ensurePersistentAcls path = do
   absolutePath <- Directory.makeAbsolute path
@@ -2383,6 +2531,35 @@ createPrivateDirectoryIO path = do
   PosixDirectory.createDirectory path' 0o700
   Posix.setFileMode path' 0o700
     `Exception.onException` OsDirectory.removeDirectory path
+
+
+createPrivateDirectoryDurablyIO :: OsPath -> IO ()
+createPrivateDirectoryDurablyIO path = do
+  createPrivateDirectoryIO path
+  (synchronizeDirectory path >> synchronizeDirectory (takeDirectory path))
+    `Exception.onException` cleanup
+ where
+  cleanup =
+    OsDirectory.removeDirectory path `catchError` const (return ())
+  synchronizeDirectory directory = do
+    directory' <- decodeFS directory
+    Exception.bracket
+      ( Posix.openFd
+          directory'
+          Posix.ReadOnly
+          Posix.defaultFileFlags
+            { Posix.nofollow = True
+            , Posix.cloexec = True
+            , Posix.directory = True
+            }
+      )
+      Posix.closeFd
+      $ \descriptor -> do
+        synchronized <- c_fsyncDirectory $ fromIntegral descriptor
+        when (synchronized < 0) $
+          throwErrnoCode
+            "createPrivateDirectoryDurably"
+            (negate synchronized)
 
 
 renameNoReplaceIO :: String -> OsPath -> OsPath -> IO ()
@@ -3007,6 +3184,9 @@ instance MonadFileSystem IO where
 
 
   createPrivateDirectory = createPrivateDirectoryIO
+
+
+  createPrivateDirectoryDurably = createPrivateDirectoryDurablyIO
 
 
   removeFile = OsDirectory.removeFile
@@ -3644,6 +3824,9 @@ instance MonadFileSystem DryRunIO where
   createPrivateDirectory path = do
     createDirectory path
     setPortableMode path 0o700
+
+
+  createPrivateDirectoryDurably = createPrivateDirectory
 
 
   removeFile path = do

@@ -1043,6 +1043,9 @@ mutatePublicationReplica race path = PublicationRaceIO $ do
 
 
 instance MonadFileSystem PublicationRaceIO where
+  createPrivateDirectoryDurably path =
+    PublicationRaceIO $
+      liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = PublicationRaceIO $ liftIO (encodePath value :: IO OsPath)
   decodePath value =
     PublicationRaceIO $ liftIO (decodePath value :: IO FilePath)
@@ -1143,6 +1146,9 @@ instance MonadFileSystem PublicationRaceIO where
 
 
 instance MonadFileSystem FailingPrivateModeIO where
+  createPrivateDirectoryDurably path =
+    FailingPrivateModeIO $
+      liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = FailingPrivateModeIO $ liftIO (encodePath value :: IO OsPath)
   decodePath value = FailingPrivateModeIO $ liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory =

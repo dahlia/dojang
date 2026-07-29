@@ -1014,6 +1014,8 @@ runIsolatedHomeIO home action = runReaderT action.unIsolatedHomeIO home
 
 
 instance MonadFileSystem IsolatedHomeIO where
+  createPrivateDirectoryDurably =
+    liftIO . FileSystem.createPrivateDirectoryDurably
   encodePath = liftIO . FileSystem.encodePath
   decodePath = liftIO . FileSystem.decodePath
   getCurrentDirectory = liftIO FileSystem.getCurrentDirectory

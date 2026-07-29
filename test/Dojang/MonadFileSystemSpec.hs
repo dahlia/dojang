@@ -25,6 +25,11 @@ import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, sort, sortOn)
 import Data.Time.Clock (addUTCTime)
+
+
+#ifdef mingw32_HOST_OS
+import Data.Time.Clock (getCurrentTime)
+#endif
 import GHC.IO.Exception
   ( IOErrorType (InappropriateType, InvalidArgument)
   )
@@ -110,6 +115,7 @@ import Dojang.MonadFileSystem
   , FileType (..)
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
+  , createPrivateDirectoriesDurably
   , dryRunIO
   , durableFilePublication
   , isNoReplaceUnsupportedError
@@ -129,6 +135,7 @@ import Dojang.TestUtils (supportsNonUtf8FileNames)
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
+  , satisfiesPortableMode
   )
 
 
@@ -173,6 +180,25 @@ posixPortableModeSpec = pure ()
 
 posixPrivateDirectorySpec :: Spec
 posixPrivateDirectorySpec = pure ()
+
+
+windowsDurableDirectorySpec :: Spec
+windowsDurableDirectorySpec =
+  specify "durable private directory creation removes stale staging" $
+    withTempDir $ \tmpDir _ -> do
+      stagingName <-
+        encodeFS ".dojang-private-directory-00112233445566778899aabbccddeeff"
+      destinationName <- encodeFS "durable-private"
+      let staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+      createPrivateDirectory staging
+      currentTime <- getCurrentTime
+      OsDirectory.setModificationTime
+        staging
+        (addUTCTime (-600) currentTime)
+      createPrivateDirectoryDurably destination
+      exists staging `shouldReturn` False
+      isDirectory destination `shouldReturn` True
 
 
 posixDryRunPortableModeSpec :: Spec
@@ -303,6 +329,10 @@ privateDirectoryTestName =
 privateDirectoryProbeVariable :: String
 privateDirectoryProbeVariable =
   "DOJANG_TEST_PRIVATE_DIRECTORY_UMASK_PROBE"
+
+
+windowsDurableDirectorySpec :: Spec
+windowsDurableDirectorySpec = pure ()
 
 
 posixDryRunPortableModeSpec :: Spec
@@ -767,6 +797,21 @@ spec = do
 
     posixRegularFileSpec
     posixPrivateDirectorySpec
+    windowsDurableDirectorySpec
+
+    specify "durably creates arbitrary private directory chains" $ hedgehog $ do
+      depth <- forAll $ Gen.int $ Range.linear 1 8
+      liftIO $
+        withTempDir $ \tmpDir _ -> do
+          components <-
+            mapM (encodeFS . ("private-" <>) . show) [1 .. depth]
+          let paths = scanl (</>) tmpDir components
+              leaf = last paths
+          createPrivateDirectoriesDurably leaf
+          modes <- mapM getPortableMode $ drop 1 paths
+          modes
+            `shouldSatisfy` all
+              (`satisfiesPortableMode` portableModeFromBits 0o700)
 
     specify "isDirectory" $ do
       isDirectory packageYamlP `shouldReturn` False
@@ -829,6 +874,36 @@ spec = do
         ioeGetLocation failure `shouldStartWith` "createDirectories"
         show failure
           `shouldContain` "one of its ancestors is a symbolic link"
+
+    if symlinkAvailable
+      then specify
+        "durable private directory creation rejects arbitrary linked ancestors"
+        $ hedgehog
+        $ do
+          depth <- forAll $ Gen.int $ Range.linear 1 8
+          linkIndex <- forAll $ Gen.int $ Range.linear 0 (depth - 1)
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              externalName <- encodeFS "external"
+              components <-
+                mapM (encodeFS . ("private-" <>) . show) [1 .. depth]
+              case splitAt linkIndex components of
+                (parents, linked : children) -> do
+                  let parent = foldl (</>) tmpDir parents
+                      external = tmpDir </> externalName
+                      selected = foldl (</>) (parent </> linked) children
+                  createDirectories parent
+                  createDirectory external
+                  createDirectoryLink external (parent </> linked)
+                  result <-
+                    tryError $ createPrivateDirectoriesDurably selected
+                  result `shouldSatisfy` isInappropriateTypeError
+                  listDirectory external `shouldReturn` []
+                _ -> expectationFailure "generated an empty directory chain"
+      else
+        xit
+          "durable private directory creation rejects linked ancestors"
+          (return () :: IO ())
 
     specify "readFile" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
@@ -1583,19 +1658,23 @@ spec = do
               `shouldReturn` sort [ownedName, movedName]
 
     specify
-      "durable file publication flushes contents before write-through rename"
+      "durable file publication protects contents before write-through rename"
       $ do
         completed <- newIORef ([] :: [String])
         let step name =
               atomicModifyIORef' completed $ \names ->
                 (names <> [name], ())
         durableFilePublication
+          (step "mode")
+          (step "contents")
           (step "runtime buffers")
           (step "device buffers")
           (step "close")
           (step "write-through rename")
         readIORef completed
-          `shouldReturn` [ "runtime buffers"
+          `shouldReturn` [ "mode"
+                         , "contents"
+                         , "runtime buffers"
                          , "device buffers"
                          , "close"
                          , "write-through rename"
@@ -1603,7 +1682,7 @@ spec = do
 
     specify "durable file publication stops after arbitrary barrier failures" $
       hedgehog $ do
-        failureStep <- forAll $ Gen.int $ Range.linear 0 3
+        failureStep <- forAll $ Gen.int $ Range.linear 0 5
         liftIO $ do
           completed <- newIORef []
           let step index = do
@@ -1617,6 +1696,8 @@ spec = do
             (step 1)
             (step 2)
             (step 3)
+            (step 4)
+            (step 5)
             `shouldThrow` (const True :: IOError -> Bool)
           readIORef completed `shouldReturn` [0 .. failureStep]
 

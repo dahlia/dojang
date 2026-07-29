@@ -661,6 +661,8 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase . copyFilePermissions source
   createDirectory = liftCommandEffectBase . createDirectory
   createPrivateDirectory = liftCommandEffectBase . createPrivateDirectory
+  createPrivateDirectoryDurably =
+    liftCommandEffectBase . createPrivateDirectoryDurably
   removeFile = liftCommandEffectBase . removeFile
   createEmptyFileInDirectoryIfIdentity pathIdentity identity =
     liftCommandEffectBase

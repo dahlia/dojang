@@ -484,7 +484,7 @@ prepareMergeWorkspace
   -- ^ Stable destination input.
   -> m MergeWorkspace
 prepareMergeWorkspace root source base destination = do
-  createPrivateDirectory root
+  createPrivateDirectoryDurably root
   getFileIdentity root >>= \case
     Nothing ->
       throwError $

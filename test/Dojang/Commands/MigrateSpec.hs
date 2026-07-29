@@ -543,6 +543,8 @@ runCoordinatedMigrationIO gate (CoordinatedMigrationIO action) =
 
 
 instance MonadFileSystem CoordinatedMigrationIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
@@ -658,6 +660,8 @@ runFailingManifestWrite target (FailingManifestWriteIO action) =
 
 
 instance MonadFileSystem FailingManifestWriteIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
