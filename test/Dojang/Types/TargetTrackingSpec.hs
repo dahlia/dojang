@@ -15,12 +15,16 @@ import Control.Monad.Except
   , runExceptT
   )
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (ReaderT, ask, runReaderT)
 import Crypto.Hash.SHA256 qualified as SHA256
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.Either (isLeft)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict qualified as Map
 import Data.Time (getCurrentTime)
 import Hedgehog.Gen qualified as Gen
-import Hedgehog.Range (linear)
+import Hedgehog.Range (constantFrom, linear)
 import System.Directory.OsPath qualified
 import System.Info (os)
 
@@ -58,7 +62,12 @@ import Test.Hspec.Expectations.Pretty
 import Test.Hspec.Hedgehog (forAll, hedgehog, (===))
 import Prelude hiding (readFile, writeFile)
 
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem
+  ( FileIdentity
+  , FileModeSnapshot
+  , FileSnapshot
+  , MonadFileSystem (..)
+  )
 import Dojang.MonadFileSystem qualified as FileSystem
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Codec (identityCodecSpec)
@@ -457,6 +466,157 @@ spec = do
           managed
           `shouldReturn` Nothing
 
+    it "rejects arbitrary convergence lost during publication" $
+      hedgehog $ do
+        original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        concurrent <-
+          forAll $
+            Gen.filter (/= original) $
+              Gen.bytes $
+                constantFrom 0 0 4096
+        racePoint <-
+          forAll $
+            Gen.element
+              [ DuringComparison
+              , DuringStableCapture
+              , DuringMaterialization
+              ]
+        observed <- liftIO $ withTempDir $ \root _ -> do
+          template <- fixtureManagedAt root
+          repository <- fixtureRepositoryAt root
+          snapshotRootName <- encodeFS "target-snapshots"
+          parentName <- encodeFS "parent"
+          rejectedName <- encodeFS "rejected"
+          destinationRootName <- encodeFS "destination-tree"
+          let templateRoute = template.route
+              sourceRoot =
+                repository.sourcePath </> templateRoute.routeName
+              intermediateRoot =
+                root </> snapshotRootName </> templateRoute.routeName
+              destinationRoot = root </> destinationRootName
+              rejectedRelative = parentName </> rejectedName
+              source = sourceRoot </> rejectedRelative
+              intermediate = intermediateRoot </> rejectedRelative
+              destination = destinationRoot </> rejectedRelative
+              route =
+                RouteResult
+                  sourceRoot
+                  templateRoute.routeName
+                  destinationRoot
+                  FileSystem.Directory
+                  templateRoute.mode
+                  templateRoute.kind
+                  templateRoute.routeDefinition
+                  templateRoute.routeProvenance
+                  templateRoute.codec
+              fileEntry path =
+                FileEntry
+                  path
+                  (File $ fromIntegral $ ByteString.length original)
+              managed =
+                ManagedCorrespondence
+                  route
+                  rejectedRelative
+                  ( FileCorrespondence
+                      (fileEntry source)
+                      Unchanged
+                      (fileEntry intermediate)
+                      (fileEntry destination)
+                      Unchanged
+                  )
+              directoryEntry path = FileEntry path Directory
+              successful =
+                ManagedCorrespondence
+                  route
+                  parentName
+                  ( FileCorrespondence
+                      (directoryEntry $ sourceRoot </> parentName)
+                      Unchanged
+                      (directoryEntry $ intermediateRoot </> parentName)
+                      (directoryEntry $ destinationRoot </> parentName)
+                      Unchanged
+                  )
+          createDirectories $ takeDirectory source
+          createDirectories $ takeDirectory intermediate
+          createDirectories $ takeDirectory destination
+          writeFile source original
+          writeFile intermediate original
+          writeFile destination original
+          transaction <-
+            newTargetSnapshotTransaction $ root </> snapshotRootName
+          now <- getCurrentTime
+          Just (_, Just successfulTarget) <-
+            observeConvergedManagedTarget
+              repository
+              transaction
+              Applied
+              now
+              successful
+          outcome <-
+            runPublicationRaceIO
+              destination
+              intermediate
+              concurrent
+              racePoint
+              $ observeConvergedManagedTarget
+                repository
+                transaction
+                Applied
+                now
+                managed
+          changedContents <-
+            readFile $
+              if racePoint == DuringMaterialization
+                then intermediate
+                else destination
+          successfulBaselineExists <-
+            isDirectory successfulTarget.snapshotPath
+          transactionEntries <-
+            listDirectoryRecursively transaction []
+          let snapshotCount =
+                length
+                  [ ()
+                  | (FileSystem.File, _) <- transactionEntries
+                  ]
+          return
+            ( outcome
+            , changedContents
+            , successfulBaselineExists
+            , snapshotCount
+            )
+        observed === (Right Nothing, concurrent, True, 0)
+
+    it "propagates stable publication observation failures" $
+      withTempDir $ \root _ -> do
+        managed <- fixtureManagedAt root
+        repository <- fixtureRepositoryAt root
+        snapshotRootName <- encodeFS "target-snapshots"
+        let intermediate = managed.correspondence.intermediate.path
+            source = managed.correspondence.source.path
+            destination = managed.correspondence.destination.path
+        createDirectories $ takeDirectory intermediate
+        createDirectories $ takeDirectory source
+        writeFile intermediate "converged"
+        writeFile source "converged"
+        writeFile destination "converged"
+        transaction <-
+          newTargetSnapshotTransaction $ root </> snapshotRootName
+        now <- getCurrentTime
+        outcome <-
+          runPublicationRaceIO
+            destination
+            intermediate
+            "unused"
+            DuringObservationFailure
+            ( observeConvergedManagedTarget
+                repository
+                transaction
+                Applied
+                now
+                managed
+            )
+        outcome `shouldSatisfy` isLeft
+
     it "does not record rendered convergence after the raw source changes" $
       withTempDir $ \root _ -> do
         managed <- fixtureManagedAt root
@@ -819,7 +979,176 @@ runFailingPrivateModeIO
 runFailingPrivateModeIO (FailingPrivateModeIO action) = runExceptT action
 
 
+newtype PublicationRaceIO a
+  = PublicationRaceIO
+      (ReaderT PublicationRace (ExceptT IOError IO) a)
+  deriving (Functor, Applicative, Monad, MonadError IOError)
+
+
+data PublicationRacePoint
+  = DuringComparison
+  | DuringStableCapture
+  | DuringMaterialization
+  | DuringObservationFailure
+  deriving (Bounded, Enum, Eq, Show)
+
+
+data PublicationRace = PublicationRace
+  { raceDestination :: OsPath
+  , raceIntermediate :: OsPath
+  , raceContents :: ByteString
+  , racePoint :: PublicationRacePoint
+  , racePending :: IORef Bool
+  }
+
+
+runPublicationRaceIO
+  :: OsPath
+  -> OsPath
+  -> ByteString
+  -> PublicationRacePoint
+  -> PublicationRaceIO a
+  -> IO (Either IOError a)
+runPublicationRaceIO
+  destination
+  intermediate
+  concurrent
+  racePoint
+  (PublicationRaceIO action) = do
+    pending <- newIORef True
+    runExceptT $
+      runReaderT
+        action
+        ( PublicationRace
+            destination
+            intermediate
+            concurrent
+            racePoint
+            pending
+        )
+
+
+mutatePublicationReplica
+  :: PublicationRace -> OsPath -> PublicationRaceIO ()
+mutatePublicationReplica race path = PublicationRaceIO $ do
+  shouldChange <-
+    liftIO $
+      atomicModifyIORef' race.racePending $ \pending ->
+        (False, pending)
+  when shouldChange $
+    liftIO
+      ( writeFile path race.raceContents
+          :: IO ()
+      )
+
+
+instance MonadFileSystem PublicationRaceIO where
+  createPrivateDirectoryDurably path =
+    PublicationRaceIO $
+      liftIO (createPrivateDirectoryDurably path :: IO ())
+  encodePath value = PublicationRaceIO $ liftIO (encodePath value :: IO OsPath)
+  decodePath value =
+    PublicationRaceIO $ liftIO (decodePath value :: IO FilePath)
+  getCurrentDirectory =
+    PublicationRaceIO $ liftIO (getCurrentDirectory :: IO OsPath)
+  getHomeDirectory =
+    PublicationRaceIO $ liftIO (getHomeDirectory :: IO OsPath)
+  exists value = PublicationRaceIO $ liftIO (exists value :: IO Bool)
+  isFile value = PublicationRaceIO $ liftIO (isFile value :: IO Bool)
+  isRegularFile value =
+    PublicationRaceIO $ liftIO (isRegularFile value :: IO Bool)
+  isDirectory value =
+    PublicationRaceIO $ liftIO (isDirectory value :: IO Bool)
+  isSymlink value =
+    PublicationRaceIO $ liftIO (isSymlink value :: IO Bool)
+  readFile path = PublicationRaceIO $ do
+    race <- ask
+    contents <- liftIO (readFile path)
+    when
+      ( path == race.raceDestination
+          && race.racePoint == DuringComparison
+      )
+      $ let PublicationRaceIO mutation =
+              mutatePublicationReplica race race.raceDestination
+        in mutation
+    return contents
+  readRegularFile path = PublicationRaceIO $ do
+    race <- ask
+    if path == race.raceDestination
+      && race.racePoint == DuringObservationFailure
+      then throwError $ userError "injected stable observation failure"
+      else do
+        contents <- liftIO (readRegularFile path :: IO (Maybe ByteString))
+        when
+          ( path == race.raceDestination
+              && race.racePoint == DuringStableCapture
+          )
+          $ let PublicationRaceIO mutation =
+                  mutatePublicationReplica race race.raceDestination
+            in mutation
+        return contents
+  writeFile path contents =
+    PublicationRaceIO $ liftIO (writeFile path contents :: IO ())
+  replaceFile source destination =
+    PublicationRaceIO $
+      liftIO (replaceFile source destination :: IO ())
+  writeTemporaryFile directory template contents = PublicationRaceIO $ do
+    race <- ask
+    temporary <-
+      liftIO (writeTemporaryFile directory template contents :: IO OsPath)
+    when (race.racePoint == DuringMaterialization) $
+      let PublicationRaceIO mutation =
+            mutatePublicationReplica race race.raceIntermediate
+      in mutation
+    return temporary
+  withFileLock _ action = action
+  canonicalizePath value =
+    PublicationRaceIO $ liftIO (canonicalizePath value :: IO OsPath)
+  readSymlinkTarget value =
+    PublicationRaceIO $ liftIO (readSymlinkTarget value :: IO OsPath)
+  copyFile source destination =
+    PublicationRaceIO $ liftIO (copyFile source destination :: IO ())
+  copyFileWithMetadata source destination =
+    PublicationRaceIO $
+      liftIO (copyFileWithMetadata source destination :: IO ())
+  copyFilePermissions source destination =
+    PublicationRaceIO $
+      liftIO (copyFilePermissions source destination :: IO ())
+  createDirectory value =
+    PublicationRaceIO $ liftIO (createDirectory value :: IO ())
+  removeFile value =
+    PublicationRaceIO $ liftIO (removeFile value :: IO ())
+  removeDirectory value =
+    PublicationRaceIO $ liftIO (removeDirectory value :: IO ())
+  listDirectory value =
+    PublicationRaceIO $ liftIO (listDirectory value :: IO [OsPath])
+  getFileSize value =
+    PublicationRaceIO $ liftIO (getFileSize value :: IO Integer)
+  getFileIdentity value =
+    PublicationRaceIO $
+      liftIO (getFileIdentity value :: IO (Maybe FileIdentity))
+  getFileSnapshot value =
+    PublicationRaceIO $
+      liftIO (getFileSnapshot value :: IO (Maybe FileSnapshot))
+  getFileModeSnapshot value =
+    PublicationRaceIO $
+      liftIO (getFileModeSnapshot value :: IO (Maybe FileModeSnapshot))
+  getPortableMode value =
+    PublicationRaceIO $ liftIO (getPortableMode value)
+  setPortableMode path bits =
+    PublicationRaceIO $ liftIO (setPortableMode path bits :: IO ())
+  setPortableWritable path writable =
+    PublicationRaceIO $
+      liftIO (setPortableWritable path writable :: IO ())
+  createSymbolicLink target link fileType =
+    PublicationRaceIO $
+      liftIO (createSymbolicLink target link fileType :: IO ())
+
+
 instance MonadFileSystem FailingPrivateModeIO where
+  createPrivateDirectoryDurably path =
+    FailingPrivateModeIO $
+      liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = FailingPrivateModeIO $ liftIO (encodePath value :: IO OsPath)
   decodePath value = FailingPrivateModeIO $ liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory =

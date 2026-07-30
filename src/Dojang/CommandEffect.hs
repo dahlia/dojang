@@ -628,7 +628,27 @@ instance MonadFileSystem CommandEffectTest where
   createFileAtomicallyWithDefaultPermissions path template =
     liftCommandEffectBase
       . createFileAtomicallyWithDefaultPermissions path template
+  writeFileAtomicallyDurably path template =
+    liftCommandEffectBase
+      . writeFileAtomicallyDurably path template
   replaceFile source = liftCommandEffectBase . replaceFile source
+  replaceFileIfSnapshot
+    snapshot
+    modeSnapshot
+    contents
+    sourceSnapshot
+    sourceMode
+    sourceContents
+    source =
+      liftCommandEffectBase
+        . replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          contents
+          sourceSnapshot
+          sourceMode
+          sourceContents
+          source
   renameDirectory source =
     liftCommandEffectBase . renameDirectory source
   writeTemporaryFile directory template =
@@ -644,11 +664,28 @@ instance MonadFileSystem CommandEffectTest where
     liftCommandEffectBase . copyFilePermissions source
   createDirectory = liftCommandEffectBase . createDirectory
   createPrivateDirectory = liftCommandEffectBase . createPrivateDirectory
+  createPrivateDirectoryDurably =
+    liftCommandEffectBase . createPrivateDirectoryDurably
   removeFile = liftCommandEffectBase . removeFile
+  createEmptyFileInDirectoryIfIdentity pathIdentity identity =
+    liftCommandEffectBase
+      . createEmptyFileInDirectoryIfIdentity pathIdentity identity
+  createPrivateFileInDirectoryIfIdentity pathIdentity identity entryName =
+    liftCommandEffectBase
+      . createPrivateFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        entryName
+  removeFileInDirectoryIfIdentity pathIdentity identity =
+    liftCommandEffectBase
+      . removeFileInDirectoryIfIdentity pathIdentity identity
   removeDirectory = liftCommandEffectBase . removeDirectory
+  removeDirectoryIfIdentity path =
+    liftCommandEffectBase . removeDirectoryIfIdentity path
   removeDirectoryRecursivelyIfIdentity path =
     liftCommandEffectBase . removeDirectoryRecursivelyIfIdentity path
   listDirectory = liftCommandEffectBase . listDirectory
+  listDirectoryPinned = liftCommandEffectBase . listDirectoryPinned
   getFileSize = liftCommandEffectBase . getFileSize
   getFileIdentity = liftCommandEffectBase . getFileIdentity
   getFileSnapshot = liftCommandEffectBase . getFileSnapshot

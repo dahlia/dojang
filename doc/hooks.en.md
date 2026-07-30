@@ -1,10 +1,10 @@
 Hooks
 =====
 
-Hooks run commands around the lifecycles of `apply`, `reflect`, `diff`,
-`status`, `edit`, and `unmanage`.  They can prepare tools before a command,
-reload a service after a successful change, or perform setup once on each
-machine.
+Hooks run commands around the lifecycles of `apply`, `reflect`, `merge`,
+`diff`, `status`, `edit`, and `unmanage`.  They can prepare tools before a
+command, reload a service after a successful change, or perform setup once on
+each machine.
 
 
 Lifecycle events
@@ -17,12 +17,14 @@ when the command succeeds.
 | ---------- | -------------- | --------------------- |
 | `apply`    | `pre-apply`    | `post-apply`          |
 | `reflect`  | `pre-reflect`  | `post-reflect`        |
+| `merge`    | `pre-merge`    | `post-merge`          |
 | `diff`     | `pre-diff`     | `post-diff`           |
 | `status`   | `pre-status`   | `post-status`         |
 | `edit`     | `pre-edit`     | `post-edit`           |
 | `unmanage` | `pre-unmanage` | `post-unmanage`       |
 
-After their pre-hooks, `reflect`, `diff`, `status`, `edit`, and `unmanage`
+After their pre-hooks, `reflect`, `merge`, `diff`, `status`, `edit`, and
+`unmanage`
 reload *dojang.toml* and *dojang-env.toml* for the command action.  They reload
 the same context again before selecting successful post-hooks, so those hooks
 cannot run from an older manifest or machine environment.

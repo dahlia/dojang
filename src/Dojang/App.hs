@@ -25,6 +25,7 @@ module Dojang.App
   , currentEnvironment'
   , currentEnvironmentWithFacts
   , clearLegacyFirstApplyHistory
+  , contextFromExistingMachineState
   , doesManifestExist
   , ensureContext
   , ensureManifest
@@ -286,7 +287,33 @@ instance
       . lift
       . lift
       . createFileAtomicallyWithDefaultPermissions dst template
+  writeFileAtomicallyDurably dst template =
+    App
+      . lift
+      . lift
+      . lift
+      . writeFileAtomicallyDurably dst template
   replaceFile src = App . lift . lift . lift . replaceFile src
+  replaceFileIfSnapshot
+    snapshot
+    modeSnapshot
+    contents
+    sourceSnapshot
+    sourceMode
+    sourceContents
+    src =
+      App
+        . lift
+        . lift
+        . lift
+        . replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          contents
+          sourceSnapshot
+          sourceMode
+          sourceContents
+          src
   renameDirectory src = App . lift . lift . lift . renameDirectory src
   writeTemporaryFile directory template contents =
     App $ lift $ lift $ lift $ writeTemporaryFile directory template contents
@@ -304,11 +331,37 @@ instance
   copyFilePermissions src = App . lift . lift . lift . copyFilePermissions src
   createDirectory = App . lift . lift . lift . createDirectory
   createPrivateDirectory = App . lift . lift . lift . createPrivateDirectory
+  createPrivateDirectoryDurably =
+    App . lift . lift . lift . createPrivateDirectoryDurably
   removeFile = App . lift . lift . lift . removeFile
+  createEmptyFileInDirectoryIfIdentity pathIdentity identity =
+    App
+      . lift
+      . lift
+      . lift
+      . createEmptyFileInDirectoryIfIdentity pathIdentity identity
+  createPrivateFileInDirectoryIfIdentity pathIdentity identity entryName =
+    App
+      . lift
+      . lift
+      . lift
+      . createPrivateFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        entryName
+  removeFileInDirectoryIfIdentity pathIdentity identity =
+    App
+      . lift
+      . lift
+      . lift
+      . removeFileInDirectoryIfIdentity pathIdentity identity
   removeDirectory = App . lift . lift . lift . removeDirectory
+  removeDirectoryIfIdentity path =
+    App . lift . lift . lift . removeDirectoryIfIdentity path
   removeDirectoryRecursivelyIfIdentity path =
     App . lift . lift . lift . removeDirectoryRecursivelyIfIdentity path
   listDirectory = App . lift . lift . lift . listDirectory
+  listDirectoryPinned = App . lift . lift . lift . listDirectoryPinned
   listDirectoryRecursively path =
     App . lift . lift . lift . listDirectoryRecursively path
   listDirectoryRecursivelyStrict path =
@@ -1069,6 +1122,29 @@ ensureContext
   :: (MonadFileSystem i, AppEffects i) => App i (Context (App i))
 ensureContext = do
   repo <- ensureRepository
+  contextForRepository repo
+
+
+-- | Builds a command context from one already-read manifest and machine-state
+-- record without creating or updating machine state.
+contextFromExistingMachineState
+  :: (MonadFileSystem i, AppEffects i)
+  => Manifest
+  -- ^ Manifest snapshot used for route evaluation.
+  -> MachineState
+  -- ^ Existing state whose intermediate path belongs to the repository.
+  -> App i (Context (App i))
+contextFromExistingMachineState manifest state = do
+  sourceDir <- asks (normalise . (.sourceDirectory))
+  contextForRepository $
+    Repository sourceDir state.intermediatePath manifest
+
+
+contextForRepository
+  :: (MonadFileSystem i, AppEffects i)
+  => Repository
+  -> App i (Context (App i))
+contextForRepository repo = do
   currentEnv <- currentEnvironment'
   $(logDebugSH) currentEnv
   resolved <-

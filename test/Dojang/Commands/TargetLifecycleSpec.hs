@@ -7,7 +7,9 @@
 
 module Dojang.Commands.TargetLifecycleSpec (spec) where
 
+import Control.Concurrent (forkFinally, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (bracket_)
+import Control.Exception qualified as Exception
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Except (MonadError, catchError)
 import Control.Monad.IO.Class (MonadIO (liftIO))
@@ -15,12 +17,23 @@ import Control.Monad.Reader (ReaderT (ReaderT), ask, runReaderT)
 import Data.HashMap.Strict (singleton)
 import Data.List (find)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isNothing)
 import Data.Text.Encoding (encodeUtf8)
 import System.Directory.OsPath qualified
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.OsPath (OsPath, encodeFS, takeDirectory, takeFileName, (</>))
-import Test.Hspec (Spec, describe, it, runIO, sequential, xit)
+import System.Timeout (timeout)
+import Test.Hspec
+  ( Spec
+  , describe
+  , expectationFailure
+  , it
+  , runIO
+  , sequential
+  , shouldSatisfy
+  , xit
+  )
 import Test.Hspec.Expectations.Pretty
   ( shouldBe
   , shouldContain
@@ -68,6 +81,7 @@ import Dojang.Types.ManagedTarget
   )
 import Dojang.Types.Manifest (Manifest (..), manifest)
 import Dojang.Types.Manifest qualified as Manifest
+import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
 import Dojang.Types.MonikerName (parseMonikerName)
 import Dojang.Types.Registry
   ( Registry (Registry)
@@ -425,6 +439,207 @@ spec = do
             `shouldReturn` Right []
           exists (takeDirectory state.targetSnapshotRoot) `shouldReturn` False
 
+      it "removes retained merge workspaces" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          invocationName <- encodeFS "retained-invocation"
+          conflictName <- encodeFS "conflict-1"
+          sourceName <- encodeFS "source"
+          let conflict =
+                workspaceRoot </> invocationName </> conflictName
+          createDirectories conflict
+          writeFile (conflict </> sourceName) "sensitive contents"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
+      symlinkIt "rejects a symlinked merge-workspace ancestor" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          externalName <- encodeFS "external-merge-workspaces"
+          sentinelName <- encodeFS "preserve-me"
+          let workspaceStore = takeDirectory workspaceRoot
+          let root = takeDirectory fixture.appEnv.sourceDirectory
+          let externalStore = root </> externalName
+          let externalWorkspace =
+                externalStore </> takeFileName workspaceRoot
+          let sentinel = externalWorkspace </> sentinelName
+          createDirectories externalWorkspace
+          writeFile sentinel "unrelated data"
+          bracket_
+            ( System.Directory.OsPath.createDirectoryLink
+                externalStore
+                workspaceStore
+            )
+            (System.Directory.OsPath.removeDirectoryLink workspaceStore)
+            $ do
+              runAppWithoutLogging fixture.appEnv (forget False)
+                `shouldThrow` (== machineStateError)
+              readFile sentinel `shouldReturn` "unrelated data"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+
+      symlinkIt "rejects a symbolic-link merge-workspace root" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          externalName <- encodeFS "external-workspace"
+          sentinelName <- encodeFS "preserve-me"
+          let root = takeDirectory fixture.appEnv.sourceDirectory
+          let externalWorkspace = root </> externalName
+          let sentinel = externalWorkspace </> sentinelName
+          createDirectories $ takeDirectory workspaceRoot
+          createDirectories externalWorkspace
+          writeFile sentinel "unrelated data"
+          bracket_
+            ( System.Directory.OsPath.createDirectoryLink
+                externalWorkspace
+                workspaceRoot
+            )
+            (System.Directory.OsPath.removeDirectoryLink workspaceRoot)
+            $ do
+              runAppWithoutLogging fixture.appEnv (forget False)
+                `shouldThrow` (== machineStateError)
+              readFile sentinel `shouldReturn` "unrelated data"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+
+      it "preserves a non-directory merge workspace for manual recovery" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          createDirectories $ takeDirectory workspaceRoot
+          writeFile workspaceRoot "unexpected file"
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldThrow` (== machineStateError)
+          readFile workspaceRoot `shouldReturn` "unexpected file"
+          removeFile workspaceRoot
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+
+      it "removes retained workspaces after state is already absent" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          retainedName <- encodeFS "retained"
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
+          removeFile $
+            repositoryStatePath
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          runAppWithoutLogging fixture.appEnv (forget False)
+            `shouldReturn` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
+      it "serializes absent-state workspace cleanup" $
+        withManagedTarget $ \fixture -> do
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          retainedName <- encodeFS "retained"
+          lockName <- encodeFS "state.lock"
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
+          removeFile $
+            repositoryStatePath
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
+          let lockPath =
+                repositoryStateDirectory
+                  fixture.appEnv.stateDirectory
+                  fixture.repositoryId
+                  </> lockName
+          started <- newEmptyMVar
+          outcome <- newEmptyMVar
+          withFileLock lockPath $ do
+            _ <-
+              forkFinally
+                ( do
+                    putMVar started ()
+                    runAppWithoutLogging fixture.appEnv $ forget False
+                )
+                (putMVar outcome)
+            takeMVar started
+            early <- timeout 250000 $ takeMVar outcome
+            early `shouldSatisfy` isNothing
+            exists workspaceRoot `shouldReturn` True
+          completed <- timeout 5000000 $ takeMVar outcome
+          case completed of
+            Nothing -> expectationFailure "forget did not finish"
+            Just (Left err) -> Exception.throwIO err
+            Just (Right result) -> result `shouldBe` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
+      it "removes retained workspaces without a machine identity" $
+        withTempDir $ \root _ -> do
+          repositoryName <- encodeFS "repository"
+          stateName <- encodeFS "state"
+          manifestName <- encodeFS "dojang.toml"
+          envName <- encodeFS "dojang-env.toml"
+          retainedName <- encodeFS "retained"
+          machineLockName <- encodeFS "machine.lock"
+          let repository = root </> repositoryName
+              stateRoot = root </> stateName
+              manifestPath = repository </> manifestName
+              Right repositoryId =
+                parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
+              repositoryManifest =
+                (manifest mempty mempty mempty mempty mempty)
+                  { Manifest.repositoryId = Just repositoryId
+                  }
+              appEnv =
+                AppEnv
+                  repository
+                  False
+                  Nothing
+                  stateRoot
+                  manifestName
+                  envName
+                  False
+                  False
+          createDirectories repository
+          writeManifestFile repositoryManifest manifestPath
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              stateRoot
+              repositoryId
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
+          started <- newEmptyMVar
+          outcome <- newEmptyMVar
+          withFileLock (stateRoot </> machineLockName) $ do
+            _ <-
+              forkFinally
+                ( do
+                    putMVar started ()
+                    runAppWithoutLogging appEnv $ forget False
+                )
+                (putMVar outcome)
+            takeMVar started
+            early <- timeout 250000 $ takeMVar outcome
+            early `shouldSatisfy` isNothing
+            exists workspaceRoot `shouldReturn` True
+          completed <- timeout 5000000 $ takeMVar outcome
+          case completed of
+            Nothing -> expectationFailure "forget did not finish"
+            Just (Left err) -> Exception.throwIO err
+            Just (Right result) -> result `shouldBe` ExitSuccess
+          exists workspaceRoot `shouldReturn` False
+
       it "removes an interrupted migration journal when forgetting" $
         withManagedTarget $ \fixture -> do
           let marker =
@@ -595,11 +810,18 @@ spec = do
         withManagedTarget $ \fixture -> do
           state <- loadState fixture
           markerName <- encodeFS "forget-in-progress"
+          retainedName <- encodeFS "retained"
+          workspaceRoot <-
+            mergeWorkspaceRepositoryRoot
+              fixture.appEnv.stateDirectory
+              fixture.repositoryId
           let marker =
                 repositoryStateDirectory
                   fixture.appEnv.stateDirectory
                   fixture.repositoryId
                   </> markerName
+          createDirectories workspaceRoot
+          writeFile (workspaceRoot </> retainedName) "sensitive contents"
           writeFile marker "approved"
           removeDirectoryRecursively state.targetSnapshotRoot
           removeDirectory $ takeDirectory state.targetSnapshotRoot
@@ -611,6 +833,7 @@ spec = do
           runAppWithoutLogging fixture.appEnv (forget False)
             `shouldReturn` ExitSuccess
           exists marker `shouldReturn` False
+          exists workspaceRoot `shouldReturn` False
           runAppWithoutLogging fixture.appEnv (forget False)
             `shouldReturn` ExitSuccess
 
@@ -791,6 +1014,8 @@ runIsolatedHomeIO home action = runReaderT action.unIsolatedHomeIO home
 
 
 instance MonadFileSystem IsolatedHomeIO where
+  createPrivateDirectoryDurably =
+    liftIO . FileSystem.createPrivateDirectoryDurably
   encodePath = liftIO . FileSystem.encodePath
   decodePath = liftIO . FileSystem.decodePath
   getCurrentDirectory = liftIO FileSystem.getCurrentDirectory

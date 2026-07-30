@@ -15,7 +15,7 @@ import Control.Concurrent
   , takeMVar
   )
 import Control.Exception qualified as Exception
-import Control.Monad (replicateM, when)
+import Control.Monad (forM_, replicateM, when)
 import Control.Monad.Except
   ( ExceptT
   , MonadError (catchError, throwError)
@@ -69,6 +69,7 @@ import Dojang.MonadFileSystem
   ( FileType (Directory, File)
   , MonadFileSystem (..)
   , dryRunIO
+  , markDurablePublicationCompleted
   )
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Environment (OperatingSystem (..))
@@ -117,7 +118,7 @@ import Dojang.Types.MachineState
 import Dojang.Types.ManagedTarget
   ( ManagedCodecState (ManagedCodecState)
   , ManagedTarget (..)
-  , SynchronizationCommand (Applied)
+  , SynchronizationCommand (..)
   , TargetFingerprint (FileFingerprint, SymlinkFingerprint)
   )
 import Dojang.Types.RepositoryId
@@ -332,10 +333,10 @@ spec = do
     it "upgrades schema-version 3 with empty machine facts" $ do
       current <- fixtureState
       let currentDocument = encodeMachineState current
-      Text.isInfixOf "schema-version = 6" currentDocument `shouldBe` True
+      Text.isInfixOf "schema-version = 7" currentDocument `shouldBe` True
       let legacyDocument =
             Text.replace
-              "schema-version = 6"
+              "schema-version = 7"
               "schema-version = 3"
               currentDocument
       Text.isInfixOf "schema-version = 3" legacyDocument `shouldBe` True
@@ -389,6 +390,30 @@ spec = do
         populated.machineId
         (encodeMachineState populated)
         `shouldBe` Right populated
+
+    it "round-trips every synchronization command" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "command-target"
+      forM_ [Applied, Reflected, Merged] $ \command -> do
+        let updatedTarget = target{updatedBy = command}
+            populated =
+              state
+                { targetRecords =
+                    Map.singleton updatedTarget.targetId updatedTarget
+                }
+            encoded = encodeMachineState populated
+        decodeMachineState
+          populated.repositoryId
+          populated.machineId
+          encoded
+          `shouldBe` Right populated
+      let merged =
+            state
+              { targetRecords =
+                  Map.singleton target.targetId target{updatedBy = Merged}
+              }
+      Text.isInfixOf "updated-by = \"merge\"" (encodeMachineState merged)
+        `shouldBe` True
 
     it "round-trips a deployment-link target record" $ do
       state <- fixtureState
@@ -471,12 +496,47 @@ spec = do
       -- version-4 document:
       let v4Document =
             Text.replace
-              "schema-version = 6"
+              "schema-version = 7"
               "schema-version = 4"
               (encodeMachineState populated)
       Text.isInfixOf "route-kind" v4Document `shouldBe` False
       Text.isInfixOf "declared-mode" v4Document `shouldBe` False
       decodeMachineState populated.repositoryId populated.machineId v4Document
+        `shouldBe` Right populated
+
+    it "reads schema-version 5 target records without migration" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "version-five-target"
+      let populated = state{targetRecords = Map.singleton target.targetId target}
+          versionFive =
+            Text.replace
+              "schema-version = 7"
+              "schema-version = 5"
+              (encodeMachineState populated)
+      Text.isInfixOf "codec-name" versionFive `shouldBe` False
+      decodeMachineState populated.repositoryId populated.machineId versionFive
+        `shouldBe` Right populated
+
+    it "reads schema-version 6 target records without migration" $ do
+      state <- fixtureState
+      target <- fixtureManagedTarget state "version-six-target"
+      let codecState' =
+            ManagedCodecState
+              "test-codec"
+              "2"
+              "configuration-digest"
+              "cache-key"
+              (Map.fromList [("fact:class", "fact-digest")])
+          target' = target{codecState = Just codecState'}
+          populated =
+            state{targetRecords = Map.singleton target'.targetId target'}
+          versionSix =
+            Text.replace
+              "schema-version = 7"
+              "schema-version = 6"
+              (encodeMachineState populated)
+      Text.isInfixOf "codec-name = \"test-codec\"" versionSix `shouldBe` True
+      decodeMachineState populated.repositoryId populated.machineId versionSix
         `shouldBe` Right populated
 
     it "persists a successful hook execution through the repository lock" $
@@ -776,14 +836,14 @@ spec = do
       decodeMachineState state.repositoryId state.machineId "not toml"
         `shouldSatisfy` isMalformed
       ( decodeMachineState state.repositoryId state.machineId $
-          Text.replace "schema-version = 6" "schema-version = 7" encoded
+          Text.replace "schema-version = 7" "schema-version = 8" encoded
         )
-        `shouldBe` Left (UnsupportedSchemaVersion 7)
+        `shouldBe` Left (UnsupportedSchemaVersion 8)
       decodeMachineState
         state.repositoryId
         state.machineId
-        "schema-version = 7\n"
-        `shouldBe` Left (UnsupportedSchemaVersion 7)
+        "schema-version = 8\n"
+        `shouldBe` Left (UnsupportedSchemaVersion 8)
       decodeMachineState anotherRepository state.machineId encoded
         `shouldBe` Left (RepositoryIdentityMismatch anotherRepository state.repositoryId)
       decodeMachineState state.repositoryId anotherMachine encoded
@@ -2838,6 +2898,51 @@ spec = do
         failed `shouldSatisfy` isFailedStateUpdate
         exists transaction `shouldReturn` False
 
+    it "retains published update resources when durability confirmation fails" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        localState <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        target <- fixtureManagedTarget localState "published-target"
+        transactionName <- encodeFS "published-transaction"
+        payloadName <- encodeFS "payload"
+        let transaction = localState.targetSnapshotRoot </> transactionName
+        failed <-
+          runFailingAfterPublicationIO
+            (repositoryStatePath paths.root paths.repositoryId)
+            $ updateManagedTargetsWith
+              paths.root
+              fixtureTime
+              localState
+              ( \records -> do
+                  createDirectories transaction
+                  writeFile (transaction </> payloadName) "baseline"
+                  return
+                    ( Map.insert target.targetId target records
+                    , transaction
+                    )
+              )
+              (\_ _ -> [])
+              (\_ _ -> return ())
+              (\_ unpublished -> removeDirectoryRecursively unpublished)
+        failed `shouldSatisfy` isFailedStateUpdate
+        exists transaction `shouldReturn` True
+        persisted <-
+          readRepositoryState paths.root paths.repositoryId paths.machineId
+        case persisted of
+          Right (Just state) ->
+            Map.member target.targetId state.targetRecords `shouldBe` True
+          _ -> expectationFailure $ "Unexpected state: " <> show persisted
+
     it "reloads target records before applying a stale caller's update" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp
@@ -2873,6 +2978,47 @@ spec = do
         updated `shouldSatisfy` isRight
         current <- takeMVar observed
         Map.member target.targetId current `shouldBe` True
+
+    it "rejects target updates from a stale repository generation" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        stale <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        forgetRepositoryStateWith
+          paths.root
+          paths.repositoryId
+          paths.machineId
+          (removeDirectoryRecursively . takeDirectory . (.intermediatePath))
+          >>= (`shouldBe` Right (Just ()))
+        recreatedResult <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        recreated <- case recreatedResult of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show recreatedResult
+        updateManagedTargets paths.root fixtureTime stale id
+          `shouldReturn` Left
+            ( RepositoryStateGenerationMismatch
+                paths.repositoryId
+                stale.generationId
+                recreated.generationId
+            )
+        readRepositoryState paths.root paths.repositoryId paths.machineId
+          `shouldReturn` Right (Just recreated)
 
     it "holds the repository lock through post-write snapshot cleanup" $
       withTempDir $ \tmp _ -> do
@@ -3213,7 +3359,7 @@ fixtureState = do
   let targetSnapshots = takeDirectory intermediate </> targetsName
   return $
     MachineState
-      6
+      7
       repositoryId'
       machineId'
       generationId
@@ -3360,25 +3506,40 @@ stateField name document =
     Nothing -> error $ "Missing state fixture field: " <> Text.unpack name
 
 
+data DurablePublicationFailure
+  = FailBeforePublication
+  | FailAfterPublication
+  deriving (Eq)
+
+
 newtype FailingReplaceIO a
-  = FailingReplaceIO (ReaderT OsPath (ExceptT IOError IO) a)
+  = FailingReplaceIO
+      (ReaderT (OsPath, DurablePublicationFailure) (ExceptT IOError IO) a)
   deriving
     ( Functor
     , Applicative
     , Monad
     , MonadIO
     , MonadError IOError
-    , MonadReader OsPath
+    , MonadReader (OsPath, DurablePublicationFailure)
     , MonadCommandEffect
     )
 
 
 runFailingReplaceIO :: OsPath -> FailingReplaceIO a -> IO (Either IOError a)
 runFailingReplaceIO target (FailingReplaceIO action) =
-  runExceptT $ runReaderT action target
+  runExceptT $ runReaderT action (target, FailBeforePublication)
+
+
+runFailingAfterPublicationIO
+  :: OsPath -> FailingReplaceIO a -> IO (Either IOError a)
+runFailingAfterPublicationIO target (FailingReplaceIO action) =
+  runExceptT $ runReaderT action (target, FailAfterPublication)
 
 
 instance MonadFileSystem FailingReplaceIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
@@ -3390,8 +3551,27 @@ instance MonadFileSystem FailingReplaceIO where
   isSymlink value = liftIO (isSymlink value :: IO Bool)
   readFile value = liftIO (readFile value :: IO ByteString)
   writeFile filename contents = liftIO (writeFile filename contents :: IO ())
+  writeFileAtomicallyDurably destination template contents = do
+    (target, failure) <- ask
+    if destination == target
+      then do
+        when (failure == FailAfterPublication) $
+          liftIO
+            ( writeFileAtomicallyDurably destination template contents
+                :: IO ()
+            )
+        let err = userError "injected durable publication failure"
+        throwError $
+          if failure == FailAfterPublication
+            then markDurablePublicationCompleted err
+            else err
+      else
+        liftIO
+          ( writeFileAtomicallyDurably destination template contents
+              :: IO ()
+          )
   replaceFile source destination = do
-    target <- ask
+    (target, _) <- ask
     if destination == target
       then throwError $ userError "injected replace failure"
       else liftIO (replaceFile source destination :: IO ())
@@ -3433,6 +3613,8 @@ runFailingCopyIO target (FailingCopyIO action) =
 
 
 instance MonadFileSystem FailingCopyIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
@@ -3488,6 +3670,8 @@ runFailingRemoveIO target (FailingRemoveIO action) =
 
 
 instance MonadFileSystem FailingRemoveIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)

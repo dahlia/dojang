@@ -8,6 +8,50 @@ To be released.
 
 ### Command-line interface
 
+ -  Added `dojang merge` for divergent regular UTF-8 files on identity-copy
+    routes.  It runs a shell-free, machine-local three-way merge driver with
+    owner-only inputs, explicit argument placeholders, an environment
+    allowlist, and portable outcome codes from 1 through 255.  Source,
+    destination, and directory selectors, `--driver`, `--driver-file`,
+    `--dry-run`, and `pre-merge`/`post-merge` hooks are supported.  [[#48],
+    [#75]]
+
+ -  Merge publication is bound to the repository generation and the route
+    policy observed for the conflict.  Source, destination, and intermediate
+    updates use identity-, content-, and mode-checked staging, and machine
+    state is published only after one stable observation proves that all three
+    replicas and their declared modes have converged.  Concurrent edits,
+    repository forgetting, recreation, and policy changes are checked before
+    and after every replica replacement, so they leave a retryable conflict
+    instead of accepting stale work.  [[#48], [#75]]
+
+ -  Interrupted merge commits and state publication are recoverable on retry.
+    Conditional replacement preserves the previous replica in a private
+    sibling until publication is safe, while pending markers retain converged
+    but unpublished work.  Machine-state contents and their replacement
+    directory entry reach stable storage before those markers are removed.
+    New workspace directories and private markers are durably published before
+    replica writes begin.  Creation of the shared workspace ancestor is
+    serialized across repositories, so a peer cannot use a visible directory
+    before its durability barrier completes.  Each marker authenticates the
+    original and accepted contents of every replica, so any subset made durable
+    by a crash can be recovered without replacing replicas that already
+    contain the accepted contents and mode.  Rejected baselines are removed
+    without disturbing successful entries from the same transaction.
+    [[#48], [#75]]
+
+ -  Failed, unresolved, and canceled workspaces remain available until
+    recovery or `dojang forget`.  Workspace creation, scanning, marker updates,
+    and cleanup are bound to pinned directory identities and validate complete
+    ancestor chains, preventing replacement links from redirecting writes or
+    removal outside machine-local state.  Cleanup is serialized with
+    repository lifecycle changes.  [[#48], [#75]]
+
+ -  Merge input changes and unreadable authoritative replicas are reported as
+    conflicts.  Invalid or unreadable successful driver output uses exit
+    status 4, while workspace and replica write failures retain recovery data
+    and use exit status 2.  [[#48], [#75]]
+
  -  Added `dojang init --from SOURCE` to acquire, validate, enroll, and
     optionally apply an existing repository in one command.  Local directories
     and `.zip`, `.tar`, `.tar.gz`, and `.tgz` archives work without
@@ -185,6 +229,12 @@ To be released.
     only when its deterministic key and recorded file fingerprint still match.
     Schema versions 1 through 5 remain readable.  [[#43], [#70]]
 
+ -  Machine-state schema version 7 can record `updated-by = "merge"` for a
+    target whose source, destination, and intermediate snapshot converged
+    through a three-way merge.  Schema versions 1 through 6 remain readable.
+    Earlier Dojang releases cannot read a state document after this version has
+    rewritten it, even when no merge was performed.  [[#48]]
+
  -  Detailed `[files]` and `[dirs]` route branches can declare portable
     destination modes.  The available modes are `private` (files `0600`,
     directories `0700`), `executable` (`0755`),
@@ -352,6 +402,7 @@ To be released.
 [#45]: https://github.com/dahlia/dojang/issues/45
 [#46]: https://github.com/dahlia/dojang/issues/46
 [#47]: https://github.com/dahlia/dojang/issues/47
+[#48]: https://github.com/dahlia/dojang/issues/48
 [#60]: https://github.com/dahlia/dojang/pull/60
 [#62]: https://github.com/dahlia/dojang/pull/62
 [#63]: https://github.com/dahlia/dojang/pull/63
@@ -366,8 +417,22 @@ To be released.
 [#72]: https://github.com/dahlia/dojang/pull/72
 [#73]: https://github.com/dahlia/dojang/pull/73
 [#74]: https://github.com/dahlia/dojang/pull/74
+[#75]: https://github.com/dahlia/dojang/pull/75
 
 ### Haskell API
+
+ -  Added `MonadFileSystem.replaceFileIfSnapshot`,
+    `MonadFileSystem.listDirectoryPinned`, and
+    `writeFileAtomicallyIfSnapshot` for content-, identity-, and mode-bound
+    replacement of both the staged source and destination, mode staging, and
+    non-recursive directory enumeration that cannot be redirected through a
+    concurrent final-entry replacement.  Filesystem-backed interpreters should
+    override the new methods to provide their documented atomicity and pinning
+    guarantees.  [[#48], [#75]]
+
+ -  Added `withMachineStateLock` and `withRepositoryStateLock` to serialize
+    lifecycle work that observes absent state with concurrent machine-identity
+    or repository-state creation.  [[#48], [#75]]
 
  -  Added `CodecBackend`, binary backend protocol framing, redacted binary
     process requests and results, and a timeout-aware command-effect boundary.

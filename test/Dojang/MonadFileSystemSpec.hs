@@ -9,11 +9,13 @@ module Dojang.MonadFileSystemSpec (spec) where
 import Control.Concurrent
   ( forkFinally
   , forkIO
+  , killThread
   , newEmptyMVar
   , putMVar
   , readMVar
   , takeMVar
   , threadDelay
+  , tryPutMVar
   , tryReadMVar
   )
 import Control.Exception qualified as Exception
@@ -21,8 +23,13 @@ import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Bits (xor)
 import Data.Foldable (traverse_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.List (isPrefixOf, sort, sortOn)
+import Data.List (isInfixOf, isPrefixOf, sort, sortOn)
 import Data.Time.Clock (addUTCTime)
+
+
+#ifdef mingw32_HOST_OS
+import Data.Time.Clock (getCurrentTime)
+#endif
 import GHC.IO.Exception
   ( IOErrorType (InappropriateType, InvalidArgument)
   )
@@ -40,11 +47,12 @@ import System.IO.Error
 import Prelude hiding (readFile, writeFile)
 import Prelude qualified (readFile, writeFile)
 
-import Control.Monad (replicateM)
+import Control.Monad (replicateM, when)
 import Control.Monad.Except (MonadError (catchError), tryError)
-import Data.ByteString qualified (length, map, readFile, writeFile)
+import Data.ByteString qualified (length, map, readFile, replicate, writeFile)
 import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range (constantFrom)
+import Hedgehog.Range qualified as Range
 import System.Directory.OsPath
   ( createDirectoryLink
   , createFileLink
@@ -86,6 +94,7 @@ import Test.Hspec
   , describe
   , expectationFailure
   , it
+  , pendingWith
   , runIO
   , specify
   , xit
@@ -106,11 +115,15 @@ import Dojang.MonadFileSystem
   , FileType (..)
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
+  , createPrivateDirectoriesDurably
+  , createPrivateDirectoriesDurablyUnderLock
   , dryRunIO
+  , durableFilePublication
   , isNoReplaceUnsupportedError
   , matchesDirectoryPathIdentity
   , noReplaceUnsupportedError
   , tryDryRunIO
+  , writeFileAtomicallyIfSnapshot
   )
 import Dojang.TestUtils
   ( withTempDir
@@ -119,11 +132,11 @@ import Dojang.TestUtils
 
 #ifndef mingw32_HOST_OS
 import Dojang.TestUtils (supportsNonUtf8FileNames)
-import Test.Hspec (pendingWith)
 #endif
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
+  , satisfiesPortableMode
   )
 
 
@@ -142,6 +155,17 @@ nonExistentFP = "---non-existent---"
 nonExistentFP' :: FilePath
 nonExistentFP' = "---non-existent-2---"
 
+
+retryRace :: Int -> IO Bool -> IO ()
+retryRace attempts action = go attempts
+ where
+  go remaining
+    | remaining < 1 =
+        expectationFailure "the guarded replacement race was not observed"
+    | otherwise = do
+        observed <- action
+        if observed then return () else go (remaining - 1)
+
 #ifdef mingw32_HOST_OS
 posixRegularFileSpec :: Spec
 posixRegularFileSpec = pure ()
@@ -157,6 +181,25 @@ posixPortableModeSpec = pure ()
 
 posixPrivateDirectorySpec :: Spec
 posixPrivateDirectorySpec = pure ()
+
+
+windowsDurableDirectorySpec :: Spec
+windowsDurableDirectorySpec =
+  specify "durable private directory creation removes stale staging" $
+    withTempDir $ \tmpDir _ -> do
+      stagingName <-
+        encodeFS ".dojang-private-directory-00112233445566778899aabbccddeeff"
+      destinationName <- encodeFS "durable-private"
+      let staging = tmpDir </> stagingName
+          destination = tmpDir </> destinationName
+      createPrivateDirectory staging
+      currentTime <- getCurrentTime
+      OsDirectory.setModificationTime
+        staging
+        (addUTCTime (-600) currentTime)
+      createPrivateDirectoryDurably destination
+      exists staging `shouldReturn` False
+      isDirectory destination `shouldReturn` True
 
 
 posixDryRunPortableModeSpec :: Spec
@@ -289,6 +332,10 @@ privateDirectoryProbeVariable =
   "DOJANG_TEST_PRIVATE_DIRECTORY_UMASK_PROBE"
 
 
+windowsDurableDirectorySpec :: Spec
+windowsDurableDirectorySpec = pure ()
+
+
 posixDryRunPortableModeSpec :: Spec
 posixDryRunPortableModeSpec = do
   specify "getPortableMode reads exact bits through the overlay" $
@@ -407,7 +454,92 @@ posixCopyInterruptionSpec = do
 
 
 posixTraversalRaceSpec :: Spec
-posixTraversalRaceSpec =
+posixTraversalRaceSpec = do
+  specify "identity-bound marker I/O rejects a relinked ancestor" $
+    withTempDir $ \tmpDir _ -> do
+      invocationName <- encodeFS "invocation"
+      workspaceName <- encodeFS "workspace"
+      parkedName <- encodeFS "parked"
+      createMarkerName <- encodeFS "pending-create"
+      removeMarkerName <- encodeFS "pending-remove"
+      let invocation = tmpDir </> invocationName
+          workspace = invocation </> workspaceName
+          parked = tmpDir </> parkedName
+          parkedWorkspace = parked </> workspaceName
+          parkedCreateMarker = parkedWorkspace </> createMarkerName
+          parkedRemoveMarker = parkedWorkspace </> removeMarkerName
+      createDirectories workspace
+      writeFile (workspace </> removeMarkerName) "retained"
+      Just identity <- getFileIdentity workspace
+      Just pathIdentity <- captureDirectoryPathIdentity workspace
+      renameDirectory invocation parked
+      createSymbolicLink parked invocation Directory
+      createEmptyFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        createMarkerName
+        `shouldReturn` False
+      removeFileInDirectoryIfIdentity
+        pathIdentity
+        identity
+        removeMarkerName
+        `shouldReturn` False
+      exists parkedCreateMarker `shouldReturn` False
+      readFile parkedRemoveMarker `shouldReturn` "retained"
+
+  specify "listDirectoryPinned never follows a raced directory link" $
+    withTempDir $ \tmpDir _ -> do
+      nestedName <- encodeFS "nested-pinned"
+      parkedName <- encodeFS "parked-pinned"
+      outsideName <- encodeFS "outside-pinned"
+      sentinelName <- encodeFS "outside-sentinel"
+      let nested = tmpDir </> nestedName
+          parked = tmpDir </> parkedName
+          outside = tmpDir </> outsideName
+      createDirectory nested
+      createDirectory outside
+      writeFile (outside </> sentinelName) "outside"
+      stopMutating <- newEmptyMVar
+      mutationFinished <- newEmptyMVar
+      firstMutation <- newEmptyMVar
+      completedMutations <- newIORef (0 :: Int)
+      _ <-
+        forkFinally
+          ( let mutate = do
+                  stopped <- tryReadMVar stopMutating
+                  case stopped of
+                    Just () -> return ()
+                    Nothing -> do
+                      OsDirectory.renameDirectory nested parked
+                      createDirectoryLink outside nested
+                      removeFile nested
+                      OsDirectory.renameDirectory parked nested
+                      atomicModifyIORef' completedMutations $ \count ->
+                        (count + 1, ())
+                      _ <- tryPutMVar firstMutation ()
+                      mutate
+            in mutate
+          )
+          (putMVar mutationFinished)
+      takeMVar firstMutation
+      outcomes <-
+        replicateM 100 (tryError $ listDirectoryPinned nested)
+          `Exception.finally` putMVar stopMutating ()
+      mutationOutcome <- timeout 5000000 $ takeMVar mutationFinished
+      case mutationOutcome of
+        Nothing -> expectationFailure "the mutation thread did not stop"
+        Just (Left exception) ->
+          expectationFailure $
+            "the mutation thread failed: " <> show exception
+        Just (Right ()) -> return ()
+      readIORef completedMutations >>= (`shouldSatisfy` (> 0))
+      outcomes
+        `shouldSatisfy` all
+          ( \case
+              Left _ -> True
+              Right entries -> sentinelName `notElem` entries
+          )
+
   specify "listDirectoryRecursively never follows a raced directory link" $
     withTempDir $ \tmpDir _ -> do
       nestedName <- encodeFS "nested"
@@ -666,6 +798,62 @@ spec = do
 
     posixRegularFileSpec
     posixPrivateDirectorySpec
+    windowsDurableDirectorySpec
+
+    specify "durably creates arbitrary private directory chains" $ hedgehog $ do
+      depth <- forAll $ Gen.int $ Range.linear 1 8
+      liftIO $
+        withTempDir $ \tmpDir _ -> do
+          components <-
+            mapM (encodeFS . ("private-" <>) . show) [1 .. depth]
+          let paths = scanl (</>) tmpDir components
+              leaf = last paths
+          createPrivateDirectoriesDurably leaf
+          modes <- mapM getPortableMode $ drop 1 paths
+          modes
+            `shouldSatisfy` all
+              (`satisfiesPortableMode` portableModeFromBits 0o700)
+
+    it "waits for a peer directory durability barrier" $
+      withTempDir $ \tmpDir _ -> do
+        lockName <- encodeFS "workspace-creation.lock"
+        sharedName <- encodeFS "merge-workspaces"
+        repositoryName <- encodeFS "repository"
+        let lock = tmpDir </> lockName
+            repository = tmpDir </> sharedName </> repositoryName
+        lockAcquired <- newEmptyMVar
+        releaseLock <- newEmptyMVar
+        holderFinished <- newEmptyMVar
+        _ <-
+          forkFinally
+            ( withFileLock lock $ do
+                putMVar lockAcquired ()
+                takeMVar releaseLock
+            )
+            (putMVar holderFinished)
+        takeMVar lockAcquired
+        creatorStarted <- newEmptyMVar
+        creatorFinished <- newEmptyMVar
+        _ <-
+          forkFinally
+            ( do
+                putMVar creatorStarted ()
+                createPrivateDirectoriesDurablyUnderLock lock repository
+            )
+            (putMVar creatorFinished)
+        takeMVar creatorStarted
+        blocked <- timeout 100000 $ readMVar creatorFinished
+        case blocked of
+          Nothing -> return ()
+          Just _ -> expectationFailure "directory creator bypassed the lock"
+        exists repository `shouldReturn` False
+        putMVar releaseLock ()
+        takeMVar holderFinished >>= either Exception.throwIO return
+        completed <- timeout 5000000 $ takeMVar creatorFinished
+        case completed of
+          Just (Right ()) -> isDirectory repository `shouldReturn` True
+          Just (Left err) -> Exception.throwIO err
+          Nothing -> expectationFailure "directory creator remained blocked"
 
     specify "isDirectory" $ do
       isDirectory packageYamlP `shouldReturn` False
@@ -729,6 +917,36 @@ spec = do
         show failure
           `shouldContain` "one of its ancestors is a symbolic link"
 
+    if symlinkAvailable
+      then specify
+        "durable private directory creation rejects arbitrary linked ancestors"
+        $ hedgehog
+        $ do
+          depth <- forAll $ Gen.int $ Range.linear 1 8
+          linkIndex <- forAll $ Gen.int $ Range.linear 0 (depth - 1)
+          liftIO $
+            withTempDir $ \tmpDir _ -> do
+              externalName <- encodeFS "external"
+              components <-
+                mapM (encodeFS . ("private-" <>) . show) [1 .. depth]
+              case splitAt linkIndex components of
+                (parents, linked : children) -> do
+                  let parent = foldl (</>) tmpDir parents
+                      external = tmpDir </> externalName
+                      selected = foldl (</>) (parent </> linked) children
+                  createDirectories parent
+                  createDirectory external
+                  createDirectoryLink external (parent </> linked)
+                  result <-
+                    tryError $ createPrivateDirectoriesDurably selected
+                  result `shouldSatisfy` isInappropriateTypeError
+                  listDirectory external `shouldReturn` []
+                _ -> expectationFailure "generated an empty directory chain"
+      else
+        xit
+          "durable private directory creation rejects linked ancestors"
+          (return () :: IO ())
+
     specify "readFile" $ withTempDir $ \tmpDir tmpDir' -> do
       () <- Prelude.writeFile (tmpDir' `combine` "foo") "Foo contents"
       contents <- readFile $ tmpDir </> foo
@@ -748,6 +966,483 @@ spec = do
       replaceFile (tmpDirP </> foo) (tmpDirP </> bar)
       readFile (tmpDirP </> bar) `shouldReturn` "new"
       exists (tmpDirP </> foo) `shouldReturn` False
+
+    it "durably replaces arbitrary contents and preserves modes" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      writable' <- forAll Gen.bool
+      (contents, replacementMode, originalMode, entries) <-
+        liftIO $ withTempDir $ \tmpDir _ -> do
+          let destination = tmpDir </> bar
+          writeFile destination original
+          setPortableWritable destination writable'
+          originalMode <- getPortableMode destination
+          writeFileAtomicallyDurably
+            destination
+            "state.toml.tmp"
+            replacement
+          contents <- readFile destination
+          replacementMode <- getPortableMode destination
+          entries <- listDirectory tmpDir
+          return (contents, replacementMode, originalMode, entries)
+      contents === replacement
+      replacementMode === originalMode
+      entries === [bar]
+
+    it "cleans its staged file when durable replacement fails" $
+      withTempDir $ \tmpDir _ -> do
+        let destination = tmpDir </> bar
+        createDirectory destination
+        writeFileAtomicallyDurably
+          destination
+          "state.toml.tmp"
+          "replacement"
+          `shouldThrow` (const True :: IOError -> Bool)
+        listDirectory tmpDir `shouldReturn` [bar]
+
+    it "conditionally replaces arbitrary matching snapshots" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination original
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source replacement
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        replaced <-
+          replaceFileIfSnapshot
+            snapshot
+            modeSnapshot
+            original
+            sourceSnapshot
+            sourceMode
+            replacement
+            source
+            destination
+        contents <- readFile destination
+        sourceExists <- exists source
+        return (replaced, contents, sourceExists)
+      observed === (True, replacement, False)
+
+    it "rejects arbitrary changes before conditional replacement" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      concurrent <-
+        forAll $
+          Gen.filter (/= original) $
+            Gen.bytes $
+              constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination original
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source replacement
+        writeFile destination concurrent
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        replaced <-
+          replaceFileIfSnapshot
+            snapshot
+            modeSnapshot
+            original
+            sourceSnapshot
+            sourceMode
+            replacement
+            source
+            destination
+        contents <- readFile destination
+        sourceExists <- exists source
+        return (replaced, contents, sourceExists)
+      observed === (False, concurrent, True)
+
+    it "rejects arbitrary staged source replacements" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      concurrent <-
+        forAll $
+          Gen.filter (/= replacement) $
+            Gen.bytes $
+              constantFrom 0 0 4096
+      observed <- liftIO $ withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination original
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source replacement
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        removeFile source
+        writeFile source concurrent
+        replaced <-
+          replaceFileIfSnapshot
+            snapshot
+            modeSnapshot
+            original
+            sourceSnapshot
+            sourceMode
+            replacement
+            source
+            destination
+        destinationContents <- readFile destination
+        sourceContents <- readFile source
+        return (replaced, destinationContents, sourceContents)
+      observed === (False, original, concurrent)
+
+    it "rejects staged source mode changes" $
+      withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination "original"
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source "replacement"
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        setPortableWritable source $ not sourceMode.writable
+        replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          sourceSnapshot
+          sourceMode
+          "replacement"
+          source
+          destination
+          `shouldReturn` False
+        readFile destination `shouldReturn` "original"
+        readFile source `shouldReturn` "replacement"
+
+    it "restores the destination when the staged source vanishes" $
+      retryRace
+        10
+        ( withTempDir $ \tmpDir _ -> do
+            let source = tmpDir </> foo
+                destination = tmpDir </> bar
+                original = Data.ByteString.replicate (32 * 1024 * 1024) 97
+                replacement = "replacement"
+            writeFile destination original
+            Just snapshot <- getFileSnapshot destination
+            Just modeSnapshot <- getFileModeSnapshot destination
+            writeFile source replacement
+            Just sourceSnapshot <- getFileSnapshot source
+            sourceMode <- getPortableMode source
+            stopRacer <- newEmptyMVar
+            raceFinished <- newEmptyMVar
+            racer <-
+              forkFinally
+                ( let waitForQuarantine = do
+                        stopped <- tryReadMVar stopRacer
+                        case stopped of
+                          Just () -> return False
+                          Nothing -> do
+                            present <- exists destination
+                            if present
+                              then threadDelay 50 >> waitForQuarantine
+                              else
+                                (removeFile source >> return True)
+                                  `catchError` \err ->
+                                    if isDoesNotExistError err
+                                      || isWindowsDeletePendingError err
+                                      then return False
+                                      else ioError err
+                  in waitForQuarantine
+                )
+                (putMVar raceFinished)
+            replacementResult <-
+              tryError
+                ( replaceFileIfSnapshot
+                    snapshot
+                    modeSnapshot
+                    original
+                    sourceSnapshot
+                    sourceMode
+                    replacement
+                    source
+                    destination
+                )
+                `Exception.onException` killThread racer
+            _ <- tryPutMVar stopRacer ()
+            raceResult <- timeout 1000000 $ takeMVar raceFinished
+            case raceResult of
+              Just (Right True) -> do
+                replacementResult
+                  `shouldSatisfy` either (const True) not
+                readFile destination `shouldReturn` original
+                exists source `shouldReturn` False
+                names <- mapM decodeFS =<< listDirectory tmpDir
+                names
+                  `shouldSatisfy` all
+                    (not . isPrefixOf ".dojang-replaced-")
+                return True
+              Just (Right False) -> do
+                replacementResult `shouldBe` Right True
+                return False
+              Just (Left err) -> Exception.throwIO err
+              Nothing -> do
+                killThread racer
+                expectationFailure "the staged-source race did not finish"
+                return False
+        )
+
+    it "restores the destination when the published stage vanishes" $
+      if os == "mingw32"
+        then pendingWith "Windows cannot unlink an open published file."
+        else
+          retryRace
+            10
+            ( withTempDir $ \tmpDir _ -> do
+                let source = tmpDir </> foo
+                    destination = tmpDir </> bar
+                    original = "original"
+                    replacement =
+                      Data.ByteString.replicate (32 * 1024 * 1024) 98
+                writeFile destination original
+                Just snapshot <- getFileSnapshot destination
+                Just modeSnapshot <- getFileModeSnapshot destination
+                writeFile source replacement
+                Just sourceSnapshot <- getFileSnapshot source
+                sourceMode <- getPortableMode source
+                stopRacer <- newEmptyMVar
+                raceFinished <- newEmptyMVar
+                racer <-
+                  forkFinally
+                    ( let waitForPublication = do
+                            stopped <- tryReadMVar stopRacer
+                            case stopped of
+                              Just () -> return False
+                              Nothing -> do
+                                staged <- exists source
+                                if staged
+                                  then threadDelay 50 >> waitForPublication
+                                  else
+                                    (removeFile destination >> return True)
+                                      `catchError` \err ->
+                                        if isDoesNotExistError err
+                                          || isWindowsDeletePendingError err
+                                          then return False
+                                          else ioError err
+                      in waitForPublication
+                    )
+                    (putMVar raceFinished)
+                replacementResult <-
+                  tryError
+                    ( replaceFileIfSnapshot
+                        snapshot
+                        modeSnapshot
+                        original
+                        sourceSnapshot
+                        sourceMode
+                        replacement
+                        source
+                        destination
+                    )
+                    `Exception.onException` killThread racer
+                _ <- tryPutMVar stopRacer ()
+                raceResult <- timeout 1000000 $ takeMVar raceFinished
+                case (raceResult, replacementResult) of
+                  (Just (Right True), Left err)
+                    | "the staged file disappeared" `isInfixOf` show err -> do
+                        readFile destination `shouldReturn` original
+                        exists source `shouldReturn` False
+                        names <- mapM decodeFS =<< listDirectory tmpDir
+                        names
+                          `shouldSatisfy` all
+                            (not . isPrefixOf ".dojang-replaced-")
+                        return True
+                  (Just (Right _), Right True) -> return False
+                  (Just (Right _), outcome) -> do
+                    expectationFailure $
+                      "unexpected post-publication outcome: " <> show outcome
+                    return False
+                  (Just (Left err), _) -> Exception.throwIO err
+                  (Nothing, _) -> do
+                    killThread racer
+                    expectationFailure $
+                      "the post-publication race did not finish"
+                    return False
+            )
+
+    it "preserves a replacement of the published staged file" $
+      if os == "mingw32"
+        then pendingWith "Windows cannot replace an open published file."
+        else
+          retryRace
+            10
+            ( withTempDir $ \tmpDir _ -> do
+                let source = tmpDir </> foo
+                    destination = tmpDir </> bar
+                    unexpectedSource = tmpDir </> baz
+                    original = "original"
+                    replacement =
+                      Data.ByteString.replicate (32 * 1024 * 1024) 99
+                    unexpected = "unexpected"
+                writeFile destination original
+                Just snapshot <- getFileSnapshot destination
+                Just modeSnapshot <- getFileModeSnapshot destination
+                writeFile source replacement
+                writeFile unexpectedSource unexpected
+                Just sourceSnapshot <- getFileSnapshot source
+                sourceMode <- getPortableMode source
+                stopRacer <- newEmptyMVar
+                raceFinished <- newEmptyMVar
+                racer <-
+                  forkFinally
+                    ( let waitForPublication = do
+                            stopped <- tryReadMVar stopRacer
+                            case stopped of
+                              Just () -> return False
+                              Nothing -> do
+                                staged <- exists source
+                                if staged
+                                  then threadDelay 50 >> waitForPublication
+                                  else
+                                    ( replaceFile
+                                        unexpectedSource
+                                        destination
+                                        >> return True
+                                    )
+                                      `catchError` \err ->
+                                        if isDoesNotExistError err
+                                          || isWindowsDeletePendingError err
+                                          then return False
+                                          else ioError err
+                      in waitForPublication
+                    )
+                    (putMVar raceFinished)
+                replacementResult <-
+                  tryError
+                    ( replaceFileIfSnapshot
+                        snapshot
+                        modeSnapshot
+                        original
+                        sourceSnapshot
+                        sourceMode
+                        replacement
+                        source
+                        destination
+                    )
+                    `Exception.onException` killThread racer
+                _ <- tryPutMVar stopRacer ()
+                raceResult <- timeout 1000000 $ takeMVar raceFinished
+                case (raceResult, replacementResult) of
+                  (Just (Right True), Left err)
+                    | "the staged file changed" `isInfixOf` show err -> do
+                        readFile destination `shouldReturn` original
+                        exists source `shouldReturn` False
+                        entries <- listDirectory tmpDir
+                        decoded <- mapM decodeFS entries
+                        let quarantines =
+                              [ entry
+                              | (entry, name) <- zip entries decoded
+                              , ".dojang-replaced-" `isPrefixOf` name
+                              ]
+                        case quarantines of
+                          [quarantine] ->
+                            readFile (tmpDir </> quarantine)
+                              `shouldReturn` unexpected
+                          _ ->
+                            expectationFailure $
+                              "expected one quarantined replacement, got "
+                                <> show decoded
+                        return True
+                  (Just (Right True), Left err)
+                    | "the staged file disappeared" `isInfixOf` show err ->
+                        return False
+                  (Just (Right True), Left err)
+                    | "the original file is preserved" `isInfixOf` show err ->
+                        return False
+                  (Just (Right _), Right True) -> return False
+                  (Just (Right _), outcome) -> do
+                    expectationFailure $
+                      "unexpected post-publication outcome: " <> show outcome
+                    return False
+                  (Just (Left err), _) -> Exception.throwIO err
+                  (Nothing, _) -> do
+                    killThread racer
+                    expectationFailure $
+                      "the post-publication race did not finish"
+                    return False
+            )
+
+    it "rejects mode changes before conditional replacement" $
+      withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination "original"
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        originalMode <- getPortableMode destination
+        writeFile source "replacement"
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        setPortableWritable destination $ not originalMode.writable
+        replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          sourceSnapshot
+          sourceMode
+          "replacement"
+          source
+          destination
+          `shouldReturn` False
+        readFile destination `shouldReturn` "original"
+        exists source `shouldReturn` True
+
+    it "conditionally replaces a matching read-only snapshot" $
+      withTempDir $ \tmpDir _ -> do
+        let source = tmpDir </> foo
+            destination = tmpDir </> bar
+        writeFile destination "original"
+        setPortableWritable destination False
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile source "replacement"
+        setPortableWritable source False
+        Just sourceSnapshot <- getFileSnapshot source
+        sourceMode <- getPortableMode source
+        replaceFileIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          sourceSnapshot
+          sourceMode
+          "replacement"
+          source
+          destination
+          `shouldReturn` True
+        readFile destination `shouldReturn` "replacement"
+        mode <- getPortableMode destination
+        mode.writable `shouldBe` False
+        names <- mapM decodeFS =<< listDirectory tmpDir
+        names
+          `shouldSatisfy` all (not . isPrefixOf ".dojang-replaced-")
+
+    it "removes a read-only staged file after conditional rejection" $
+      withTempDir $ \tmpDir _ -> do
+        let destination = tmpDir </> bar
+        writeFile destination "original"
+        Just snapshot <- getFileSnapshot destination
+        Just modeSnapshot <- getFileModeSnapshot destination
+        writeFile destination "concurrent-change"
+        writeFileAtomicallyIfSnapshot
+          snapshot
+          modeSnapshot
+          "original"
+          destination
+          "dojang-merge.tmp"
+          "replacement"
+          (portableModeFromBits 0o444)
+          `shouldReturn` False
+        readFile destination `shouldReturn` "concurrent-change"
+        names <- mapM decodeFS =<< listDirectory tmpDir
+        names `shouldSatisfy` all (not . isPrefixOf "dojang-merge.tmp")
 
     describe "withFileLock" $ do
       it "creates a missing regular lock file" $
@@ -968,6 +1663,52 @@ spec = do
           `shouldReturn` True
         exists owned `shouldReturn` False
 
+    specify "removeDirectoryIfIdentity removes only its empty directory" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        let owned = tmpDir </> ownedName
+        createDirectory owned
+        Just identity <- getFileIdentity owned
+        removeDirectoryIfIdentity owned identity `shouldReturn` True
+        exists owned `shouldReturn` False
+
+    specify "removeDirectoryIfIdentity restores a nonempty directory" $
+      withTempDir $ \tmpDir _ -> do
+        ownedName <- encodeFS "owned"
+        childName <- encodeFS "child"
+        let owned = tmpDir </> ownedName
+            child = owned </> childName
+        createDirectory owned
+        writeFile child "retained"
+        Just identity <- getFileIdentity owned
+        removeDirectoryIfIdentity owned identity
+          `shouldThrow` (not . isDoesNotExistError)
+        readFile child `shouldReturn` "retained"
+
+    specify "removeDirectoryIfIdentity preserves arbitrary replacements" $
+      hedgehog $ do
+        replaceOriginal <- forAll Gen.bool
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            ownedName <- encodeFS "owned"
+            movedName <- encodeFS "moved"
+            let owned = tmpDir </> ownedName
+                moved = tmpDir </> movedName
+            createDirectory owned
+            Just identity <- getFileIdentity owned
+            when replaceOriginal $ do
+              renameDirectory owned moved
+              createDirectory owned
+            removed <- removeDirectoryIfIdentity owned identity
+            if replaceOriginal
+              then do
+                removed `shouldBe` False
+                sort <$> listDirectory tmpDir
+                  `shouldReturn` sort [ownedName, movedName]
+              else do
+                removed `shouldBe` True
+                exists owned `shouldReturn` False
+
     specify
       "removeDirectoryRecursivelyIfIdentity preserves arbitrary replacements"
       $ hedgehog
@@ -990,6 +1731,157 @@ spec = do
             readFile (owned </> sentinelName) `shouldReturn` contents
             sort <$> listDirectory tmpDir
               `shouldReturn` sort [ownedName, movedName]
+
+    specify
+      "durable file publication protects contents before write-through rename"
+      $ do
+        completed <- newIORef ([] :: [String])
+        let step name =
+              atomicModifyIORef' completed $ \names ->
+                (names <> [name], ())
+        durableFilePublication
+          (step "mode")
+          (step "contents")
+          (step "runtime buffers")
+          (step "device buffers")
+          (step "close")
+          (step "write-through rename")
+        readIORef completed
+          `shouldReturn` [ "mode"
+                         , "contents"
+                         , "runtime buffers"
+                         , "device buffers"
+                         , "close"
+                         , "write-through rename"
+                         ]
+
+    specify "durable file publication stops after arbitrary barrier failures" $
+      hedgehog $ do
+        failureStep <- forAll $ Gen.int $ Range.linear 0 5
+        liftIO $ do
+          completed <- newIORef []
+          let step index = do
+                atomicModifyIORef' completed $ \indices ->
+                  (indices <> [index], ())
+                when (index == failureStep) $
+                  ioError $
+                    userError "durability barrier failed"
+          durableFilePublication
+            (step 0)
+            (step 1)
+            (step 2)
+            (step 3)
+            (step 4)
+            (step 5)
+            `shouldThrow` (const True :: IOError -> Bool)
+          readIORef completed `shouldReturn` [0 .. failureStep]
+
+    specify
+      "identity-bound marker I/O preserves arbitrary directory replacements"
+      $ hedgehog
+      $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        privateContents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        replaceAncestor <- forAll Gen.bool
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            invocationName <- encodeFS "invocation"
+            workspaceName <- encodeFS "workspace"
+            parkedName <- encodeFS "parked"
+            markerName <- encodeFS "pending-target"
+            privateName <- encodeFS "source"
+            let invocation = tmpDir </> invocationName
+                workspace = invocation </> workspaceName
+                parked =
+                  if replaceAncestor
+                    then tmpDir </> parkedName
+                    else invocation </> parkedName
+                replacementMarker = workspace </> markerName
+                replacementPrivate = workspace </> privateName
+            createDirectories workspace
+            Just identity <- getFileIdentity workspace
+            Just pathIdentity <- captureDirectoryPathIdentity workspace
+            renameDirectory
+              (if replaceAncestor then invocation else workspace)
+              parked
+            createDirectories workspace
+            writeFile replacementMarker contents
+            writeFile replacementPrivate contents
+            createEmptyFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              markerName
+              `shouldReturn` False
+            createPrivateFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              privateName
+              privateContents
+              `shouldReturn` False
+            removeFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              markerName
+              `shouldReturn` False
+            readFile replacementMarker `shouldReturn` contents
+            readFile replacementPrivate `shouldReturn` contents
+
+    specify "identity-bound marker I/O updates its captured directory" $
+      withTempDir $ \tmpDir _ -> do
+        workspaceName <- encodeFS "workspace"
+        markerName <- encodeFS "pending-target"
+        privateName <- encodeFS "source"
+        let workspace = tmpDir </> workspaceName
+            marker = workspace </> markerName
+            private = workspace </> privateName
+        createDirectory workspace
+        Just identity <- getFileIdentity workspace
+        Just pathIdentity <- captureDirectoryPathIdentity workspace
+        createEmptyFileInDirectoryIfIdentity
+          pathIdentity
+          identity
+          markerName
+          `shouldReturn` True
+        readFile marker `shouldReturn` ""
+        createPrivateFileInDirectoryIfIdentity
+          pathIdentity
+          identity
+          privateName
+          "private"
+          `shouldReturn` True
+        readFile private `shouldReturn` "private"
+        privateMode <- getPortableMode private
+        privateMode.posixBits
+          `shouldSatisfy` maybe True (== 0o600)
+        removeFileInDirectoryIfIdentity
+          pathIdentity
+          identity
+          markerName
+          `shouldReturn` True
+        exists marker `shouldReturn` False
+
+    specify "identity-bound private writes preserve arbitrary contents" $
+      hedgehog $ do
+        contents <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+        liftIO $
+          withTempDir $ \tmpDir _ -> do
+            workspaceName <- encodeFS "workspace"
+            privateName <- encodeFS "source"
+            let workspace = tmpDir </> workspaceName
+                private = workspace </> privateName
+            createDirectory workspace
+            Just identity <- getFileIdentity workspace
+            Just pathIdentity <- captureDirectoryPathIdentity workspace
+            createPrivateFileInDirectoryIfIdentity
+              pathIdentity
+              identity
+              privateName
+              contents
+              `shouldReturn` True
+            readFile private `shouldReturn` contents
+            privateMode <- getPortableMode private
+            privateMode.posixBits
+              `shouldSatisfy` maybe True (== 0o600)
 
     specify "listDirectory" $ withFixture $ \tmpDir _ -> do
       result <- listDirectory tmpDir

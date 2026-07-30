@@ -73,6 +73,7 @@ import Dojang.ExitCodes (machineStateError)
 import Dojang.MonadFileSystem
   ( MonadFileSystem
       ( createDirectories
+      , createPrivateDirectoryDurably
       , exists
       , readFile
       , removeDirectory
@@ -1096,6 +1097,18 @@ spec = sequential $ do
       let manifest = Manifest (Just repositoryId) mempty mempty mempty mempty mempty
       withHome home (runAppWithoutLogging appEnv $ prepareMachineState manifest)
         `shouldThrow` (== machineStateError)
+
+  it "delegates durable private directory creation to the inner filesystem" $
+    withTempDir $ \tmp _ -> do
+      directoryName <- encodeFS "durable-private"
+      let directory = tmp </> directoryName
+          appEnv =
+            AppEnv tmp True Nothing tmp tmp tmp False False
+      runAppResultWithoutLogging
+        appEnv
+        (createPrivateDirectoryDurably directory)
+        `shouldReturn` Right ()
+      exists directory `shouldReturn` True
 
 #ifdef mingw32_HOST_OS
 atomicPublicationSpec :: Spec

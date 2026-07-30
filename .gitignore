@@ -10,5 +10,6 @@ dojang.cabal
 dojang.iml
 dojang.tix
 dojang.exe.tix
+spec.tix
 out/
 site/

@@ -85,7 +85,13 @@ hasMaterializedSnapshot target = case target.fingerprint of
 
 
 -- | The command that most recently synchronized a destination.
-data SynchronizationCommand = Applied | Reflected
+data SynchronizationCommand
+  = -- | The target was synchronized by @dojang apply@.
+    Applied
+  | -- | The target was synchronized by @dojang reflect@.
+    Reflected
+  | -- | A three-way merge synchronized the source, destination, and baseline.
+    Merged
   deriving (Eq, Ord, Show)
 
 

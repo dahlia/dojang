@@ -993,6 +993,8 @@ runCoordinatedInitIO gate (CoordinatedInitIO action) = runReaderT action gate
 
 
 instance MonadFileSystem CoordinatedInitIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)

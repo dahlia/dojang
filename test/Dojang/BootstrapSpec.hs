@@ -1403,6 +1403,8 @@ runFailingModeIO (FailingModeIO action) = runExceptT action
 
 
 instance MonadFileSystem FailingModeIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)
   getCurrentDirectory = liftIO (getCurrentDirectory :: IO OsPath)
@@ -1542,6 +1544,8 @@ runCurrentDirectoryIOWithRace
 
 
 instance MonadFileSystem CurrentDirectoryIO where
+  createPrivateDirectoryDurably path =
+    liftIO (createPrivateDirectoryDurably path :: IO ())
   encodePath "." = CurrentDirectoryIO $ fst <$> ask
   encodePath value = liftIO (encodePath value :: IO OsPath)
   decodePath value = liftIO (decodePath value :: IO FilePath)

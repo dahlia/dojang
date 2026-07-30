@@ -43,7 +43,11 @@ import Dojang.ExitCodes
   , lifecycleSelectionError
   , machineStateError
   )
-import Dojang.MonadFileSystem (MonadFileSystem (..))
+import Dojang.MonadFileSystem
+  ( MonadFileSystem (..)
+  , captureDirectoryPathIdentity
+  , matchesDirectoryPathIdentity
+  )
 import Dojang.Types.Context
   ( Context (..)
   , makeManagedCorrespond
@@ -60,6 +64,8 @@ import Dojang.Types.MachineState
   , readRepositoryState
   , updateManagedTargetsWith
   , validateSelectedSnapshotLocation
+  , withMachineStateLock
+  , withRepositoryStateLock
   )
 import Dojang.Types.ManagedTarget
   ( CurrentEntry (..)
@@ -74,7 +80,9 @@ import Dojang.Types.ManagedTarget
   , unreachableSnapshots
   )
 import Dojang.Types.Manifest (Manifest (..))
+import Dojang.Types.Merge (mergeWorkspaceRepositoryRoot)
 import Dojang.Types.Repository (Repository (..))
+import Dojang.Types.RepositoryId (RepositoryId)
 import Dojang.Types.TargetTracking (observeOrphanStatus)
 
 
@@ -254,23 +262,48 @@ forget force = do
   repositoryId <- case manifest.repositoryId of
     Nothing -> die' machineStateError "This repository has no stable identity."
     Just identifier -> return identifier
-  machineResult <- readMachineId root
-  machine <- stateOrDie machineResult
+  initialMachineResult <- readMachineId root
+  initialMachine <- stateOrDie initialMachineResult
+  machine <- case initialMachine of
+    Just machineId -> return $ Just machineId
+    Nothing -> do
+      stateRootExists <- isDirectory root
+      if not stateRootExists
+        then return Nothing
+        else do
+          machineResult <-
+            withMachineStateLock root $ do
+              currentResult <- readMachineId root
+              current <- stateOrDie currentResult
+              case current of
+                Nothing ->
+                  removeMergeWorkspaces root repositoryId >> return Nothing
+                Just machineId -> return $ Just machineId
+          stateOrDie machineResult
   case machine of
     Nothing -> reportAbsent
     Just machineId -> do
-      existingResult <- readRepositoryState root repositoryId machineId
-      existing <- stateOrDie existingResult
-      case existing of
-        Nothing -> do
-          progressResult <- isRepositoryForgetInProgress root repositoryId
-          retrying <- stateOrDie progressResult
-          if retrying
-            then finishForget root checkout repositoryId machineId
-            else reportAbsent
-        Just _ -> finishForget root checkout repositoryId machineId
+      finish <-
+        withRepositoryStateLock root repositoryId $ do
+          existingResult <- readRepositoryState root repositoryId machineId
+          existing <- stateOrDie existingResult
+          case existing of
+            Nothing -> do
+              progressResult <- isRepositoryForgetInProgress root repositoryId
+              retrying <- stateOrDie progressResult
+              if retrying
+                then return True
+                else removeMergeWorkspaces root repositoryId >> return False
+            Just _ -> return True
+      shouldFinish <- stateOrDie finish
+      if shouldFinish
+        then finishForget root checkout repositoryId machineId
+        else reportAbsent
  where
   finishForget root checkout repositoryId machineId = do
+    priorProgressResult <- isRepositoryForgetInProgress root repositoryId
+    approvedRetry <- stateOrDie priorProgressResult
+    when approvedRetry $ removeMergeWorkspaces root repositoryId
     forgotten <-
       forgetRepositoryStateWith root repositoryId machineId $ \state -> do
         ownership <- validateRepositoryStateOwnership checkout state
@@ -300,6 +333,7 @@ forget force = do
           _ <- stateOrDie marked
           return ()
         when retrying $ clearLegacyFirstApplyHistory checkout
+        removeMergeWorkspaces root repositoryId
         removeSnapshot state.targetSnapshotRoot
         removeSnapshot state.intermediatePath
         removeEmptySnapshotDirectory $ takeDirectory state.targetSnapshotRoot
@@ -308,8 +342,8 @@ forget force = do
       Nothing -> reportAbsent
       Just () -> do
         printStderr' Note $
-          "Forgot this repository's machine-local targets, snapshots, and "
-            <> "first-apply history."
+          "Forgot this repository's machine-local targets, snapshots, merge "
+            <> "workspaces, and first-apply history."
         return ExitSuccess
 
   reportAbsent = do
@@ -333,6 +367,49 @@ removeSnapshot path = do
   if directory
     then removeDirectoryRecursively path
     else when file $ removeFile path
+
+
+removeMergeWorkspaces
+  :: (MonadFileSystem i, AppEffects i)
+  => OsPath
+  -> RepositoryId
+  -> App i ()
+removeMergeWorkspaces root repositoryId = do
+  workspaceRoot <- mergeWorkspaceRepositoryRoot root repositoryId
+  absoluteWorkspaceRoot <- makeAbsolute workspaceRoot
+  symbolicLink <- isSymlink absoluteWorkspaceRoot
+  when symbolicLink $
+    die' machineStateError "Refusing to remove a symbolic-link merge workspace."
+  directory <- isDirectory absoluteWorkspaceRoot
+  file <- isFile absoluteWorkspaceRoot
+  when file $ do
+    pathStyle <- pathStyleFor StandardError
+    die' machineStateError $
+      "Refusing to remove the non-directory merge workspace "
+        <> pathStyle absoluteWorkspaceRoot
+        <> ".  Remove it manually, then retry."
+  when directory $ do
+    pathIdentity <- captureDirectoryPathIdentity absoluteWorkspaceRoot
+    expectedIdentity <- getFileIdentity absoluteWorkspaceRoot
+    case (pathIdentity, expectedIdentity) of
+      (Just expectedPath, Just expectedEntry) -> do
+        unchanged <- matchesDirectoryPathIdentity expectedPath
+        unless unchanged $
+          die'
+            machineStateError
+            "The merge-workspace path changed while it was being removed."
+        removed <-
+          removeDirectoryRecursivelyIfIdentity
+            absoluteWorkspaceRoot
+            expectedEntry
+        unless removed $
+          die'
+            machineStateError
+            "The merge workspace changed while it was being removed."
+      _ ->
+        die'
+          machineStateError
+          "Refusing to remove a merge workspace through an unsafe directory path."
 
 
 removeEmptySnapshotDirectory

@@ -39,6 +39,7 @@ nav:
   - manifest.md
   - machine-state.md
   - hooks.md
+  - merge.md
   - routing.md
   - codecs.md
   - environment.md

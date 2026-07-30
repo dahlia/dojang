@@ -605,6 +605,8 @@
         },
         "pre-reflect": {"$ref": "#/$defs/hookList"},
         "post-reflect": {"$ref": "#/$defs/hookList"},
+        "pre-merge": {"$ref": "#/$defs/hookList"},
+        "post-merge": {"$ref": "#/$defs/hookList"},
         "pre-diff": {"$ref": "#/$defs/hookList"},
         "post-diff": {"$ref": "#/$defs/hookList"},
         "pre-status": {"$ref": "#/$defs/hookList"},

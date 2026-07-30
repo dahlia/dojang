@@ -473,6 +473,8 @@ data Hooks' = Hooks'
   , postApply :: Maybe [Hook']
   , preReflect :: Maybe [Hook']
   , postReflect :: Maybe [Hook']
+  , preMerge :: Maybe [Hook']
+  , postMerge :: Maybe [Hook']
   , preDiff :: Maybe [Hook']
   , postDiff :: Maybe [Hook']
   , preStatus :: Maybe [Hook']
@@ -495,6 +497,8 @@ emptyHooks =
     , postApply = Nothing
     , preReflect = Nothing
     , postReflect = Nothing
+    , preMerge = Nothing
+    , postMerge = Nothing
     , preDiff = Nothing
     , postDiff = Nothing
     , preStatus = Nothing
@@ -516,6 +520,8 @@ instance FromValue Hooks' where
         <*> optKey "post-apply"
         <*> optKey "pre-reflect"
         <*> optKey "post-reflect"
+        <*> optKey "pre-merge"
+        <*> optKey "post-merge"
         <*> optKey "pre-diff"
         <*> optKey "post-diff"
         <*> optKey "pre-status"
@@ -539,6 +545,8 @@ instance ToTable Hooks' where
         ++ maybeField "post-apply" hooks.postApply
         ++ maybeField "pre-reflect" hooks.preReflect
         ++ maybeField "post-reflect" hooks.postReflect
+        ++ maybeField "pre-merge" hooks.preMerge
+        ++ maybeField "post-merge" hooks.postMerge
         ++ maybeField "pre-diff" hooks.preDiff
         ++ maybeField "post-diff" hooks.postDiff
         ++ maybeField "pre-status" hooks.preStatus

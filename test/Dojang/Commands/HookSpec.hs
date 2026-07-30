@@ -6,7 +6,7 @@
 module Dojang.Commands.HookSpec (spec) where
 
 import Control.Exception (bracket_)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -189,6 +189,7 @@ spec = sequential $ do
     it "covers only the supported command lifecycles" $ do
       commandHookTypes "apply" `shouldBe` Just (PreApply, PostApply)
       commandHookTypes "reflect" `shouldBe` Just (PreReflect, PostReflect)
+      commandHookTypes "merge" `shouldBe` Just (PreMerge, PostMerge)
       commandHookTypes "diff" `shouldBe` Just (PreDiff, PostDiff)
       commandHookTypes "status" `shouldBe` Just (PreStatus, PostStatus)
       commandHookTypes "edit" `shouldBe` Just (PreEdit, PostEdit)
@@ -627,12 +628,32 @@ spec = sequential $ do
                 simpleVariableGetter $
                   const $
                     pure Nothing
+        let stateRootPath = tmpDir </> stateDir
+        let state =
+              MachineState
+                4
+                repositoryId
+                machineId
+                generationId
+                tmpDir
+                (tmpDir </> manifestFilename)
+                (tmpDir </> intermediateDir)
+                (managedTargetSnapshotRoot stateRootPath repositoryId)
+                Nothing
+                Map.empty
+                (read "2026-07-15 00:00:00 UTC")
+                (read "2026-07-15 00:00:00 UTC")
+                False
+                []
+                Map.empty
+                Map.empty
+                Map.empty
         let appEnv =
               AppEnv
                 tmpDir
                 False
                 (Just intermediateDir)
-                (tmpDir </> stateDir)
+                stateRootPath
                 manifestFilename
                 envFilename
                 False
@@ -649,27 +670,15 @@ spec = sequential $ do
                 Map.empty
                 "apply"
                 []
-                ( MachineState
-                    4
-                    repositoryId
-                    machineId
-                    generationId
-                    tmpDir
-                    (tmpDir </> manifestFilename)
-                    (tmpDir </> intermediateDir)
-                    (tmpDir </> stateDir)
-                    Nothing
-                    Map.empty
-                    (read "2026-07-15 00:00:00 UTC")
-                    (read "2026-07-15 00:00:00 UTC")
-                    False
-                    []
-                    Map.empty
-                    Map.empty
-                    Map.empty
-                )
-                (tmpDir </> stateDir)
+                state
+                stateRootPath
                 defaultHookProcessRunner
+        runAppWithoutLogging appEnv $ do
+          FileSystem.createDirectories $
+            repositoryStateDirectory stateRootPath repositoryId
+          FileSystem.writeFile
+            (repositoryStatePath stateRootPath repositoryId)
+            (encodeUtf8 $ encodeMachineState state)
         withEnvVars
           [ ("DOJANG_TEST_PARENT", Just "inherited")
           , ("DOJANG_OS", Just "stale")
@@ -703,10 +712,10 @@ spec = sequential $ do
         stateDir <- encodeFS ".state"
         command <- encodeFS "hook-command"
         let Right identifier = parseHookId "prepare"
-        let hook =
+        let hook policy identifier' =
               Hook
-                { hookId = Just identifier
-                , policy = HookOnce
+                { hookId = identifier'
+                , policy = policy
                 , changeKey = Nothing
                 , command = command
                 , args = []
@@ -714,6 +723,11 @@ spec = sequential $ do
                 , workingDirectory = Nothing
                 , ignoreFailure = False
                 }
+        let hooks :: [Hook]
+            hooks =
+              [ hook HookOnce $ Just identifier
+              , hook HookAlways Nothing
+              ]
         let Right repositoryId =
               parseRepositoryId "123e4567-e89b-42d3-a456-426614174000"
         let Right machineId =
@@ -722,17 +736,8 @@ spec = sequential $ do
               parseStateGenerationId "323e4567-e89b-42d3-a456-426614174000"
         let Right recreatedGenerationId =
               parseStateGenerationId "423e4567-e89b-42d3-a456-426614174000"
-        let manifest' =
-              Manifest (Just repositoryId) empty Map.empty Map.empty Map.empty $
-                Map.singleton PreApply [hook]
-        let repository = Repository tmpDir (tmpDir </> intermediateDir) manifest'
         let environment =
               emptyEnvironment "linux" "x86_64" $ Kernel "Linux" "6.0.0"
-        let context =
-              Context repository environment $
-                simpleVariableGetter $
-                  const $
-                    pure Nothing
         let stateRootPath = tmpDir </> stateDir
         let createdTime = read "2026-07-15 00:00:00 UTC"
         let recreatedTime = read "2026-07-15 01:00:00 UTC"
@@ -777,23 +782,39 @@ spec = sequential $ do
           FileSystem.writeFile
             (repositoryStatePath stateRootPath repositoryId)
             (encodeUtf8 $ encodeMachineState recreatedState)
-        let hookEnv =
-              HookEnv
-                tmpDir
-                (tmpDir </> manifestFilename)
-                False
-                "linux"
-                "x86_64"
-                "Linux"
-                "6.0.0"
-                Map.empty
-                "apply"
-                []
-                oldState
-                stateRootPath
-                (const $ Just $ ProcessCompleted ExitSuccess "" "")
-        (runAppWithoutLogging appEnv $ executeHooks hookEnv context PreApply)
-          `shouldThrow` (== machineStateError)
+        forM_ hooks $ \hook' -> do
+          let manifest' =
+                Manifest
+                  (Just repositoryId)
+                  empty
+                  Map.empty
+                  Map.empty
+                  Map.empty
+                  (Map.singleton PreApply [hook'])
+              repository =
+                Repository tmpDir (tmpDir </> intermediateDir) manifest'
+              context =
+                Context repository environment $
+                  simpleVariableGetter $
+                    const $
+                      pure Nothing
+              hookEnv =
+                HookEnv
+                  tmpDir
+                  (tmpDir </> manifestFilename)
+                  False
+                  "linux"
+                  "x86_64"
+                  "Linux"
+                  "6.0.0"
+                  Map.empty
+                  "apply"
+                  []
+                  oldState
+                  stateRootPath
+                  (const $ Just $ ProcessCompleted ExitSuccess "" "")
+          (runAppWithoutLogging appEnv $ executeHooks hookEnv context PreApply)
+            `shouldThrow` (== machineStateError)
 
     it "hook environment probe" $ do
       arguments <- getArgs

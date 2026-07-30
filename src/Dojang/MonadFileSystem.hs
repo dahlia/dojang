@@ -15,8 +15,13 @@ module Dojang.MonadFileSystem
   , FileSnapshot
   , FileType (..)
   , MonadFileSystem (..)
+  , createPrivateDirectoriesDurably
+  , createPrivateDirectoriesDurablyUnderLock
   , dryRunIO
   , dryRunIO'
+  , durableFilePublication
+  , isDurablePublicationCompletedError
+  , markDurablePublicationCompleted
   , captureDirectoryPathIdentity
   , fileSnapshotIdentity
   , isNoReplaceUnsupportedError
@@ -24,6 +29,7 @@ module Dojang.MonadFileSystem
   , noReplaceUnsupportedError
   , tryDryRunIO
   , writeFileAtomically
+  , writeFileAtomicallyIfSnapshot
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -35,6 +41,7 @@ import Data.Bits (complement, (.&.), (.|.))
 import Data.List (inits, isPrefixOf, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty ((:|)), filter, singleton, toList)
 import Data.Ord (Down (Down))
+import Data.Word (Word8)
 import GHC.IO.Exception
   ( IOErrorType
       ( InappropriateType
@@ -71,6 +78,7 @@ import Control.Monad.State.Strict
 import Data.ByteString (ByteString)
 import Data.ByteString qualified
   ( concat
+  , empty
   , hGetContents
   , hGetSome
   , hPut
@@ -98,6 +106,7 @@ import System.FileLock qualified as FileLock
 import Dojang.Types.RouteMetadata
   ( PortableMode (..)
   , portableModeFromBits
+  , satisfiesPortableMode
   )
 
 
@@ -115,17 +124,19 @@ import Foreign
   )
 import Foreign.C.Types (CInt (CInt))
 import Data.Int (Int64)
+import Data.Time.Clock (NominalDiffTime, diffUTCTime, getCurrentTime)
 import System.IO (IOMode (ReadMode), hIsSeekable)
 import System.Win32.File qualified as Win32
 import System.Win32.String qualified as Win32String
 import System.Win32.Time qualified as Win32Time
 import System.Win32.Types qualified as Win32
 #else
+import Data.ByteString qualified (useAsCStringLen)
 import Foreign.C.Error qualified as CError
 import Foreign.C.String (CString)
 import Foreign.C.Types (CInt (CInt), CSize (CSize))
 import Foreign.Marshal.Alloc (allocaBytes)
-import Foreign.Ptr (Ptr)
+import Foreign.Ptr (Ptr, castPtr)
 import GHC.Foreign qualified as GHC
 import GHC.IO.Encoding (getFileSystemEncoding)
 #if defined(linux_HOST_OS) || defined(darwin_HOST_OS)
@@ -481,11 +492,80 @@ class (MonadError IOError m) => MonadFileSystem m where
             (Just destination')
 
 
+  -- | Atomically replaces a complete file and makes the replacement durable.
+  --
+  -- Filesystem-backed implementations must not return until both the file
+  -- contents and its replacement directory entry have reached stable storage.
+  -- Virtual and test filesystems may use the ordinary atomic implementation.
+  writeFileAtomicallyDurably
+    :: (HasCallStack) => OsPath -> FilePath -> ByteString -> m ()
+  writeFileAtomicallyDurably = writeFileAtomically
+
+
   -- | Replaces the destination file with the source file.
   --
   -- Both paths must be on the same filesystem.  Implementations should use
   -- the platform's atomic replacement operation where one is available.
   replaceFile :: (HasCallStack) => OsPath -> OsPath -> m ()
+
+
+  -- | Replaces a file only while both files retain expected snapshots.
+  --
+  -- Returns 'False' without consuming the source when the destination changed.
+  -- Filesystem-backed implementations must bind validation to both the entry
+  -- that is displaced and the staged entry that is published rather than
+  -- perform pathname checks followed by an unconditional replacement.  The
+  -- published entry must be revalidated after the rename so a source changed
+  -- between its last pathname observation and publication is rejected.
+  replaceFileIfSnapshot
+    :: (HasCallStack)
+    => FileSnapshot
+    -- ^ Expected destination snapshot.
+    -> FileModeSnapshot
+    -- ^ Expected destination identity and mode.
+    -> ByteString
+    -- ^ Expected destination contents.
+    -> FileSnapshot
+    -- ^ Expected staged source snapshot.
+    -> PortableMode
+    -- ^ Expected staged source mode.
+    -> ByteString
+    -- ^ Expected staged source contents.
+    -> OsPath
+    -- ^ Staged source file on the same filesystem.
+    -> OsPath
+    -- ^ Destination file.
+    -> m Bool
+  replaceFileIfSnapshot
+    expected
+    expectedMode
+    expectedContents
+    expectedSource
+    expectedSourceMode
+    expectedSourceContents
+    source
+    destination = do
+      actualSource <- getFileSnapshot source
+      actualSourceMode <- getFileModeSnapshot source
+      actualSourceContents <- readRegularFile source
+      if not $
+        matchesStagedFile
+          expectedSource
+          expectedSourceMode
+          expectedSourceContents
+          actualSource
+          actualSourceMode
+          actualSourceContents
+        then return False
+        else do
+          actual <- getFileSnapshot destination
+          actualMode <- getFileModeSnapshot destination
+          actualContents <- readRegularFile destination
+          if actual == Just expected
+            && actualMode == Just expectedMode
+            && actualContents == Just expectedContents
+            then replaceFile source destination >> return True
+            else return False
 
 
   -- | Renames a directory without replacing an existing destination.
@@ -634,6 +714,14 @@ class (MonadError IOError m) => MonadFileSystem m where
     setPortableMode path 0o700
 
 
+  -- | Creates an owner-only directory and durably publishes its entry.
+  --
+  -- Filesystem-backed implementations must not return until the new
+  -- directory's name is recoverable after a system crash.  Virtual and test
+  -- filesystems may simply delegate to 'createPrivateDirectory'.
+  createPrivateDirectoryDurably :: (HasCallStack) => OsPath -> m ()
+
+
   -- | Creates a directory at the given path, including all parent directories.
   createDirectories :: (HasCallStack) => OsPath -> m ()
   createDirectories path =
@@ -678,8 +766,126 @@ class (MonadError IOError m) => MonadFileSystem m where
   removeFile :: (HasCallStack) => OsPath -> m ()
 
 
+  -- | Creates an empty file inside a captured directory path.
+  --
+  -- Returns 'False' without changing anything when either the directory or an
+  -- ancestor no longer has the captured identity, or when the directory's
+  -- identity differs from the separately captured final identity.  The entry
+  -- name must be a single path component.  Filesystem-backed implementations
+  -- must bind validation and creation to pinned directory handles so a
+  -- concurrent pathname replacement cannot redirect the write.
+  createEmptyFileInDirectoryIfIdentity
+    :: (HasCallStack)
+    => DirectoryPathIdentity
+    -> FileIdentity
+    -> OsPath
+    -> m Bool
+  createEmptyFileInDirectoryIfIdentity pathIdentity identity entryName = do
+    validateDirectoryEntryName
+      "createEmptyFileInDirectoryIfIdentity"
+      entryName
+    let directory = directoryPathIdentityPath pathIdentity
+    pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
+    actualIdentity <- getFileIdentity directory
+    if pathUnchanged && actualIdentity == Just identity
+      then do
+        createFileAtomicallyWithDefaultPermissions
+          (directory </> entryName)
+          "dojang-pinned.tmp"
+          Data.ByteString.empty
+        return True
+      else return False
+
+
+  -- | Creates an owner-only regular file inside a captured directory path.
+  --
+  -- Returns 'False' without changing anything when either the directory or an
+  -- ancestor no longer has the captured identity, or when the directory's
+  -- identity differs from the separately captured final identity.  The entry
+  -- name must be a single path component.  Filesystem-backed implementations
+  -- must bind validation, creation, content writing, and the owner-only mode
+  -- to pinned directory handles so a concurrent pathname replacement cannot
+  -- redirect the write.
+  createPrivateFileInDirectoryIfIdentity
+    :: (HasCallStack)
+    => DirectoryPathIdentity
+    -> FileIdentity
+    -> OsPath
+    -> ByteString
+    -> m Bool
+  createPrivateFileInDirectoryIfIdentity
+    pathIdentity
+    identity
+    entryName
+    contents = do
+      validateDirectoryEntryName
+        "createPrivateFileInDirectoryIfIdentity"
+        entryName
+      let directory = directoryPathIdentityPath pathIdentity
+      pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
+      actualIdentity <- getFileIdentity directory
+      if pathUnchanged && actualIdentity == Just identity
+        then do
+          let path = directory </> entryName
+          createFileAtomicallyWithDefaultPermissions
+            path
+            "dojang-private.tmp"
+            Data.ByteString.empty
+          setPortableMode path 0o600
+          writeFile path contents
+          return True
+        else return False
+
+
+  -- | Removes a file inside a captured directory path.
+  --
+  -- A missing file counts as successful removal.  Returns 'False' without
+  -- changing anything when either the directory or an ancestor no longer has
+  -- the captured identity, or when the directory's identity differs from the
+  -- separately captured final identity.  The entry name must be a single path
+  -- component.  Filesystem-backed implementations must bind validation and
+  -- removal to pinned directory handles.
+  removeFileInDirectoryIfIdentity
+    :: (HasCallStack)
+    => DirectoryPathIdentity
+    -> FileIdentity
+    -> OsPath
+    -> m Bool
+  removeFileInDirectoryIfIdentity pathIdentity identity entryName = do
+    validateDirectoryEntryName
+      "removeFileInDirectoryIfIdentity"
+      entryName
+    let directory = directoryPathIdentityPath pathIdentity
+    pathUnchanged <- matchesDirectoryPathIdentity pathIdentity
+    actualIdentity <- getFileIdentity directory
+    if pathUnchanged && actualIdentity == Just identity
+      then
+        (removeFile (directory </> entryName) >> return True)
+          `catchError` \err ->
+            if isDoesNotExistError err
+              then return True
+              else throwError err
+      else return False
+
+
   -- | Removes a directory.  It must be empty.
   removeDirectory :: (HasCallStack) => OsPath -> m ()
+
+
+  -- | Removes an empty directory only when it has the expected identity.
+  --
+  -- Returns 'False' without removing anything when the path is absent, its
+  -- identity differs, or the interpreter cannot verify identities.
+  -- Filesystem-backed implementations must bind the final identity check to
+  -- the directory entry being removed so a concurrent pathname replacement
+  -- is preserved.
+  removeDirectoryIfIdentity
+    :: (HasCallStack) => OsPath -> FileIdentity -> m Bool
+  removeDirectoryIfIdentity path expectedIdentity = do
+    actualIdentity <- getFileIdentity path
+    if actualIdentity == Just expectedIdentity
+      then removeDirectory path >> return True
+      else return False
 
 
   -- | Removes a directory entirely, including all its contents.
@@ -719,6 +925,15 @@ class (MonadError IOError m) => MonadFileSystem m where
   -- | Lists all files and directories in a directory except for @.@ and @..@,
   -- without recursing into subdirectories.
   listDirectory :: (HasCallStack) => OsPath -> m [OsPath]
+
+
+  -- | Lists one directory while pinning the opened directory entry.
+  --
+  -- Filesystem-backed implementations must reject a symbolic link and prevent
+  -- a concurrent pathname replacement from redirecting enumeration.  Virtual
+  -- interpreters may delegate to 'listDirectory'.
+  listDirectoryPinned :: (HasCallStack) => OsPath -> m [OsPath]
+  listDirectoryPinned = listDirectory
 
 
   -- | Lists all files and directories in a directory recursively.  It doesn't
@@ -855,6 +1070,89 @@ class (MonadError IOError m) => MonadFileSystem m where
     -> m ()
 
 
+directoryPathIdentityPath :: DirectoryPathIdentity -> OsPath
+directoryPathIdentityPath (DirectoryPathIdentity path _) = path
+
+
+validateDirectoryEntryName
+  :: (HasCallStack, MonadFileSystem m) => String -> OsPath -> m ()
+validateDirectoryEntryName location entryName = do
+  decoded <- decodePath entryName
+  unless
+    ( not (Prelude.null decoded)
+        && decoded /= "."
+        && decoded /= ".."
+        && not (isAbsolute entryName)
+        && takeFileName entryName == entryName
+    )
+    $ throwError
+    $ mkIOError InvalidArgument location Nothing (Just decoded)
+      `ioeSetErrorString` "entry name is not a single path component"
+
+
+-- | Creates every missing directory in a path privately and durably.
+--
+-- Existing directory components are preserved.  Symbolic links and
+-- non-directory components are rejected so a newly created child cannot be
+-- redirected outside the requested path.
+createPrivateDirectoriesDurably
+  :: (HasCallStack, MonadFileSystem m) => OsPath -> m ()
+createPrivateDirectoriesDurably path =
+  ( forM_ ancestors $ \ancestor -> do
+      symbolicLink <- isSymlink ancestor
+      when symbolicLink $ do
+        ancestor' <- decodePath ancestor
+        throwError $ symlinkError ancestor'
+      directory <- isDirectory ancestor
+      unless directory $ do
+        file <- isFile ancestor
+        if file
+          then do
+            ancestor' <- decodePath ancestor
+            throwError $ fileError ancestor'
+          else
+            createPrivateDirectoryDurably ancestor `catchError` \err ->
+              if isAlreadyExistsError err
+                then do
+                  createdSymlink <- isSymlink ancestor
+                  createdByPeer <- isDirectory ancestor
+                  unless (not createdSymlink && createdByPeer) $ throwError err
+                else throwError err
+  )
+    `mapError` (`ioePrependLocation` "createPrivateDirectoriesDurably")
+ where
+  ancestors =
+    map joinPath $
+      drop 1 $
+        inits $
+          splitDirectories path
+  fileError path' =
+    mkIOError
+      InappropriateType
+      "createPrivateDirectoriesDurably"
+      Nothing
+      (Just path')
+      `ioeSetErrorString` "one of its ancestors is a non-directory file"
+  symlinkError path' =
+    mkIOError
+      InappropriateType
+      "createPrivateDirectoriesDurably"
+      Nothing
+      (Just path')
+      `ioeSetErrorString` "one of its ancestors is a symbolic link"
+
+
+-- | Creates a private durable directory chain while serializing peer creators.
+--
+-- Every process that can create a path beneath the same shared ancestor must
+-- use the same lock path.  A peer can then observe an existing ancestor only
+-- after its creator has completed the directory-entry durability barrier.
+createPrivateDirectoriesDurablyUnderLock
+  :: (HasCallStack, MonadFileSystem m) => OsPath -> OsPath -> m ()
+createPrivateDirectoriesDurablyUnderLock lock path =
+  withFileLock lock $ createPrivateDirectoriesDurably path
+
+
 -- | Writes a sibling temporary file and atomically replaces the destination.
 writeFileAtomically
   :: (HasCallStack, MonadFileSystem m)
@@ -880,6 +1178,75 @@ writeFileAtomically destination template contents = do
       throwError err
 
 
+-- | Stages complete contents and their final mode, then conditionally replaces
+-- an observed regular file.
+--
+-- Returns 'False' without changing the destination when its snapshot no
+-- longer matches.  The temporary file is removed on rejection or failure.
+writeFileAtomicallyIfSnapshot
+  :: (HasCallStack, MonadFileSystem m)
+  => FileSnapshot
+  -- ^ Expected destination snapshot.
+  -> FileModeSnapshot
+  -- ^ Expected destination identity and mode.
+  -> ByteString
+  -- ^ Expected destination contents.
+  -> OsPath
+  -- ^ Destination file.
+  -> FilePath
+  -- ^ Temporary filename template.
+  -> ByteString
+  -- ^ Complete replacement contents.
+  -> PortableMode
+  -- ^ Mode to apply before publication.
+  -> m Bool
+writeFileAtomicallyIfSnapshot
+  expected
+  expectedMode
+  expectedContents
+  destination
+  template
+  contents
+  mode = do
+    let directory = takeDirectory destination
+    temporary <- writeTemporaryFile directory template contents
+    ( do
+        stagedSnapshot <- getFileSnapshot temporary
+        replaced <-
+          case stagedSnapshot of
+            Nothing -> return False
+            Just snapshot -> do
+              applyPortableMode temporary mode
+              replaceFileIfSnapshot
+                expected
+                expectedMode
+                expectedContents
+                snapshot
+                mode
+                contents
+                temporary
+                destination
+        unless replaced $ do
+          temporaryExists <- exists temporary
+          when temporaryExists $ removeFileAfterWidening temporary
+        return replaced
+      )
+      `catchError` \err -> do
+        temporaryExists <- exists temporary
+        when temporaryExists $ removeFileAfterWidening temporary
+        throwError err
+   where
+    applyPortableMode path portableMode =
+      case portableMode.posixBits of
+        Just bits -> setPortableMode path bits
+        Nothing -> setPortableWritable path portableMode.writable
+    removeFileAfterWidening path =
+      removeFile path `catchError` \err ->
+        if isPermissionError err
+          then setPortableWritable path True >> removeFile path
+          else throwError err
+
+
 createFileAtomicallyWithDefaultPermissionsIO
   :: OsPath -> FilePath -> ByteString -> IO ()
 createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
@@ -899,6 +1266,172 @@ createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
     hClose handle
     temporaryPath <- encodeFS temporary
     renameNoReplaceIO "renameFileNoReplace" temporaryPath destination
+
+
+writeFileAtomicallyDurablyIO
+  :: OsPath -> FilePath -> ByteString -> IO ()
+writeFileAtomicallyDurablyIO destination template contents = do
+  directory <- decodeFS $ takeDirectory destination
+  Exception.bracketOnError
+    (openBinaryTempFileWithDefaultPermissions directory template)
+    discardTemporary
+    publishTemporary
+ where
+  discardTemporary (temporary, handle) = do
+    hClose handle `catchError` const (return ())
+    temporaryPath <- encodeFS temporary
+    removeTemporaryFileIO temporaryPath
+
+  publishTemporary (temporary, handle) = do
+    temporaryPath <- encodeFS temporary
+    publishTemporaryFileDurablyIO
+      destination
+      temporaryPath
+      handle
+      contents
+      (copyDestinationPermissions temporaryPath)
+
+  copyDestinationPermissions temporaryPath = do
+    destinationExists <- exists destination
+    when destinationExists $
+      copyFilePermissionsIO destination temporaryPath
+
+#ifdef mingw32_HOST_OS
+publishTemporaryFileDurablyIO
+  :: OsPath -> OsPath -> Handle -> ByteString -> IO () -> IO ()
+publishTemporaryFileDurablyIO
+  destination
+  temporary
+  handle
+  contents
+  applyPermissions =
+    durableFilePublication
+      applyPermissions
+      (Data.ByteString.hPut handle contents)
+      (hFlush handle)
+      (Win32.withHandleToHANDLE handle Win32.flushFileBuffers)
+      (hClose handle)
+      (replaceFileWriteThroughIO temporary destination)
+#else
+publishTemporaryFileDurablyIO
+  :: OsPath -> OsPath -> Handle -> ByteString -> IO () -> IO ()
+publishTemporaryFileDurablyIO
+  destination
+  temporary
+  handle
+  contents
+  applyPermissions = do
+    applyPermissions
+    Data.ByteString.hPut handle contents
+    hFlush handle
+    descriptor <- Posix.handleToFd handle
+    Exception.bracket
+      (return descriptor)
+      Posix.closeFd
+      (synchronizeDescriptorIO "writeFileAtomicallyDurably")
+    replaceFileIO temporary destination
+    synchronizeDirectoryIO
+      "writeFileAtomicallyDurably"
+      (takeDirectory destination)
+      `catchError` (throwError . markDurablePublicationCompleted)
+#endif
+
+
+removeTemporaryFileIO :: OsPath -> IO ()
+removeTemporaryFileIO path =
+  OsDirectory.removeFile path `catchError` \err ->
+    when (isPermissionError err) $ do
+      setPortableWritableIO path True
+        `catchError` const (return ())
+      OsDirectory.removeFile path
+        `catchError` const (return ())
+
+
+-- | Sequences the durability barriers required to publish a staged file.
+--
+-- The final mode is applied before contents are written.  The runtime buffer
+-- is then flushed, followed by the operating-system file buffer.  The file is
+-- closed before its name is published using a write-through operation.
+durableFilePublication
+  :: (Monad m)
+  => m ()
+  -- ^ Apply the final mode to the staged file.
+  -> m ()
+  -- ^ Write the complete contents.
+  -> m ()
+  -- ^ Flush the language-runtime buffer.
+  -> m ()
+  -- ^ Flush the operating-system file buffer to stable storage.
+  -> m ()
+  -- ^ Close the staged file.
+  -> m ()
+  -- ^ Publish the staged name with write-through semantics.
+  -> m ()
+durableFilePublication
+  applyFinalMode
+  writeContents
+  flushRuntimeBuffer
+  flushDeviceBuffer
+  closeStagedFile
+  publishStagedFile = do
+    applyFinalMode
+    writeContents
+    flushRuntimeBuffer
+    flushDeviceBuffer
+    closeStagedFile
+    publishStagedFile
+
+
+-- | Marks an I/O failure as occurring after an atomic durable replacement
+-- became visible.
+--
+-- The replacement directory entry is already published, but its durability
+-- barrier failed.  Callers must retain resources referenced by the new file
+-- because rolling them back could leave published references dangling.
+markDurablePublicationCompleted :: IOError -> IOError
+markDurablePublicationCompleted =
+  (`ioeSetLocation` durablePublicationCompletedLocation)
+
+
+-- | Tests whether an I/O failure occurred after an atomic durable replacement
+-- became visible.
+isDurablePublicationCompletedError :: IOError -> Bool
+isDurablePublicationCompletedError err =
+  ioeGetLocation err == durablePublicationCompletedLocation
+
+
+durablePublicationCompletedLocation :: String
+durablePublicationCompletedLocation =
+  "writeFileAtomicallyDurably: replacement published"
+
+#ifdef mingw32_HOST_OS
+createFileAtomicallyDurablyIO
+  :: OsPath -> FilePath -> Maybe Word -> ByteString -> IO ()
+createFileAtomicallyDurablyIO
+  destination
+  template
+  mode
+  contents = do
+    directory <- decodeFS $ takeDirectory destination
+    Exception.bracketOnError
+      (openBinaryTempFileWithDefaultPermissions directory template)
+      discardTemporary
+      publishTemporary
+   where
+    discardTemporary (temporary, handle) = do
+      hClose handle `catchError` const (return ())
+      Directory.removeFile temporary `catchError` const (return ())
+
+    publishTemporary (temporary, handle) = do
+      temporaryPath <- encodeFS temporary
+      durableFilePublication
+        (forM_ mode $ setPortableModeIO temporaryPath)
+        (Data.ByteString.hPut handle contents)
+        (hFlush handle)
+        (Win32.withHandleToHANDLE handle Win32.flushFileBuffers)
+        (hClose handle)
+        (renameNoReplaceWriteThroughIO temporaryPath destination)
+#endif
 
 
 -- | Tests whether a no-replace rename is unsupported by the filesystem.
@@ -1027,6 +1560,11 @@ listDirectoryRecursivelyIO mode path ignorePatterns = do
               entryType -> return [(entryType, entry)]
 
 
+listDirectoryPinnedIO :: OsPath -> IO [OsPath]
+listDirectoryPinnedIO path =
+  withPinnedDirectory path $ OsDirectory.listDirectory path
+
+
 withPinnedDirectory :: OsPath -> IO a -> IO a
 withPinnedDirectory path action =
   withPinnedEntry path $ \fileType ->
@@ -1105,6 +1643,112 @@ throwPinnedDirectoryError path message = do
   ioError $
     mkIOError InappropriateType "listDirectoryRecursively" Nothing (Just path')
       `ioeSetErrorString` message
+
+
+withMatchingDirectoryPathIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> IO a
+  -> IO (Maybe a)
+withMatchingDirectoryPathIdentityIO
+  (DirectoryPathIdentity _ entries)
+  expectedIdentity
+  action =
+    case reverse entries of
+      (_, finalIdentity) : _
+        | finalIdentity == expectedIdentity -> do
+            pinned <-
+              pin entries `catchError` const (return Nothing)
+            case pinned of
+              Nothing -> return Nothing
+              Just (Left err) -> throwError err
+              Just (Right value) -> return $ Just value
+      _ -> return Nothing
+   where
+    pin [] = Just <$> tryError action
+    pin ((path, expected) : rest) =
+      withEntryHandle
+        path
+        (Win32.fILE_SHARE_READ .|. Win32.fILE_SHARE_WRITE)
+        $ \information -> do
+          let attributes = information.bhfiFileAttributes
+              supported =
+                attributes .&. Win32.fILE_ATTRIBUTE_REPARSE_POINT == 0
+                  && attributes .&. Win32.fILE_ATTRIBUTE_DIRECTORY /= 0
+              unchanged =
+                fileIdentityFromInformation information == expected
+          if supported && unchanged
+            then pin rest
+            else return Nothing
+
+
+createEmptyFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+createEmptyFileInDirectoryIfIdentityIO
+  pathIdentity@(DirectoryPathIdentity directory _)
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "createEmptyFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ createFileAtomicallyDurablyIO
+          (directory </> entryName)
+          "dojang-pinned.tmp"
+          Nothing
+          Data.ByteString.empty
+    return $ maybe False (const True) result
+
+
+createPrivateFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> OsPath
+  -> ByteString
+  -> IO Bool
+createPrivateFileInDirectoryIfIdentityIO
+  pathIdentity@(DirectoryPathIdentity directory _)
+  expectedIdentity
+  entryName
+  contents = do
+    validateDirectoryEntryName
+      "createPrivateFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ createFileAtomicallyDurablyIO
+          (directory </> entryName)
+          "dojang-private.tmp"
+          (Just 0o600)
+          contents
+    return $ maybe False (const True) result
+
+
+removeFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+removeFileInDirectoryIfIdentityIO
+  pathIdentity@(DirectoryPathIdentity directory _)
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "removeFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        ( OsDirectory.removeFile (directory </> entryName)
+            `catchError` \err ->
+              if isDoesNotExistError err
+                then return ()
+                else throwError err
+        )
+    return $ maybe False (const True) result
 #else
 data DirectoryStream
 
@@ -1127,6 +1771,30 @@ foreign import ccall unsafe "dojang_file_type_at"
   -- Returns 1 for a directory, 2 for a symbolic link, 3 for another entry,
   -- or a negated errno.
   c_fileTypeAt :: CInt -> CString -> IO CInt
+
+
+foreign import ccall safe "dojang_fsync_directory"
+  -- Returns 1 after synchronization or a negated errno.
+  c_fsyncDirectory :: CInt -> IO CInt
+
+
+foreign import ccall safe "dojang_create_empty_file_at"
+  -- Returns 1 after creation or a negated errno.
+  c_createEmptyFileAt :: CInt -> CString -> IO CInt
+
+
+foreign import ccall safe "dojang_create_private_file_at"
+  c_createPrivateFileAt
+    :: CInt
+    -> CString
+    -> Ptr Word8
+    -> CSize
+    -> IO CInt
+
+
+foreign import ccall unsafe "dojang_remove_file_at"
+  -- Returns 1 after removal or a negated errno.
+  c_removeFileAt :: CInt -> CString -> IO CInt
 
 
 listDirectoryRecursivelyIO
@@ -1167,6 +1835,12 @@ listDirectoryRecursivelyIO mode path ignorePatterns = do
                       (Directory, entry)
                         : fmap (fmap (entry </>)) descendants
               File -> return [(File, entry)]
+
+
+listDirectoryPinnedIO :: OsPath -> IO [OsPath]
+listDirectoryPinnedIO path = do
+  path' <- decodeFS path
+  withPinnedDirectoryFd Nothing path' listDirectoryFd
 
 
 withPinnedDirectoryFd
@@ -1244,6 +1918,152 @@ throwErrnoCode location err =
       (CError.Errno err)
       Nothing
       Nothing
+
+
+withMatchingDirectoryPathIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> (Fd -> IO a)
+  -> IO (Maybe a)
+withMatchingDirectoryPathIdentityIO
+  (DirectoryPathIdentity _ entries)
+  expectedIdentity
+  action =
+    case reverse entries of
+      (_, finalIdentity) : _
+        | finalIdentity == expectedIdentity -> pin Nothing entries
+      _ -> return Nothing
+   where
+    pin _ [] = return Nothing
+    pin parent ((entry, expected) : rest) =
+      Exception.mask $ \restore -> do
+        entry' <-
+          decodeFS $
+            case parent of
+              Nothing -> entry
+              Just _ -> takeFileName entry
+        opened <-
+          tryError $
+            Posix.openFdAt
+              parent
+              entry'
+              Posix.ReadOnly
+              Posix.defaultFileFlags
+                { Posix.nonBlock = True
+                , Posix.nofollow = True
+                , Posix.cloexec = True
+                , Posix.directory = True
+                }
+        case opened of
+          Left _ -> return Nothing
+          Right descriptor ->
+            Exception.bracket
+              (return descriptor)
+              Posix.closeFd
+              $ \pinned -> do
+                status <- Posix.getFdStatus pinned
+                if fileIdentityFromStatus status /= expected
+                  then return Nothing
+                  else case rest of
+                    [] -> Just <$> restore (action pinned)
+                    _ -> restore $ pin (Just pinned) rest
+
+
+createEmptyFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+createEmptyFileInDirectoryIfIdentityIO
+  pathIdentity
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "createEmptyFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ \descriptor ->
+          runDirectoryEntryOperation
+            "createEmptyFileInDirectoryIfIdentity"
+            descriptor
+            entryName
+            c_createEmptyFileAt
+    return $ maybe False (const True) result
+
+
+createPrivateFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity
+  -> FileIdentity
+  -> OsPath
+  -> ByteString
+  -> IO Bool
+createPrivateFileInDirectoryIfIdentityIO
+  pathIdentity
+  expectedIdentity
+  entryName
+  contents = do
+    validateDirectoryEntryName
+      "createPrivateFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        $ \descriptor -> do
+          entryName' <- decodeFS entryName
+          PosixInternal.withFilePath entryName' $ \entryPath ->
+            Data.ByteString.useAsCStringLen contents $ \(buffer, byteCount) -> do
+              created <-
+                c_createPrivateFileAt
+                  (fromIntegral descriptor)
+                  entryPath
+                  (castPtr buffer)
+                  (fromIntegral byteCount)
+              when (created < 0) $
+                throwErrnoCode
+                  "createPrivateFileInDirectoryIfIdentity"
+                  (negate created)
+    return $ maybe False (const True) result
+
+
+removeFileInDirectoryIfIdentityIO
+  :: DirectoryPathIdentity -> FileIdentity -> OsPath -> IO Bool
+removeFileInDirectoryIfIdentityIO
+  pathIdentity
+  expectedIdentity
+  entryName = do
+    validateDirectoryEntryName
+      "removeFileInDirectoryIfIdentity"
+      entryName
+    result <-
+      withMatchingDirectoryPathIdentityIO
+        pathIdentity
+        expectedIdentity
+        ( \descriptor ->
+            runDirectoryEntryOperation
+              "removeFileInDirectoryIfIdentity"
+              descriptor
+              entryName
+              c_removeFileAt
+              `catchError` \err ->
+                if isDoesNotExistError err
+                  then return ()
+                  else throwError err
+        )
+    return $ maybe False (const True) result
+
+
+runDirectoryEntryOperation
+  :: String
+  -> Fd
+  -> OsPath
+  -> (CInt -> CString -> IO CInt)
+  -> IO ()
+runDirectoryEntryOperation location descriptor entryName action = do
+  entryName' <- decodeFS entryName
+  PosixInternal.withFilePath entryName' $ \entryPath -> do
+    result <- action (fromIntegral descriptor) entryPath
+    when (result < 0) $ throwErrnoCode location $ negate result
 #endif
 
 #if defined(linux_HOST_OS)
@@ -1526,6 +2346,77 @@ createPrivateDirectoryIO path = do
     Win32.createDirectory path' $ Just attributes
 
 
+createPrivateDirectoryDurablyIO :: OsPath -> IO ()
+createPrivateDirectoryDurablyIO destination = do
+  cleanupPrivateDirectoryStagingIO $ takeDirectory destination
+  allocate (128 :: Int)
+ where
+  allocate attempts
+    | attempts < 1 =
+        throwError $
+          userError "could not allocate a durable private-directory path"
+    | otherwise = do
+        randomBytes <- getEntropy 16
+        name <-
+          encodeFS $
+            privateDirectoryStagingPrefix
+              <> encodeRandomHex (Data.ByteString.unpack randomBytes)
+        let temporary = takeDirectory destination </> name
+        created <- tryError $ createPrivateDirectoryIO temporary
+        case created of
+          Left err
+            | isAlreadyExistsError err -> allocate $ attempts - 1
+            | otherwise -> throwError err
+          Right () ->
+            renameNoReplaceWriteThroughIO temporary destination
+              `Exception.onException`
+                ( OsDirectory.removeDirectory temporary
+                    `catchError` const (return ())
+                )
+
+
+cleanupPrivateDirectoryStagingIO :: OsPath -> IO ()
+cleanupPrivateDirectoryStagingIO parent = do
+  entries <- OsDirectory.listDirectory parent
+  forM_ entries $ \entry -> do
+    name <- decodeFS entry
+    when (privateDirectoryStagingPrefix `isPrefixOf` name) $ do
+      let staging = parent </> entry
+      symbolicLink <-
+        OsDirectory.pathIsSymbolicLink staging
+          `catchError` const (return True)
+      stale <- privateDirectoryStagingIsStaleIO staging
+      when (not symbolicLink && stale) $ do
+        identity <-
+          getFileIdentityIO staging
+            `catchError` const (return Nothing)
+        forM_ identity $ \expected ->
+          void $
+            removeDirectoryIfIdentityIO staging expected
+              `catchError` const (return False)
+
+
+privateDirectoryStagingPrefix :: String
+privateDirectoryStagingPrefix = ".dojang-private-directory-"
+
+
+privateDirectoryStagingIsStaleIO :: OsPath -> IO Bool
+privateDirectoryStagingIsStaleIO staging =
+  ( do
+      staging' <- decodeFS staging
+      modifiedTime <- Directory.getModificationTime staging'
+      currentTime <- getCurrentTime
+      return $
+        diffUTCTime currentTime modifiedTime
+          >= privateDirectoryStagingMinimumAge
+  )
+    `catchError` const (return False)
+
+
+privateDirectoryStagingMinimumAge :: NominalDiffTime
+privateDirectoryStagingMinimumAge = 300
+
+
 ensurePersistentAcls :: FilePath -> IO ()
 ensurePersistentAcls path = do
   absolutePath <- Directory.makeAbsolute path
@@ -1593,6 +2484,56 @@ renameNoReplaceIO _location source destination = do
   source' <- decodeFS source
   destination' <- decodeFS destination
   Win32.moveFile source' destination'
+
+
+renameNoReplaceWriteThroughIO :: OsPath -> OsPath -> IO ()
+renameNoReplaceWriteThroughIO source destination = do
+  source' <- decodeFS source
+  destination' <- decodeFS destination
+  Win32.moveFileEx
+    source'
+    (Just destination')
+    moveFileWriteThrough
+ where
+  -- Win32 2.14 does not expose the MOVEFILE_WRITE_THROUGH constant.
+  moveFileWriteThrough :: Win32.MoveFileFlag
+  moveFileWriteThrough = 0x00000008
+
+
+replaceFileWriteThroughIO :: OsPath -> OsPath -> IO ()
+replaceFileWriteThroughIO source destination = do
+  destinationExists <- doesPathExist destination
+  if not destinationExists
+    then publish
+    else do
+      permissions <- OsDirectory.getPermissions destination
+      OsDirectory.setPermissions
+        destination
+        (Directory.setOwnerWritable True permissions)
+      publish `catchError` \err -> do
+        destinationStillExists <- doesPathExist destination
+        when destinationStillExists $
+          OsDirectory.setPermissions destination permissions
+        sourceStillExists <- doesPathExist source
+        when sourceStillExists $ do
+          sourcePermissions <- OsDirectory.getPermissions source
+          OsDirectory.setPermissions
+            source
+            (Directory.setOwnerWritable True sourcePermissions)
+        throwError err
+ where
+  publish = do
+    source' <- decodeFS source
+    destination' <- decodeFS destination
+    Win32.moveFileEx
+      source'
+      (Just destination')
+      (moveFileReplaceExisting .|. moveFileWriteThrough)
+  -- Win32 2.14 does not expose these MOVEFILE constants.
+  moveFileReplaceExisting :: Win32.MoveFileFlag
+  moveFileReplaceExisting = 0x00000001
+  moveFileWriteThrough :: Win32.MoveFileFlag
+  moveFileWriteThrough = 0x00000008
 
 
 #else
@@ -1754,6 +2695,44 @@ createPrivateDirectoryIO path = do
     `Exception.onException` OsDirectory.removeDirectory path
 
 
+createPrivateDirectoryDurablyIO :: OsPath -> IO ()
+createPrivateDirectoryDurablyIO path = do
+  createPrivateDirectoryIO path
+  ( synchronizeDirectoryIO "createPrivateDirectoryDurably" path
+      >> synchronizeDirectoryIO
+        "createPrivateDirectoryDurably"
+        (takeDirectory path)
+    )
+    `Exception.onException` cleanup
+ where
+  cleanup =
+    OsDirectory.removeDirectory path `catchError` const (return ())
+
+
+synchronizeDirectoryIO :: String -> OsPath -> IO ()
+synchronizeDirectoryIO location directory = do
+  directory' <- decodeFS directory
+  Exception.bracket
+    ( Posix.openFd
+        directory'
+        Posix.ReadOnly
+        Posix.defaultFileFlags
+          { Posix.nofollow = True
+          , Posix.cloexec = True
+          , Posix.directory = True
+          }
+    )
+    Posix.closeFd
+    (synchronizeDescriptorIO location)
+
+
+synchronizeDescriptorIO :: String -> Fd -> IO ()
+synchronizeDescriptorIO location descriptor = do
+  synchronized <- c_fsyncDirectory $ fromIntegral descriptor
+  when (synchronized < 0) $
+    throwErrnoCode location $ negate synchronized
+
+
 renameNoReplaceIO :: String -> OsPath -> OsPath -> IO ()
 renameNoReplaceIO location source destination = do
   destination' <- decodeFS destination
@@ -1809,6 +2788,282 @@ throwNoReplaceUnsupported location destination =
 #endif
 
 
+replaceFileIfSnapshotIO
+  :: FileSnapshot
+  -> FileModeSnapshot
+  -> ByteString
+  -> FileSnapshot
+  -> PortableMode
+  -> ByteString
+  -> OsPath
+  -> OsPath
+  -> IO Bool
+replaceFileIfSnapshotIO
+  expectedSnapshot
+  expectedModeSnapshot
+  expectedContents
+  expectedSourceSnapshot
+  expectedSourceMode
+  expectedSourceContents
+  source
+  destination =
+    Exception.mask $ \restore -> do
+      sourceMatches <- stagedSourceMatches
+      initialSnapshot <- getFileSnapshotIO destination
+      initialModeSnapshot <- getFileModeSnapshotIO destination
+      if not sourceMatches
+        || initialSnapshot /= Just expectedSnapshot
+        || initialModeSnapshot /= Just expectedModeSnapshot
+        then return False
+        else do
+          displaced <- quarantineFile (128 :: Int) destination
+          case displaced of
+            Nothing -> return False
+            Just quarantine -> do
+              actualSnapshot <- getFileSnapshotIO quarantine
+              actualModeSnapshot <- getFileModeSnapshotIO quarantine
+              actualContents <- readRegularFileIO quarantine
+              let matchesExpected =
+                    maybe
+                      False
+                      (sameFileVersionAfterRename expectedSnapshot)
+                      actualSnapshot
+                      && actualModeSnapshot == Just expectedModeSnapshot
+                      && actualContents == Just expectedContents
+              if not matchesExpected
+                then restoreOriginal quarantine >> return False
+                else do
+                  sourceStillMatches <-
+                    stagedSourceMatches `catchError` \err -> do
+                      restoreOriginal quarantine
+                      throwError err
+                  if not sourceStillMatches
+                    then restoreOriginal quarantine >> return False
+                    else do
+                      renameNoReplaceIO
+                        "replaceFileIfSnapshot"
+                        source
+                        destination
+                        `catchError` \err -> do
+                          restoreOriginal quarantine
+                          throwError err
+                      publishedMatches <-
+                        stagedDestinationMatches
+                          `catchError` reportPreservedOriginal quarantine
+                      if not publishedMatches
+                        then rollbackPublished quarantine
+                        else finishReplacement restore quarantine
+   where
+    stagedSourceMatches = observeStagedFile source
+    stagedDestinationMatches = observeStagedFile destination
+    observeStagedFile path = do
+      actualSnapshot <- getFileSnapshotIO path
+      case actualSnapshot of
+        Nothing -> return False
+        Just _ -> do
+          actualModeSnapshot <- getFileModeSnapshotIO path
+          case actualModeSnapshot of
+            Nothing -> return False
+            Just _ -> do
+              actualContents <-
+                readRegularFileIO path `catchError` \err ->
+                  if isDoesNotExistError err
+                    then return Nothing
+                    else throwError err
+              finalSnapshot <- getFileSnapshotIO path
+              finalModeSnapshot <- getFileModeSnapshotIO path
+              return $
+                actualSnapshot == finalSnapshot
+                  && actualModeSnapshot == finalModeSnapshot
+                  && matchesStagedFile
+                    expectedSourceSnapshot
+                    expectedSourceMode
+                    expectedSourceContents
+                    actualSnapshot
+                    actualModeSnapshot
+                    actualContents
+    finishReplacement restore quarantine = do
+      unchanged <- getFileSnapshotIO quarantine
+      unchangedMode <- getFileModeSnapshotIO quarantine
+      unchangedContents <- readRegularFileIO quarantine
+      let remainedUnchanged =
+            maybe
+              False
+              (sameFileVersionAfterRename expectedSnapshot)
+              unchanged
+              && unchangedMode == Just expectedModeSnapshot
+              && unchangedContents == Just expectedContents
+      if remainedUnchanged
+        then
+          restore (removeFileAfterWideningIO quarantine)
+            >> return True
+        else do
+          quarantine' <- decodeFS quarantine
+          throwError $
+            userError $
+              "the displaced file changed during replacement; "
+                <> "its contents are preserved at "
+                <> quarantine'
+    rollbackPublished originalQuarantine = do
+      unexpected <- quarantineFile (128 :: Int) destination
+      case unexpected of
+        Nothing -> do
+          restoreOriginal originalQuarantine
+          throwError $
+            userError $
+              "the staged file disappeared during replacement; "
+                <> "the original file was restored"
+        Just unexpectedQuarantine -> do
+          restoreOriginal originalQuarantine
+          unexpectedQuarantine' <- decodeFS unexpectedQuarantine
+          throwError $
+            userError $
+              "the staged file changed during replacement; the unexpected "
+                <> "entry is preserved at "
+                <> unexpectedQuarantine'
+    reportPreservedOriginal quarantine err = do
+      quarantine' <- decodeFS quarantine
+      throwError $
+        ioeSetErrorString err $
+          "the original file is preserved at " <> quarantine'
+    quarantineFile attempts path
+      | attempts < 1 =
+          throwError $
+            userError "could not allocate a unique file-replacement path"
+      | otherwise = do
+          randomBytes <- getEntropy 16
+          name <-
+            encodeFS $
+              ".dojang-replaced-"
+                <> encodeRandomHex (Data.ByteString.unpack randomBytes)
+          let quarantine = takeDirectory path </> name
+          ( renameNoReplaceIO "replaceFileIfSnapshot" path quarantine
+              >> return (Just quarantine)
+            )
+            `catchError` \err ->
+              if isDoesNotExistError err
+                then return Nothing
+                else
+                  if isAlreadyExistsError err
+                    then quarantineFile (attempts - 1) path
+                    else throwError err
+    restoreOriginal quarantine =
+      renameNoReplaceIO "replaceFileIfSnapshot" quarantine destination
+        `catchError` \err -> do
+          quarantine' <- decodeFS quarantine
+          throwError $
+            ioeSetErrorString err $
+              "the original file is preserved at " <> quarantine'
+
+
+removeFileAfterWideningIO :: OsPath -> IO ()
+removeFileAfterWideningIO path =
+  OsDirectory.removeFile path `catchError` \err ->
+    if isPermissionError err
+      then setPortableWritableIO path True >> OsDirectory.removeFile path
+      else throwError err
+
+
+sameFileVersionAfterRename :: FileSnapshot -> FileSnapshot -> Bool
+sameFileVersionAfterRename
+  (FileSnapshot expectedIdentity expectedSize expectedModified _)
+  (FileSnapshot actualIdentity actualSize actualModified _) =
+    expectedIdentity == actualIdentity
+      && expectedSize == actualSize
+      && expectedModified == actualModified
+
+
+matchesStagedFile
+  :: FileSnapshot
+  -> PortableMode
+  -> ByteString
+  -> Maybe FileSnapshot
+  -> Maybe FileModeSnapshot
+  -> Maybe ByteString
+  -> Bool
+matchesStagedFile
+  expectedSnapshot
+  expectedMode
+  expectedContents
+  actualSnapshot
+  actualModeSnapshot
+  actualContents =
+    maybe False (sameFileVersionAfterRename expectedSnapshot) actualSnapshot
+      && maybe False matchesMode actualModeSnapshot
+      && actualContents == Just expectedContents
+   where
+    matchesMode (FileModeSnapshot actualIdentity actualMode) =
+      actualIdentity == fileSnapshotIdentity expectedSnapshot
+        && satisfiesPortableMode actualMode expectedMode
+
+
+removeDirectoryIfIdentityIO :: OsPath -> FileIdentity -> IO Bool
+removeDirectoryIfIdentityIO path expectedIdentity =
+  Exception.mask $ \restore -> do
+    initialIdentity <- getFileIdentityIO path
+    if initialIdentity /= Just expectedIdentity
+      then return False
+      else do
+        quarantined <- quarantineDirectory maximumQuarantineAttempts path
+        case quarantined of
+          Nothing -> return False
+          Just quarantine -> do
+            actualIdentity <- tryError $ getFileIdentityIO quarantine
+            case actualIdentity of
+              Left err -> do
+                restoreQuarantine quarantine
+                throwError err
+              Right identity ->
+                if identity /= Just expectedIdentity
+                  then restoreQuarantine quarantine >> return False
+                  else do
+                    (restore $ OsDirectory.removeDirectory quarantine)
+                      `catchError` \err -> do
+                        restoreQuarantine quarantine
+                        throwError err
+                    return True
+ where
+  quarantineDirectory attempts source
+    | attempts < 1 =
+        throwError $
+          userError "could not allocate a unique empty-directory cleanup path"
+    | otherwise = do
+        randomBytes <- getEntropy 16
+        name <-
+          encodeFS $
+            ".dojang-empty-cleanup-"
+              <> encodeRandomHex (Data.ByteString.unpack randomBytes)
+        let quarantine = takeDirectory source </> name
+        ( ( retryOnPermissionErrorsOnWindows 10 $
+              renameNoReplaceIO "renameDirectory" source quarantine
+          )
+            >> return (Just quarantine)
+          )
+          `catchError` \err ->
+            if isDoesNotExistError err
+              then return Nothing
+              else
+                if isAlreadyExistsError err
+                  then quarantineDirectory (attempts - 1) source
+                  else throwError err
+
+  restoreQuarantine quarantine =
+    ( retryOnPermissionErrorsOnWindows 10 $
+        renameNoReplaceIO "renameDirectory" quarantine path
+    )
+      `catchError` \err -> do
+        quarantine' <- decodeFS quarantine
+        throwError $
+          userError $
+            "empty-directory cleanup preserved a directory at "
+              <> quarantine'
+              <> ": "
+              <> Exception.displayException err
+
+  maximumQuarantineAttempts :: Int
+  maximumQuarantineAttempts = 128
+
+
 removeDirectoryRecursivelyIfIdentityIO
   :: OsPath -> FileIdentity -> IO Bool
 removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
@@ -1836,7 +3091,8 @@ removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
         randomBytes <- getEntropy 16
         name <-
           encodeFS $
-            ".dojang-cleanup-" <> encodeHex (Data.ByteString.unpack randomBytes)
+            ".dojang-cleanup-"
+              <> encodeRandomHex (Data.ByteString.unpack randomBytes)
         let quarantine = takeDirectory source </> name
         ( ( retryOnPermissionErrorsOnWindows 10 $
               renameNoReplaceIO "renameDirectory" source quarantine
@@ -1867,14 +3123,16 @@ removeDirectoryRecursivelyIfIdentityIO path expectedIdentity =
   maximumQuarantineAttempts :: Int
   maximumQuarantineAttempts = 128
 
-  encodeHex = concatMap $ \byte ->
-    let encoded = showHex byte ""
-    in if length encoded < 2 then '0' : encoded else encoded
-
 
 removeDirectoryRecursivelyIO :: OsPath -> IO ()
 removeDirectoryRecursivelyIO =
   retryOnPermissionErrorsOnWindows 10 . removeDirectoryRecursive
+
+
+encodeRandomHex :: [Word8] -> String
+encodeRandomHex = concatMap $ \byte ->
+  let encoded = showHex byte ""
+  in if length encoded < 2 then '0' : encoded else encoded
 
 
 retryOnPermissionErrorsOnWindows :: Int -> IO () -> IO ()
@@ -2046,7 +3304,13 @@ instance MonadFileSystem IO where
     createFileAtomicallyWithDefaultPermissionsIO
 
 
+  writeFileAtomicallyDurably = writeFileAtomicallyDurablyIO
+
+
   replaceFile = replaceFileIO
+
+
+  replaceFileIfSnapshot = replaceFileIfSnapshotIO
 
 
   renameDirectory = renameNoReplaceIO "renameDirectory"
@@ -2096,10 +3360,29 @@ instance MonadFileSystem IO where
   createPrivateDirectory = createPrivateDirectoryIO
 
 
+  createPrivateDirectoryDurably = createPrivateDirectoryDurablyIO
+
+
   removeFile = OsDirectory.removeFile
 
 
+  createEmptyFileInDirectoryIfIdentity =
+    createEmptyFileInDirectoryIfIdentityIO
+
+
+  createPrivateFileInDirectoryIfIdentity =
+    createPrivateFileInDirectoryIfIdentityIO
+
+
+  removeFileInDirectoryIfIdentity =
+    removeFileInDirectoryIfIdentityIO
+
+
   removeDirectory = OsDirectory.removeDirectory
+
+
+  removeDirectoryIfIdentity =
+    removeDirectoryIfIdentityIO
 
 
   -- See also: https://github.com/jaspervdj/hakyll/pull/783
@@ -2111,6 +3394,9 @@ instance MonadFileSystem IO where
 
 
   listDirectory = OsDirectory.listDirectory
+
+
+  listDirectoryPinned = listDirectoryPinnedIO
 
 
   listDirectoryRecursively =
@@ -2712,6 +3998,9 @@ instance MonadFileSystem DryRunIO where
   createPrivateDirectory path = do
     createDirectory path
     setPortableMode path 0o700
+
+
+  createPrivateDirectoryDurably = createPrivateDirectory
 
 
   removeFile path = do
