@@ -122,6 +122,7 @@ import Dojang.CommandEffect (MonadCommandEffect)
 import Dojang.MonadFileSystem
   ( FileType (..)
   , MonadFileSystem (..)
+  , isDurablePublicationCompletedError
   , writeFileAtomically
   )
 import Dojang.Types.Environment
@@ -3218,8 +3219,10 @@ updateManagedTargets root now state update = do
 -- published with the changed records, removed while the repository lock
 -- remains held, and cleared by a second atomic state write.  If cleanup or that
 -- final write fails, the published journal makes the work retryable.  If
--- initial publication fails, the rollback callback removes resources created
--- by the update callback.
+-- initial publication is proven not to have replaced the state, the rollback
+-- callback removes resources created by the update callback.  Resources are
+-- retained when publication succeeded but its durability barrier failed, or
+-- when the published state cannot be re-observed safely.
 updateManagedTargetsWith
   :: (MonadFileSystem m)
   => OsPath
@@ -3267,7 +3270,8 @@ updateManagedTargetsWith root now state update cleanupPaths afterPublish rollbac
                       let published =
                             updatedWithoutCleanup{pendingCleanupPaths = pending}
                       writeState root published `catchError` \err -> do
-                        rollback current' result
+                        unless (isDurablePublicationCompletedError err) $
+                          rollback current' result
                         throwError err
                       afterPublish published result
                       cleanupManagedTargetPaths published pending
@@ -3464,7 +3468,7 @@ writeState root state = do
   let directory = repositoryStateDirectory root state.repositoryId
   let destination = repositoryStatePath root state.repositoryId
   createDirectories directory
-  writeFileAtomically
+  writeFileAtomicallyDurably
     destination
     "state.toml.tmp"
     (encodeUtf8 $ encodeMachineState state)

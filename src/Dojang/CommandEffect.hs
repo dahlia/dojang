@@ -628,6 +628,9 @@ instance MonadFileSystem CommandEffectTest where
   createFileAtomicallyWithDefaultPermissions path template =
     liftCommandEffectBase
       . createFileAtomicallyWithDefaultPermissions path template
+  writeFileAtomicallyDurably path template =
+    liftCommandEffectBase
+      . writeFileAtomicallyDurably path template
   replaceFile source = liftCommandEffectBase . replaceFile source
   replaceFileIfSnapshot
     snapshot

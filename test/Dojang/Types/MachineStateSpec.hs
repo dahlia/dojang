@@ -69,6 +69,7 @@ import Dojang.MonadFileSystem
   ( FileType (Directory, File)
   , MonadFileSystem (..)
   , dryRunIO
+  , markDurablePublicationCompleted
   )
 import Dojang.TestUtils (withTempDir)
 import Dojang.Types.Environment (OperatingSystem (..))
@@ -2897,6 +2898,51 @@ spec = do
         failed `shouldSatisfy` isFailedStateUpdate
         exists transaction `shouldReturn` False
 
+    it "retains published update resources when durability confirmation fails" $
+      withTempDir $ \tmp _ -> do
+        paths <- migrationPaths tmp
+        prepared <-
+          prepareRepositoryState
+            paths.root
+            paths.repositoryId
+            paths.machineId
+            paths.checkout
+            Nothing
+            fixtureTime
+        localState <- case prepared of
+          Right (state, CreatedRepositoryState) -> return state
+          _ -> fail $ "Unexpected state: " <> show prepared
+        target <- fixtureManagedTarget localState "published-target"
+        transactionName <- encodeFS "published-transaction"
+        payloadName <- encodeFS "payload"
+        let transaction = localState.targetSnapshotRoot </> transactionName
+        failed <-
+          runFailingAfterPublicationIO
+            (repositoryStatePath paths.root paths.repositoryId)
+            $ updateManagedTargetsWith
+              paths.root
+              fixtureTime
+              localState
+              ( \records -> do
+                  createDirectories transaction
+                  writeFile (transaction </> payloadName) "baseline"
+                  return
+                    ( Map.insert target.targetId target records
+                    , transaction
+                    )
+              )
+              (\_ _ -> [])
+              (\_ _ -> return ())
+              (\_ unpublished -> removeDirectoryRecursively unpublished)
+        failed `shouldSatisfy` isFailedStateUpdate
+        exists transaction `shouldReturn` True
+        persisted <-
+          readRepositoryState paths.root paths.repositoryId paths.machineId
+        case persisted of
+          Right (Just state) ->
+            Map.member target.targetId state.targetRecords `shouldBe` True
+          _ -> expectationFailure $ "Unexpected state: " <> show persisted
+
     it "reloads target records before applying a stale caller's update" $
       withTempDir $ \tmp _ -> do
         paths <- migrationPaths tmp
@@ -3460,22 +3506,35 @@ stateField name document =
     Nothing -> error $ "Missing state fixture field: " <> Text.unpack name
 
 
+data DurablePublicationFailure
+  = FailBeforePublication
+  | FailAfterPublication
+  deriving (Eq)
+
+
 newtype FailingReplaceIO a
-  = FailingReplaceIO (ReaderT OsPath (ExceptT IOError IO) a)
+  = FailingReplaceIO
+      (ReaderT (OsPath, DurablePublicationFailure) (ExceptT IOError IO) a)
   deriving
     ( Functor
     , Applicative
     , Monad
     , MonadIO
     , MonadError IOError
-    , MonadReader OsPath
+    , MonadReader (OsPath, DurablePublicationFailure)
     , MonadCommandEffect
     )
 
 
 runFailingReplaceIO :: OsPath -> FailingReplaceIO a -> IO (Either IOError a)
 runFailingReplaceIO target (FailingReplaceIO action) =
-  runExceptT $ runReaderT action target
+  runExceptT $ runReaderT action (target, FailBeforePublication)
+
+
+runFailingAfterPublicationIO
+  :: OsPath -> FailingReplaceIO a -> IO (Either IOError a)
+runFailingAfterPublicationIO target (FailingReplaceIO action) =
+  runExceptT $ runReaderT action (target, FailAfterPublication)
 
 
 instance MonadFileSystem FailingReplaceIO where
@@ -3492,8 +3551,27 @@ instance MonadFileSystem FailingReplaceIO where
   isSymlink value = liftIO (isSymlink value :: IO Bool)
   readFile value = liftIO (readFile value :: IO ByteString)
   writeFile filename contents = liftIO (writeFile filename contents :: IO ())
+  writeFileAtomicallyDurably destination template contents = do
+    (target, failure) <- ask
+    if destination == target
+      then do
+        when (failure == FailAfterPublication) $
+          liftIO
+            ( writeFileAtomicallyDurably destination template contents
+                :: IO ()
+            )
+        let err = userError "injected durable publication failure"
+        throwError $
+          if failure == FailAfterPublication
+            then markDurablePublicationCompleted err
+            else err
+      else
+        liftIO
+          ( writeFileAtomicallyDurably destination template contents
+              :: IO ()
+          )
   replaceFile source destination = do
-    target <- ask
+    (target, _) <- ask
     if destination == target
       then throwError $ userError "injected replace failure"
       else liftIO (replaceFile source destination :: IO ())

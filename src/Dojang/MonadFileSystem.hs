@@ -19,6 +19,8 @@ module Dojang.MonadFileSystem
   , dryRunIO
   , dryRunIO'
   , durableFilePublication
+  , isDurablePublicationCompletedError
+  , markDurablePublicationCompleted
   , captureDirectoryPathIdentity
   , fileSnapshotIdentity
   , isNoReplaceUnsupportedError
@@ -487,6 +489,16 @@ class (MonadError IOError m) => MonadFileSystem m where
             "createFileAtomicallyWithDefaultPermissions"
             Nothing
             (Just destination')
+
+
+  -- | Atomically replaces a complete file and makes the replacement durable.
+  --
+  -- Filesystem-backed implementations must not return until both the file
+  -- contents and its replacement directory entry have reached stable storage.
+  -- Virtual and test filesystems may use the ordinary atomic implementation.
+  writeFileAtomicallyDurably
+    :: (HasCallStack) => OsPath -> FilePath -> ByteString -> m ()
+  writeFileAtomicallyDurably = writeFileAtomically
 
 
   -- | Replaces the destination file with the source file.
@@ -1244,6 +1256,85 @@ createFileAtomicallyWithDefaultPermissionsIO destination template contents = do
     renameNoReplaceIO "renameFileNoReplace" temporaryPath destination
 
 
+writeFileAtomicallyDurablyIO
+  :: OsPath -> FilePath -> ByteString -> IO ()
+writeFileAtomicallyDurablyIO destination template contents = do
+  directory <- decodeFS $ takeDirectory destination
+  Exception.bracketOnError
+    (openBinaryTempFileWithDefaultPermissions directory template)
+    discardTemporary
+    publishTemporary
+ where
+  discardTemporary (temporary, handle) = do
+    hClose handle `catchError` const (return ())
+    temporaryPath <- encodeFS temporary
+    removeTemporaryFileIO temporaryPath
+
+  publishTemporary (temporary, handle) = do
+    temporaryPath <- encodeFS temporary
+    publishTemporaryFileDurablyIO
+      destination
+      temporaryPath
+      handle
+      contents
+      (copyDestinationPermissions temporaryPath)
+
+  copyDestinationPermissions temporaryPath = do
+    destinationExists <- exists destination
+    when destinationExists $
+      copyFilePermissionsIO destination temporaryPath
+
+#ifdef mingw32_HOST_OS
+publishTemporaryFileDurablyIO
+  :: OsPath -> OsPath -> Handle -> ByteString -> IO () -> IO ()
+publishTemporaryFileDurablyIO
+  destination
+  temporary
+  handle
+  contents
+  applyPermissions =
+    durableFilePublication
+      applyPermissions
+      (Data.ByteString.hPut handle contents)
+      (hFlush handle)
+      (Win32.withHandleToHANDLE handle Win32.flushFileBuffers)
+      (hClose handle)
+      (replaceFileWriteThroughIO temporary destination)
+#else
+publishTemporaryFileDurablyIO
+  :: OsPath -> OsPath -> Handle -> ByteString -> IO () -> IO ()
+publishTemporaryFileDurablyIO
+  destination
+  temporary
+  handle
+  contents
+  applyPermissions = do
+    applyPermissions
+    Data.ByteString.hPut handle contents
+    hFlush handle
+    descriptor <- Posix.handleToFd handle
+    Exception.bracket
+      (return descriptor)
+      Posix.closeFd
+      (synchronizeDescriptorIO "writeFileAtomicallyDurably")
+    replaceFileIO temporary destination
+    synchronizeDirectoryIO
+      "writeFileAtomicallyDurably"
+      (takeDirectory destination)
+      `catchError` (throwError . markDurablePublicationCompleted)
+#endif
+
+
+removeTemporaryFileIO :: OsPath -> IO ()
+removeTemporaryFileIO path =
+  OsDirectory.removeFile path `catchError` \err ->
+    when (isPermissionError err) $ do
+      setPortableWritableIO path True
+        `catchError` const (return ())
+      OsDirectory.removeFile path
+        `catchError` const (return ())
+
+
 -- | Sequences the durability barriers required to publish a staged file.
 --
 -- The final mode is applied before contents are written.  The runtime buffer
@@ -1277,6 +1368,29 @@ durableFilePublication
     flushDeviceBuffer
     closeStagedFile
     publishStagedFile
+
+
+-- | Marks an I/O failure as occurring after an atomic durable replacement
+-- became visible.
+--
+-- The replacement directory entry is already published, but its durability
+-- barrier failed.  Callers must retain resources referenced by the new file
+-- because rolling them back could leave published references dangling.
+markDurablePublicationCompleted :: IOError -> IOError
+markDurablePublicationCompleted =
+  (`ioeSetLocation` durablePublicationCompletedLocation)
+
+
+-- | Tests whether an I/O failure occurred after an atomic durable replacement
+-- became visible.
+isDurablePublicationCompletedError :: IOError -> Bool
+isDurablePublicationCompletedError err =
+  ioeGetLocation err == durablePublicationCompletedLocation
+
+
+durablePublicationCompletedLocation :: String
+durablePublicationCompletedLocation =
+  "writeFileAtomicallyDurably: replacement published"
 
 #ifdef mingw32_HOST_OS
 createFileAtomicallyDurablyIO
@@ -2374,6 +2488,42 @@ renameNoReplaceWriteThroughIO source destination = do
   moveFileWriteThrough = 0x00000008
 
 
+replaceFileWriteThroughIO :: OsPath -> OsPath -> IO ()
+replaceFileWriteThroughIO source destination = do
+  destinationExists <- doesPathExist destination
+  if not destinationExists
+    then publish
+    else do
+      permissions <- OsDirectory.getPermissions destination
+      OsDirectory.setPermissions
+        destination
+        (Directory.setOwnerWritable True permissions)
+      publish `catchError` \err -> do
+        destinationStillExists <- doesPathExist destination
+        when destinationStillExists $
+          OsDirectory.setPermissions destination permissions
+        sourceStillExists <- doesPathExist source
+        when sourceStillExists $ do
+          sourcePermissions <- OsDirectory.getPermissions source
+          OsDirectory.setPermissions
+            source
+            (Directory.setOwnerWritable True sourcePermissions)
+        throwError err
+ where
+  publish = do
+    source' <- decodeFS source
+    destination' <- decodeFS destination
+    Win32.moveFileEx
+      source'
+      (Just destination')
+      (moveFileReplaceExisting .|. moveFileWriteThrough)
+  -- Win32 2.14 does not expose these MOVEFILE constants.
+  moveFileReplaceExisting :: Win32.MoveFileFlag
+  moveFileReplaceExisting = 0x00000001
+  moveFileWriteThrough :: Win32.MoveFileFlag
+  moveFileWriteThrough = 0x00000008
+
+
 #else
 replaceFileIO :: OsPath -> OsPath -> IO ()
 replaceFileIO = OsDirectory.renameFile
@@ -2536,30 +2686,39 @@ createPrivateDirectoryIO path = do
 createPrivateDirectoryDurablyIO :: OsPath -> IO ()
 createPrivateDirectoryDurablyIO path = do
   createPrivateDirectoryIO path
-  (synchronizeDirectory path >> synchronizeDirectory (takeDirectory path))
+  ( synchronizeDirectoryIO "createPrivateDirectoryDurably" path
+      >> synchronizeDirectoryIO
+        "createPrivateDirectoryDurably"
+        (takeDirectory path)
+    )
     `Exception.onException` cleanup
  where
   cleanup =
     OsDirectory.removeDirectory path `catchError` const (return ())
-  synchronizeDirectory directory = do
-    directory' <- decodeFS directory
-    Exception.bracket
-      ( Posix.openFd
-          directory'
-          Posix.ReadOnly
-          Posix.defaultFileFlags
-            { Posix.nofollow = True
-            , Posix.cloexec = True
-            , Posix.directory = True
-            }
-      )
-      Posix.closeFd
-      $ \descriptor -> do
-        synchronized <- c_fsyncDirectory $ fromIntegral descriptor
-        when (synchronized < 0) $
-          throwErrnoCode
-            "createPrivateDirectoryDurably"
-            (negate synchronized)
+
+
+synchronizeDirectoryIO :: String -> OsPath -> IO ()
+synchronizeDirectoryIO location directory = do
+  directory' <- decodeFS directory
+  Exception.bracket
+    ( Posix.openFd
+        directory'
+        Posix.ReadOnly
+        Posix.defaultFileFlags
+          { Posix.nofollow = True
+          , Posix.cloexec = True
+          , Posix.directory = True
+          }
+    )
+    Posix.closeFd
+    (synchronizeDescriptorIO location)
+
+
+synchronizeDescriptorIO :: String -> Fd -> IO ()
+synchronizeDescriptorIO location descriptor = do
+  synchronized <- c_fsyncDirectory $ fromIntegral descriptor
+  when (synchronized < 0) $
+    throwErrnoCode location $ negate synchronized
 
 
 renameNoReplaceIO :: String -> OsPath -> OsPath -> IO ()
@@ -3131,6 +3290,9 @@ instance MonadFileSystem IO where
 
   createFileAtomicallyWithDefaultPermissions =
     createFileAtomicallyWithDefaultPermissionsIO
+
+
+  writeFileAtomicallyDurably = writeFileAtomicallyDurablyIO
 
 
   replaceFile = replaceFileIO

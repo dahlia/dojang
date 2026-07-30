@@ -159,6 +159,9 @@ empty directory may itself be another successfully recorded baseline.
 The pending-publication marker also remains after a guarded commit abort and is
 removed only after target publication succeeds, so a later converged state can
 still repair its machine-state record.
+The state document contents and their replacement directory entry are flushed
+to stable storage before that marker is removed, so a system interruption
+cannot preserve cleanup while losing target publication.
 Every newly created workspace directory is published durably through its
 parent before a pending marker can authorize replica writes.  Marker contents
 receive their owner-only mode before any accepted merge bytes are written.

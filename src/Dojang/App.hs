@@ -287,6 +287,12 @@ instance
       . lift
       . lift
       . createFileAtomicallyWithDefaultPermissions dst template
+  writeFileAtomicallyDurably dst template =
+    App
+      . lift
+      . lift
+      . lift
+      . writeFileAtomicallyDurably dst template
   replaceFile src = App . lift . lift . lift . replaceFile src
   replaceFileIfSnapshot
     snapshot

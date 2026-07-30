@@ -925,6 +925,39 @@ spec = do
       readFile (tmpDirP </> bar) `shouldReturn` "new"
       exists (tmpDirP </> foo) `shouldReturn` False
 
+    it "durably replaces arbitrary contents and preserves modes" $ hedgehog $ do
+      original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
+      writable' <- forAll Gen.bool
+      (contents, replacementMode, originalMode, entries) <-
+        liftIO $ withTempDir $ \tmpDir _ -> do
+          let destination = tmpDir </> bar
+          writeFile destination original
+          setPortableWritable destination writable'
+          originalMode <- getPortableMode destination
+          writeFileAtomicallyDurably
+            destination
+            "state.toml.tmp"
+            replacement
+          contents <- readFile destination
+          replacementMode <- getPortableMode destination
+          entries <- listDirectory tmpDir
+          return (contents, replacementMode, originalMode, entries)
+      contents === replacement
+      replacementMode === originalMode
+      entries === [bar]
+
+    it "cleans its staged file when durable replacement fails" $
+      withTempDir $ \tmpDir _ -> do
+        let destination = tmpDir </> bar
+        createDirectory destination
+        writeFileAtomicallyDurably
+          destination
+          "state.toml.tmp"
+          "replacement"
+          `shouldThrow` (const True :: IOError -> Bool)
+        listDirectory tmpDir `shouldReturn` [bar]
+
     it "conditionally replaces arbitrary matching snapshots" $ hedgehog $ do
       original <- forAll $ Gen.bytes $ constantFrom 0 0 4096
       replacement <- forAll $ Gen.bytes $ constantFrom 0 0 4096
