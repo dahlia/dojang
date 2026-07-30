@@ -116,6 +116,7 @@ import Dojang.MonadFileSystem
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
   , createPrivateDirectoriesDurably
+  , createPrivateDirectoriesDurablyUnderLock
   , dryRunIO
   , durableFilePublication
   , isNoReplaceUnsupportedError
@@ -812,6 +813,47 @@ spec = do
           modes
             `shouldSatisfy` all
               (`satisfiesPortableMode` portableModeFromBits 0o700)
+
+    it "waits for a peer directory durability barrier" $
+      withTempDir $ \tmpDir _ -> do
+        lockName <- encodeFS "workspace-creation.lock"
+        sharedName <- encodeFS "merge-workspaces"
+        repositoryName <- encodeFS "repository"
+        let lock = tmpDir </> lockName
+            repository = tmpDir </> sharedName </> repositoryName
+        lockAcquired <- newEmptyMVar
+        releaseLock <- newEmptyMVar
+        holderFinished <- newEmptyMVar
+        _ <-
+          forkFinally
+            ( withFileLock lock $ do
+                putMVar lockAcquired ()
+                takeMVar releaseLock
+            )
+            (putMVar holderFinished)
+        takeMVar lockAcquired
+        creatorStarted <- newEmptyMVar
+        creatorFinished <- newEmptyMVar
+        _ <-
+          forkFinally
+            ( do
+                putMVar creatorStarted ()
+                createPrivateDirectoriesDurablyUnderLock lock repository
+            )
+            (putMVar creatorFinished)
+        takeMVar creatorStarted
+        blocked <- timeout 100000 $ readMVar creatorFinished
+        case blocked of
+          Nothing -> return ()
+          Just _ -> expectationFailure "directory creator bypassed the lock"
+        exists repository `shouldReturn` False
+        putMVar releaseLock ()
+        takeMVar holderFinished >>= either Exception.throwIO return
+        completed <- timeout 5000000 $ takeMVar creatorFinished
+        case completed of
+          Just (Right ()) -> isDirectory repository `shouldReturn` True
+          Just (Left err) -> Exception.throwIO err
+          Nothing -> expectationFailure "directory creator remained blocked"
 
     specify "isDirectory" $ do
       isDirectory packageYamlP `shouldReturn` False

@@ -165,6 +165,9 @@ cannot preserve cleanup while losing target publication.
 Every newly created workspace directory is published durably through its
 parent before a pending marker can authorize replica writes.  Marker contents
 receive their owner-only mode before any accepted merge bytes are written.
+Concurrent repositories serialize creation of their shared workspace
+ancestor, so an already-visible directory is not used until its creator's
+durability barrier completes.
 Pending-publication recovery scans only the known invocation and conflict
 directory levels.  Each level is enumerated through a pinned directory entry,
 and pending-marker creation and removal remain bound to the captured workspace

@@ -16,6 +16,7 @@ module Dojang.MonadFileSystem
   , FileType (..)
   , MonadFileSystem (..)
   , createPrivateDirectoriesDurably
+  , createPrivateDirectoriesDurablyUnderLock
   , dryRunIO
   , dryRunIO'
   , durableFilePublication
@@ -1139,6 +1140,17 @@ createPrivateDirectoriesDurably path =
       Nothing
       (Just path')
       `ioeSetErrorString` "one of its ancestors is a symbolic link"
+
+
+-- | Creates a private durable directory chain while serializing peer creators.
+--
+-- Every process that can create a path beneath the same shared ancestor must
+-- use the same lock path.  A peer can then observe an existing ancestor only
+-- after its creator has completed the directory-entry durability barrier.
+createPrivateDirectoriesDurablyUnderLock
+  :: (HasCallStack, MonadFileSystem m) => OsPath -> OsPath -> m ()
+createPrivateDirectoriesDurablyUnderLock lock path =
+  withFileLock lock $ createPrivateDirectoriesDurably path
 
 
 -- | Writes a sibling temporary file and atomically replaces the destination.

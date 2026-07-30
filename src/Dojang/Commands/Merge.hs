@@ -93,7 +93,7 @@ import Dojang.MonadFileSystem
   , FileModeSnapshot (FileModeSnapshot)
   , MonadFileSystem (..)
   , captureDirectoryPathIdentity
-  , createPrivateDirectoriesDurably
+  , createPrivateDirectoriesDurablyUnderLock
   , matchesDirectoryPathIdentity
   )
 import Dojang.MonadFileSystem qualified as FileSystem
@@ -1788,8 +1788,12 @@ createInvocationRoot
   => MachineState
   -> App i (OsPath, FileIdentity)
 createInvocationRoot machineState = do
+  stateRoot <- asks (.stateDirectory)
   repositoryRoot <- currentMergeWorkspaceRepositoryRoot machineState
-  createPrivateDirectoriesDurably repositoryRoot
+  lockName <- encodePath "merge-workspaces.lock"
+  createPrivateDirectoriesDurablyUnderLock
+    (stateRoot </> lockName)
+    repositoryRoot
   setPortableMode repositoryRoot 0o700
   identifier <- newUUID
   invocationName <- encodePath $ Text.unpack $ UUID.toText identifier

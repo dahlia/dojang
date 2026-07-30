@@ -31,11 +31,14 @@ To be released.
     but unpublished work.  Machine-state contents and their replacement
     directory entry reach stable storage before those markers are removed.
     New workspace directories and private markers are durably published before
-    replica writes begin.  Each marker authenticates the original and accepted
-    contents of every replica, so any subset made durable by a crash can be
-    recovered without replacing replicas that already contain the accepted
-    contents and mode.  Rejected baselines are removed without disturbing
-    successful entries from the same transaction.  [[#48], [#75]]
+    replica writes begin.  Creation of the shared workspace ancestor is
+    serialized across repositories, so a peer cannot use a visible directory
+    before its durability barrier completes.  Each marker authenticates the
+    original and accepted contents of every replica, so any subset made durable
+    by a crash can be recovered without replacing replicas that already
+    contain the accepted contents and mode.  Rejected baselines are removed
+    without disturbing successful entries from the same transaction.
+    [[#48], [#75]]
 
  -  Failed, unresolved, and canceled workspaces remain available until
     recovery or `dojang forget`.  Workspace creation, scanning, marker updates,
